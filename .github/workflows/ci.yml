@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras --dev
+
+      - name: Import package
+        run: uv run python -c "import saxo_bank_mcp"
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run basedpyright
+
+      - name: QA gitignore secret probe
+        run: uv run python -m saxo_bank_mcp.qa gitignore-secret --out .omo/evidence/saxo-bank-mcp/ci-gitignore-secret.json
+
+      - name: QA health probe
+        run: uv run python -m saxo_bank_mcp.qa health --out .omo/evidence/saxo-bank-mcp/ci-health.json

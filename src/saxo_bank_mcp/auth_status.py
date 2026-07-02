@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Final, Literal, TypedDict
+
+type EffectiveReadEnvironment = Literal["SIM", "LIVE", "LIVE_READ_DISABLED"]
+type SimCredentialSource = Literal["file", "env", "missing"]
+type EnvironmentName = Literal["SIM", "LIVE"]
+
+AUTH_STATUS_VERIFIES: Final[tuple[str, ...]] = (
+    "local Saxo environment selection",
+    "local credential-source presence without exposing credentials",
+    "local token-cache path, presence, readability, and expiry metadata",
+)
+AUTH_STATUS_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
+    "Saxo login/server-side authentication",
+    "account access",
+    "active session validity",
+    "session capabilities",
+    "trading/order readiness",
+    "live-write permission",
+)
+
+
+class SaxoAuthStatus(TypedDict):
+    requested_environment: EnvironmentName
+    effective_read_environment: EffectiveReadEnvironment
+    live_reads: bool
+    live_writes: Literal[False]
+    sim_credentials_present: bool
+    sim_credential_source: SimCredentialSource
+    live_credentials_present: bool
+    sim_redirect_uri_present: bool
+    pending_pkce_authorization_present: bool
+    token_cache_present: bool
+    token_cache_readable: bool
+    token_cache_expired: bool | None
+    token_cache_path: str
+    scope_used: Literal[False]
+    verifies: list[str]
+    does_not_verify: list[str]
+    blocking_reasons: list[str]
+    next_action: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuthStatusInputs:
+    requested_environment: EnvironmentName
+    effective_read_environment: EffectiveReadEnvironment
+    live_reads_enabled: bool
+    sim_credentials_present: bool
+    sim_credential_source: SimCredentialSource
+    live_credentials_present: bool
+    sim_redirect_uri_present: bool
+    pending_pkce_authorization_present: bool
+    token_cache_path_refused: bool
+    token_cache_present: bool
+    token_cache_readable: bool
+    token_cache_expired: bool | None
+    token_cache_path: str
+
+
+def build_auth_status(inputs: AuthStatusInputs) -> SaxoAuthStatus:
+    blocking_reasons = _blocking_reasons(inputs)
+    return {
+        "requested_environment": inputs.requested_environment,
+        "effective_read_environment": inputs.effective_read_environment,
+        "live_reads": inputs.effective_read_environment == "LIVE",
+        "live_writes": False,
+        "sim_credentials_present": inputs.sim_credentials_present,
+        "sim_credential_source": inputs.sim_credential_source,
+        "live_credentials_present": inputs.live_credentials_present,
+        "sim_redirect_uri_present": inputs.sim_redirect_uri_present,
+        "pending_pkce_authorization_present": inputs.pending_pkce_authorization_present,
+        "token_cache_present": inputs.token_cache_present,
+        "token_cache_readable": inputs.token_cache_readable,
+        "token_cache_expired": inputs.token_cache_expired,
+        "token_cache_path": inputs.token_cache_path,
+        "scope_used": False,
+        "verifies": list(AUTH_STATUS_VERIFIES),
+        "does_not_verify": list(AUTH_STATUS_DOES_NOT_VERIFY),
+        "blocking_reasons": blocking_reasons,
+        "next_action": _next_action(blocking_reasons),
+    }
+
+
+def _blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
+    return [*_environment_blocking_reasons(inputs), *_token_blocking_reasons(inputs)]
+
+
+def _environment_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
+    reasons: list[str] = []
+    if inputs.requested_environment == "SIM":
+        if not inputs.sim_credentials_present:
+            reasons.append("sim_credentials_missing")
+        if not inputs.sim_redirect_uri_present:
+            reasons.append("sim_redirect_uri_missing")
+    elif inputs.effective_read_environment != "LIVE":
+        if not inputs.live_reads_enabled:
+            reasons.append("live_reads_disabled")
+        if not inputs.live_credentials_present:
+            reasons.append("live_credentials_missing")
+    return reasons
+
+
+def _token_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
+    reasons: list[str] = []
+    if inputs.token_cache_path_refused:
+        reasons.append("token_cache_path_refused")
+    elif not inputs.token_cache_present:
+        if inputs.pending_pkce_authorization_present:
+            reasons.append("pending_pkce_authorization_present")
+        reasons.append("token_cache_missing")
+    elif not inputs.token_cache_readable:
+        reasons.append("token_cache_unreadable")
+    elif inputs.token_cache_expired is True:
+        reasons.append("token_cache_expired")
+    return reasons
+
+
+def _next_action(blocking_reasons: list[str]) -> str:
+    actions: tuple[tuple[str, str], ...] = (
+        (
+            "sim_credentials_missing",
+            "configure SIM PKCE credentials, then call saxo_auth_status again",
+        ),
+        (
+            "sim_redirect_uri_missing",
+            "set SAXO_MCP_SIM_REDIRECT_URI to the registered Saxo redirect URI, "
+            "then call saxo_start_pkce_login; PKCE cannot be completed "
+            "machine-only without this URI and a Saxo-returned authorization code",
+        ),
+        (
+            "token_cache_path_refused",
+            "move SAXO_MCP_TOKEN_CACHE_PATH outside the repository and common synced folders",
+        ),
+        (
+            "token_cache_unreadable",
+            "remove or replace the unreadable token cache, then restart the SIM PKCE login",
+        ),
+        (
+            "pending_pkce_authorization_present",
+            "complete the Saxo login already started, then call saxo_exchange_pkce_code; "
+            "do not claim session verification until saxo_get_session_capabilities passes",
+        ),
+        (
+            "token_cache_missing",
+            "call saxo_start_pkce_login, complete Saxo login, then call saxo_exchange_pkce_code, "
+            "or provide a valid SIM token cache/portal token",
+        ),
+        (
+            "token_cache_expired",
+            "call saxo_refresh_token, then call saxo_get_session_capabilities",
+        ),
+        (
+            "live_reads_disabled",
+            "use SIM mode, or configure LIVE read credentials and SAXO_MCP_ENABLE_LIVE_READS=1 "
+            "in a later approved live-read phase",
+        ),
+        (
+            "live_credentials_missing",
+            "use SIM mode, or configure LIVE read credentials and SAXO_MCP_ENABLE_LIVE_READS=1 "
+            "in a later approved live-read phase",
+        ),
+    )
+    for reason, action in actions:
+        if reason in blocking_reasons:
+            return action
+    return "call saxo_get_session_capabilities to verify the current SIM session capability fields"

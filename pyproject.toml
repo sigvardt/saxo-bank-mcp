@@ -1,0 +1,64 @@
+[project]
+name = "saxo-bank-mcp"
+version = "0.1.0"
+description = "Saxo Bank OpenAPI MCP server with evidence-gated implementation loops."
+requires-python = ">=3.12"
+dependencies = [
+  "fastmcp==3.4.2",
+  "httpx2[brotli,http2,zstd]==2.5.0",
+  "pydantic>=2.12.5",
+  "websockets==16.0",
+]
+
+[project.scripts]
+saxo-bank-mcp = "saxo_bank_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/saxo_bank_mcp"]
+
+[dependency-groups]
+dev = [
+  "basedpyright>=1.34.0",
+  "pytest>=9.0.2",
+  "ruff>=0.14.8",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "EM101",
+  "EM102",
+  "INP001",
+  "S603",
+  "TC001",
+  "TC002",
+  "TC003",
+  "TRY003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
