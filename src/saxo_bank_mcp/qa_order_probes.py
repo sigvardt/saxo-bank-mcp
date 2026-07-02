@@ -195,6 +195,7 @@ def class_report_for_qa(
 ) -> dict[str, JsonValue]:
     completed = _completion_requirements_met(spec, tool_payload)
     status = _class_status(tool_payload, completed=completed)
+    reason = _agent_reason(tool_payload)
     return {
         "write_class": spec.write_class,
         "tool_name": spec.tool_name,
@@ -238,8 +239,8 @@ def class_report_for_qa(
         "order_or_subscription_created": (
             tool_payload.get("order_or_subscription_created") is True
         ),
-        "denial_reason": str(tool_payload.get("denial_reason", "")),
-        "reason": str(tool_payload.get("reason", "")),
+        "denial_reason": str(tool_payload.get("denial_reason") or ""),
+        "reason": reason,
         "next_action": str(tool_payload.get("next_action", "")),
         "does_not_verify": _does_not_verify(tool_payload),
     }
@@ -302,7 +303,32 @@ def _completion_not_claimed_reason(
         )
     if tool_payload.get("status") == "completed":
         return "completed response lacked the class-specific proof required by the oracle"
-    return str(tool_payload.get("reason", tool_payload.get("denial_reason", "")))
+    return _agent_reason(tool_payload)
+
+
+def _agent_reason(tool_payload: dict[str, JsonValue]) -> str:
+    for key in ("reason", "denial_reason"):
+        value = tool_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    parsed = tool_payload.get("parsed_response")
+    if isinstance(parsed, dict):
+        status = str(tool_payload.get("status", "unknown"))
+        http_status = str(tool_payload.get("http_status", "unknown"))
+        error_codes = _error_codes(parsed)
+        codes = ",".join(error_codes) if error_codes else "none"
+        return (
+            "saxo_order_write_not_completed "
+            f"status={status} http_status={http_status} error_codes={codes}"
+        )
+    return ""
+
+
+def _error_codes(parsed_response: dict[str, JsonValue]) -> list[str]:
+    raw = parsed_response.get("error_codes")
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 def _does_not_verify(tool_payload: dict[str, JsonValue]) -> list[str]:

@@ -207,6 +207,29 @@ def test_cancel_by_instrument_empty_success_is_not_mutation_proof() -> None:
     assert report["port_orders_readback"] is False
 
 
+def test_order_write_report_synthesizes_noncompletion_reason() -> None:
+    report = class_report_for_qa(
+        ORDER_WRITE_SPECS["place"],
+        {"status": "preview_created"},
+        {
+            "status": "failed",
+            "http_status": 400,
+            "network_call_made": True,
+            "parsed_response": {
+                "error_codes": ["TradeNotCompleted"],
+                "outcome": "failed",
+            },
+        },
+    )
+
+    expected = (
+        "saxo_order_write_not_completed "
+        "status=failed http_status=400 error_codes=TradeNotCompleted"
+    )
+    assert report["reason"] == expected
+    assert report["completion_not_claimed_reason"] == expected
+
+
 def test_synthetic_disclaimer_errors_are_exercised_not_passed() -> None:
     synthetic_disclaimer_handle = "fixture-disclaimer-handle"
     probe_input = DisclaimerProbeInput(

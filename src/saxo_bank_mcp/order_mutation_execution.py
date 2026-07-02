@@ -127,6 +127,7 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
     )
     readback = await _readback(token, request_body)
     status = _execution_status(spec, parsed)
+    reason = _order_write_reason(status=status, http_status=response.status_code, parsed=parsed)
     mutation_may_have_occurred = parsed.outcome in {
         "success",
         "partial_success",
@@ -153,6 +154,7 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "order_result_parsed": True,
             "http_status": response.status_code,
             "parsed_response": parsed.to_json_value(),
+            "reason": reason,
             "port_orders_readback": readback["port_orders_readback"],
             "trade_messages_readback": readback["trade_messages_readback"],
             "readback_required": parsed.needs_readback,
@@ -183,10 +185,25 @@ def _tool_result(payload: Mapping[str, JsonValue]) -> ToolResult:
 def _diagnostic_text(payload: Mapping[str, JsonValue]) -> str:
     status = str(payload.get("status", "unknown"))
     tool_name = str(payload.get("tool_name", "saxo_order_tool"))
-    reason = payload.get("denial_reason", payload.get("reason", ""))
+    reason = payload.get("denial_reason") or payload.get("reason") or ""
     if reason:
         return f"{tool_name}: {status}; reason={reason}; no completed mutation claimed"
     return f"{tool_name}: {status}; completed mutation requires real SIM proof"
+
+
+def _order_write_reason(
+    *,
+    status: str,
+    http_status: int,
+    parsed: ParsedOrderWriteResponse,
+) -> str:
+    if status in {"completed", "completed_unverified"}:
+        return ""
+    codes = ",".join(parsed.error_codes) if parsed.error_codes else "none"
+    return (
+        "saxo_order_write_not_completed "
+        f"status={status} http_status={http_status} error_codes={codes}"
+    )
 
 
 def _cached_token(spec: OrderWriteSpec) -> SaxoTokenSet | JsonObject:

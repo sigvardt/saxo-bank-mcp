@@ -319,6 +319,10 @@ async def test_unknown_order_response_is_retry_unsafe_and_tri_state(
     assert payload["retry_unsafe"] is True
     assert payload["port_orders_readback"] is True
     assert payload["trade_messages_readback"] is True
+    assert payload["reason"] == (
+        "saxo_order_write_not_completed "
+        "status=unknown_state http_status=200 error_codes=TradeNotCompleted"
+    )
 
 
 @pytest.mark.anyio
