@@ -205,6 +205,11 @@ def class_report_for_qa(
         "write_class_status": str(tool_payload.get("write_class_status", status)),
         "real_mutation_proven": completed,
         "completion_oracle": _completion_oracle(spec),
+        "completion_not_claimed_reason": _completion_not_claimed_reason(
+            spec,
+            tool_payload,
+            completed=completed,
+        ),
         "fastmcp_called": tool_payload.get("fastmcp_called") is True,
         "preview_token_redacted": _preview_token_redacted(preview),
         "approval_factor_mode": str(tool_payload.get("approval_factor_mode", "test_only_sim")),
@@ -236,6 +241,7 @@ def class_report_for_qa(
         "denial_reason": str(tool_payload.get("denial_reason", "")),
         "reason": str(tool_payload.get("reason", "")),
         "next_action": str(tool_payload.get("next_action", "")),
+        "does_not_verify": _does_not_verify(tool_payload),
     }
 
 
@@ -267,15 +273,43 @@ def _completion_requirements_met(
 def _completion_oracle(spec: OrderWriteSpec) -> str:
     if spec.write_class == "cancel-by-instrument":
         return (
-            "completed response parsed, x-request-id present, retry safe, order_cancelled true, "
-            "mutation content proves a matched order, and trade messages "
-            "readback; portfolio order-list readback alone is not required for "
-            "delete-by-instrument"
+            "To claim completion, the output must show a parsed completed response, a generated "
+            "x-request-id, retry_unsafe=false, order_cancelled=true, mutation content proving a "
+            "matched order, and trade-message readback; portfolio order-list readback alone is "
+            "not sufficient for delete-by-instrument"
         )
     return (
         "completed response parsed, x-request-id present, retry safe, portfolio order-list "
         "readback, and trade messages readback"
     )
+
+
+def _completion_not_claimed_reason(
+    spec: OrderWriteSpec,
+    tool_payload: dict[str, JsonValue],
+    *,
+    completed: bool,
+) -> str:
+    if completed:
+        return ""
+    if (
+        spec.write_class == "cancel-by-instrument"
+        and tool_payload.get("status") == "completed_unverified"
+    ):
+        return (
+            "empty-success delete-by-instrument did not prove any order matched the "
+            "cancel filter"
+        )
+    if tool_payload.get("status") == "completed":
+        return "completed response lacked the class-specific proof required by the oracle"
+    return str(tool_payload.get("reason", tool_payload.get("denial_reason", "")))
+
+
+def _does_not_verify(tool_payload: dict[str, JsonValue]) -> list[str]:
+    raw = tool_payload.get("does_not_verify")
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw]
 
 
 def _class_status(tool_payload: dict[str, JsonValue], *, completed: bool) -> str:
