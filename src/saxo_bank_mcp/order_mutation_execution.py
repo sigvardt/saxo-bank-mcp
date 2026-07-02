@@ -126,7 +126,7 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
         http_status=response.status_code,
     )
     readback = await _readback(token, request_body)
-    status = "completed" if parsed.outcome == "success" else parsed.outcome
+    status = _execution_status(spec, parsed)
     mutation_may_have_occurred = parsed.outcome in {
         "success",
         "partial_success",
@@ -302,6 +302,16 @@ def _mutation_flag(
             return None
         case _:
             return False
+
+
+def _execution_status(spec: OrderWriteSpec, parsed: ParsedOrderWriteResponse) -> str:
+    if (
+        spec.write_class == "cancel-by-instrument"
+        and parsed.outcome == "success"
+        and not parsed.order_ids
+    ):
+        return "completed_unverified"
+    return "completed" if parsed.outcome == "success" else parsed.outcome
 
 
 def _order_cancelled_flag(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -205,16 +206,19 @@ def class_report_for_qa(
         "real_mutation_proven": completed,
         "completion_oracle": _completion_oracle(spec),
         "fastmcp_called": tool_payload.get("fastmcp_called") is True,
-        "preview_token_redacted": True,
+        "preview_token_redacted": _preview_token_redacted(preview),
         "approval_factor_mode": str(tool_payload.get("approval_factor_mode", "test_only_sim")),
         "x_request_id_present": tool_payload.get("x_request_id_present") is True,
+        "x_request_id_response_echo_verified": (
+            tool_payload.get("x_request_id_response_echo_verified") is True
+        ),
         "order_result_parsed": tool_payload.get("order_result_parsed") is True,
         "port_orders_readback": tool_payload.get("port_orders_readback") is True,
         "trade_messages_readback": tool_payload.get("trade_messages_readback") is True,
         "cleanup_attempted": tool_payload.get("cleanup_attempted") is True,
         "cleanup_status": str(tool_payload.get("cleanup_status", "not_run")),
         "raw_audit_path_inside_repo": tool_payload.get("raw_audit_path_inside_repo") is True,
-        "account_key_redacted": True,
+        "account_key_redacted": _account_key_redacted(tool_payload),
         "mutation_may_have_occurred": tool_payload.get("mutation_may_have_occurred") is True,
         "mutation_content_verified": tool_payload.get("mutation_content_verified") is True,
         "retry_unsafe": tool_payload.get("retry_unsafe") is True,
@@ -264,7 +268,7 @@ def _completion_oracle(spec: OrderWriteSpec) -> str:
     if spec.write_class == "cancel-by-instrument":
         return (
             "completed response parsed, x-request-id present, retry safe, order_cancelled true, "
-            "mutation content or pre/post state proves a matched order, and trade messages "
+            "mutation content proves a matched order, and trade messages "
             "readback; portfolio order-list readback alone is not required for "
             "delete-by-instrument"
         )
@@ -282,7 +286,10 @@ def _class_status(tool_payload: dict[str, JsonValue], *, completed: bool) -> str
         return "incomplete"
     if status == "denied":
         return "refused"
-    if status == "completed" and tool_payload.get("network_call_made") is True:
+    if (
+        status in {"completed", "completed_unverified"}
+        and tool_payload.get("network_call_made") is True
+    ):
         return "exercised"
     if _safely_rejected_by_saxo(tool_payload):
         return "incomplete"
@@ -298,6 +305,14 @@ def _safely_rejected_by_saxo(tool_payload: dict[str, JsonValue]) -> bool:
         and tool_payload.get("retry_unsafe") is not True
         and tool_payload.get("order_result_parsed") is True
     )
+
+
+def _preview_token_redacted(preview: dict[str, JsonValue]) -> bool:
+    return isinstance(preview.get("preview_token"), str)
+
+
+def _account_key_redacted(tool_payload: dict[str, JsonValue]) -> bool:
+    return "AccountKey" not in json.dumps(tool_payload, sort_keys=True)
 
 
 def _preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue]:

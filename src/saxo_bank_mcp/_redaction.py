@@ -24,6 +24,9 @@ _SENSITIVE_KEYS: Final = frozenset(
         "accountkey",
         "accountnumber",
         "approvalfactor",
+        "orderid",
+        "orderids",
+        "multilegorderid",
         "previewtoken",
     },
 )
@@ -34,7 +37,8 @@ _INLINE_PATTERNS: Final = (
     re.compile(
         r"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
         r"app[_-]?secret|client[_-]?key|app[_-]?key|approval[_-]?factor|"
-        r"preview[_-]?token|account[_-]?(?:key|number))"
+        r"preview[_-]?token|account[_-]?(?:key|number)|"
+        r"(?:multi[_-]?leg[_-]?)?order[_-]?ids?)"
         r"[\"']?\s*[:=]\s*[\"']?)[^'\"\s,;}]+",
     ),
 )

@@ -25,6 +25,9 @@ def request_body_coherence_reasons(
     if body_uic is not None and body_uic != request.instrument_uic:
         reasons.append("request_body_instrument_uic_mismatch")
 
+    asset_type_reasons = _asset_type_reasons(spec, body)
+    reasons.extend(asset_type_reasons)
+
     body_quantity = _quantity(body)
     if _requires_quantity(spec):
         reasons.extend(_required_float_reasons(body_quantity, request.quantity, "quantity"))
@@ -42,6 +45,18 @@ def _account_key_reasons(
         return ("request_body_account_key_missing",)
     if account_key != expected_account_key:
         return ("request_body_account_key_mismatch",)
+    return ()
+
+
+def _asset_type_reasons(
+    spec: OrderWriteSpec,
+    body: Mapping[str, JsonValue],
+) -> tuple[str, ...]:
+    if "AssetType" not in spec.query_keys and spec.write_class not in {"place", "modify"}:
+        return ()
+    asset_type = _string(body.get("AssetType"))
+    if asset_type is None:
+        return ("request_body_asset_type_missing",)
     return ()
 
 

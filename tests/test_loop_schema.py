@@ -256,6 +256,40 @@ def test_write_and_money_moving_validation_rules(tmp_path: Path) -> None:
     assert not result.errors
 
 
+def test_money_moving_completion_with_unproven_mutation_requires_explicit_limitation(
+    tmp_path: Path,
+) -> None:
+    payload = valid_completion()
+    payload["risk_class"] = "money_moving"
+    payload["fixed_feedback"] = [{"finding": "X", "fix": "Y", "evidence": "audit.md"}]
+    path = tmp_path / "tribunal-completion.json"
+    path.write_text(TribunalCompletion.model_validate(payload).model_dump_json(), encoding="utf-8")
+    write_valid_evidence_files(tmp_path)
+    (tmp_path / "output.json").write_text(
+        '{"status":"exercised","completion_claim_allowed":false,'
+        '"real_mutation_proven":false}',
+        encoding="utf-8",
+    )
+
+    result = validate_completion_artifact(path)
+
+    assert any("completion_claim_allowed=false" in error for error in result.errors)
+    assert any("mutation completion is not proven" in error for error in result.errors)
+
+    payload["fixed_feedback"] = [
+        {
+            "finding": "completion_claim_allowed=false and real_mutation_proven=false",
+            "fix": "Marked as honest exercised coverage; not proven mutation completion.",
+            "evidence": "output.json",
+        },
+    ]
+    path.write_text(TribunalCompletion.model_validate(payload).model_dump_json(), encoding="utf-8")
+
+    result = validate_completion_artifact(path)
+
+    assert not result.errors
+
+
 def test_write_and_money_moving_rejects_more_trivial_outputs(tmp_path: Path) -> None:
     payload = valid_completion()
     payload["risk_class"] = "write"

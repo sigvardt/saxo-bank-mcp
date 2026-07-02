@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from saxo_bank_mcp import qa
+from saxo_bank_mcp._redaction import REDACTED, redact_json
 from saxo_bank_mcp.hard_task_manifest import (
     DEFAULT_INCOMPLETE_TOOL_IDS,
     HARD_TASK_SPECS,
@@ -237,3 +238,19 @@ def test_synthetic_disclaimer_errors_are_exercised_not_passed() -> None:
 
     assert lookup_status == "exercised"
     assert response_status == "exercised"
+
+
+def test_order_identifiers_are_redacted_from_evidence() -> None:
+    redacted = redact_json(
+        {
+            "OrderId": "67762872",
+            "order_ids": ["67762872"],
+            "MultiLegOrderId": "abc123",
+        },
+    )
+
+    assert redacted == {
+        "OrderId": REDACTED,
+        "order_ids": REDACTED,
+        "MultiLegOrderId": REDACTED,
+    }

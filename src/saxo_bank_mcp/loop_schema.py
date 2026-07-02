@@ -147,6 +147,7 @@ def _validate_complete_evidence(
         errors.append("complete tools must have non-empty fixed_feedback from peer review")
 
     validate_mcp_execution(completion.tool_id, completion.mcp_execution, base_dir, errors)
+    _validate_money_moving_completion_flags(completion, base_dir, errors)
 
     if completion.output is None:
         errors.append("complete tools require output")
@@ -168,6 +169,54 @@ def _validate_complete_evidence(
                 "complete tool audit file must contain at least "
                 f"{MIN_AUDIT_CHARS} characters of safety/control descriptions"
             )
+
+
+def _validate_money_moving_completion_flags(
+    completion: TribunalCompletion,
+    base_dir: Path,
+    errors: list[str],
+) -> None:
+    if completion.risk_class is not RiskClass.MONEY_MOVING:
+        return
+    payload = _completion_output_payload(completion, base_dir)
+    if not isinstance(payload, Mapping):
+        return
+    payload_mapping = cast("Mapping[str, object]", payload)
+    completion_claim_allowed = payload_mapping.get("completion_claim_allowed")
+    real_mutation_proven = payload_mapping.get("real_mutation_proven")
+    if completion_claim_allowed is not False and real_mutation_proven is not False:
+        return
+    evidence_text = " ".join(
+        (
+            completion.audit,
+            completion.output or "",
+            "" if completion.mcp_execution is None else completion.mcp_execution.notes,
+            " ".join(f"{item.finding} {item.fix}" for item in completion.fixed_feedback),
+        ),
+    ).lower()
+    if "completion_claim_allowed=false" not in evidence_text:
+        errors.append(
+            "money-moving complete artifact with completion_claim_allowed=false must "
+            "state that limitation",
+        )
+    if "not proven mutation" not in evidence_text and "not proven" not in evidence_text:
+        errors.append(
+            "money-moving complete artifact with real_mutation_proven=false must state "
+            "that mutation completion is not proven",
+        )
+
+
+def _completion_output_payload(
+    completion: TribunalCompletion,
+    base_dir: Path,
+) -> object:
+    if completion.output is None:
+        return None
+    output_path = _artifact_path(completion.output, base_dir)
+    try:
+        return json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
 
 
 def _judge_verdict_status(path: Path) -> str | None:
