@@ -265,6 +265,7 @@ def test_sim_order_place_fixture_uses_manual_market_body() -> None:
     body = request["request_body"]
     assert isinstance(body, dict)
     assert body["Uic"] == order_probes.FIXTURE_INSTRUMENT
+    assert body["Amount"] == order_probes.FIXTURE_ORDER_AMOUNT
     assert body["AssetType"] == "FxSpot"
     assert body["ManualOrder"] is False
     assert body["OrderType"] == "Market"

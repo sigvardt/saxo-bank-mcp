@@ -28,6 +28,7 @@ from saxo_bank_mcp.server import mcp
 
 FIXTURE_ACCOUNT: Final = "SIM-ACCOUNT-1"
 FIXTURE_INSTRUMENT: Final = 21
+FIXTURE_ORDER_AMOUNT: Final = 100
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
 ORDER_WRITE_CLASS_BY_NAME: Final[dict[str, OrderWriteClass]] = {
     "place": "place",
@@ -381,12 +382,12 @@ def probe_preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, J
         "operation_id": spec.operation_id,
         "account_key": account_key,
         "instrument_uic": FIXTURE_INSTRUMENT,
-        "quantity": 1,
-        "estimated_notional": 10,
+        "quantity": FIXTURE_ORDER_AMOUNT,
+        "estimated_notional": FIXTURE_ORDER_AMOUNT,
         "account_currency": "USD",
         "risk": {
-            "cost": 10,
-            "cash_required": 10,
+            "cost": FIXTURE_ORDER_AMOUNT,
+            "cash_required": FIXTURE_ORDER_AMOUNT,
             "margin_impact": 1,
             "contract_multiplier": 1,
             "conversion_known": True,
@@ -409,14 +410,20 @@ def _request_body(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue
                 **common,
                 "OrderType": "Limit",
                 "OrderDuration": {"DurationType": "DayOrder"},
-                "Legs": [{"Uic": FIXTURE_INSTRUMENT, "Amount": 1, "BuySell": "Buy"}],
+                "Legs": [
+                    {
+                        "Uic": FIXTURE_INSTRUMENT,
+                        "Amount": FIXTURE_ORDER_AMOUNT,
+                        "BuySell": "Buy",
+                    },
+                ],
             }
         case _:
             return {
                 **common,
                 "Uic": FIXTURE_INSTRUMENT,
                 "AssetType": "FxSpot",
-                "Amount": 1,
+                "Amount": FIXTURE_ORDER_AMOUNT,
                 "BuySell": "Buy",
                 "ManualOrder": False,
                 "OrderType": "Market",
