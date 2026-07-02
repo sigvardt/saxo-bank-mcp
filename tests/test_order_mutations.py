@@ -244,6 +244,12 @@ async def test_place_order_executes_mocked_sim_write_with_readbacks(
 
     payload = result.structured_content
     assert payload is not None
+    tool_payload = order_probes.JSON_OBJECT_ADAPTER.validate_python(payload)
+    qa_report = order_probes.class_report_for_qa(
+        ORDER_WRITE_SPECS["place"],
+        {},
+        tool_payload,
+    )
     assert payload["status"] == "completed"
     assert payload["network_call_made"] is True
     assert payload["order_result_parsed"] is True
@@ -256,6 +262,8 @@ async def test_place_order_executes_mocked_sim_write_with_readbacks(
     assert payload["cleanup_attempted"] is True
     assert payload["cleanup_status"] == "verified_no_open_order"
     assert payload["raw_audit_path_inside_repo"] is False
+    assert qa_report["status"] == "completed"
+    assert qa_report["reason"] == ""
     assert seen == [
         ("POST", "/sim/openapi/trade/v2/orders"),
         ("GET", "/sim/openapi/port/v1/orders/me"),

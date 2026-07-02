@@ -198,7 +198,7 @@ def class_report_for_qa(
 ) -> dict[str, JsonValue]:
     completed = _completion_requirements_met(spec, tool_payload)
     status = _class_status(tool_payload, completed=completed)
-    reason = _agent_reason(tool_payload)
+    reason = "" if completed else _agent_reason(tool_payload)
     return {
         "write_class": spec.write_class,
         "tool_name": spec.tool_name,
