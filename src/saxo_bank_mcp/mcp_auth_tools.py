@@ -12,6 +12,14 @@ from saxo_bank_mcp.config import (
     SimAuthSettingsError,
     resolve_sim_auth_settings,
 )
+from saxo_bank_mcp.live_mode import (
+    LiveReadSettingsError,
+    live_cached_token_for_tool,
+    live_read_auth_required,
+    live_read_refused_for_runtime,
+    live_session_error,
+    resolve_live_read_settings,
+)
 from saxo_bank_mcp.mcp_pkce_state import (
     PendingAuthorizationBlocked,
     PendingAuthorizationReady,
@@ -188,21 +196,16 @@ async def saxo_refresh_token() -> ToolResult:
 
 async def saxo_get_session_capabilities() -> ToolResult:
     runtime = SaxoRuntimeConfig.from_env()
-    if runtime.effective_read_environment() != "SIM":
-        return {
-            "status": "live_not_called",
-            "tool_name": "saxo_get_session_capabilities",
-            "requested_environment": runtime.requested_environment.value,
-            "live_reads": runtime.effective_read_environment() == "LIVE",
-            "detail": "this Todo 2 tool only calls SIM endpoints; no live endpoint was called",
-            "scope_used": False,
-            "next_action": (
-                "set SAXO_MCP_ENVIRONMENT=SIM to read SIM session capability fields; "
-                "LIVE reads belong to a later approved phase"
-            ),
-            "verifies": [],
-            "does_not_verify": list(SESSION_DOES_NOT_VERIFY),
-        }
+    match runtime.effective_read_environment():
+        case "SIM":
+            return await _read_sim_session_capabilities()
+        case "LIVE_READ_DISABLED":
+            return live_read_refused_for_runtime("saxo_get_session_capabilities", runtime)
+        case "LIVE":
+            return await _read_live_session_capabilities()
+
+
+async def _read_sim_session_capabilities() -> ToolResult:
     try:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
@@ -231,7 +234,45 @@ async def saxo_get_session_capabilities() -> ToolResult:
         "environment": "SIM",
         "endpoint_path": SESSION_CAPABILITIES_PATH,
         "token_refreshed": refreshed,
+        "network_call_made": True,
         "capabilities": session_capabilities(capabilities),
         "verifies": list(SESSION_VERIFIES),
         "does_not_verify": list(SESSION_DOES_NOT_VERIFY),
+    }
+
+
+async def _read_live_session_capabilities() -> ToolResult:
+    try:
+        settings = resolve_live_read_settings()
+    except LiveReadSettingsError as error:
+        return live_read_auth_required("saxo_get_session_capabilities", error.code)
+    token_or_result = live_cached_token_for_tool(
+        "saxo_get_session_capabilities",
+        settings.cache_path,
+    )
+    if isinstance(token_or_result, dict):
+        return token_or_result
+    try:
+        capabilities = await read_session_capabilities(settings, token_or_result)
+    except SessionRequestError as error:
+        return live_session_error("saxo_get_session_capabilities", error)
+    return {
+        "status": "passed",
+        "tool_name": "saxo_get_session_capabilities",
+        "requested_environment": "LIVE",
+        "environment": "LIVE",
+        "endpoint_path": SESSION_CAPABILITIES_PATH,
+        "token_refreshed": False,
+        "network_call_made": True,
+        "live_write_called": False,
+        "order_or_subscription_created": False,
+        "account_identifiers_redacted": True,
+        "capabilities": session_capabilities(capabilities),
+        "verifies": ["cached LIVE bearer token can read current session capability fields"],
+        "does_not_verify": [
+            "order placement safety",
+            "instrument/account suitability",
+            "real-money approval",
+            "live-write permission",
+        ],
     }

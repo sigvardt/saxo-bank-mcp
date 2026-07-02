@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, Protocol, TypedDict
 
 import httpx2
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from saxo_bank_mcp.auth import SaxoTokenSet
-from saxo_bank_mcp.config import SimAuthSettings
 from saxo_bank_mcp.http_client import create_async_client
 
 SESSION_CAPABILITIES_PATH = "/root/v1/sessions/capabilities"
@@ -22,6 +21,10 @@ class SessionCapabilityFields(TypedDict):
     AuthenticationLevel: CapabilityValue
     DataLevel: CapabilityValue
     TradeLevel: CapabilityValue
+
+
+class SessionReadSettings(Protocol):
+    rest_base_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +53,7 @@ _CAPABILITIES_ADAPTER = TypeAdapter(SessionCapabilitiesResponse)
 
 
 async def read_session_capabilities(
-    settings: SimAuthSettings,
+    settings: SessionReadSettings,
     token: SaxoTokenSet,
     *,
     transport: httpx2.AsyncBaseTransport | None = None,

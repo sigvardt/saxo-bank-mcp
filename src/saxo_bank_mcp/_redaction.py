@@ -106,6 +106,7 @@ SAFE_SECRET_PLACEHOLDERS: Final = frozenset(
         "SIM_TEST_APPROVED",
         "SIM-ACCOUNT-1",
         "FIXTURE_ACCOUNT",
+        "LIVE-WRITE-REFUSAL-PROBE",
         "<redacted>",
         "approval_factor_invalid",
         "approval_factor_missing",

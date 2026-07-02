@@ -243,5 +243,5 @@ async def test_session_capabilities_does_not_call_live_endpoint(
 
     payload = result.structured_content
     assert payload is not None
-    assert payload["status"] == "live_not_called"
+    assert payload["status"] == "refused"
     assert payload["requested_environment"] == "LIVE"

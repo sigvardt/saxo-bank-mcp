@@ -198,7 +198,7 @@ def test_secret_scan_ignores_account_key_placeholder(tmp_path: Path) -> None:
     assert json.loads(out.read_text(encoding="utf-8"))["findings"] == []
 
 
-def test_live_write_refusal_fails_when_enabled(
+def test_live_write_refusal_still_refuses_when_only_enable_var_is_set(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,8 +207,12 @@ def test_live_write_refusal_fails_when_enabled(
 
     result = qa.main(["live-write-refusal", "--out", str(out)])
 
-    assert result == 1
-    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "failed"
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert result == 0
+    assert report["status"] == "refused"
+    assert report["refusal_reason"] == "missing_live_write_enablement"
+    assert "two independent approval factors" in report["missing_requirements"]
+    assert report["network_call_made"] is False
 
 
 def test_live_read_refusal_checks_read_env(

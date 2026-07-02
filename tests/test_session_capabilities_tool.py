@@ -127,7 +127,7 @@ async def test_session_capabilities_live_refusal_has_agent_next_action(
 
     payload = result.structured_content
     assert payload is not None
-    assert payload["status"] == "live_not_called"
+    assert payload["status"] == "refused"
     assert payload["scope_used"] is False
     assert payload["verifies"] == []
-    assert "SAXO_MCP_ENVIRONMENT=SIM" in str(payload["next_action"])
+    assert "provide LIVE read credentials" in str(payload["next_action"])

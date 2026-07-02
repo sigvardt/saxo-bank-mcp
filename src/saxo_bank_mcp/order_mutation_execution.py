@@ -16,10 +16,13 @@ from saxo_bank_mcp.audit import AuditPathError, append_audit_event
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import (
     SIM_ENDPOINTS,
+    SaxoEnvironment,
+    SaxoRuntimeConfig,
     SimAuthSettingsError,
     resolve_sim_auth_settings,
 )
 from saxo_bank_mcp.http_client import create_async_client
+from saxo_bank_mcp.live_mode import live_write_refusal_payload
 from saxo_bank_mcp.mcp_token_state import (
     CachedTokenBlocked,
     CachedTokenReady,
@@ -57,6 +60,9 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
     approval_factor: str | None,
 ) -> ToolResult:
     spec = ORDER_WRITE_SPECS[write_class]
+    live_refusal = _live_write_refusal_if_requested(spec)
+    if live_refusal is not None:
+        return _tool_result(live_refusal)
     if not preview_token.strip():
         return _tool_result(_denied(spec, "preview_token_missing"))
     if approval_factor is None or not approval_factor.strip():
@@ -218,6 +224,18 @@ def _auth_required(spec: OrderWriteSpec, reason: str) -> JsonObject:
         "mutation_may_have_occurred": False,
         "retry_unsafe": False,
     }
+
+
+def _live_write_refusal_if_requested(spec: OrderWriteSpec) -> JsonObject | None:
+    match SaxoRuntimeConfig.from_env().requested_environment:
+        case SaxoEnvironment.LIVE:
+            return live_write_refusal_payload(
+                tool_name=spec.tool_name,
+                write_class=spec.write_class,
+                operation_id=spec.operation_id,
+            )
+        case SaxoEnvironment.SIM:
+            return None
 
 
 def _commit_denied(spec: OrderWriteSpec, commit: Mapping[str, object]) -> JsonObject:
