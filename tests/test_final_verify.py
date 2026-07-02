@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
-from saxo_bank_mcp import final_verify
+from saxo_bank_mcp import final_verify, tribunal_index
 from saxo_bank_mcp.loop_manifest import GitState
 
 EXPECTED_PLAN_MARKERS = (
@@ -225,20 +226,37 @@ def test_plan_gate_fails_task_three_without_evidence(tmp_path: Path) -> None:
     assert "Task 3 evidence" in out.read_text(encoding="utf-8")
 
 
-def test_scope_gate_fails_when_registry_tools_lack_tribunal_artifacts(
+def test_scope_gate_fails_when_registered_tools_lack_tribunal_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    source_inventory = (
+        Path(__file__).resolve().parents[1] / "data/saxo/openapi_inventory.json"
+    )
     monkeypatch.chdir(tmp_path)
-    registry = tmp_path / "data/saxo_endpoint_registry.json"
-    registry.parent.mkdir()
-    registry.write_text('{"tools":["tool_a","tool_b"]}\n', encoding="utf-8")
+    inventory = tmp_path / "data/saxo/openapi_inventory.json"
+    inventory.parent.mkdir(parents=True)
+    shutil.copyfile(source_inventory, inventory)
     existing_report = tmp_path / ".omo/evidence/saxo-bank-mcp/task-9-tribunal-index.json"
     existing_report.parent.mkdir(parents=True)
     existing_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    monkeypatch.setattr(
+        tribunal_index,
+        "list_registered_mcp_tool_ids",
+        lambda: frozenset({"registered_tool_a", "registered_tool_b"}),
+    )
     out = tmp_path / "scope.md"
 
     result = final_verify.main(["scope", "--out", str(out)])
 
+    index = json.loads(
+        (tmp_path / ".omo/evidence/saxo-bank-mcp/final-scope-tribunal-index.json")
+        .read_text(encoding="utf-8"),
+    )
     assert result == 1
-    assert "tribunal_index run" in out.read_text(encoding="utf-8")
+    report = out.read_text(encoding="utf-8")
+    assert "`PASS` data/saxo/openapi_inventory.json: present" in report
+    assert "`PASS` Saxo inventory validation: passed" in report
+    assert "tribunal_index run" in report
+    assert index["source"] == "fastmcp_tool_list"
+    assert index["missing_tool_ids"] == ["registered_tool_a", "registered_tool_b"]

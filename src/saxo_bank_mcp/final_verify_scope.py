@@ -1,64 +1,44 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pydantic import ValidationError
 
 from saxo_bank_mcp import tribunal_index
 from saxo_bank_mcp._evidence import write_text
+from saxo_bank_mcp.endpoint_registry import load_inventory, validate_inventory
 from saxo_bank_mcp.final_verify_common import (
-    JSON_MAPPING_ADAPTER,
     GitStateProvider,
     render_report,
 )
 
+INVENTORY_PATH = Path("data/saxo/openapi_inventory.json")
 SCOPE_REQUIRED_PATHS = (
-    "data/saxo_endpoint_registry.json",
+    str(INVENTORY_PATH),
     ".omo/evidence/saxo-bank-mcp/task-9-tribunal-index.json",
 )
 
 
 def registry_tool_ids(path: Path) -> tuple[frozenset[str], str | None]:
     if not path.exists():
-        return frozenset(), "missing"
+        return frozenset(), "missing inventory"
+    return tribunal_index.list_registered_mcp_tool_ids(), None
+
+
+def inventory_validation_check(path: Path) -> tuple[str, bool, str]:
     try:
-        payload = JSON_MAPPING_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+        inventory = load_inventory(path)
+        validation = validate_inventory(inventory)
     except (OSError, ValidationError) as exc:
-        return frozenset(), type(exc).__name__
-    candidates = payload.get("tools") or payload.get("operations") or payload.get("tool_ids")
-    if not isinstance(candidates, list):
-        return frozenset(), "missing tools/operations/tool_ids list"
-    tool_ids: set[str] = set()
-    for item in candidates:
-        match item:
-            case str():
-                tool_ids.add(item)
-            case dict():
-                value = (
-                    item.get("tool_id")
-                    or item.get("mcp_tool_id")
-                    or item.get("id")
-                    or item.get("name")
-                )
-                if isinstance(value, str):
-                    tool_ids.add(value)
-            case _:
-                continue
-    if not tool_ids:
-        return frozenset(), "empty expected tool list"
-    return frozenset(tool_ids), None
+        return "Saxo inventory validation", False, type(exc).__name__
+    passed = validation.get("status") == "passed"
+    detail = "passed" if passed else "failed"
+    return "Saxo inventory validation", passed, detail
 
 
-def run_scope_tribunal_index(expected_tools: frozenset[str]) -> tuple[str, bool, str]:
-    if not expected_tools:
-        return "tribunal_index run", False, "empty expected tool list"
-    tools_file = Path(".omo/evidence/saxo-bank-mcp/final-scope-tools.json")
-    write_text(tools_file, json.dumps(sorted(expected_tools), indent=2) + "\n")
+def run_scope_tribunal_index() -> tuple[str, bool, str]:
     result = tribunal_index.main(
         [
-            "--tools-file",
-            str(tools_file),
             "--out",
             ".omo/evidence/saxo-bank-mcp/final-scope-tribunal-index.json",
         ],
@@ -68,20 +48,12 @@ def run_scope_tribunal_index(expected_tools: frozenset[str]) -> tuple[str, bool,
 
 
 def verify_scope(out: Path, git_state_provider: GitStateProvider) -> int:
-    registry_path = Path("data/saxo_endpoint_registry.json")
-    expected_tools, registry_error = registry_tool_ids(registry_path)
     checks = [
         (path, Path(path).exists(), "present" if Path(path).exists() else "missing")
         for path in SCOPE_REQUIRED_PATHS
     ]
-    checks.append(
-        (
-            "endpoint registry expected tools",
-            registry_error is None,
-            f"{len(expected_tools)} tools" if registry_error is None else registry_error,
-        ),
-    )
-    checks.append(run_scope_tribunal_index(expected_tools))
+    checks.append(inventory_validation_check(INVENTORY_PATH))
+    checks.append(run_scope_tribunal_index())
     passed = all(ok for _, ok, _ in checks)
     write_text(
         out,
