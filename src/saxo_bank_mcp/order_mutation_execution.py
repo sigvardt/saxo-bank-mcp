@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -56,7 +56,7 @@ ORDER_WRITE_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
 ORDER_ID_PROOF_REQUIRED_CLASSES: Final[frozenset[OrderWriteClass]] = frozenset(
     {"place", "modify", "multileg-place", "multileg-modify", "cancel-by-instrument"},
 )
-READBACK_PORT_ORDERS_PATH: Final = "/port/v1/orders"
+READBACK_PORT_ORDERS_PATH: Final = "/port/v1/orders/me"
 READBACK_TRADE_MESSAGES_PATH: Final = "/trade/v1/messages"
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
 
@@ -111,7 +111,7 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
     )
     if isinstance(response, dict):
         if response.get("status") == "network_error":
-            readback = await _readback(token, request_body)
+            readback = await _readback(token, ())
             response.update(
                 {
                     **readback,
@@ -129,8 +129,9 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
         _object_payload(response_body),
         http_status=response.status_code,
     )
-    readback = await _readback(token, request_body)
-    status = _execution_status(spec, parsed)
+    readback = await _readback(token, parsed.order_ids)
+    cleanup_status = _cleanup_status(spec, parsed, readback)
+    status = _status_with_cleanup(_execution_status(spec, parsed), cleanup_status)
     reason = _order_write_reason(status=status, http_status=response.status_code, parsed=parsed)
     mutation_may_have_occurred = parsed.outcome in {
         "success",
@@ -167,8 +168,8 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "raw_audit_path": str(audit_path) if audit_path is not None else "",
             "raw_audit_path_inside_repo": raw_audit_path_inside_repo,
             "audit_mode": None if audit_path is None else audit_mode(audit_path),
-            "cleanup_attempted": False,
-            "cleanup_status": "not_required_by_executor",
+            "cleanup_attempted": cleanup_status != "not_required_by_executor",
+            "cleanup_status": cleanup_status,
             "order_placed": _content_backed_mutation_flag(
                 spec,
                 parsed,
@@ -181,7 +182,9 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             ),
             "order_cancelled": _order_cancelled_flag(spec, parsed),
             "mutation_content_verified": _mutation_content_verified(spec, parsed),
+            "order_or_subscription_created": mutation_may_have_occurred,
             "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
+            **readback,
         },
     )
 
@@ -359,6 +362,15 @@ def _execution_status(spec: OrderWriteSpec, parsed: ParsedOrderWriteResponse) ->
     return "completed" if parsed.outcome == "success" else parsed.outcome
 
 
+def _status_with_cleanup(status: str, cleanup_status: str) -> str:
+    if status == "completed" and cleanup_status in {
+        "open_order_status_unverified",
+        "open_order_still_present_cleanup_not_attempted",
+    }:
+        return "completed_unverified"
+    return status
+
+
 def _order_cancelled_flag(
     spec: OrderWriteSpec,
     parsed: ParsedOrderWriteResponse,
@@ -438,25 +450,68 @@ async def _send_order_write(
         return _network_error(spec, type(error).__name__)
 
 
-async def _readback(token: SaxoTokenSet, request_body: Mapping[str, JsonValue]) -> JsonObject:
+async def _readback(token: SaxoTokenSet, response_order_ids: tuple[str, ...]) -> JsonObject:
     headers = {"Accept": "application/json", "Authorization": f"Bearer {token.access_token}"}
-    account_key = _string_or_int(request_body.get("AccountKey"))
     try:
         async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
             port = await client.get(
                 READBACK_PORT_ORDERS_PATH.lstrip("/"),
-                params={} if account_key is None else {"AccountKey": account_key},
                 headers=headers,
             )
             messages = await client.get(READBACK_TRADE_MESSAGES_PATH.lstrip("/"), headers=headers)
     except httpx2.HTTPError:
-        return {"port_orders_readback": False, "trade_messages_readback": False}
+        return {
+            "port_orders_readback": False,
+            "trade_messages_readback": False,
+            "open_order_readback_matched_response_order": False,
+            "open_order_readback_confirmed_absent": False,
+        }
+    open_order_ids = _order_ids_from_json(_response_body(port))
+    matched_open_order = bool(frozenset(response_order_ids).intersection(open_order_ids))
     return {
         "port_orders_readback": HTTP_SUCCESS_MIN <= port.status_code < HTTP_SUCCESS_MAX,
         "trade_messages_readback": (
             HTTP_SUCCESS_MIN <= messages.status_code < HTTP_SUCCESS_MAX
         ),
+        "open_order_readback_matched_response_order": matched_open_order,
+        "open_order_readback_confirmed_absent": bool(response_order_ids) and not matched_open_order,
     }
+
+
+def _cleanup_status(
+    spec: OrderWriteSpec,
+    parsed: ParsedOrderWriteResponse,
+    readback: Mapping[str, JsonValue],
+) -> str:
+    if spec.write_class not in {"place", "multileg-place"} or parsed.outcome != "success":
+        return "not_required_by_executor"
+    if not parsed.order_ids:
+        return "not_required_by_executor"
+    if readback.get("port_orders_readback") is not True:
+        return "open_order_status_unverified"
+    if readback.get("open_order_readback_matched_response_order") is True:
+        return "open_order_still_present_cleanup_not_attempted"
+    if readback.get("open_order_readback_confirmed_absent") is True:
+        return "verified_no_open_order"
+    return "open_order_status_unverified"
+
+
+def _order_ids_from_json(value: JsonValue) -> frozenset[str]:
+    found: set[str] = set()
+    _collect_order_ids(value, found)
+    return frozenset(found)
+
+
+def _collect_order_ids(value: JsonValue, found: set[str]) -> None:
+    if isinstance(value, Mapping):
+        candidate = value.get("OrderId")
+        if isinstance(candidate, str) and candidate.strip():
+            found.add(candidate.strip())
+        for child in value.values():
+            _collect_order_ids(child, found)
+    elif not isinstance(value, str) and isinstance(value, Sequence):
+        for child in value:
+            _collect_order_ids(child, found)
 
 
 def _network_error(spec: OrderWriteSpec, detail: str) -> JsonObject:

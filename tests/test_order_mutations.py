@@ -251,12 +251,81 @@ async def test_place_order_executes_mocked_sim_write_with_readbacks(
     assert payload["port_orders_readback"] is True
     assert payload["trade_messages_readback"] is True
     assert payload["order_placed"] is True
+    assert payload["order_or_subscription_created"] is True
+    assert payload["open_order_readback_confirmed_absent"] is True
+    assert payload["cleanup_attempted"] is True
+    assert payload["cleanup_status"] == "verified_no_open_order"
     assert payload["raw_audit_path_inside_repo"] is False
     assert seen == [
         ("POST", "/sim/openapi/trade/v2/orders"),
-        ("GET", "/sim/openapi/port/v1/orders"),
+        ("GET", "/sim/openapi/port/v1/orders/me"),
         ("GET", "/sim/openapi/trade/v1/messages"),
     ]
+
+
+@pytest.mark.anyio
+async def test_place_order_with_open_order_is_completed_unverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_safety_state()
+    _configure_safety(monkeypatch, tmp_path)
+
+    def ready_token(_spec: OrderWriteSpec) -> SaxoTokenSet:
+        return SaxoTokenSet(
+            access_token="access-token-value",  # noqa: S106
+            refresh_token="refresh-token-value",  # noqa: S106
+            code_verifier="code-verifier-value",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST":
+            return httpx2.Response(
+                200,
+                json={"OrderId": "67762872"},
+                request=request,
+            )
+        if request.url.path.endswith("/port/v1/orders/me"):
+            return httpx2.Response(
+                200,
+                json={"Data": [{"OrderId": "67762872"}]},
+                request=request,
+            )
+        return httpx2.Response(200, json={"Data": []}, request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(order_execution, "_cached_token", ready_token)
+    monkeypatch.setattr(order_execution, "create_async_client", client_factory)
+
+    async with Client(mcp) as client:
+        preview = await _create_preview(client, "post.trade.v2.orders")
+        result = await client.call_tool(
+            "saxo_place_sim_order",
+            {
+                "preview_token": str(preview["preview_token"]),
+                "approval_factor": TEST_APPROVAL_FACTOR,
+            },
+            raise_on_error=False,
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    assert result.is_error is True
+    assert payload["status"] == "completed_unverified"
+    assert payload["order_placed"] is True
+    assert payload["order_or_subscription_created"] is True
+    assert payload["open_order_readback_matched_response_order"] is True
+    assert payload["cleanup_status"] == "open_order_still_present_cleanup_not_attempted"
 
 
 def test_sim_order_place_fixture_uses_manual_market_body() -> None:

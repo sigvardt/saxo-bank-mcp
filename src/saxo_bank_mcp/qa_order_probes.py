@@ -224,6 +224,12 @@ def class_report_for_qa(
         "order_result_parsed": tool_payload.get("order_result_parsed") is True,
         "port_orders_readback": tool_payload.get("port_orders_readback") is True,
         "trade_messages_readback": tool_payload.get("trade_messages_readback") is True,
+        "open_order_readback_matched_response_order": (
+            tool_payload.get("open_order_readback_matched_response_order") is True
+        ),
+        "open_order_readback_confirmed_absent": (
+            tool_payload.get("open_order_readback_confirmed_absent") is True
+        ),
         "cleanup_attempted": tool_payload.get("cleanup_attempted") is True,
         "cleanup_status": str(tool_payload.get("cleanup_status", "not_run")),
         "raw_audit_path_inside_repo": tool_payload.get("raw_audit_path_inside_repo") is True,
@@ -268,6 +274,13 @@ def _completion_requirements_met(
             and tool_payload.get("order_cancelled") is True
             and tool_payload.get("trade_messages_readback") is True
         )
+    if spec.write_class in {"place", "multileg-place"}:
+        return (
+            tool_payload.get("mutation_content_verified") is True
+            and tool_payload.get("port_orders_readback") is True
+            and tool_payload.get("trade_messages_readback") is True
+            and tool_payload.get("cleanup_status") == "verified_no_open_order"
+        )
     return (
         tool_payload.get("mutation_content_verified") is True
         and tool_payload.get("port_orders_readback") is True
@@ -282,6 +295,12 @@ def _completion_oracle(spec: OrderWriteSpec) -> str:
             "x-request-id, retry_unsafe=false, order_cancelled=true, mutation content proving a "
             "matched order, and trade-message readback; portfolio order-list readback alone is "
             "not sufficient for delete-by-instrument"
+        )
+    if spec.write_class in {"place", "multileg-place"}:
+        return (
+            "completed response parsed, x-request-id present, retry safe, mutation content "
+            "verified, portfolio order-list readback, trade messages readback, and cleanup_status "
+            "verified_no_open_order"
         )
     return (
         "completed response parsed, x-request-id present, retry safe, mutation content "
