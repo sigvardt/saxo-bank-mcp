@@ -84,6 +84,10 @@ def stream_event_payload(
         "environment": "SIM",
         "fastmcp_called": tool_payload.get("fastmcp_called") is True,
         "official_docs_checked": tool_payload.get("official_docs_checked") is True,
+        "official_docs_check_caveat": str(
+            tool_payload.get("official_docs_check_caveat", ""),
+        ),
+        "official_limits_declared": tool_payload.get("official_limits_declared") is True,
         "streaming_endpoint": SIM_STREAMING_ENDPOINT,
         "token_in_query_url": tool_payload.get("token_in_query_url") is True,
         "token_query_url_check_source": str(

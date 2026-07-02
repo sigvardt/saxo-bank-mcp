@@ -208,7 +208,12 @@ def streaming_docs_evidence(connect_url: str | None = None) -> dict[str, JsonVal
         build_streaming_connect_url("docsEvidenceCtx") if connect_url is None else connect_url
     )
     return {
-        "official_docs_checked": True,
+        "official_docs_checked": False,
+        "official_docs_check_caveat": (
+            "The probe does not fetch Saxo documentation at runtime; it compares "
+            "requested limits against vendored limits with declared Saxo source URLs."
+        ),
+        "official_limits_declared": True,
         "streaming_endpoint": SIM_STREAMING_ENDPOINT,
         "streaming_connect_path": "/connect",
         "token_in_query_url": token_in_streaming_query_url(observed_connect_url),

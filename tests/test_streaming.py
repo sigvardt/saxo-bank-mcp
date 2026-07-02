@@ -183,7 +183,9 @@ def test_stream_qa_records_incomplete_auth_required(
     assert report["status"] == "incomplete_auth_required"
     assert report["command"] == "stream"
     assert report["fastmcp_called"] is True
-    assert report["official_docs_checked"] is True
+    assert report["official_docs_checked"] is False
+    assert report["official_limits_declared"] is True
+    assert "does not fetch Saxo documentation" in report["official_docs_check_caveat"]
     assert report["streaming_endpoint"] == SIM_STREAMING_ENDPOINT
     assert report["limit_expected_connections"] == EXPECTED_CONNECTIONS
     assert report["limit_expected_price_instruments"] == EXPECTED_PRICE_INSTRUMENTS
