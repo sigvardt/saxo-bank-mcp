@@ -171,7 +171,9 @@ def test_secret_scan_ignores_variable_names(tmp_path: Path) -> None:
     result = qa.main(["secret-scan", "--paths", str(target), "--out", str(out)])
 
     assert result == 0
-    assert json.loads(out.read_text(encoding="utf-8"))["findings"] == []
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["paths"] == [str(target)]
+    assert report["findings"] == []
 
 
 def test_secret_scan_detects_access_token(tmp_path: Path) -> None:

@@ -260,6 +260,7 @@ def handle_secret_scan(out: Path, paths: list[str]) -> int:
                 "passed" if not findings and not scan_errors else "failed",
                 "credential regex scan",
             ),
+            "paths": list(paths),
             "findings": findings,
             "scan_errors": scan_errors,
         },
