@@ -103,6 +103,7 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
                     spec,
                     account.account_key,
                     setup,
+                    preview,
                 )
                 per_class.append(
                     class_report_for_qa(
@@ -358,11 +359,17 @@ async def _post_tool_cleanup(
     spec: OrderWriteSpec,
     account_key: str,
     setup: SetupOrder | None,
+    preview: dict[str, JsonValue],
 ) -> dict[str, JsonValue]:
     if setup is None and spec.write_class == "place":
         return await _post_single_place_cleanup(client, account_key, spec.tool_name)
     if setup is None and spec.write_class == "multileg-place":
-        return await _post_multileg_place_cleanup(client, account_key, spec.tool_name)
+        return await _post_multileg_place_cleanup(
+            client,
+            account_key,
+            spec.tool_name,
+            external_reference=_preview_external_reference(preview),
+        )
     if setup is None or setup.report.get("setup_open_order_found") is not True:
         return {"setup_cleanup_required": False}
     present_after_tool, read_report = await _raw_setup_order_present(setup, spec.tool_name)
@@ -431,7 +438,7 @@ async def _post_single_place_cleanup(
         "setup_order_absent_after_tool": order_id is None,
         "setup_order_still_open_after_tool": order_id is not None,
         "setup_cleanup_attempted": False,
-        **read_report,
+        **_initial_cleanup_read_report(read_report),
     }
     if order_id is None:
         return cleanup_report
@@ -448,6 +455,9 @@ async def _post_single_place_cleanup(
                 cleanup_payload.get("network_call_made") is True
             ),
             "setup_cleanup_final_absent": present_after_cleanup is False,
+            "setup_cleanup_final_status": _final_cleanup_status(
+                present_after_cleanup=present_after_cleanup,
+            ),
             **cleanup_read,
         },
     )
@@ -458,19 +468,22 @@ async def _post_multileg_place_cleanup(
     client: Client[FastMCPTransport],
     account_key: str,
     tool_name: str,
+    *,
+    external_reference: str | None,
 ) -> dict[str, JsonValue]:
     order_id, read_report = await _raw_multileg_open_order_id(
         account_key,
-        external_reference=None,
+        external_reference=external_reference,
         tool_name=tool_name,
     )
     cleanup_report: dict[str, JsonValue] = {
         "setup_cleanup_required": True,
+        "setup_external_reference_redacted": external_reference is not None,
         "setup_order_absence_checked": True,
         "setup_order_absent_after_tool": order_id is None,
         "setup_order_still_open_after_tool": order_id is not None,
         "setup_cleanup_attempted": False,
-        **read_report,
+        **_initial_cleanup_read_report(read_report),
     }
     if order_id is None:
         return cleanup_report
@@ -487,10 +500,47 @@ async def _post_multileg_place_cleanup(
                 cleanup_payload.get("network_call_made") is True
             ),
             "setup_cleanup_final_absent": present_after_cleanup is False,
+            "setup_cleanup_final_status": _final_cleanup_status(
+                present_after_cleanup=present_after_cleanup,
+            ),
             **cleanup_read,
         },
     )
     return cleanup_report
+
+
+def _preview_external_reference(preview: dict[str, JsonValue]) -> str | None:
+    request_body = preview.get("request_body")
+    if not isinstance(request_body, Mapping):
+        return None
+    external_reference = request_body.get("ExternalReference")
+    if not isinstance(external_reference, str):
+        return None
+    return external_reference.strip() or None
+
+
+def _initial_cleanup_read_report(
+    read_report: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    report = dict(read_report)
+    renames = {
+        "setup_raw_matching_open_order_count": "setup_raw_initial_matching_open_order_count",
+        "setup_raw_matching_multileg_order_count": (
+            "setup_raw_initial_matching_multileg_order_count"
+        ),
+    }
+    for old_key, new_key in renames.items():
+        if old_key in report:
+            report[new_key] = report.pop(old_key)
+    return report
+
+
+def _final_cleanup_status(*, present_after_cleanup: bool | None) -> str:
+    if present_after_cleanup is False:
+        return "verified_no_open_order"
+    if present_after_cleanup is True:
+        return "open_order_still_present_after_cleanup"
+    return "unknown_after_cleanup"
 
 
 async def _raw_setup_order_present(
@@ -809,6 +859,7 @@ def class_report_for_qa(
     )
     status = _class_status(tool_payload, completed=completed)
     reason = "" if completed else _agent_reason(tool_payload)
+    tool_cleanup_status = str(tool_payload.get("cleanup_status", "not_run"))
     return {
         "write_class": spec.write_class,
         "tool_name": spec.tool_name,
@@ -841,7 +892,12 @@ def class_report_for_qa(
             tool_payload.get("open_order_readback_confirmed_absent") is True
         ),
         "cleanup_attempted": tool_payload.get("cleanup_attempted") is True,
-        "cleanup_status": str(tool_payload.get("cleanup_status", "not_run")),
+        "cleanup_status": _qa_lifecycle_cleanup_status(tool_cleanup_status, cleanup_report),
+        "cleanup_status_source": _qa_lifecycle_cleanup_status_source(
+            tool_cleanup_status,
+            cleanup_report,
+        ),
+        "tool_cleanup_status": tool_cleanup_status,
         "qa_setup": setup_report,
         "qa_cleanup": cleanup_report,
         "raw_audit_path_inside_repo": tool_payload.get("raw_audit_path_inside_repo") is True,
@@ -994,7 +1050,30 @@ def _raw_cleanup_final_absent_proven(cleanup_report: dict[str, JsonValue]) -> bo
     return (
         cleanup_report.get("setup_cleanup_final_absent") is True
         and cleanup_report.get("setup_raw_read_status") == "passed"
+        and cleanup_report.get("setup_raw_order_id_present") is not True
     )
+
+
+def _qa_lifecycle_cleanup_status(
+    tool_cleanup_status: str,
+    cleanup_report: dict[str, JsonValue],
+) -> str:
+    final_status = cleanup_report.get("setup_cleanup_final_status")
+    if isinstance(final_status, str) and final_status:
+        return final_status
+    if _raw_cleanup_final_absent_proven(cleanup_report):
+        return "verified_no_open_order"
+    return tool_cleanup_status
+
+
+def _qa_lifecycle_cleanup_status_source(
+    tool_cleanup_status: str,
+    cleanup_report: dict[str, JsonValue],
+) -> str:
+    lifecycle_status = _qa_lifecycle_cleanup_status(tool_cleanup_status, cleanup_report)
+    if lifecycle_status != tool_cleanup_status:
+        return "qa_cleanup_final_readback"
+    return "tool_payload"
 
 
 def _completion_oracle(spec: OrderWriteSpec) -> str:
@@ -1035,6 +1114,11 @@ def _completion_not_claimed_reason(
         )
     if tool_payload.get("status") == "completed":
         return "completed response lacked the class-specific proof required by the oracle"
+    if tool_payload.get("status") == "completed_unverified":
+        return (
+            "completed_unverified response lacked the class-specific cleanup/readback proof "
+            "required by the oracle"
+        )
     return _agent_reason(tool_payload)
 
 

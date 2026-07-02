@@ -381,6 +381,69 @@ def test_cancel_qa_requires_successful_raw_absence_readback() -> None:
     assert report["real_mutation_proven"] is False
 
 
+def test_multileg_place_qa_requires_final_order_absence() -> None:
+    tool_payload: dict[str, JsonValue] = {
+        "status": "completed_unverified",
+        "network_call_made": True,
+        "order_result_parsed": True,
+        "x_request_id_present": True,
+        "retry_unsafe": False,
+        "mutation_content_verified": True,
+        "port_orders_readback": True,
+        "trade_messages_readback": True,
+        "cleanup_status": "open_order_still_present_cleanup_not_attempted",
+    }
+    cleanup: dict[str, JsonValue] = {
+        "setup_cleanup_final_absent": True,
+        "setup_raw_read_status": "passed",
+        "setup_raw_order_id_present": True,
+    }
+
+    report = order_probes.class_report_for_qa(
+        ORDER_WRITE_SPECS["multileg-place"],
+        {},
+        tool_payload,
+        cleanup=cleanup,
+    )
+
+    assert report["status"] == "exercised"
+    assert report["real_mutation_proven"] is False
+    assert report["completion_not_claimed_reason"]
+
+
+def test_multileg_place_qa_reports_lifecycle_cleanup_status() -> None:
+    tool_payload: dict[str, JsonValue] = {
+        "status": "completed_unverified",
+        "network_call_made": True,
+        "order_result_parsed": True,
+        "x_request_id_present": True,
+        "retry_unsafe": False,
+        "mutation_content_verified": True,
+        "port_orders_readback": True,
+        "trade_messages_readback": True,
+        "cleanup_status": "open_order_still_present_cleanup_not_attempted",
+    }
+    cleanup: dict[str, JsonValue] = {
+        "setup_cleanup_final_absent": True,
+        "setup_cleanup_final_status": "verified_no_open_order",
+        "setup_raw_read_status": "passed",
+        "setup_raw_order_id_present": False,
+    }
+
+    report = order_probes.class_report_for_qa(
+        ORDER_WRITE_SPECS["multileg-place"],
+        {},
+        tool_payload,
+        cleanup=cleanup,
+    )
+
+    assert report["status"] == "completed"
+    assert report["real_mutation_proven"] is True
+    assert report["cleanup_status"] == "verified_no_open_order"
+    assert report["cleanup_status_source"] == "qa_cleanup_final_readback"
+    assert report["tool_cleanup_status"] == "open_order_still_present_cleanup_not_attempted"
+
+
 @pytest.mark.anyio
 async def test_empty_success_place_order_response_is_not_proven_mutation(
     tmp_path: Path,
