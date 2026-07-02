@@ -8,6 +8,7 @@ from saxo_bank_mcp.final_verify_code import CODE_REQUIRED_PATHS
 from saxo_bank_mcp.final_verify_code import verify_code as _verify_code
 from saxo_bank_mcp.final_verify_mcp import (
     MCP_ALLOWED_STATUSES,
+    MCP_HARD_TASK_SUMMARY,
     MCP_REQUIRED_EVIDENCE,
 )
 from saxo_bank_mcp.final_verify_mcp import (
@@ -28,6 +29,7 @@ from saxo_bank_mcp.loop_manifest import current_git_state
 __all__ = (
     "CODE_REQUIRED_PATHS",
     "MCP_ALLOWED_STATUSES",
+    "MCP_HARD_TASK_SUMMARY",
     "MCP_REQUIRED_EVIDENCE",
     "PLAN_MARKERS",
     "SCOPE_REQUIRED_PATHS",
