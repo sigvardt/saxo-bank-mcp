@@ -23,6 +23,7 @@ from saxo_bank_mcp.token_cache import (
     TokenCachePathError,
     default_token_cache_path,
     inspect_token_cache,
+    load_pending_authorization,
     pending_authorization_path,
     token_cache_path,
 )
@@ -110,13 +111,14 @@ class SaxoRuntimeConfig(BaseModel):
             cache = error.path.expanduser()
             cache_refused = True
         sim_credential_source = _sim_credential_source(source)
+        redirect_uri = _sim_redirect_uri(source, cache)
         return cls(
             requested_environment=requested,
             live_reads_enabled=source.get("SAXO_MCP_ENABLE_LIVE_READS") == "1",
             sim_credentials_present=sim_credential_source != "missing",
             sim_credential_source=sim_credential_source,
             live_credentials_present=_credentials_present(source, "LIVE"),
-            sim_redirect_uri_present=bool(source.get("SAXO_MCP_SIM_REDIRECT_URI", "").strip()),
+            sim_redirect_uri_present=bool(redirect_uri),
             cache_path=cache,
             token_cache_path_refused=cache_refused,
         )
@@ -187,7 +189,7 @@ def resolve_sim_auth_settings(
         cache = token_cache_path(_requested_token_cache_path(source), repo_root=repo_root)
     except TokenCachePathError as error:
         raise SimAuthSettingsError("token_cache_path_refused", str(error)) from error
-    redirect_uri = source.get("SAXO_MCP_SIM_REDIRECT_URI", "").strip()
+    redirect_uri = _sim_redirect_uri(source, cache)
     if require_redirect and not redirect_uri:
         raise SimAuthSettingsError(
             "sim_redirect_uri_missing",
@@ -246,6 +248,16 @@ def _env_sim_app_key(environ: Mapping[str, str]) -> str | None:
         if value:
             return value
     return None
+
+
+def _sim_redirect_uri(environ: Mapping[str, str], cache_path: Path) -> str:
+    configured = environ.get("SAXO_MCP_SIM_REDIRECT_URI", "").strip()
+    if configured:
+        return configured
+    pending = load_pending_authorization(pending_authorization_path(cache_path))
+    if pending is None:
+        return ""
+    return pending.redirect_uri
 
 
 def _require_trusted_sim_endpoint(label: str, url: str) -> None:
