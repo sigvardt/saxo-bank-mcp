@@ -50,7 +50,11 @@ ORDER_WRITE_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
     "real-money approval",
     "future account suitability after readback time",
     "x-request-id response echo",
+    "placed or modified order id in portfolio order-list readback",
     "whether delete-by-instrument matched an existing order when Saxo returns empty success",
+)
+ORDER_ID_PROOF_REQUIRED_CLASSES: Final[frozenset[OrderWriteClass]] = frozenset(
+    {"place", "modify", "multileg-place", "multileg-modify", "cancel-by-instrument"},
 )
 READBACK_PORT_ORDERS_PATH: Final = "/port/v1/orders"
 READBACK_TRADE_MESSAGES_PATH: Final = "/trade/v1/messages"
@@ -165,8 +169,16 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "audit_mode": None if audit_path is None else audit_mode(audit_path),
             "cleanup_attempted": False,
             "cleanup_status": "not_required_by_executor",
-            "order_placed": _mutation_flag(spec, parsed.outcome, ("place", "multileg-place")),
-            "order_modified": _mutation_flag(spec, parsed.outcome, ("modify", "multileg-modify")),
+            "order_placed": _content_backed_mutation_flag(
+                spec,
+                parsed,
+                ("place", "multileg-place"),
+            ),
+            "order_modified": _content_backed_mutation_flag(
+                spec,
+                parsed,
+                ("modify", "multileg-modify"),
+            ),
             "order_cancelled": _order_cancelled_flag(spec, parsed),
             "mutation_content_verified": _mutation_content_verified(spec, parsed),
             "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
@@ -321,9 +333,25 @@ def _mutation_flag(
             return False
 
 
+def _content_backed_mutation_flag(
+    spec: OrderWriteSpec,
+    parsed: ParsedOrderWriteResponse,
+    matching_classes: tuple[OrderWriteClass, ...],
+) -> bool | None:
+    if spec.write_class not in matching_classes:
+        return False
+    match parsed.outcome:
+        case "success":
+            return _mutation_content_verified(spec, parsed)
+        case "partial_success" | "unknown_state":
+            return None
+        case "failed" | "rate_limited":
+            return False
+
+
 def _execution_status(spec: OrderWriteSpec, parsed: ParsedOrderWriteResponse) -> str:
     if (
-        spec.write_class == "cancel-by-instrument"
+        spec.write_class in ORDER_ID_PROOF_REQUIRED_CLASSES
         and parsed.outcome == "success"
         and not parsed.order_ids
     ):
@@ -353,7 +381,7 @@ def _mutation_content_verified(
 ) -> bool:
     if parsed.outcome != "success":
         return False
-    if spec.write_class == "cancel-by-instrument":
+    if spec.write_class in ORDER_ID_PROOF_REQUIRED_CLASSES:
         return bool(parsed.order_ids)
     return True
 

@@ -169,7 +169,7 @@ async def _create_preview(
     account_key: str,
 ) -> dict[str, JsonValue]:
     result = await client.call_tool(
-        "saxo_create_write_preview", _preview_request(spec, account_key)
+        "saxo_create_write_preview", probe_preview_request(spec, account_key)
     )
     return _payload(result.structured_content)
 
@@ -266,7 +266,8 @@ def _completion_requirements_met(
             and tool_payload.get("trade_messages_readback") is True
         )
     return (
-        tool_payload.get("port_orders_readback") is True
+        tool_payload.get("mutation_content_verified") is True
+        and tool_payload.get("port_orders_readback") is True
         and tool_payload.get("trade_messages_readback") is True
     )
 
@@ -280,8 +281,8 @@ def _completion_oracle(spec: OrderWriteSpec) -> str:
             "not sufficient for delete-by-instrument"
         )
     return (
-        "completed response parsed, x-request-id present, retry safe, portfolio order-list "
-        "readback, and trade messages readback"
+        "completed response parsed, x-request-id present, retry safe, mutation content "
+        "verified, portfolio order-list readback, and trade messages readback"
     )
 
 
@@ -375,7 +376,7 @@ def _account_key_redacted(tool_payload: dict[str, JsonValue]) -> bool:
     return "AccountKey" not in json.dumps(tool_payload, sort_keys=True)
 
 
-def _preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue]:
+def probe_preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue]:
     return {
         "operation_id": spec.operation_id,
         "account_key": account_key,
@@ -414,10 +415,11 @@ def _request_body(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue
             return {
                 **common,
                 "Uic": FIXTURE_INSTRUMENT,
-                "AssetType": "Stock",
+                "AssetType": "FxSpot",
                 "Amount": 1,
                 "BuySell": "Buy",
-                "OrderType": "Limit",
+                "ManualOrder": False,
+                "OrderType": "Market",
                 "OrderDuration": {"DurationType": "DayOrder"},
             }
 

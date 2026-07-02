@@ -10,10 +10,12 @@ from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport
 
 import saxo_bank_mcp.order_mutation_execution as order_execution
+import saxo_bank_mcp.qa_order_probes as order_probes
 from saxo_bank_mcp import qa
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.order_mutation_models import (
+    ORDER_WRITE_SPECS,
     OrderWriteSpec,
     parse_order_mutation_response,
 )
@@ -255,6 +257,68 @@ async def test_place_order_executes_mocked_sim_write_with_readbacks(
         ("GET", "/sim/openapi/port/v1/orders"),
         ("GET", "/sim/openapi/trade/v1/messages"),
     ]
+
+
+def test_sim_order_place_fixture_uses_manual_market_body() -> None:
+    request = order_probes.probe_preview_request(ORDER_WRITE_SPECS["place"], "SIM-ACCOUNT-1")
+
+    body = request["request_body"]
+    assert isinstance(body, dict)
+    assert body["Uic"] == order_probes.FIXTURE_INSTRUMENT
+    assert body["AssetType"] == "FxSpot"
+    assert body["ManualOrder"] is False
+    assert body["OrderType"] == "Market"
+
+
+@pytest.mark.anyio
+async def test_empty_success_place_order_response_is_not_proven_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_safety_state()
+    _configure_safety(monkeypatch, tmp_path)
+
+    def ready_token(_spec: OrderWriteSpec) -> SaxoTokenSet:
+        return SaxoTokenSet(
+            access_token="access-token-value",  # noqa: S106
+            refresh_token="refresh-token-value",  # noqa: S106
+            code_verifier="code-verifier-value",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={}, request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+    ) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(order_execution, "_cached_token", ready_token)
+    monkeypatch.setattr(order_execution, "create_async_client", client_factory)
+
+    async with Client(mcp) as client:
+        preview = await _create_preview(client, "post.trade.v2.orders")
+        result = await client.call_tool(
+            "saxo_place_sim_order",
+            {
+                "preview_token": str(preview["preview_token"]),
+                "approval_factor": TEST_APPROVAL_FACTOR,
+            },
+            raise_on_error=False,
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    assert result.is_error is True
+    assert payload["status"] == "completed_unverified"
+    assert payload["order_placed"] is False
+    assert payload["mutation_content_verified"] is False
 
 
 @pytest.mark.anyio
