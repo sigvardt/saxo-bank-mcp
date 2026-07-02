@@ -273,7 +273,7 @@ async def _trade_disclaimer_response() -> dict[str, JsonValue]:
         "disclaimer_response_submitted": payload.get("disclaimer_response_submitted") is True,
         "happy_path_verified": status == "passed",
         "safe_fixture_exercised": status == "exercised",
-        "completion_claim_allowed": status in {"passed", "exercised"},
+        "completion_claim_allowed": disclaimer_response_completion_claim_allowed(status),
         "coverage_limitation": _disclaimer_coverage_limitation(status, probe_input),
         "order_placed": payload.get("order_placed") is True,
         "live_write": payload.get("live_write") is True,
@@ -565,6 +565,10 @@ def disclaimer_response_status(
     ):
         return "exercised"
     return str(payload.get("status", "failed"))
+
+
+def disclaimer_response_completion_claim_allowed(status: str) -> bool:
+    return status == "passed"
 
 
 def _disclaimer_coverage_limitation(

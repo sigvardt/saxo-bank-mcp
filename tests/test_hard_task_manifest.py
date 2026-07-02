@@ -25,6 +25,7 @@ from saxo_bank_mcp.qa_order_probes import class_report_for_qa
 from saxo_bank_mcp.qa_trade_probes import (
     DisclaimerProbeInput,
     disclaimer_lookup_status,
+    disclaimer_response_completion_claim_allowed,
     disclaimer_response_status,
 )
 
@@ -261,6 +262,8 @@ def test_synthetic_disclaimer_errors_are_exercised_not_passed() -> None:
 
     assert lookup_status == "exercised"
     assert response_status == "exercised"
+    assert disclaimer_response_completion_claim_allowed(response_status) is False
+    assert disclaimer_response_completion_claim_allowed("passed") is True
 
 
 def test_order_identifiers_are_redacted_from_evidence() -> None:
