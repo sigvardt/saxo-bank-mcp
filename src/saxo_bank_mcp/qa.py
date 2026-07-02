@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from saxo_bank_mcp._evidence import write_json
+from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
 from saxo_bank_mcp.loop_manifest import ManifestSpec, build_manifest
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
@@ -39,8 +40,12 @@ from saxo_bank_mcp.qa_safety_probes import handle_approval_denied, handle_approv
 from saxo_bank_mcp.qa_streaming_probes import handle_stream, handle_stream_cleanup
 from saxo_bank_mcp.qa_trade_probes import (
     handle_trade_disclaimer_blocked,
+    handle_trade_disclaimer_lookup,
+    handle_trade_disclaimer_response,
+    handle_trade_multileg_defaults,
     handle_trade_precheck,
 )
+from saxo_bank_mcp.tribunal_index import list_registered_mcp_tool_ids
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,9 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
         "nontrade-denial-sweep",
         "nontrade-write",
         "trade-precheck",
+        "trade-multileg-defaults",
+        "trade-disclaimer-lookup",
+        "trade-disclaimer-response",
         "sim-order-mutation",
         "stream",
         "readme-smoke",
+        "hard-task-manifest",
     ):
         add_common(subparsers.add_parser(name))
 
@@ -187,6 +196,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_nontrade_denied(args.out, service=str(args.service))
     elif command == "trade-precheck":
         result = handle_trade_precheck(args.out)
+    elif command == "trade-multileg-defaults":
+        result = handle_trade_multileg_defaults(args.out)
+    elif command == "trade-disclaimer-lookup":
+        result = handle_trade_disclaimer_lookup(args.out)
+    elif command == "trade-disclaimer-response":
+        result = handle_trade_disclaimer_response(args.out)
     elif command == "trade-disclaimer-blocked":
         result = handle_trade_disclaimer_blocked(args.out)
     elif command == "sim-order-mutation":
@@ -204,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_stream_cleanup(args.out, simulate_leak=bool(args.simulate_leak))
     elif command == "readme-smoke":
         result = handle_readme_smoke(args.out)
+    elif command == "hard-task-manifest":
+        result = handle_hard_task_manifest(args.out, list_registered_mcp_tool_ids())
     elif command == "approval-denied":
         result = handle_approval_denied(args.out, str(args.missing))
     else:

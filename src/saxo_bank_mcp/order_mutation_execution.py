@@ -38,6 +38,7 @@ from saxo_bank_mcp.order_mutation_models import (
     OrderWriteClass,
     OrderWriteOutcome,
     OrderWriteSpec,
+    ParsedOrderWriteResponse,
     parse_order_mutation_response,
 )
 from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, SafetyConfig, SafetyKernel
@@ -48,6 +49,8 @@ ORDER_WRITE_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
     "LIVE write readiness",
     "real-money approval",
     "future account suitability after readback time",
+    "x-request-id response echo",
+    "whether delete-by-instrument matched an existing order when Saxo returns empty success",
 )
 READBACK_PORT_ORDERS_PATH: Final = "/port/v1/orders"
 READBACK_TRADE_MESSAGES_PATH: Final = "/trade/v1/messages"
@@ -145,6 +148,8 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "preview_token_redacted": True,
             "approval_factor_mode": "test_only_sim",
             "x_request_id_present": bool(request_id),
+            "x_request_id_generated": bool(request_id),
+            "x_request_id_response_echo_verified": False,
             "order_result_parsed": True,
             "http_status": response.status_code,
             "parsed_response": parsed.to_json_value(),
@@ -160,11 +165,8 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "cleanup_status": "not_required_by_executor",
             "order_placed": _mutation_flag(spec, parsed.outcome, ("place", "multileg-place")),
             "order_modified": _mutation_flag(spec, parsed.outcome, ("modify", "multileg-modify")),
-            "order_cancelled": _mutation_flag(
-                spec,
-                parsed.outcome,
-                ("cancel", "cancel-by-instrument", "multileg-cancel"),
-            ),
+            "order_cancelled": _order_cancelled_flag(spec, parsed),
+            "mutation_content_verified": _mutation_content_verified(spec, parsed),
             "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
         },
     )
@@ -300,6 +302,33 @@ def _mutation_flag(
             return None
         case _:
             return False
+
+
+def _order_cancelled_flag(
+    spec: OrderWriteSpec,
+    parsed: ParsedOrderWriteResponse,
+) -> bool | None:
+    if spec.write_class not in {"cancel", "cancel-by-instrument", "multileg-cancel"}:
+        return False
+    outcome = parsed.outcome
+    if outcome in {"partial_success", "unknown_state"}:
+        return None
+    if outcome != "success":
+        return False
+    if spec.write_class == "cancel-by-instrument" and not parsed.order_ids:
+        return None
+    return True
+
+
+def _mutation_content_verified(
+    spec: OrderWriteSpec,
+    parsed: ParsedOrderWriteResponse,
+) -> bool:
+    if parsed.outcome != "success":
+        return False
+    if spec.write_class == "cancel-by-instrument":
+        return bool(parsed.order_ids)
+    return True
 
 
 def _indeterminate_flags(spec: OrderWriteSpec) -> JsonObject:

@@ -20,6 +20,7 @@ from saxo_bank_mcp.order_mutation_models import (
     OrderWriteClass,
     OrderWriteSpec,
 )
+from saxo_bank_mcp.qa_account import resolve_sim_account_key
 from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
 from saxo_bank_mcp.server import mcp
@@ -56,22 +57,24 @@ def handle_trade_write_denied(out: Path, missing: str) -> int:
 async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str, JsonValue]:
     reset_safety_state()
     per_class: list[dict[str, JsonValue]] = []
-    with _safety_env():
+    account = await resolve_sim_account_key(
+        default_account_key=FIXTURE_ACCOUNT,
+        tool_name="saxo_sim_order_mutation_qa",
+    )
+    with _safety_env(account.account_key):
         async with Client(mcp) as client:
             for write_class in classes:
                 spec = ORDER_WRITE_SPECS[write_class]
-                preview = await _create_preview(client, spec)
+                preview = await _create_preview(client, spec, account.account_key)
                 tool_payload = await _call_order_tool(client, spec, preview)
-                per_class.append(_class_report(spec, preview, tool_payload))
+                per_class.append(class_report_for_qa(spec, preview, tool_payload))
     completed = [
         str(row["write_class"])
         for row in per_class
         if row.get("status") == "completed" and row.get("real_mutation_proven") is True
     ]
     auth_required = [
-        str(row["write_class"])
-        for row in per_class
-        if row.get("tool_status") == "auth_required"
+        str(row["write_class"]) for row in per_class if row.get("tool_status") == "auth_required"
     ]
     has_failed = any(row.get("status") == "failed" for row in per_class)
     was_exercised = any(row.get("network_call_made") is True for row in per_class)
@@ -100,6 +103,7 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
         "completion_claim_allowed": all_classes_complete,
         "fastmcp_called": True,
         "network_call_made": any(row.get("network_call_made") is True for row in per_class),
+        "account_resolution": account.to_safe_json(),
         "live_write": any(row.get("live_write") is True for row in per_class),
         "order_or_subscription_created": any(
             row.get("order_or_subscription_created") is True for row in per_class
@@ -112,9 +116,13 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
 async def _trade_write_denied(missing: str) -> dict[str, JsonValue]:
     reset_safety_state()
     spec = ORDER_WRITE_SPECS["place"]
-    with _safety_env():
+    account = await resolve_sim_account_key(
+        default_account_key=FIXTURE_ACCOUNT,
+        tool_name="saxo_trade_write_denied_qa",
+    )
+    with _safety_env(account.account_key):
         async with Client(mcp) as client:
-            preview = await _create_preview(client, spec)
+            preview = await _create_preview(client, spec, account.account_key)
             token = str(preview.get("preview_token", ""))
             result = await client.call_tool(
                 spec.tool_name,
@@ -141,15 +149,14 @@ async def _trade_write_denied(missing: str) -> dict[str, JsonValue]:
         "denial_reason": str(payload.get("denial_reason", "")),
         "same_request_fingerprint": same_fingerprint,
         "preview_token_redacted": True,
+        "account_resolution": account.to_safe_json(),
         "audit_path_inside_repo": payload.get("audit_path_inside_repo") is True,
         "network_call_made": payload.get("network_call_made") is True,
         "order_placed": payload.get("order_placed") is True,
         "order_modified": payload.get("order_modified") is True,
         "order_cancelled": payload.get("order_cancelled") is True,
         "live_write": payload.get("live_write") is True,
-        "order_or_subscription_created": (
-            payload.get("order_or_subscription_created") is True
-        ),
+        "order_or_subscription_created": (payload.get("order_or_subscription_created") is True),
         "write_result": payload,
         "git": current_git_state().model_dump(mode="json"),
     }
@@ -158,8 +165,11 @@ async def _trade_write_denied(missing: str) -> dict[str, JsonValue]:
 async def _create_preview(
     client: Client[FastMCPTransport],
     spec: OrderWriteSpec,
+    account_key: str,
 ) -> dict[str, JsonValue]:
-    result = await client.call_tool("saxo_create_write_preview", _preview_request(spec))
+    result = await client.call_tool(
+        "saxo_create_write_preview", _preview_request(spec, account_key)
+    )
     return _payload(result.structured_content)
 
 
@@ -177,18 +187,12 @@ async def _call_order_tool(
     return _payload(result.structured_content)
 
 
-def _class_report(
+def class_report_for_qa(
     spec: OrderWriteSpec,
     preview: dict[str, JsonValue],
     tool_payload: dict[str, JsonValue],
 ) -> dict[str, JsonValue]:
-    completed = (
-        tool_payload.get("status") == "completed"
-        and tool_payload.get("network_call_made") is True
-        and tool_payload.get("order_result_parsed") is True
-        and tool_payload.get("port_orders_readback") is True
-        and tool_payload.get("trade_messages_readback") is True
-    )
+    completed = _completion_requirements_met(spec, tool_payload)
     status = _class_status(tool_payload, completed=completed)
     return {
         "write_class": spec.write_class,
@@ -199,6 +203,7 @@ def _class_report(
         "tool_status": str(tool_payload.get("status", "")),
         "write_class_status": str(tool_payload.get("write_class_status", status)),
         "real_mutation_proven": completed,
+        "completion_oracle": _completion_oracle(spec),
         "fastmcp_called": tool_payload.get("fastmcp_called") is True,
         "preview_token_redacted": True,
         "approval_factor_mode": str(tool_payload.get("approval_factor_mode", "test_only_sim")),
@@ -211,6 +216,7 @@ def _class_report(
         "raw_audit_path_inside_repo": tool_payload.get("raw_audit_path_inside_repo") is True,
         "account_key_redacted": True,
         "mutation_may_have_occurred": tool_payload.get("mutation_may_have_occurred") is True,
+        "mutation_content_verified": tool_payload.get("mutation_content_verified") is True,
         "retry_unsafe": tool_payload.get("retry_unsafe") is True,
         "committed_before_network_result": (
             tool_payload.get("committed_before_network_result") is True
@@ -229,6 +235,45 @@ def _class_report(
     }
 
 
+def _completion_requirements_met(
+    spec: OrderWriteSpec,
+    tool_payload: dict[str, JsonValue],
+) -> bool:
+    common_requirements_met = (
+        tool_payload.get("status") == "completed"
+        and tool_payload.get("network_call_made") is True
+        and tool_payload.get("order_result_parsed") is True
+        and tool_payload.get("x_request_id_present") is True
+        and tool_payload.get("retry_unsafe") is not True
+    )
+    if not common_requirements_met:
+        return False
+    if spec.write_class == "cancel-by-instrument":
+        return (
+            tool_payload.get("mutation_content_verified") is True
+            and tool_payload.get("order_cancelled") is True
+            and tool_payload.get("trade_messages_readback") is True
+        )
+    return (
+        tool_payload.get("port_orders_readback") is True
+        and tool_payload.get("trade_messages_readback") is True
+    )
+
+
+def _completion_oracle(spec: OrderWriteSpec) -> str:
+    if spec.write_class == "cancel-by-instrument":
+        return (
+            "completed response parsed, x-request-id present, retry safe, order_cancelled true, "
+            "mutation content or pre/post state proves a matched order, and trade messages "
+            "readback; portfolio order-list readback alone is not required for "
+            "delete-by-instrument"
+        )
+    return (
+        "completed response parsed, x-request-id present, retry safe, portfolio order-list "
+        "readback, and trade messages readback"
+    )
+
+
 def _class_status(tool_payload: dict[str, JsonValue], *, completed: bool) -> str:
     if completed:
         return "completed"
@@ -237,6 +282,8 @@ def _class_status(tool_payload: dict[str, JsonValue], *, completed: bool) -> str
         return "incomplete"
     if status == "denied":
         return "refused"
+    if status == "completed" and tool_payload.get("network_call_made") is True:
+        return "exercised"
     if _safely_rejected_by_saxo(tool_payload):
         return "incomplete"
     return "failed"
@@ -253,10 +300,10 @@ def _safely_rejected_by_saxo(tool_payload: dict[str, JsonValue]) -> bool:
     )
 
 
-def _preview_request(spec: OrderWriteSpec) -> dict[str, JsonValue]:
+def _preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue]:
     return {
         "operation_id": spec.operation_id,
-        "account_key": FIXTURE_ACCOUNT,
+        "account_key": account_key,
         "instrument_uic": FIXTURE_INSTRUMENT,
         "quantity": 1,
         "estimated_notional": 10,
@@ -268,12 +315,12 @@ def _preview_request(spec: OrderWriteSpec) -> dict[str, JsonValue]:
             "contract_multiplier": 1,
             "conversion_known": True,
         },
-        "request_body": _request_body(spec),
+        "request_body": _request_body(spec, account_key),
     }
 
 
-def _request_body(spec: OrderWriteSpec) -> dict[str, JsonValue]:
-    common: dict[str, JsonValue] = {"AccountKey": FIXTURE_ACCOUNT}
+def _request_body(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue]:
+    common: dict[str, JsonValue] = {"AccountKey": account_key}
     match spec.write_class:
         case "cancel":
             return {**common, "OrderIds": "fixture-order-id"}
@@ -336,11 +383,12 @@ def _write_redacted_with_secret_scan(
 
 
 @contextmanager
-def _safety_env() -> Generator[None]:
+def _safety_env(account_key: str) -> Generator[None]:
     previous = {key: os.environ.get(key) for key in _SAFETY_ENV_DEFAULTS}
     try:
         for key, value in _SAFETY_ENV_DEFAULTS.items():
             os.environ[key] = value
+        os.environ["SAXO_MCP_ACCOUNT_ALLOWLIST"] = account_key
         yield
     finally:
         for key, value in previous.items():
