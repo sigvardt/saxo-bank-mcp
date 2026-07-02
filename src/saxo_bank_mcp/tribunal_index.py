@@ -86,12 +86,24 @@ def main(argv: list[str] | None = None) -> int:
     duplicate_tool_ids = tuple(
         sorted(tool_id for tool_id, count in Counter(seen_tool_values).items() if count > 1)
     )
+    unexpected_tool_ids = tuple(sorted(seen_tools - expected_tools))
     validation_errors = tuple(
         f"{result.path}: {error}" for result in validations for error in result.errors
     )
-    coverage_errors = tuple(
-        f"missing expected tool artifact: {tool_id}" for tool_id in missing_expected
-    ) + tuple(f"duplicate tool artifact: {tool_id}" for tool_id in duplicate_tool_ids)
+    coverage_errors = (
+        tuple(
+            f"missing expected tool artifact: {tool_id}"
+            for tool_id in missing_expected
+        )
+        + tuple(
+            f"duplicate tool artifact: {tool_id}"
+            for tool_id in duplicate_tool_ids
+        )
+        + tuple(
+            f"unexpected tool artifact (unregistered tool_id): {tool_id}"
+            for tool_id in unexpected_tool_ids
+        )
+    )
     error_lines = validation_errors + coverage_errors
     if not validations and not expected_tools and not args.allow_empty_bootstrap:
         error_lines += (
@@ -149,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             "seen_tool_ids": sorted(seen_tools),
             "missing_tool_ids": list(missing_expected),
             "duplicate_tool_ids": list(duplicate_tool_ids),
+            "unexpected_tool_ids": list(unexpected_tool_ids),
             "counts": dict(sorted(status_counts.items())),
             "completed_tool_ids": completed_tool_ids,
             "refused_tool_ids": refused_tool_ids,
