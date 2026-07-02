@@ -218,7 +218,11 @@ async def _create_preview(
         "saxo_create_write_preview",
         request,
     )
-    return _payload(result.structured_content), setup
+    preview = _payload(result.structured_content)
+    external_reference = _request_external_reference(request)
+    if external_reference is not None:
+        preview["_qa_external_reference"] = external_reference
+    return preview, setup
 
 
 async def _preview_request_for_probe(
@@ -510,7 +514,20 @@ async def _post_multileg_place_cleanup(
 
 
 def _preview_external_reference(preview: dict[str, JsonValue]) -> str | None:
+    preview_reference = preview.get("_qa_external_reference")
+    if isinstance(preview_reference, str):
+        return preview_reference.strip() or None
     request_body = preview.get("request_body")
+    if not isinstance(request_body, Mapping):
+        return None
+    external_reference = request_body.get("ExternalReference")
+    if not isinstance(external_reference, str):
+        return None
+    return external_reference.strip() or None
+
+
+def _request_external_reference(request: dict[str, JsonValue]) -> str | None:
+    request_body = request.get("request_body")
     if not isinstance(request_body, Mapping):
         return None
     external_reference = request_body.get("ExternalReference")
