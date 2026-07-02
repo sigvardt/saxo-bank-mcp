@@ -78,7 +78,11 @@ def test_plan_gate_fails_when_loop_goal_is_blocked(
     assert "G001-test: blocked" in out.read_text(encoding="utf-8")
 
 
-def test_mcp_gate_fails_without_real_evidence(tmp_path: Path) -> None:
+def test_mcp_gate_fails_without_real_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     out = tmp_path / "report.md"
 
     result = final_verify.main(["mcp", "--out", str(out)])
