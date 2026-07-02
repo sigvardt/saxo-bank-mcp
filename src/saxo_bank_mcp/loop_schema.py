@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -56,8 +58,6 @@ class TribunalCompletion(BaseModel):
 
     @model_validator(mode="after")
     def validate_status_contract(self) -> Self:
-        if self.status is CompletionStatus.COMPLETE and self.remaining_actionable_feedback:
-            raise ValueError("complete tools cannot have remaining_actionable_feedback")
         if self.status is CompletionStatus.COMPLETE and self.output is None:
             raise ValueError("complete tools require output")
         if self.status is CompletionStatus.REFUSED and not self.refusal_reason:
@@ -103,55 +103,158 @@ def referenced_paths(completion: TribunalCompletion, base_dir: Path) -> tuple[Pa
     return tuple(paths)
 
 
-def _validate_write_money_moving_completion(
+def _artifact_path(value: str, base_dir: Path) -> Path:
+    candidate = Path(value)
+    return candidate if candidate.is_absolute() else base_dir / candidate
+
+
+def _compact_artifact_text(path: Path, errors: list[str]) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError as exc:
+        errors.append(f"unreadable referenced evidence: {type(exc).__name__}")
+    return None
+
+
+def _validate_complete_evidence(
     completion: TribunalCompletion,
     base_dir: Path,
     errors: list[str],
 ) -> None:
-    is_write_or_money = completion.risk_class in (RiskClass.WRITE, RiskClass.MONEY_MOVING)
-    if not (completion.status is CompletionStatus.COMPLETE and is_write_or_money):
+    if completion.status is not CompletionStatus.COMPLETE:
         return
 
-    if not completion.fixed_feedback:
+    if completion.remaining_actionable_feedback:
         errors.append(
-            "write/money_moving complete tools must have non-empty fixed_feedback from peer review"
+            "complete tools cannot have remaining_actionable_feedback"
         )
 
+    if not completion.fixed_feedback:
+        errors.append("complete tools must have non-empty fixed_feedback from peer review")
+
     if completion.output is None:
-        errors.append("write/money_moving complete tools require output")
+        errors.append("complete tools require output")
         return
 
-    p = Path(completion.output)
-    output_path = p if p.is_absolute() else base_dir / completion.output
+    output_path = _artifact_path(completion.output, base_dir)
     if output_path.exists():
-        try:
-            content = output_path.read_text(encoding="utf-8", errors="ignore").strip()
+        content = _compact_artifact_text(output_path, errors)
+        if content is not None:
             compact_content = "".join(content.split())
             if compact_content in TRIVIAL_ARTIFACT_CONTENT:
-                errors.append(
-                    f"write/money_moving complete tool has trivial output content: {content!r}"
-                )
-        except OSError as exc:
-            errors.append(f"unreadable output evidence: {type(exc).__name__}")
+                errors.append(f"complete tool has trivial output content: {content!r}")
 
-    ap = Path(completion.audit)
-    audit_path = ap if ap.is_absolute() else base_dir / completion.audit
+    audit_path = _artifact_path(completion.audit, base_dir)
     if audit_path.exists():
+        content = _compact_artifact_text(audit_path, errors)
+        if content is not None and len(content) < MIN_AUDIT_CHARS:
+            errors.append(
+                "complete tool audit file must contain at least "
+                f"{MIN_AUDIT_CHARS} characters of safety/control descriptions"
+            )
+
+
+def _judge_verdict_status(path: Path) -> str | None:
+    try:
+        payload: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    payload_mapping = cast("Mapping[str, object]", payload)
+    verdict = payload_mapping.get("verdict")
+    if not isinstance(verdict, Mapping):
+        return None
+    verdict_mapping = cast("Mapping[str, object]", verdict)
+    status = verdict_mapping.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _latest_tribunal_verdict_status(
+    run_path: Path,
+    errors: list[str],
+) -> str | None:
+    if not (run_path / "normalized.json").is_file():
+        errors.append(f"tribunal_run missing normalized.json: {run_path}")
+    judge_outputs = tuple(sorted(run_path.glob("rounds/round-*/judge-output.json")))
+    if not judge_outputs:
+        errors.append(f"tribunal_run missing judge-output.json: {run_path}")
+        return None
+    latest_status = None
+    for judge_output in judge_outputs:
+        latest_status = _judge_verdict_status(judge_output) or latest_status
+    if latest_status is None:
+        errors.append(f"tribunal_run has no parseable judge verdict: {run_path}")
+    return latest_status
+
+
+def _tribunal_run_mentions_tool(
+    run_path: Path,
+    tool_id: str,
+    errors: list[str],
+) -> None:
+    judge_input_path = run_path / "judge-input.md"
+    if not judge_input_path.is_file():
+        errors.append(f"complete tool tribunal_run missing judge-input.md: {run_path}")
+        return
+    try:
+        judge_input = judge_input_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError as exc:
+        errors.append(f"unreadable judge-input.md: {run_path}: {type(exc).__name__}")
+        return
+    tool_slug = tool_id.replace("_", "-")
+    if tool_id not in judge_input and tool_slug not in judge_input:
+        errors.append(f"complete tool tribunal_run does not mention tool_id: {tool_id}")
+
+
+def _validate_tribunal_run(
+    completion: TribunalCompletion,
+    base_dir: Path,
+    errors: list[str],
+) -> None:
+    run_path = _artifact_path(completion.tribunal_run, base_dir)
+    if not run_path.exists():
+        return
+    if not run_path.is_dir():
+        errors.append(f"tribunal_run must be a run directory: {run_path}")
+        return
+    latest_verdict_status = _latest_tribunal_verdict_status(run_path, errors)
+    if latest_verdict_status is None:
+        return
+    if completion.status is not CompletionStatus.COMPLETE:
+        return
+    if latest_verdict_status != "confirmed":
+        errors.append(
+            "complete tool tribunal_run highest verdict must be confirmed: "
+            f"{completion.tool_id} -> {latest_verdict_status}"
+        )
+    _tribunal_run_mentions_tool(run_path, completion.tool_id, errors)
+
+
+def _raw_artifact_identity(path: Path) -> tuple[str | None, CompletionStatus | None]:
+    try:
+        payload: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, Mapping):
+        return None, None
+    payload_mapping = cast("Mapping[str, object]", payload)
+    raw_tool_id = payload_mapping.get("tool_id")
+    raw_status = payload_mapping.get("status")
+    status = None
+    if isinstance(raw_status, str):
         try:
-            content = audit_path.read_text(encoding="utf-8", errors="ignore").strip()
-            if len(content) < MIN_AUDIT_CHARS:
-                errors.append(
-                    "write/money_moving audit file must contain at least "
-                    f"{MIN_AUDIT_CHARS} characters of safety/control descriptions"
-                )
-        except OSError as exc:
-            errors.append(f"unreadable audit evidence: {type(exc).__name__}")
+            status = CompletionStatus(raw_status)
+        except ValueError:
+            status = None
+    return raw_tool_id if isinstance(raw_tool_id, str) else None, status
 
 
 def validate_completion_artifact(path: Path) -> ArtifactValidation:
     try:
         completion = load_completion_file(path)
     except (OSError, UnicodeError, ValidationError) as exc:
+        raw_tool_id, raw_status = _raw_artifact_identity(path)
         message = (
             type(exc).__name__
             if isinstance(exc, OSError | UnicodeError)
@@ -159,8 +262,8 @@ def validate_completion_artifact(path: Path) -> ArtifactValidation:
         )
         return ArtifactValidation(
             path=str(path),
-            tool_id=None,
-            status=None,
+            tool_id=raw_tool_id,
+            status=raw_status,
             errors=(f"schema: {message}",),
         )
 
@@ -179,7 +282,8 @@ def validate_completion_artifact(path: Path) -> ArtifactValidation:
             except OSError as exc:
                 errors.append(f"unreadable referenced path: {candidate}: {type(exc).__name__}")
 
-    _validate_write_money_moving_completion(completion, path.parent, errors)
+    _validate_complete_evidence(completion, path.parent, errors)
+    _validate_tribunal_run(completion, path.parent, errors)
 
     return ArtifactValidation(
         path=str(path),

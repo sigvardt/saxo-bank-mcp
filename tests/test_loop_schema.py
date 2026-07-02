@@ -10,6 +10,19 @@ from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.loop_schema import TribunalCompletion, validate_completion_artifact
 
 
+def write_tribunal_run(directory: Path) -> None:
+    (directory / "rounds" / "round-01").mkdir(parents=True, exist_ok=True)
+    (directory / "normalized.json").write_text("{}", encoding="utf-8")
+    (directory / "rounds" / "round-01" / "judge-output.json").write_text(
+        '{"verdict": {"status": "confirmed"}}',
+        encoding="utf-8",
+    )
+    (directory / "judge-input.md").write_text(
+        "Hard task for saxo_get_session_capabilities through the real MCP path.",
+        encoding="utf-8",
+    )
+
+
 def valid_completion() -> dict[str, JsonValue]:
     return {
         "tool_id": "saxo_get_session_capabilities",
@@ -29,11 +42,18 @@ def valid_completion() -> dict[str, JsonValue]:
     }
 
 
-def test_complete_rejects_remaining_feedback() -> None:
+def test_complete_rejects_remaining_feedback(tmp_path: Path) -> None:
     data = valid_completion()
     data["remaining_actionable_feedback"] = ["approval factor is unclear"]
-    with pytest.raises(ValidationError, match="remaining_actionable_feedback"):
-        TribunalCompletion.model_validate(data)
+    path = tmp_path / "tribunal-completion.json"
+    tc = TribunalCompletion.model_validate(data)
+    path.write_text(tc.model_dump_json(), encoding="utf-8")
+    for name in ("schema.json", "task.md", "input.json", "output.json", "audit.md"):
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    write_tribunal_run(tmp_path / "tribunal")
+
+    result = validate_completion_artifact(path)
+    assert any("remaining_actionable_feedback" in e for e in result.errors)
 
 
 def test_refused_requires_reason() -> None:
@@ -74,8 +94,7 @@ def test_write_and_money_moving_validation_rules(tmp_path: Path) -> None:
     # Write empty files for referenced paths to satisfy other checks
     for name in ("schema.json", "task.md", "input.json", "output.json", "audit.md"):
         (tmp_path / name).write_text("{}", encoding="utf-8")
-    (tmp_path / "tribunal").mkdir(exist_ok=True)
-    (tmp_path / "tribunal" / "judge-output.json").write_text("{}", encoding="utf-8")
+    write_tribunal_run(tmp_path / "tribunal")
 
     result = validate_completion_artifact(path)
     assert any("must have non-empty fixed_feedback" in e for e in result.errors)
@@ -114,8 +133,7 @@ def test_write_and_money_moving_rejects_more_trivial_outputs(tmp_path: Path) -> 
         (tmp_path / name).write_text("{}", encoding="utf-8")
     audit_text = "Substantive safety controls described over fifty characters."
     (tmp_path / "audit.md").write_text(audit_text, encoding="utf-8")
-    (tmp_path / "tribunal").mkdir()
-    (tmp_path / "tribunal" / "judge-output.json").write_text("{}", encoding="utf-8")
+    write_tribunal_run(tmp_path / "tribunal")
     for value in ("null", "0", "{ }"):
         (tmp_path / "output.json").write_text(value, encoding="utf-8")
 
@@ -134,3 +152,24 @@ def test_validate_completion_artifact_malformed_json_returns_schema_error(tmp_pa
     assert result.status is None
     assert result.errors
     assert any(e.startswith("schema:") for e in result.errors)
+
+
+def test_validate_completion_artifact_rejects_placeholder_tribunal_run(
+    tmp_path: Path,
+) -> None:
+    payload = valid_completion()
+    payload["fixed_feedback"] = [{"finding": "X", "fix": "Y", "evidence": "audit.md"}]
+    path = tmp_path / "tribunal-completion.json"
+    path.write_text(TribunalCompletion.model_validate(payload).model_dump_json(), encoding="utf-8")
+    for name in ("schema.json", "task.md", "input.json"):
+        (tmp_path / name).write_text("{}", encoding="utf-8")
+    (tmp_path / "output.json").write_text('{"status":"passed"}', encoding="utf-8")
+    (tmp_path / "audit.md").write_text(
+        "Substantive safety controls described over fifty characters.",
+        encoding="utf-8",
+    )
+    (tmp_path / "tribunal").mkdir()
+
+    result = validate_completion_artifact(path)
+
+    assert any("tribunal_run missing normalized.json" in e for e in result.errors)

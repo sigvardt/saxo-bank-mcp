@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from collections import Counter
 from pathlib import Path
 
+from fastmcp import Client
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import now_utc, write_json, write_text
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.loop_schema import CompletionStatus, validate_completion_artifact
+from saxo_bank_mcp.server import mcp
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +40,22 @@ def load_expected_tools(path: Path | None) -> frozenset[str]:
     return frozenset(line.strip() for line in text.splitlines() if line.strip())
 
 
+async def _list_registered_mcp_tool_ids() -> frozenset[str]:
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+    return frozenset(tool.name for tool in tools)
+
+
+def list_registered_mcp_tool_ids() -> frozenset[str]:
+    return asyncio.run(_list_registered_mcp_tool_ids())
+
+
+def resolve_expected_tools(path: Path | None) -> tuple[frozenset[str], str]:
+    if path is not None:
+        return load_expected_tools(path), "tools_file"
+    return list_registered_mcp_tool_ids(), "fastmcp_tool_list"
+
+
 def find_completion_files(root: Path) -> tuple[Path, ...]:
     if not root.exists():
         return ()
@@ -47,23 +66,69 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     out: Path = args.out
     if args.self_test_missing_artifact:
-        write_text(out, "missing tool_id=self_test_missing_tool\n")
+        write_text(
+            out,
+            "missing tool_id=self_test_missing_tool\n"
+            "network_call_made=false\n"
+            "live_write=false\n"
+            "order_or_subscription_created=false\n",
+        )
         return 1
 
-    expected_tools = load_expected_tools(args.tools_file)
+    expected_tools, expected_source = resolve_expected_tools(args.tools_file)
     artifacts = find_completion_files(args.root)
     validations = tuple(validate_completion_artifact(path) for path in artifacts)
-    seen_tools = frozenset(result.tool_id for result in validations if result.tool_id is not None)
+    seen_tool_values = tuple(
+        result.tool_id for result in validations if result.tool_id is not None
+    )
+    seen_tools = frozenset(seen_tool_values)
     missing_expected = tuple(sorted(expected_tools - seen_tools))
-    error_lines = tuple(
+    duplicate_tool_ids = tuple(
+        sorted(tool_id for tool_id, count in Counter(seen_tool_values).items() if count > 1)
+    )
+    validation_errors = tuple(
         f"{result.path}: {error}" for result in validations for error in result.errors
-    ) + tuple(f"missing expected tool artifact: {tool_id}" for tool_id in missing_expected)
+    )
+    coverage_errors = tuple(
+        f"missing expected tool artifact: {tool_id}" for tool_id in missing_expected
+    ) + tuple(f"duplicate tool artifact: {tool_id}" for tool_id in duplicate_tool_ids)
+    error_lines = validation_errors + coverage_errors
     if not validations and not expected_tools and not args.allow_empty_bootstrap:
         error_lines += (
             "no tribunal artifacts seen; pass --allow-empty-bootstrap only before MCP tools exist",
         )
+    complete_with_remaining_feedback = tuple(
+        sorted(
+            result.tool_id
+            for result in validations
+            if result.tool_id is not None
+            and any(
+                "remaining_actionable_feedback" in error for error in result.errors
+            )
+        ),
+    )
     status_counts = Counter(
         result.status.value for result in validations if result.status is not None
+    )
+    completed_tool_ids = sorted(
+        result.tool_id
+        for result in validations
+        if result.status is CompletionStatus.COMPLETE and result.tool_id is not None
+    )
+    refused_tool_ids = sorted(
+        result.tool_id
+        for result in validations
+        if result.status is CompletionStatus.REFUSED and result.tool_id is not None
+    )
+    incomplete_tool_ids = sorted(
+        result.tool_id
+        for result in validations
+        if result.status is CompletionStatus.INCOMPLETE and result.tool_id is not None
+    )
+    exempt_tool_ids = sorted(
+        result.tool_id
+        for result in validations
+        if result.status is CompletionStatus.EXEMPT and result.tool_id is not None
     )
     passed = not error_lines
     write_json(
@@ -75,31 +140,29 @@ def main(argv: list[str] | None = None) -> int:
             "git": current_git_state().model_dump(mode="json"),
             "status": "passed" if passed else "failed",
             "root": str(args.root),
+            "source": expected_source,
             "artifact_count": len(validations),
             "no_artifacts_seen": len(validations) == 0,
             "expected_tool_count": len(expected_tools),
             "seen_tool_count": len(seen_tools),
+            "expected_tool_ids": sorted(expected_tools),
+            "seen_tool_ids": sorted(seen_tools),
+            "missing_tool_ids": list(missing_expected),
+            "duplicate_tool_ids": list(duplicate_tool_ids),
             "counts": dict(sorted(status_counts.items())),
-            "completed_tool_ids": sorted(
-                result.tool_id
-                for result in validations
-                if result.status is CompletionStatus.COMPLETE and result.tool_id is not None
+            "completed_tool_ids": completed_tool_ids,
+            "refused_tool_ids": refused_tool_ids,
+            "incomplete_tool_ids": incomplete_tool_ids,
+            "incomplete_tool_count": len(incomplete_tool_ids),
+            "has_incomplete_tools": bool(incomplete_tool_ids),
+            "exempt_tool_ids": exempt_tool_ids,
+            "remaining_actionable_feedback_complete_tool_ids": list(
+                complete_with_remaining_feedback
             ),
-            "refused_tool_ids": sorted(
-                result.tool_id
-                for result in validations
-                if result.status is CompletionStatus.REFUSED and result.tool_id is not None
-            ),
-            "incomplete_tool_ids": sorted(
-                result.tool_id
-                for result in validations
-                if result.status is CompletionStatus.INCOMPLETE and result.tool_id is not None
-            ),
-            "exempt_tool_ids": sorted(
-                result.tool_id
-                for result in validations
-                if result.status is CompletionStatus.EXEMPT and result.tool_id is not None
-            ),
+            "invalid_artifact_errors": list(validation_errors),
+            "coverage_errors": list(coverage_errors),
+            "no_hidden_deferred_state": not error_lines,
+            "no_deferred_state": not error_lines and not incomplete_tool_ids,
             "errors": list(error_lines),
         },
     )
