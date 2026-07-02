@@ -8,7 +8,8 @@ from pathlib import Path
 
 from saxo_bank_mcp._evidence import write_json
 from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
-from saxo_bank_mcp.loop_manifest import ManifestSpec, build_manifest
+from saxo_bank_mcp.hard_task_summary import handle_hard_task_summary
+from saxo_bank_mcp.loop_manifest import GitState, ManifestSpec, build_manifest
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
     handle_nontrade_denied,
@@ -70,6 +71,16 @@ def build_parser() -> argparse.ArgumentParser:
         "hard-task-manifest",
     ):
         add_common(subparsers.add_parser(name))
+
+    hard_task_summary = subparsers.add_parser("hard-task-summary")
+    hard_task_summary.add_argument("--out", type=Path, required=True)
+    hard_task_summary.add_argument(
+        "--receipts-dir",
+        type=Path,
+        default=Path(".omo/evidence/saxo-bank-mcp/strict-g003-hard-tasks"),
+    )
+    hard_task_summary.add_argument("--expected-tool", action="append", default=[])
+    hard_task_summary.add_argument("--expected-sha", default=None)
 
     gitignore = subparsers.add_parser("gitignore-secret")
     add_common(gitignore)
@@ -221,6 +232,22 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_readme_smoke(args.out)
     elif command == "hard-task-manifest":
         result = handle_hard_task_manifest(args.out, list_registered_mcp_tool_ids())
+    elif command == "hard-task-summary":
+        expected_tools = tuple(str(value) for value in args.expected_tool)
+        git = (
+            None
+            if args.expected_sha is None
+            else GitState(sha=str(args.expected_sha), dirty=False)
+        )
+        if expected_tools:
+            result = handle_hard_task_summary(
+                args.out,
+                args.receipts_dir,
+                expected_tool_ids=expected_tools,
+                git=git,
+            )
+        else:
+            result = handle_hard_task_summary(args.out, args.receipts_dir, git=git)
     elif command == "approval-denied":
         result = handle_approval_denied(args.out, str(args.missing))
     else:

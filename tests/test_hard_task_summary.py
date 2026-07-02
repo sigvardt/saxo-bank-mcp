@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from saxo_bank_mcp import qa
+from saxo_bank_mcp.hard_task_summary import build_hard_task_execution_summary
+from saxo_bank_mcp.loop_manifest import GitState
+
+
+def write_receipt(path: Path, *, sha: str, dirty: bool = False) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "status": "exercised",
+                "driver": "loop_harness",
+                "command": "sim-order-mutation",
+                "fastmcp_called": True,
+                "live_write": False,
+                "git": {"sha": sha, "dirty": dirty, "unavailable_reason": None},
+                "secret_scan": {"findings": [], "scan_errors": []},
+                "completion_claim_allowed": False,
+            },
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_hard_task_summary_derives_receipt_rows(tmp_path: Path) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(receipts / "saxo_place_sim_order.json", sha="abc123")
+
+    summary = build_hard_task_execution_summary(
+        receipts,
+        expected_tool_ids=("saxo_place_sim_order",),
+        git=GitState(sha="abc123", dirty=False),
+    )
+
+    assert summary.status == "passed"
+    assert summary.tool_count == 1
+    assert summary.all_fastmcp_called is True
+    assert summary.all_git_clean is True
+    assert summary.failed_tools == ()
+    assert summary.rows[0].tool_id == "saxo_place_sim_order"
+    assert summary.rows[0].receipt == str(receipts / "saxo_place_sim_order.json")
+    assert summary.rows[0].git_sha == "abc123"
+    assert summary.rows[0].git_dirty is False
+
+
+def test_hard_task_summary_rejects_stale_or_dirty_receipts(tmp_path: Path) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(receipts / "saxo_place_sim_order.json", sha="old")
+    write_receipt(
+        receipts / "saxo_modify_sim_order.json",
+        sha="abc123",
+        dirty=True,
+    )
+
+    summary = build_hard_task_execution_summary(
+        receipts,
+        expected_tool_ids=("saxo_place_sim_order", "saxo_modify_sim_order"),
+        git=GitState(sha="abc123", dirty=False),
+    )
+
+    assert summary.status == "failed"
+    assert summary.all_git_clean is False
+    assert summary.failed_tools == ("saxo_modify_sim_order", "saxo_place_sim_order")
+    errors_by_tool = {row.tool_id: row.error for row in summary.rows}
+    assert errors_by_tool["saxo_place_sim_order"] == "receipt git SHA does not match current HEAD"
+    assert errors_by_tool["saxo_modify_sim_order"] == "receipt generated from dirty git state"
+
+
+def test_hard_task_summary_qa_command_writes_report(tmp_path: Path) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(
+        receipts / "saxo_create_order_preview.json",
+        sha="abc123",
+    )
+    out = tmp_path / "summary.json"
+
+    result = qa.main(
+        [
+            "hard-task-summary",
+            "--receipts-dir",
+            str(receipts),
+            "--expected-tool",
+            "saxo_create_order_preview",
+            "--expected-sha",
+            "abc123",
+            "--out",
+            str(out),
+        ],
+    )
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert result == 0
+    assert report["status"] == "passed"
+    assert report["rows"][0]["tool_id"] == "saxo_create_order_preview"
+    assert report["secret_scan"] == {"findings": [], "scan_errors": []}
