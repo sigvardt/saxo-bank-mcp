@@ -27,8 +27,10 @@ from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
 from saxo_bank_mcp.server import mcp
 
 FIXTURE_ACCOUNT: Final = "SIM-ACCOUNT-1"
-FIXTURE_INSTRUMENT: Final = 21
-FIXTURE_ORDER_AMOUNT: Final = 100
+FIXTURE_INSTRUMENT: Final = 211
+FIXTURE_ASSET_TYPE: Final = "Stock"
+FIXTURE_ORDER_AMOUNT: Final = 1
+FIXTURE_ORDER_NOTIONAL: Final = 100
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
 ORDER_WRITE_CLASS_BY_NAME: Final[dict[str, OrderWriteClass]] = {
     "place": "place",
@@ -383,11 +385,11 @@ def probe_preview_request(spec: OrderWriteSpec, account_key: str) -> dict[str, J
         "account_key": account_key,
         "instrument_uic": FIXTURE_INSTRUMENT,
         "quantity": FIXTURE_ORDER_AMOUNT,
-        "estimated_notional": FIXTURE_ORDER_AMOUNT,
+        "estimated_notional": FIXTURE_ORDER_NOTIONAL,
         "account_currency": "USD",
         "risk": {
-            "cost": FIXTURE_ORDER_AMOUNT,
-            "cash_required": FIXTURE_ORDER_AMOUNT,
+            "cost": FIXTURE_ORDER_NOTIONAL,
+            "cash_required": FIXTURE_ORDER_NOTIONAL,
             "margin_impact": 1,
             "contract_multiplier": 1,
             "conversion_known": True,
@@ -402,7 +404,7 @@ def _request_body(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue
         case "cancel":
             return {**common, "OrderIds": "fixture-order-id"}
         case "cancel-by-instrument":
-            return {**common, "AssetType": "Stock", "Uic": FIXTURE_INSTRUMENT}
+            return {**common, "AssetType": FIXTURE_ASSET_TYPE, "Uic": FIXTURE_INSTRUMENT}
         case "multileg-cancel":
             return {**common, "MultiLegOrderId": "fixture-multileg-order-id"}
         case "multileg-place" | "multileg-modify":
@@ -422,7 +424,7 @@ def _request_body(spec: OrderWriteSpec, account_key: str) -> dict[str, JsonValue
             return {
                 **common,
                 "Uic": FIXTURE_INSTRUMENT,
-                "AssetType": "FxSpot",
+                "AssetType": FIXTURE_ASSET_TYPE,
                 "Amount": FIXTURE_ORDER_AMOUNT,
                 "BuySell": "Buy",
                 "ManualOrder": False,
