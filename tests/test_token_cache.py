@@ -75,6 +75,7 @@ def test_token_cache_save_uses_owner_only_file_mode(
 
     assert stat.S_IMODE(cache.stat().st_mode) == OWNER_FILE_MODE
     assert stat.S_IMODE(cache.parent.stat().st_mode) == OWNER_DIR_MODE
+    assert list(cache.parent.glob(f".{cache.name}.*.tmp")) == []
 
 
 @pytest.mark.anyio

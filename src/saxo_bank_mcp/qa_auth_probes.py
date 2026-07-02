@@ -9,7 +9,7 @@ from pydantic import TypeAdapter
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp._redaction import redact_json
-from saxo_bank_mcp.config import SaxoAuthStatus
+from saxo_bank_mcp.auth_status import SaxoAuthStatus
 from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.server import mcp
 from saxo_bank_mcp.token_cache import TokenCachePathError, token_cache_path
@@ -162,6 +162,8 @@ def _safe_auth_status(payload: SaxoAuthStatus) -> dict[str, JsonValue]:
         "token_cache_present": payload["token_cache_present"],
         "token_cache_readable": payload["token_cache_readable"],
         "token_cache_expired": payload["token_cache_expired"],
+        "token_cache_refresh_supported": payload["token_cache_refresh_supported"],
+        "token_cache_environment": payload["token_cache_environment"],
         "scope_used": payload["scope_used"],
         "verifies": payload["verifies"],
         "does_not_verify": payload["does_not_verify"],

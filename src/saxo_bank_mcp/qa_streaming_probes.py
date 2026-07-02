@@ -64,7 +64,7 @@ async def stream_probe(options: StreamProbeOptions) -> JsonObject:
                 "context_id": "task8ctx",
                 "reference_id": "task8prices",
                 "uics": [21],
-                "asset_type": "Stock",
+                "asset_type": "FxSpot",
                 "wait_seconds": 2.0,
             },
             raise_on_error=False,

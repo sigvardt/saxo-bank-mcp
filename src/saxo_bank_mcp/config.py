@@ -111,7 +111,7 @@ class SaxoRuntimeConfig(BaseModel):
             cache = error.path.expanduser()
             cache_refused = True
         sim_credential_source = _sim_credential_source(source)
-        redirect_uri = _sim_redirect_uri(source, cache)
+        redirect_uri = _sim_redirect_uri(source, cache, allow_pending=False)
         return cls(
             requested_environment=requested,
             live_reads_enabled=source.get("SAXO_MCP_ENABLE_LIVE_READS") == "1",
@@ -158,6 +158,12 @@ class SaxoRuntimeConfig(BaseModel):
                 token_cache_present=cache["present"],
                 token_cache_readable=cache["readable"],
                 token_cache_expired=None if token_status is None else token_status["is_expired"],
+                token_cache_refresh_supported=(
+                    token.refresh_material() is not None if token is not None else None
+                ),
+                token_cache_environment=(
+                    None if token_status is None else token_status["environment"]
+                ),
                 token_cache_path=str(self.cache_path),
             ),
         )
@@ -183,13 +189,14 @@ def resolve_sim_auth_settings(
     *,
     repo_root: Path | None = None,
     require_redirect: bool = True,
+    allow_pending_redirect: bool = True,
 ) -> SimAuthSettings:
     source = os.environ if environ is None else environ
     try:
         cache = token_cache_path(_requested_token_cache_path(source), repo_root=repo_root)
     except TokenCachePathError as error:
         raise SimAuthSettingsError("token_cache_path_refused", str(error)) from error
-    redirect_uri = _sim_redirect_uri(source, cache)
+    redirect_uri = _sim_redirect_uri(source, cache, allow_pending=allow_pending_redirect)
     if require_redirect and not redirect_uri:
         raise SimAuthSettingsError(
             "sim_redirect_uri_missing",
@@ -250,10 +257,17 @@ def _env_sim_app_key(environ: Mapping[str, str]) -> str | None:
     return None
 
 
-def _sim_redirect_uri(environ: Mapping[str, str], cache_path: Path) -> str:
+def _sim_redirect_uri(
+    environ: Mapping[str, str],
+    cache_path: Path,
+    *,
+    allow_pending: bool = True,
+) -> str:
     configured = environ.get("SAXO_MCP_SIM_REDIRECT_URI", "").strip()
     if configured:
         return configured
+    if not allow_pending:
+        return ""
     pending = load_pending_authorization(pending_authorization_path(cache_path))
     if pending is None:
         return ""

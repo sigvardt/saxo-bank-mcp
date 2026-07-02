@@ -44,6 +44,7 @@ _RAW_CREDENTIAL_LINE_PATTERN: Final = re.compile(
 _EMAIL_PATTERN: Final = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _PERSON_PATTERN: Final = re.compile(r"\bJoakim\s+Sigvardt\b", re.IGNORECASE)
 SECRET_REGEXES: Final = (
+    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
     re.compile(r"access_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
     re.compile(r"client_?secret['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
@@ -60,6 +61,10 @@ PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
         "# noqa: S106",
         "AliasChoices(",
         "Field(",
+        "access_token: Annotated[",
+        "access_token=access_token",
+        "access_token=PORTAL_ACCESS_FIXTURE",
+        '"access_token": PORTAL_ACCESS_FIXTURE',
         "account_key: Annotated[",
         "account_key: Annotated[str",
         "account_key=account_key",
@@ -87,6 +92,7 @@ PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
         "preview_token_fingerprint",
         'preview["preview_token"]',
         'preview.get("preview_token"',
+        '"refresh_token": refresh.refresh_token',
         "self.",
         "settings.",
         "token.",

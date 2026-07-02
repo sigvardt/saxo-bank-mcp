@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated, Final
+from urllib.parse import urlparse, urlunparse
 
 from pydantic import Field
 
@@ -12,14 +13,8 @@ from saxo_bank_mcp.config import (
     SimAuthSettingsError,
     resolve_sim_auth_settings,
 )
-from saxo_bank_mcp.live_mode import (
-    LiveReadSettingsError,
-    live_cached_token_for_tool,
-    live_read_auth_required,
-    live_read_refused_for_runtime,
-    live_session_error,
-    resolve_live_read_settings,
-)
+from saxo_bank_mcp.live_mode import live_read_refused_for_runtime
+from saxo_bank_mcp.mcp_live_session_tools import read_live_session_capabilities
 from saxo_bank_mcp.mcp_pkce_state import (
     PendingAuthorizationBlocked,
     PendingAuthorizationReady,
@@ -37,6 +32,7 @@ from saxo_bank_mcp.mcp_tool_results import (
     SESSION_DOES_NOT_VERIFY,
     SESSION_VERIFIES,
     ToolResult,
+    auth_required,
     oauth_error,
     redacted_authorization_url,
     session_capabilities,
@@ -72,9 +68,24 @@ AUTHORIZATION_URL_SENSITIVITY: Final = (
 )
 
 
+def _registered_redirect_uri_hint(runtime_redirect_uri: str) -> str:
+    parsed = urlparse(runtime_redirect_uri)
+    if parsed.hostname != "localhost" or parsed.port is None:
+        return (
+            "Saxo must accept this runtime callback URL for the app before login "
+            "returns a code"
+        )
+    registered_uri = urlunparse((parsed.scheme, "localhost", parsed.path, "", "", ""))
+    return (
+        "For Saxo PKCE localhost callbacks, Saxo docs say the app registration "
+        f"cannot include a port; register {registered_uri} in Saxo, then use "
+        f"{runtime_redirect_uri} as the local runtime callback URL."
+    )
+
+
 def saxo_start_pkce_login(*, reveal_authorization_url: bool = False) -> ToolResult:
     try:
-        settings = resolve_sim_auth_settings()
+        settings = resolve_sim_auth_settings(allow_pending_redirect=False)
     except SimAuthSettingsError as error:
         return settings_error("saxo_start_pkce_login", error)
     pkce = create_pkce_pair()
@@ -107,7 +118,8 @@ def saxo_start_pkce_login(*, reveal_authorization_url: bool = False) -> ToolResu
         "authorization_url_revealed": reveal_authorization_url,
         "authorization_url_sensitivity": AUTHORIZATION_URL_SENSITIVITY,
         "redirect_uri_present": True,
-        "redirect_uri_note": "must match Saxo app registration; Saxo may reject mismatches",
+        "redirect_uri_kind": "runtime_callback_url",
+        "registered_redirect_uri_hint": _registered_redirect_uri_hint(settings.redirect_uri),
         "verifies": list(AUTH_VERIFIES),
         "does_not_verify": list(AUTH_DOES_NOT_VERIFY),
         "next_action": "complete Saxo login, then call saxo_exchange_pkce_code with code and state",
@@ -178,6 +190,8 @@ async def saxo_refresh_token() -> ToolResult:
             return result
         case CachedTokenReady(token=token):
             pass
+    if token.refresh_material() is None:
+        return auth_required("saxo_refresh_token", "token_not_refreshable")
     try:
         refreshed = await refresh_access_token(settings, token)
     except OAuthRequestError as error:
@@ -202,7 +216,7 @@ async def saxo_get_session_capabilities() -> ToolResult:
         case "LIVE_READ_DISABLED":
             return live_read_refused_for_runtime("saxo_get_session_capabilities", runtime)
         case "LIVE":
-            return await _read_live_session_capabilities()
+            return await read_live_session_capabilities()
 
 
 async def _read_sim_session_capabilities() -> ToolResult:
@@ -218,6 +232,8 @@ async def _read_sim_session_capabilities() -> ToolResult:
             pass
     refreshed = False
     if token.redacted_status()["is_expired"]:
+        if token.refresh_material() is None:
+            return auth_required("saxo_get_session_capabilities", "token_not_refreshable")
         try:
             token = await refresh_access_token(settings, token)
         except OAuthRequestError as error:
@@ -227,52 +243,23 @@ async def _read_sim_session_capabilities() -> ToolResult:
     try:
         capabilities = await read_session_capabilities(settings, token)
     except SessionRequestError as error:
-        return session_error("saxo_get_session_capabilities", error)
+        return session_error("saxo_get_session_capabilities", error, token)
     return {
         "status": "passed",
         "tool_name": "saxo_get_session_capabilities",
         "environment": "SIM",
         "endpoint_path": SESSION_CAPABILITIES_PATH,
         "token_refreshed": refreshed,
+        "token": token_status(token),
+        "token_refresh_supported": token.refresh_material() is not None,
+        "scope_used": False,
         "network_call_made": True,
         "capabilities": session_capabilities(capabilities),
+        "next_action": (
+            "use these fields only as current session-capability proof; if a later "
+            "session read fails and token_refresh_supported=false, call "
+            "saxo_cache_sim_access_token with a fresh portal token"
+        ),
         "verifies": list(SESSION_VERIFIES),
         "does_not_verify": list(SESSION_DOES_NOT_VERIFY),
-    }
-
-
-async def _read_live_session_capabilities() -> ToolResult:
-    try:
-        settings = resolve_live_read_settings()
-    except LiveReadSettingsError as error:
-        return live_read_auth_required("saxo_get_session_capabilities", error.code)
-    token_or_result = live_cached_token_for_tool(
-        "saxo_get_session_capabilities",
-        settings.cache_path,
-    )
-    if isinstance(token_or_result, dict):
-        return token_or_result
-    try:
-        capabilities = await read_session_capabilities(settings, token_or_result)
-    except SessionRequestError as error:
-        return live_session_error("saxo_get_session_capabilities", error)
-    return {
-        "status": "passed",
-        "tool_name": "saxo_get_session_capabilities",
-        "requested_environment": "LIVE",
-        "environment": "LIVE",
-        "endpoint_path": SESSION_CAPABILITIES_PATH,
-        "token_refreshed": False,
-        "network_call_made": True,
-        "live_write_called": False,
-        "order_or_subscription_created": False,
-        "account_identifiers_redacted": True,
-        "capabilities": session_capabilities(capabilities),
-        "verifies": ["cached LIVE bearer token can read current session capability fields"],
-        "does_not_verify": [
-            "order placement safety",
-            "instrument/account suitability",
-            "real-money approval",
-            "live-write permission",
-        ],
     }

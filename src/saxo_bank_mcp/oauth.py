@@ -16,11 +16,16 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.config import SimAuthSettings
 from saxo_bank_mcp.http_client import create_async_client
 
-type OAuthFailureCode = Literal["http_error", "network_error", "invalid_token_response"]
+type OAuthFailureCode = Literal[
+    "http_error",
+    "network_error",
+    "invalid_token_response",
+    "token_not_refreshable",
+]
 HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX = 300
 
@@ -61,6 +66,7 @@ class OAuthTokenResponse(BaseModel):
         self,
         *,
         code_verifier: str,
+        environment: TokenEnvironment | None = None,
         received_at: datetime | None = None,
     ) -> SaxoTokenSet:
         issued_at = datetime.now(UTC) if received_at is None else received_at
@@ -68,6 +74,7 @@ class OAuthTokenResponse(BaseModel):
             access_token=self.access_token,
             refresh_token=self.refresh_token,
             code_verifier=code_verifier,
+            environment=environment,
             expires_at=issued_at + timedelta(seconds=self.expires_in),
         )
 
@@ -91,10 +98,16 @@ def authorization_code_form(
 
 
 def refresh_token_form(token: SaxoTokenSet) -> dict[str, str]:
+    refresh = token.refresh_material()
+    if refresh is None:
+        raise OAuthRequestError(
+            "token_not_refreshable",
+            "Cached token has no refresh token or PKCE verifier",
+        )
     return {
         "grant_type": "refresh_token",
-        "refresh_token": token.refresh_token,
-        "code_verifier": token.code_verifier,
+        "refresh_token": refresh.refresh_token,
+        "code_verifier": refresh.code_verifier,
     }
 
 
@@ -108,7 +121,7 @@ async def exchange_authorization_code(
     form = authorization_code_form(settings, code=code, code_verifier=code_verifier)
     response = await _post_token_form(settings.token_url, form, transport=transport)
     parsed = _parse_token_response(response)
-    return parsed.to_token_set(code_verifier=code_verifier)
+    return parsed.to_token_set(code_verifier=code_verifier, environment="SIM")
 
 
 async def refresh_access_token(
@@ -117,13 +130,23 @@ async def refresh_access_token(
     *,
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> SaxoTokenSet:
+    refresh = token.refresh_material()
+    if refresh is None:
+        raise OAuthRequestError(
+            "token_not_refreshable",
+            "Cached token has no refresh token or PKCE verifier",
+        )
     response = await _post_token_form(
         settings.token_url,
-        refresh_token_form(token),
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh.refresh_token,
+            "code_verifier": refresh.code_verifier,
+        },
         transport=transport,
     )
     parsed = _parse_token_response(response)
-    return parsed.to_token_set(code_verifier=token.code_verifier)
+    return parsed.to_token_set(code_verifier=refresh.code_verifier, environment=token.environment)
 
 
 async def _post_token_form(

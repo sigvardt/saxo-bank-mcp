@@ -44,7 +44,7 @@ def handle_sim_order_mutation(out: Path, classes: str | None) -> int:
     return _write_redacted_with_secret_scan(
         out,
         payload,
-        ("passed", "incomplete_auth_required"),
+        ("passed", "exercised", "incomplete_auth_required"),
     )
 
 
@@ -74,7 +74,16 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
         if row.get("tool_status") == "auth_required"
     ]
     has_failed = any(row.get("status") == "failed" for row in per_class)
-    status = "failed" if has_failed else "passed" if completed else "incomplete_auth_required"
+    was_exercised = any(row.get("network_call_made") is True for row in per_class)
+    status = (
+        "failed"
+        if has_failed
+        else "passed"
+        if completed
+        else "exercised"
+        if was_exercised
+        else "incomplete_auth_required"
+    )
     all_classes_complete = len(completed) == len(classes)
     return {
         **base_event(
@@ -228,7 +237,20 @@ def _class_status(tool_payload: dict[str, JsonValue], *, completed: bool) -> str
         return "incomplete"
     if status == "denied":
         return "refused"
+    if _safely_rejected_by_saxo(tool_payload):
+        return "incomplete"
     return "failed"
+
+
+def _safely_rejected_by_saxo(tool_payload: dict[str, JsonValue]) -> bool:
+    return (
+        tool_payload.get("status") == "failed"
+        and tool_payload.get("network_call_made") is True
+        and tool_payload.get("order_or_subscription_created") is not True
+        and tool_payload.get("mutation_may_have_occurred") is not True
+        and tool_payload.get("retry_unsafe") is not True
+        and tool_payload.get("order_result_parsed") is True
+    )
 
 
 def _preview_request(spec: OrderWriteSpec) -> dict[str, JsonValue]:

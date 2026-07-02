@@ -10,7 +10,7 @@ from saxo_bank_mcp.config import SaxoRuntimeConfig, resolve_sim_auth_settings
 from saxo_bank_mcp.token_cache import pending_authorization_path, save_pending_authorization
 
 
-def test_runtime_config_uses_pending_pkce_redirect_when_env_missing(
+def test_runtime_config_reports_pending_pkce_without_configured_redirect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -30,8 +30,9 @@ def test_runtime_config_uses_pending_pkce_redirect_when_env_missing(
     )
 
     status = config.redacted_status()
-    assert status["sim_redirect_uri_present"] is True
+    assert status["sim_redirect_uri_present"] is False
     assert status["blocking_reasons"] == [
+        "sim_redirect_uri_missing",
         "pending_pkce_authorization_present",
         "token_cache_missing",
     ]

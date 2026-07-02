@@ -6,7 +6,8 @@ from typing import Final, Literal, TypedDict
 
 from fastmcp import FastMCP
 
-from saxo_bank_mcp.config import SaxoAuthStatus, SaxoRuntimeConfig
+from saxo_bank_mcp.auth_status import SaxoAuthStatus
+from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.mcp_auth_tools import (
     saxo_exchange_pkce_code,
     saxo_get_session_capabilities,
@@ -26,6 +27,10 @@ from saxo_bank_mcp.mcp_order_tools import (
     saxo_modify_sim_order,
     saxo_place_multileg_sim_order,
     saxo_place_sim_order,
+)
+from saxo_bank_mcp.mcp_portal_token_tools import (
+    SIM_ACCESS_CACHE_TOOL_DESCRIPTION,
+    saxo_cache_sim_access_token,
 )
 from saxo_bank_mcp.mcp_safety_tools import (
     COMMIT_TOOL_DESCRIPTION,
@@ -137,6 +142,7 @@ def saxo_auth_status() -> SaxoAuthStatus:
 
 mcp.tool(description=PKCE_START_TOOL_DESCRIPTION)(saxo_start_pkce_login)
 mcp.tool(description=PKCE_EXCHANGE_TOOL_DESCRIPTION)(saxo_exchange_pkce_code)
+mcp.tool(description=SIM_ACCESS_CACHE_TOOL_DESCRIPTION)(saxo_cache_sim_access_token)
 mcp.tool(description=REFRESH_TOOL_DESCRIPTION)(saxo_refresh_token)
 mcp.tool(description=SESSION_CAPABILITIES_TOOL_DESCRIPTION)(saxo_get_session_capabilities)
 mcp.tool(description=ENTITLEMENTS_TOOL_DESCRIPTION)(saxo_get_entitlements)

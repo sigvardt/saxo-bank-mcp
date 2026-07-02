@@ -35,6 +35,8 @@ class SaxoAuthStatus(TypedDict):
     token_cache_present: bool
     token_cache_readable: bool
     token_cache_expired: bool | None
+    token_cache_refresh_supported: bool | None
+    token_cache_environment: EnvironmentName | None
     token_cache_path: str
     scope_used: Literal[False]
     verifies: list[str]
@@ -57,6 +59,8 @@ class AuthStatusInputs:
     token_cache_present: bool
     token_cache_readable: bool
     token_cache_expired: bool | None
+    token_cache_refresh_supported: bool | None
+    token_cache_environment: EnvironmentName | None
     token_cache_path: str
 
 
@@ -75,12 +79,14 @@ def build_auth_status(inputs: AuthStatusInputs) -> SaxoAuthStatus:
         "token_cache_present": inputs.token_cache_present,
         "token_cache_readable": inputs.token_cache_readable,
         "token_cache_expired": inputs.token_cache_expired,
+        "token_cache_refresh_supported": inputs.token_cache_refresh_supported,
+        "token_cache_environment": inputs.token_cache_environment,
         "token_cache_path": inputs.token_cache_path,
         "scope_used": False,
         "verifies": list(AUTH_STATUS_VERIFIES),
         "does_not_verify": list(AUTH_STATUS_DOES_NOT_VERIFY),
         "blocking_reasons": blocking_reasons,
-        "next_action": _next_action(blocking_reasons),
+        "next_action": _next_action(inputs, blocking_reasons),
     }
 
 
@@ -93,7 +99,7 @@ def _environment_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
     if inputs.requested_environment == "SIM":
         if not inputs.sim_credentials_present:
             reasons.append("sim_credentials_missing")
-        if not inputs.sim_redirect_uri_present:
+        if not inputs.sim_redirect_uri_present and not _has_usable_token_cache(inputs):
             reasons.append("sim_redirect_uri_missing")
     elif inputs.effective_read_environment != "LIVE":
         if not inputs.live_reads_enabled:
@@ -101,6 +107,15 @@ def _environment_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
         if not inputs.live_credentials_present:
             reasons.append("live_credentials_missing")
     return reasons
+
+
+def _has_usable_token_cache(inputs: AuthStatusInputs) -> bool:
+    return (
+        not inputs.token_cache_path_refused
+        and inputs.token_cache_present
+        and inputs.token_cache_readable
+        and inputs.token_cache_expired is False
+    )
 
 
 def _token_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
@@ -118,7 +133,12 @@ def _token_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
     return reasons
 
 
-def _next_action(blocking_reasons: list[str]) -> str:
+def _next_action(inputs: AuthStatusInputs, blocking_reasons: list[str]) -> str:
+    if _needs_fresh_portal_token(inputs, blocking_reasons):
+        return (
+            "call saxo_cache_sim_access_token with a fresh Saxo developer portal SIM "
+            "token, then call saxo_get_session_capabilities"
+        )
     actions: tuple[tuple[str, str], ...] = (
         (
             "sim_credentials_missing",
@@ -128,7 +148,8 @@ def _next_action(blocking_reasons: list[str]) -> str:
             "sim_redirect_uri_missing",
             "set SAXO_MCP_SIM_REDIRECT_URI to the registered Saxo redirect URI, "
             "then call saxo_start_pkce_login; PKCE cannot be completed "
-            "machine-only without this URI and a Saxo-returned authorization code",
+            "machine-only without this URI and a Saxo-returned authorization code; "
+            "or call saxo_cache_sim_access_token with a fresh Saxo developer portal SIM token",
         ),
         (
             "token_cache_path_refused",
@@ -167,3 +188,18 @@ def _next_action(blocking_reasons: list[str]) -> str:
         if reason in blocking_reasons:
             return action
     return "call saxo_get_session_capabilities to verify the current SIM session capability fields"
+
+
+def _needs_fresh_portal_token(
+    inputs: AuthStatusInputs,
+    blocking_reasons: list[str],
+) -> bool:
+    return (
+        inputs.token_cache_present
+        and inputs.token_cache_readable
+        and inputs.token_cache_refresh_supported is False
+        and (
+            "token_cache_expired" in blocking_reasons
+            or "sim_redirect_uri_missing" in blocking_reasons
+        )
+    )

@@ -21,6 +21,7 @@ type LiveReadSettingsErrorCode = Literal[
     "live_credentials_missing",
     "live_token_cache_path_missing",
     "live_token_cache_path_refused",
+    "token_environment_mismatch",
 ]
 
 LIVE_WRITE_MISSING_REQUIREMENTS: Final[tuple[str, ...]] = (
@@ -152,6 +153,8 @@ def live_cached_token_for_tool(tool_name: str, cache_path: Path) -> SaxoTokenSet
         return live_read_auth_required(tool_name, reason)
     if token.redacted_status()["is_expired"]:
         return live_read_auth_required(tool_name, "token_cache_expired")
+    if token.environment == "SIM":
+        return live_read_auth_required(tool_name, "token_environment_mismatch")
     return token
 
 
@@ -225,7 +228,12 @@ def live_read_missing_requirements_for_reason(reason: str) -> list[str]:
             return ["LIVE credentials"]
         case "live_token_cache_path_missing" | "live_token_cache_path_refused":
             return ["SAXO_MCP_LIVE_TOKEN_CACHE_PATH"]
-        case "token_cache_missing" | "token_cache_unreadable" | "token_cache_expired":
+        case (
+            "token_cache_missing"
+            | "token_cache_unreadable"
+            | "token_cache_expired"
+            | "token_environment_mismatch"
+        ):
             return ["valid LIVE token cache"]
         case _:
             return ["LIVE read enablement"]
@@ -237,5 +245,7 @@ def live_read_next_action(reason: str) -> str:
             return "provide a fresh LIVE read token cache before retrying"
         case "token_cache_missing" | "token_cache_unreadable":
             return "provide a readable LIVE token cache outside the repository"
+        case "token_environment_mismatch":
+            return "replace the LIVE token cache with a LIVE-issued token before retrying"
         case _:
             return "configure explicit LIVE read enablement before retrying"

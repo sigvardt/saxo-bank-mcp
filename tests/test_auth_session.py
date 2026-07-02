@@ -8,7 +8,7 @@ import httpx2
 import pytest
 from fastmcp import Client
 
-from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.auth import SaxoPendingAuthorization, SaxoTokenSet
 from saxo_bank_mcp.config import SIM_ENDPOINTS, SimAuthSettings
 from saxo_bank_mcp.oauth import (
     authorization_code_form,
@@ -18,6 +18,7 @@ from saxo_bank_mcp.oauth import (
 )
 from saxo_bank_mcp.server import mcp
 from saxo_bank_mcp.session import SESSION_CAPABILITIES_PATH, read_session_capabilities
+from saxo_bank_mcp.token_cache import pending_authorization_path, save_pending_authorization
 
 
 @pytest.fixture
@@ -151,7 +152,7 @@ async def test_start_pkce_login_redacts_authorization_url_by_default(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
-    monkeypatch.setenv("SAXO_MCP_SIM_REDIRECT_URI", "https://example.test/callback")
+    monkeypatch.setenv("SAXO_MCP_SIM_REDIRECT_URI", "http://localhost:8080/callback")
 
     async with Client(mcp) as client:
         result = await client.call_tool("saxo_start_pkce_login", {})
@@ -164,6 +165,8 @@ async def test_start_pkce_login_redacts_authorization_url_by_default(
     assert payload["authorization_url_revealed"] is False
     assert "do not log or share" in str(payload["authorization_url_sensitivity"])
     assert "authorization_url" not in payload
+    assert "http://localhost/callback" in str(payload["registered_redirect_uri_hint"])
+    assert "cannot include a port" in str(payload["registered_redirect_uri_hint"])
     assert "sim-app-key" not in serialized
     assert "scope=" not in serialized
     assert "trading readiness/order safety" in serialized
@@ -210,6 +213,35 @@ async def test_start_pkce_login_reports_missing_redirect_without_prompting(
     assert payload["status"] == "auth_required"
     assert payload["reason"] == "sim_redirect_uri_missing"
     assert "SAXO_MCP_SIM_REDIRECT_URI" in str(payload)
+
+
+@pytest.mark.anyio
+async def test_start_pkce_login_does_not_reuse_pending_redirect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    monkeypatch.delenv("SAXO_MCP_SIM_REDIRECT_URI", raising=False)
+    cache_path = tmp_path / ".local/state/saxo-bank-mcp/token-cache.json"
+    save_pending_authorization(
+        pending_authorization_path(cache_path),
+        SaxoPendingAuthorization(
+            state="state",
+            code_verifier="verifier",
+            redirect_uri="https://example.test/stale-callback",
+            created_at=datetime.now(UTC),
+        ),
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("saxo_start_pkce_login", {})
+
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "auth_required"
+    assert payload["reason"] == "sim_redirect_uri_missing"
+    assert "authorization_url" not in payload
 
 
 @pytest.mark.anyio

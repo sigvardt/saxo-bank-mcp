@@ -74,7 +74,9 @@ _AUTH_NEXT_ACTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "sim_redirect_uri_missing": (
             "set SAXO_MCP_SIM_REDIRECT_URI to the registered Saxo redirect URI, "
             "then call saxo_start_pkce_login; PKCE cannot be completed "
-            "machine-only without this URI and a Saxo-returned authorization code"
+            "machine-only without this URI and a Saxo-returned authorization code; "
+            "or call saxo_cache_sim_access_token with a fresh Saxo developer portal "
+            "SIM token"
         ),
         "sim_endpoint_untrusted": "use the official Saxo SIM authorization and token endpoints",
         "token_cache_path_refused": (
@@ -110,6 +112,10 @@ _AUTH_NEXT_ACTIONS: Final[Mapping[str, str]] = MappingProxyType(
         ),
         "invalid_token_response": (
             "inspect the redacted token-endpoint response shape before retrying"
+        ),
+        "token_not_refreshable": (
+            "provide a fresh Saxo developer portal SIM access token, or complete PKCE "
+            "login to cache refresh-capable token material"
         ),
         "invalid_capabilities_response": (
             "treat session capabilities as unverified; inspect the redacted response shape "
@@ -156,6 +162,7 @@ def auth_required(tool_name: str, reason: str) -> ToolResult:
         "environment": "SIM",
         "reason": reason,
         "scope_used": False,
+        "network_call_made": False,
         "next_action": auth_next_action(reason),
         "verifies": [],
         "does_not_verify": list(AUTH_DOES_NOT_VERIFY),
@@ -181,8 +188,13 @@ def oauth_error(tool_name: str, error: OAuthRequestError) -> ToolResult:
     }
 
 
-def session_error(tool_name: str, error: SessionRequestError) -> ToolResult:
-    return {
+def session_error(
+    tool_name: str,
+    error: SessionRequestError,
+    token: SaxoTokenSet | None = None,
+) -> ToolResult:
+    refresh_supported = token.refresh_material() is not None if token is not None else None
+    result: ToolResult = {
         "status": "session_capabilities_failed",
         "tool_name": tool_name,
         "environment": "SIM",
@@ -191,13 +203,24 @@ def session_error(tool_name: str, error: SessionRequestError) -> ToolResult:
         "http_status": error.http_status,
         "detail": error.detail,
         "scope_used": False,
-        "next_action": session_next_action(error.code),
+        "network_call_made": True,
+        "next_action": session_next_action(error.code, token),
         "verifies": [],
         "does_not_verify": list(SESSION_DOES_NOT_VERIFY),
     }
+    if token is not None:
+        result["token"] = token_status(token)
+        result["token_refresh_supported"] = refresh_supported
+    return result
 
 
-def session_next_action(reason: str) -> str:
+def session_next_action(reason: str, token: SaxoTokenSet | None = None) -> str:
+    if reason == "http_error" and token is not None and token.refresh_material() is None:
+        return (
+            "call saxo_cache_sim_access_token with a fresh Saxo developer portal SIM "
+            "token; Saxo can reject a non-refreshable portal token before the local "
+            "expires_at value says it is expired"
+        )
     return _SESSION_NEXT_ACTIONS.get(
         reason,
         "call saxo_auth_status before retrying saxo_get_session_capabilities",
@@ -210,6 +233,7 @@ def token_status(token: SaxoTokenSet) -> dict[str, ToolLeaf]:
         "has_access_token": status["has_access_token"],
         "has_refresh_token": status["has_refresh_token"],
         "has_code_verifier": status["has_code_verifier"],
+        "environment": status["environment"],
         "expires_at": status["expires_at"],
         "is_expired": status["is_expired"],
     }

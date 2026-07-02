@@ -209,9 +209,11 @@ async def test_order_preview_blocks_required_disclaimer() -> None:
 @pytest.mark.anyio
 async def test_order_preview_without_fixture_requires_auth_before_network(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.delenv("SAXO_MCP_SIM_CLIENT_ID", raising=False)
     monkeypatch.delenv("SAXO_MCP_SIM_APP_KEY", raising=False)
+    monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(tmp_path / "empty-token-cache.json"))
     async with Client(mcp) as client:
         result = await client.call_tool(
             "saxo_create_order_preview",

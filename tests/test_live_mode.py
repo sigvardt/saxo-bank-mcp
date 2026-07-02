@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from saxo_bank_mcp import qa
+from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.live_mode import live_cached_token_for_tool
+from saxo_bank_mcp.token_cache import save_token_cache
 
 
 def test_live_read_probe_writes_no_credentials_artifact(
@@ -67,6 +71,26 @@ def test_live_read_probe_requires_live_token_cache_when_enabled(
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}
     assert "live-client-id" not in json.dumps(report)
     assert "live-client-secret" not in json.dumps(report)
+
+
+def test_live_cached_token_refuses_sim_environment_token(tmp_path: Path) -> None:
+    cache = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="sim-access-token",  # noqa: S106
+            environment="SIM",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
+
+    result = live_cached_token_for_tool("saxo_get_session_capabilities", cache)
+
+    assert isinstance(result, dict)
+    assert result["status"] == "auth_required"
+    assert result["reason"] == "token_environment_mismatch"
+    assert result["network_call_made"] is False
+    assert "LIVE-issued token" in str(result["next_action"])
 
 
 def test_live_write_refusal_drives_fastmcp_order_tool(
