@@ -39,7 +39,12 @@ LOOP_GOALS_PATH = Path(
 )
 FINAL_GOAL_ID = "G011-final-verification-run-f1-f4-from-om"
 FINAL_SELF_CHECK_CRITERION_ID = "C001"
-FINAL_GOAL_ALLOWED_SELF_CHECK_STATUSES = frozenset({"blocked", "in_progress", "pending"})
+FINAL_GOAL_ALLOWED_PRE_CHECKPOINT_STATUSES = frozenset(
+    {"blocked", "in_progress", "pending"},
+)
+FINAL_GOAL_ALLOWED_SELF_CHECK_STATUSES = frozenset(
+    {"blocked", "in_progress", "pending", "pass"},
+)
 
 
 def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider) -> int:
@@ -141,7 +146,11 @@ def _incomplete_goal_labels(goals: list[JsonValue]) -> list[str]:
             continue
         raw_id = item.get("id")
         goal_id = raw_id if isinstance(raw_id, str) else f"goal {index}"
-        if goal_id == FINAL_GOAL_ID and _final_goal_ready_for_self_check(item):
+        if (
+            goal_id == FINAL_GOAL_ID
+            and status in FINAL_GOAL_ALLOWED_PRE_CHECKPOINT_STATUSES
+            and _final_goal_ready_for_self_check(item)
+        ):
             continue
         status_text = status if isinstance(status, str) else "missing status"
         labels.append(f"{goal_id}: {status_text}")

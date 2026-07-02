@@ -114,6 +114,42 @@ def test_plan_gate_allows_final_goal_self_reference(
     assert "status: `passed`" in out.read_text(encoding="utf-8")
 
 
+def test_plan_gate_allows_final_goal_after_self_check_pass_before_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    goals_path = tmp_path / LOOP_GOALS_PATH
+    goals_path.parent.mkdir(parents=True, exist_ok=True)
+    goals_path.write_text(
+        json.dumps(
+            {
+                "goals": [
+                    {"id": "G001-test", "status": "complete"},
+                    {
+                        "id": "G011-final-verification-run-f1-f4-from-om",
+                        "status": "blocked",
+                        "successCriteria": [
+                            {"id": "C001", "status": "pass"},
+                            {"id": "C002", "status": "pass"},
+                            {"id": "C003", "status": "pass"},
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "report.md"
+
+    result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
+
+    assert result == 0
+    assert "status: `passed`" in out.read_text(encoding="utf-8")
+
+
 def test_plan_gate_rejects_final_goal_when_other_criteria_unresolved(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -147,6 +183,43 @@ def test_plan_gate_rejects_final_goal_when_other_criteria_unresolved(
 
     assert result == 1
     assert "G011-final-verification-run-f1-f4-from-om: blocked" in out.read_text(
+        encoding="utf-8",
+    )
+
+
+def test_plan_gate_rejects_failed_final_goal_even_when_criteria_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    goals_path = tmp_path / LOOP_GOALS_PATH
+    goals_path.parent.mkdir(parents=True, exist_ok=True)
+    goals_path.write_text(
+        json.dumps(
+            {
+                "goals": [
+                    {
+                        "id": "G011-final-verification-run-f1-f4-from-om",
+                        "status": "failed",
+                        "successCriteria": [
+                            {"id": "C001", "status": "pass"},
+                            {"id": "C002", "status": "pass"},
+                            {"id": "C003", "status": "pass"},
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "report.md"
+
+    result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
+
+    assert result == 1
+    assert "G011-final-verification-run-f1-f4-from-om: failed" in out.read_text(
         encoding="utf-8",
     )
 
