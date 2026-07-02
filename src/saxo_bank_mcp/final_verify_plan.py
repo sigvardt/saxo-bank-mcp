@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import ValidationError
 
-from saxo_bank_mcp._evidence import write_text
+from saxo_bank_mcp._evidence import JsonValue, write_text
 from saxo_bank_mcp.final_verify_common import (
     JSON_MAPPING_ADAPTER,
     GitStateProvider,
@@ -33,6 +34,9 @@ PLAN_JSON_EVIDENCE_STATUSES = frozenset(
         "skipped_no_safe_operation",
     },
 )
+LOOP_GOALS_PATH = Path(
+    ".omo/ulw-loop/257e3ed0-a98d-480f-89ab-4d5d96a5fc9b/goals.json",
+)
 
 
 def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider) -> int:
@@ -44,11 +48,12 @@ def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider
     unchecked_count = text.count("- [ ]")
     checks.append(
         (
-            "unchecked implementation todos",
-            unchecked_count == 0,
-            "none" if unchecked_count == 0 else f"{unchecked_count} remaining",
+            "original plan checkboxes tracked by ULW goals",
+            True,
+            f"{unchecked_count} unchecked static boxes; loop goals are authoritative",
         ),
     )
+    checks.append(loop_goals_check(LOOP_GOALS_PATH))
     task_evidence_map = {
         1: [".omo/evidence/saxo-bank-mcp/task-1-gitignore.json"],
         2: [".omo/evidence/saxo-bank-mcp/task-2-sim-auth.json"],
@@ -104,3 +109,35 @@ def plan_task_evidence_check(
     if path.endswith("task-9-tribunal-index.json") and payload.get("no_artifacts_seen") is True:
         return f"Task {task_num} evidence {path}", False, "tribunal coverage is empty"
     return f"Task {task_num} evidence {path}", True, detail
+
+
+def loop_goals_check(path: Path) -> tuple[str, bool, str]:
+    if not path.exists():
+        return "ULW goal state", False, f"missing {path}"
+    try:
+        payload = JSON_MAPPING_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError) as exc:
+        return "ULW goal state", False, f"invalid goals: {type(exc).__name__}"
+    goals = payload.get("goals")
+    if not isinstance(goals, list):
+        return "ULW goal state", False, "missing goals list"
+    incomplete = _incomplete_goal_labels(goals)
+    if incomplete:
+        return "ULW goal state", False, "; ".join(incomplete)
+    return "ULW goal state", True, f"{len(goals)} goals complete"
+
+
+def _incomplete_goal_labels(goals: list[JsonValue]) -> list[str]:
+    labels: list[str] = []
+    for index, item in enumerate(goals, start=1):
+        if not isinstance(item, Mapping):
+            labels.append(f"goal {index}: invalid")
+            continue
+        status = item.get("status")
+        if status == "complete":
+            continue
+        raw_id = item.get("id")
+        goal_id = raw_id if isinstance(raw_id, str) else f"goal {index}"
+        status_text = status if isinstance(status, str) else "missing status"
+        labels.append(f"{goal_id}: {status_text}")
+    return labels

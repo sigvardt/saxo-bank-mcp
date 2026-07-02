@@ -26,6 +26,16 @@ EXPECTED_MCP_REQUIRED_EVIDENCE = (
     ".omo/evidence/saxo-bank-mcp/task-8-stream.json",
     ".omo/evidence/saxo-bank-mcp/task-10-live-write-refusal.json",
 )
+LOOP_GOALS_PATH = Path(
+    ".omo/ulw-loop/257e3ed0-a98d-480f-89ab-4d5d96a5fc9b/goals.json",
+)
+
+
+def write_loop_goals(root: Path, status: str = "complete") -> None:
+    path = root / LOOP_GOALS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"goals": [{"id": "G001-test", "status": status}]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_plan_marker_contract_is_literal() -> None:
@@ -36,15 +46,36 @@ def test_mcp_required_evidence_contract_is_literal() -> None:
     assert final_verify.MCP_REQUIRED_EVIDENCE == EXPECTED_MCP_REQUIRED_EVIDENCE
 
 
-def test_plan_gate_passes_when_markers_exist(tmp_path: Path) -> None:
+def test_plan_gate_passes_when_markers_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     plan = tmp_path / "plan.md"
     plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    write_loop_goals(tmp_path)
     out = tmp_path / "report.md"
 
     result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
 
     assert result == 0
     assert "status: `passed`" in out.read_text(encoding="utf-8")
+
+
+def test_plan_gate_fails_when_loop_goal_is_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    write_loop_goals(tmp_path, status="blocked")
+    out = tmp_path / "report.md"
+
+    result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
+
+    assert result == 1
+    assert "G001-test: blocked" in out.read_text(encoding="utf-8")
 
 
 def test_mcp_gate_fails_without_real_evidence(tmp_path: Path) -> None:
@@ -194,6 +225,7 @@ def test_plan_gate_passes_when_checked_task_has_evidence(
     plan = tmp_path / "plan.md"
     plan_text = "\n".join(EXPECTED_PLAN_MARKERS) + "\n- [x] 2. Implement Saxo..."
     plan.write_text(plan_text, encoding="utf-8")
+    write_loop_goals(tmp_path)
 
     evidence_path = tmp_path / ".omo/evidence/saxo-bank-mcp/task-2-sim-auth.json"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
