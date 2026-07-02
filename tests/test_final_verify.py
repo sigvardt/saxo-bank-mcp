@@ -78,6 +78,79 @@ def test_plan_gate_fails_when_loop_goal_is_blocked(
     assert "G001-test: blocked" in out.read_text(encoding="utf-8")
 
 
+def test_plan_gate_allows_final_goal_self_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    goals_path = tmp_path / LOOP_GOALS_PATH
+    goals_path.parent.mkdir(parents=True, exist_ok=True)
+    goals_path.write_text(
+        json.dumps(
+            {
+                "goals": [
+                    {"id": "G001-test", "status": "complete"},
+                    {
+                        "id": "G011-final-verification-run-f1-f4-from-om",
+                        "status": "blocked",
+                        "successCriteria": [
+                            {"id": "C001", "status": "blocked"},
+                            {"id": "C002", "status": "pass"},
+                            {"id": "C003", "status": "pass"},
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "report.md"
+
+    result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
+
+    assert result == 0
+    assert "status: `passed`" in out.read_text(encoding="utf-8")
+
+
+def test_plan_gate_rejects_final_goal_when_other_criteria_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    plan = tmp_path / "plan.md"
+    plan.write_text("\n".join(EXPECTED_PLAN_MARKERS), encoding="utf-8")
+    goals_path = tmp_path / LOOP_GOALS_PATH
+    goals_path.parent.mkdir(parents=True, exist_ok=True)
+    goals_path.write_text(
+        json.dumps(
+            {
+                "goals": [
+                    {
+                        "id": "G011-final-verification-run-f1-f4-from-om",
+                        "status": "blocked",
+                        "successCriteria": [
+                            {"id": "C001", "status": "blocked"},
+                            {"id": "C002", "status": "pending"},
+                            {"id": "C003", "status": "pass"},
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "report.md"
+
+    result = final_verify.main(["plan", "--plan", str(plan), "--out", str(out)])
+
+    assert result == 1
+    assert "G011-final-verification-run-f1-f4-from-om: blocked" in out.read_text(
+        encoding="utf-8",
+    )
+
+
 def test_mcp_gate_fails_without_real_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

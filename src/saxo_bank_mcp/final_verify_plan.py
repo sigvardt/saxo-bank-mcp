@@ -37,6 +37,9 @@ PLAN_JSON_EVIDENCE_STATUSES = frozenset(
 LOOP_GOALS_PATH = Path(
     ".omo/ulw-loop/257e3ed0-a98d-480f-89ab-4d5d96a5fc9b/goals.json",
 )
+FINAL_GOAL_ID = "G011-final-verification-run-f1-f4-from-om"
+FINAL_SELF_CHECK_CRITERION_ID = "C001"
+FINAL_GOAL_ALLOWED_SELF_CHECK_STATUSES = frozenset({"blocked", "in_progress", "pending"})
 
 
 def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider) -> int:
@@ -138,6 +141,26 @@ def _incomplete_goal_labels(goals: list[JsonValue]) -> list[str]:
             continue
         raw_id = item.get("id")
         goal_id = raw_id if isinstance(raw_id, str) else f"goal {index}"
+        if goal_id == FINAL_GOAL_ID and _final_goal_ready_for_self_check(item):
+            continue
         status_text = status if isinstance(status, str) else "missing status"
         labels.append(f"{goal_id}: {status_text}")
     return labels
+
+
+def _final_goal_ready_for_self_check(goal: Mapping[str, JsonValue]) -> bool:
+    criteria = goal.get("successCriteria")
+    if not isinstance(criteria, list):
+        return False
+    seen_self_check = False
+    for item in criteria:
+        if not isinstance(item, Mapping):
+            return False
+        criterion_id = item.get("id")
+        status = item.get("status")
+        if criterion_id == FINAL_SELF_CHECK_CRITERION_ID:
+            seen_self_check = status in FINAL_GOAL_ALLOWED_SELF_CHECK_STATUSES
+            continue
+        if status != "pass":
+            return False
+    return seen_self_check
