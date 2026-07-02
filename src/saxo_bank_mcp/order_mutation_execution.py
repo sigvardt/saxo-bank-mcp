@@ -123,10 +123,11 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             )
         return _tool_result(response)
 
-    response_body = _response_body(response)
-    audit_path = _audit_raw_response(spec, response.status_code, response_body)
+    raw_response_body = _raw_response_body(response)
+    public_response_body = _public_response_body(raw_response_body)
+    audit_path = _audit_raw_response(spec, response.status_code, public_response_body)
     parsed = parse_order_mutation_response(
-        _object_payload(response_body),
+        _object_payload(raw_response_body),
         http_status=response.status_code,
     )
     readback = await _readback(token, parsed.order_ids)
@@ -158,7 +159,9 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "x_request_id_response_echo_verified": False,
             "order_result_parsed": True,
             "http_status": response.status_code,
-            "parsed_response": parsed.to_json_value(),
+            "parsed_response": _public_parsed_response(parsed),
+            "parsed_order_id_count": len(parsed.order_ids),
+            "parsed_order_ids_redacted": bool(parsed.order_ids),
             "reason": reason,
             "port_orders_readback": readback["port_orders_readback"],
             "trade_messages_readback": readback["trade_messages_readback"],
@@ -466,7 +469,7 @@ async def _readback(token: SaxoTokenSet, response_order_ids: tuple[str, ...]) ->
             "open_order_readback_matched_response_order": False,
             "open_order_readback_confirmed_absent": False,
         }
-    open_order_ids = _order_ids_from_json(_response_body(port))
+    open_order_ids = _order_ids_from_json(_raw_response_body(port))
     matched_open_order = bool(frozenset(response_order_ids).intersection(open_order_ids))
     return {
         "port_orders_readback": HTTP_SUCCESS_MIN <= port.status_code < HTTP_SUCCESS_MAX,
@@ -536,14 +539,26 @@ def _query_params(
     return params
 
 
-def _response_body(response: httpx2.Response) -> JsonValue:
+def _raw_response_body(response: httpx2.Response) -> JsonValue:
     if not response.content:
         return {}
     try:
-        redacted = redact_json(response.json())
+        return response.json()
     except ValueError:
-        return redact_text(response.text)
-    return redacted
+        return response.text
+
+
+def _public_response_body(value: JsonValue) -> JsonValue:
+    if isinstance(value, str):
+        return redact_text(value)
+    return redact_json(value)
+
+
+def _public_parsed_response(parsed: ParsedOrderWriteResponse) -> JsonObject:
+    redacted = redact_json(parsed.to_json_value())
+    if isinstance(redacted, Mapping):
+        return JSON_OBJECT_ADAPTER.validate_python(redacted)
+    return parsed.to_json_value()
 
 
 def _object_payload(value: JsonValue) -> JsonObject:

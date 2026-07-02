@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -13,6 +13,8 @@ from saxo_bank_mcp.hard_task_manifest import DEFAULT_INCOMPLETE_TOOL_IDS
 from saxo_bank_mcp.loop_manifest import GitState, current_git_state
 
 JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, JsonValue])
+PASSED_RECEIPT_STATUS: Final = "passed"
+EXERCISED_RECEIPT_STATUS: Final = "exercised"
 
 
 class HardTaskSummaryRow(BaseModel):
@@ -179,8 +181,8 @@ def _optional_bool(value: JsonValue | None) -> bool | None:
 
 def _row_error(row: HardTaskSummaryRow, current_git: GitState) -> str:
     errors: list[str] = []
-    if row.status == "failed":
-        errors.append("receipt status is failed")
+    if completion_error := _completion_error(row):
+        errors.append(completion_error)
     if not row.fastmcp_called:
         errors.append("receipt did not prove FastMCP call")
     if row.git_dirty:
@@ -192,3 +194,16 @@ def _row_error(row: HardTaskSummaryRow, current_git: GitState) -> str:
     if row.live_write:
         errors.append("receipt attempted live write")
     return errors[0] if errors else ""
+
+
+def _completion_error(row: HardTaskSummaryRow) -> str:
+    if row.completion_claim_allowed is False:
+        return "receipt explicitly disallows completion claim"
+    if row.status == PASSED_RECEIPT_STATUS:
+        return ""
+    if (
+        row.status == EXERCISED_RECEIPT_STATUS
+        and row.completion_claim_allowed is True
+    ):
+        return ""
+    return f"receipt status {row.status} does not allow completion"

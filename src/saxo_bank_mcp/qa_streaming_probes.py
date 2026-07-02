@@ -24,6 +24,8 @@ from saxo_bank_mcp.streaming import (
     reset_local_subscriptions,
 )
 
+STREAM_FRAME_WAIT_SECONDS = 10.0
+
 
 def handle_stream(
     out: Path,
@@ -65,7 +67,7 @@ async def stream_probe(options: StreamProbeOptions) -> JsonObject:
                 "reference_id": "task8prices",
                 "uics": [21],
                 "asset_type": "FxSpot",
-                "wait_seconds": 2.0,
+                "wait_seconds": STREAM_FRAME_WAIT_SECONDS,
             },
             raise_on_error=False,
         )

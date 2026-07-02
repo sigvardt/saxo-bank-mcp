@@ -8,18 +8,25 @@ from saxo_bank_mcp.hard_task_summary import build_hard_task_execution_summary
 from saxo_bank_mcp.loop_manifest import GitState
 
 
-def write_receipt(path: Path, *, sha: str, dirty: bool = False) -> None:
+def write_receipt(
+    path: Path,
+    *,
+    sha: str,
+    dirty: bool = False,
+    status: str = "passed",
+    completion_claim_allowed: bool | None = None,
+) -> None:
     path.write_text(
         json.dumps(
             {
-                "status": "exercised",
+                "status": status,
                 "driver": "loop_harness",
                 "command": "sim-order-mutation",
                 "fastmcp_called": True,
                 "live_write": False,
                 "git": {"sha": sha, "dirty": dirty, "unavailable_reason": None},
                 "secret_scan": {"findings": [], "scan_errors": []},
-                "completion_claim_allowed": False,
+                "completion_claim_allowed": completion_claim_allowed,
             },
         ),
         encoding="utf-8",
@@ -46,6 +53,48 @@ def test_hard_task_summary_derives_receipt_rows(tmp_path: Path) -> None:
     assert summary.rows[0].receipt == str(receipts / "saxo_place_sim_order.json")
     assert summary.rows[0].git_sha == "abc123"
     assert summary.rows[0].git_dirty is False
+
+
+def test_hard_task_summary_rejects_receipts_that_cannot_claim_completion(
+    tmp_path: Path,
+) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(
+        receipts / "saxo_cancel_sim_order.json",
+        sha="abc123",
+        status="exercised",
+        completion_claim_allowed=False,
+    )
+    write_receipt(
+        receipts / "saxo_create_streaming_price_subscription.json",
+        sha="abc123",
+        status="incomplete_no_frame",
+    )
+
+    summary = build_hard_task_execution_summary(
+        receipts,
+        expected_tool_ids=(
+            "saxo_cancel_sim_order",
+            "saxo_create_streaming_price_subscription",
+        ),
+        git=GitState(sha="abc123", dirty=False),
+    )
+
+    assert summary.status == "failed"
+    assert summary.failed_tools == (
+        "saxo_cancel_sim_order",
+        "saxo_create_streaming_price_subscription",
+    )
+    errors_by_tool = {row.tool_id: row.error for row in summary.rows}
+    assert (
+        errors_by_tool["saxo_cancel_sim_order"]
+        == "receipt explicitly disallows completion claim"
+    )
+    assert (
+        errors_by_tool["saxo_create_streaming_price_subscription"]
+        == "receipt status incomplete_no_frame does not allow completion"
+    )
 
 
 def test_hard_task_summary_rejects_stale_or_dirty_receipts(tmp_path: Path) -> None:
