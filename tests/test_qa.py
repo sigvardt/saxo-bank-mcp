@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from saxo_bank_mcp import qa, qa_safety_probes
+from saxo_bank_mcp import qa, qa_readme_probe, qa_safety_probes
 
 EXPECTED_CLIENT_APP_SECRET_FINDINGS = 2
 EXPECTED_STREAMING_CONNECTIONS = 4
@@ -94,6 +94,59 @@ def test_health_probe_calls_fastmcp_saxo_health(tmp_path: Path) -> None:
     assert report["mode"] == "SIM"
     assert report["live_writes"] is False
     assert "not implemented" not in report["detail"]
+
+
+def test_readme_smoke_passes_with_required_docs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    required_text = "\n".join(qa_readme_probe.README_REQUIRED_MARKERS)
+    (tmp_path / "README.md").write_text(required_text, encoding="utf-8")
+    (docs / "operator-guide.md").write_text(required_text, encoding="utf-8")
+    (docs / "incident-cleanup.md").write_text(required_text, encoding="utf-8")
+    out = tmp_path / "readme-smoke.json"
+
+    result = qa.main(["readme-smoke", "--out", str(out)])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert result == 0
+    assert report["status"] == "passed"
+    assert report["required_command_markers_present"] is True
+    assert report["missing_command_markers"] == []
+    assert report["health_status"] == "passed"
+    assert report["auth_status_status"] == "passed"
+    assert report["copied_secret_values_detected"] is False
+    assert report["prompted_user"] is False
+    assert report["secret_scan"] == {"findings": [], "scan_errors": []}
+    assert set(report["final_verify_help_exit_codes"].values()) == {0}
+
+
+def test_readme_smoke_fails_when_command_marker_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    missing_marker = qa_readme_probe.README_REQUIRED_MARKERS[0]
+    required_text = "\n".join(
+        marker for marker in qa_readme_probe.README_REQUIRED_MARKERS if marker != missing_marker
+    )
+    (tmp_path / "README.md").write_text(required_text, encoding="utf-8")
+    (docs / "operator-guide.md").write_text(required_text, encoding="utf-8")
+    (docs / "incident-cleanup.md").write_text(required_text, encoding="utf-8")
+    out = tmp_path / "readme-smoke.json"
+
+    result = qa.main(["readme-smoke", "--out", str(out)])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert result == 1
+    assert report["status"] == "failed"
+    assert report["required_command_markers_present"] is False
+    assert report["missing_command_markers"] == [missing_marker]
 
 
 def test_live_read_skips_without_enablement(

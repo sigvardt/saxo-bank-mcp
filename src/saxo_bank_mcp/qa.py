@@ -34,6 +34,7 @@ from saxo_bank_mcp.qa_read_probes import (
     handle_registered_endpoint_denied,
     load_registered_endpoint_list,
 )
+from saxo_bank_mcp.qa_readme_probe import handle_readme_smoke
 from saxo_bank_mcp.qa_safety_probes import handle_approval_denied, handle_approval_happy
 from saxo_bank_mcp.qa_streaming_probes import handle_stream, handle_stream_cleanup
 from saxo_bank_mcp.qa_trade_probes import (
@@ -201,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         )
     elif command == "stream-cleanup":
         result = handle_stream_cleanup(args.out, simulate_leak=bool(args.simulate_leak))
+    elif command == "readme-smoke":
+        result = handle_readme_smoke(args.out)
     elif command == "approval-denied":
         result = handle_approval_denied(args.out, str(args.missing))
     else:
