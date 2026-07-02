@@ -7,7 +7,19 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self, cast
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_validator,
+)
+
+from saxo_bank_mcp.loop_mcp_execution import (
+    McpExecutionEvidence,
+    referenced_mcp_execution_paths,
+    validate_mcp_execution,
+)
 
 MIN_AUDIT_CHARS = 50
 TRIVIAL_ARTIFACT_CONTENT = frozenset(
@@ -54,6 +66,7 @@ class TribunalCompletion(BaseModel):
     remaining_actionable_feedback: tuple[str, ...] = ()
     refusal_reason: str | None = None
     exemption_reason: str | None = None
+    mcp_execution: McpExecutionEvidence | None = None
     completed_at: datetime
 
     @model_validator(mode="after")
@@ -100,6 +113,7 @@ def referenced_paths(completion: TribunalCompletion, base_dir: Path) -> tuple[Pa
             continue
         candidate = Path(value)
         paths.append(candidate if candidate.is_absolute() else base_dir / candidate)
+    paths.extend(referenced_mcp_execution_paths(completion.mcp_execution, base_dir))
     return tuple(paths)
 
 
@@ -131,6 +145,8 @@ def _validate_complete_evidence(
 
     if not completion.fixed_feedback:
         errors.append("complete tools must have non-empty fixed_feedback from peer review")
+
+    validate_mcp_execution(completion.tool_id, completion.mcp_execution, base_dir, errors)
 
     if completion.output is None:
         errors.append("complete tools require output")
