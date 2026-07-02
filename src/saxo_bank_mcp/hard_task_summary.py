@@ -29,6 +29,7 @@ class HardTaskSummaryRow(BaseModel):
     secret_scan_clean: bool
     live_write: bool
     completion_claim_allowed: bool | None = None
+    safe_fixture_coverage_claim_allowed: bool | None = None
     error: str = ""
 
 
@@ -133,6 +134,9 @@ def _summary_row(path: Path, tool_id: str, current_git: GitState) -> HardTaskSum
         secret_scan_clean=_secret_scan_clean(payload),
         live_write=payload.get("live_write") is True,
         completion_claim_allowed=_optional_bool(payload.get("completion_claim_allowed")),
+        safe_fixture_coverage_claim_allowed=_optional_bool(
+            payload.get("safe_fixture_coverage_claim_allowed"),
+        ),
         error="",
     )
     return row.model_copy(update={"error": _row_error(row, current_git)})
@@ -197,13 +201,20 @@ def _row_error(row: HardTaskSummaryRow, current_git: GitState) -> str:
 
 
 def _completion_error(row: HardTaskSummaryRow) -> str:
-    if row.completion_claim_allowed is False:
-        return "receipt explicitly disallows completion claim"
     if row.status == PASSED_RECEIPT_STATUS:
+        if row.completion_claim_allowed is False:
+            return "passed receipt explicitly disallows completion claim"
         return ""
     if (
         row.status == EXERCISED_RECEIPT_STATUS
         and row.completion_claim_allowed is True
     ):
         return ""
+    if (
+        row.status == EXERCISED_RECEIPT_STATUS
+        and row.safe_fixture_coverage_claim_allowed is True
+    ):
+        return ""
+    if row.completion_claim_allowed is False:
+        return "receipt explicitly disallows completion claim"
     return f"receipt status {row.status} does not allow completion"

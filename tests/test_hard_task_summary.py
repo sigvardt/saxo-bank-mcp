@@ -14,7 +14,7 @@ def write_receipt(
     sha: str,
     dirty: bool = False,
     status: str = "passed",
-    completion_claim_allowed: bool | None = None,
+    extra: dict[str, object] | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -26,7 +26,7 @@ def write_receipt(
                 "live_write": False,
                 "git": {"sha": sha, "dirty": dirty, "unavailable_reason": None},
                 "secret_scan": {"findings": [], "scan_errors": []},
-                "completion_claim_allowed": completion_claim_allowed,
+                **({} if extra is None else extra),
             },
         ),
         encoding="utf-8",
@@ -64,7 +64,7 @@ def test_hard_task_summary_rejects_receipts_that_cannot_claim_completion(
         receipts / "saxo_cancel_sim_order.json",
         sha="abc123",
         status="exercised",
-        completion_claim_allowed=False,
+        extra={"completion_claim_allowed": False},
     )
     write_receipt(
         receipts / "saxo_create_streaming_price_subscription.json",
@@ -95,6 +95,34 @@ def test_hard_task_summary_rejects_receipts_that_cannot_claim_completion(
         errors_by_tool["saxo_create_streaming_price_subscription"]
         == "receipt status incomplete_no_frame does not allow completion"
     )
+
+
+def test_hard_task_summary_allows_safe_fixture_coverage_without_completion_claim(
+    tmp_path: Path,
+) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(
+        receipts / "saxo_register_disclaimer_response.json",
+        sha="abc123",
+        status="exercised",
+        extra={
+            "completion_claim_allowed": False,
+            "safe_fixture_coverage_claim_allowed": True,
+        },
+    )
+
+    summary = build_hard_task_execution_summary(
+        receipts,
+        expected_tool_ids=("saxo_register_disclaimer_response",),
+        git=GitState(sha="abc123", dirty=False),
+    )
+
+    assert summary.status == "passed"
+    assert summary.failed_tools == ()
+    row = summary.rows[0]
+    assert row.completion_claim_allowed is False
+    assert row.safe_fixture_coverage_claim_allowed is True
 
 
 def test_hard_task_summary_rejects_stale_or_dirty_receipts(tmp_path: Path) -> None:

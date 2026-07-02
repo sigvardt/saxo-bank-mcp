@@ -274,6 +274,7 @@ async def _trade_disclaimer_response() -> dict[str, JsonValue]:
         "happy_path_verified": status == "passed",
         "safe_fixture_exercised": status == "exercised",
         "completion_claim_allowed": disclaimer_response_completion_claim_allowed(status),
+        "safe_fixture_coverage_claim_allowed": status == "exercised",
         "coverage_limitation": _disclaimer_coverage_limitation(status, probe_input),
         "order_placed": payload.get("order_placed") is True,
         "live_write": payload.get("live_write") is True,
