@@ -881,17 +881,17 @@ def _completion_requirements_met(  # noqa: PLR0911
         spec.write_class == "cancel-by-instrument"
         and tool_payload.get("status") == "completed_unverified"
         and _setup_order_proven(setup_report)
-        and cleanup_report.get("setup_order_absent_after_tool") is True
+        and _raw_absence_proven(cleanup_report)
     )
     cleanup_proven_multileg_place = (
         spec.write_class == "multileg-place"
         and tool_payload.get("status") == "completed_unverified"
-        and cleanup_report.get("setup_cleanup_final_absent") is True
+        and _raw_cleanup_final_absent_proven(cleanup_report)
     )
     cleanup_proven_place = (
         spec.write_class == "place"
         and tool_payload.get("status") == "completed_unverified"
-        and cleanup_report.get("setup_cleanup_final_absent") is True
+        and _raw_cleanup_final_absent_proven(cleanup_report)
     )
     readback_proven_multileg_modify = (
         spec.write_class == "multileg-modify"
@@ -917,14 +917,14 @@ def _completion_requirements_met(  # noqa: PLR0911
     if spec.write_class == "cancel-by-instrument":
         return (
             _setup_order_proven(setup_report)
-            and cleanup_report.get("setup_order_absent_after_tool") is True
+            and _raw_absence_proven(cleanup_report)
             and tool_payload.get("trade_messages_readback") is True
         )
     if spec.write_class == "cancel":
         return (
             _setup_order_proven(setup_report)
             and tool_payload.get("mutation_content_verified") is True
-            and cleanup_report.get("setup_order_absent_after_tool") is True
+            and _raw_absence_proven(cleanup_report)
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
         )
@@ -932,7 +932,7 @@ def _completion_requirements_met(  # noqa: PLR0911
         return (
             _setup_order_proven(setup_report)
             and tool_payload.get("mutation_content_verified") is True
-            and cleanup_report.get("setup_order_absent_after_tool") is True
+            and _raw_absence_proven(cleanup_report)
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
         )
@@ -942,7 +942,7 @@ def _completion_requirements_met(  # noqa: PLR0911
             and cleanup_report.get("setup_modified_after_tool") is True
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
-            and cleanup_report.get("setup_cleanup_final_absent") is True
+            and _raw_cleanup_final_absent_proven(cleanup_report)
         )
     if spec.write_class == "modify":
         return (
@@ -950,14 +950,14 @@ def _completion_requirements_met(  # noqa: PLR0911
             and tool_payload.get("mutation_content_verified") is True
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
-            and cleanup_report.get("setup_cleanup_final_absent") is True
+            and _raw_cleanup_final_absent_proven(cleanup_report)
         )
     if spec.write_class == "multileg-place":
         return (
             tool_payload.get("mutation_content_verified") is True
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
-            and cleanup_report.get("setup_cleanup_final_absent") is True
+            and _raw_cleanup_final_absent_proven(cleanup_report)
         )
     if spec.write_class == "place":
         return (
@@ -966,7 +966,7 @@ def _completion_requirements_met(  # noqa: PLR0911
             and tool_payload.get("trade_messages_readback") is True
             and (
                 tool_payload.get("cleanup_status") == "verified_no_open_order"
-                or cleanup_report.get("setup_cleanup_final_absent") is True
+                or _raw_cleanup_final_absent_proven(cleanup_report)
             )
         )
     return (
@@ -980,6 +980,20 @@ def _setup_order_proven(setup_report: dict[str, JsonValue]) -> bool:
     return (
         setup_report.get("setup_order_created") is True
         and setup_report.get("setup_open_order_found") is True
+    )
+
+
+def _raw_absence_proven(cleanup_report: dict[str, JsonValue]) -> bool:
+    return (
+        cleanup_report.get("setup_order_absent_after_tool") is True
+        and cleanup_report.get("setup_raw_read_status") == "passed"
+    )
+
+
+def _raw_cleanup_final_absent_proven(cleanup_report: dict[str, JsonValue]) -> bool:
+    return (
+        cleanup_report.get("setup_cleanup_final_absent") is True
+        and cleanup_report.get("setup_raw_read_status") == "passed"
     )
 
 

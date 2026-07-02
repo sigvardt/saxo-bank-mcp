@@ -348,6 +348,39 @@ def test_sim_order_place_fixture_uses_manual_market_body() -> None:
     assert body["OrderType"] == "Market"
 
 
+def test_cancel_qa_requires_successful_raw_absence_readback() -> None:
+    tool_payload: dict[str, JsonValue] = {
+        "status": "completed",
+        "network_call_made": True,
+        "order_result_parsed": True,
+        "x_request_id_present": True,
+        "retry_unsafe": False,
+        "mutation_content_verified": True,
+        "port_orders_readback": True,
+        "trade_messages_readback": True,
+    }
+    setup = order_probes.SetupOrder(
+        order_id="redacted-order-id",
+        order_kind="single",
+        report={"setup_order_created": True, "setup_open_order_found": True},
+    )
+    cleanup: dict[str, JsonValue] = {
+        "setup_order_absent_after_tool": True,
+        "setup_raw_read_status": "network_error",
+    }
+
+    report = order_probes.class_report_for_qa(
+        ORDER_WRITE_SPECS["cancel"],
+        {},
+        tool_payload,
+        setup=setup,
+        cleanup=cleanup,
+    )
+
+    assert report["status"] == "exercised"
+    assert report["real_mutation_proven"] is False
+
+
 @pytest.mark.anyio
 async def test_empty_success_place_order_response_is_not_proven_mutation(
     tmp_path: Path,
