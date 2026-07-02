@@ -359,6 +359,8 @@ async def _post_tool_cleanup(
     account_key: str,
     setup: SetupOrder | None,
 ) -> dict[str, JsonValue]:
+    if setup is None and spec.write_class == "place":
+        return await _post_single_place_cleanup(client, account_key, spec.tool_name)
     if setup is None and spec.write_class == "multileg-place":
         return await _post_multileg_place_cleanup(client, account_key, spec.tool_name)
     if setup is None or setup.report.get("setup_open_order_found") is not True:
@@ -399,6 +401,44 @@ async def _post_tool_cleanup(
     present_after_cleanup, cleanup_read = await _raw_setup_order_present(
         setup,
         cleanup_tool_name,
+    )
+    cleanup_report.update(
+        {
+            "setup_cleanup_attempted": True,
+            "setup_cleanup_tool_status": str(cleanup_payload.get("status", "")),
+            "setup_cleanup_network_call_made": (
+                cleanup_payload.get("network_call_made") is True
+            ),
+            "setup_cleanup_final_absent": present_after_cleanup is False,
+            **cleanup_read,
+        },
+    )
+    return cleanup_report
+
+
+async def _post_single_place_cleanup(
+    client: Client[FastMCPTransport],
+    account_key: str,
+    tool_name: str,
+) -> dict[str, JsonValue]:
+    order_id, read_report = await _raw_fixture_open_order_id(
+        account_key,
+        tool_name=tool_name,
+    )
+    cleanup_report: dict[str, JsonValue] = {
+        "setup_cleanup_required": True,
+        "setup_order_absence_checked": True,
+        "setup_order_absent_after_tool": order_id is None,
+        "setup_order_still_open_after_tool": order_id is not None,
+        "setup_cleanup_attempted": False,
+        **read_report,
+    }
+    if order_id is None:
+        return cleanup_report
+    cleanup_payload = await _cancel_fixture_orders_by_instrument(client, account_key)
+    present_after_cleanup, cleanup_read = await _raw_order_id_present(
+        order_id,
+        tool_name=ORDER_WRITE_SPECS["cancel-by-instrument"].tool_name,
     )
     cleanup_report.update(
         {
@@ -848,6 +888,11 @@ def _completion_requirements_met(  # noqa: PLR0911
         and tool_payload.get("status") == "completed_unverified"
         and cleanup_report.get("setup_cleanup_final_absent") is True
     )
+    cleanup_proven_place = (
+        spec.write_class == "place"
+        and tool_payload.get("status") == "completed_unverified"
+        and cleanup_report.get("setup_cleanup_final_absent") is True
+    )
     readback_proven_multileg_modify = (
         spec.write_class == "multileg-modify"
         and tool_payload.get("status") == "completed_unverified"
@@ -858,6 +903,7 @@ def _completion_requirements_met(  # noqa: PLR0911
         (
             tool_completed
             or setup_proven_cancel_by_instrument
+            or cleanup_proven_place
             or cleanup_proven_multileg_place
             or readback_proven_multileg_modify
         )
@@ -918,7 +964,10 @@ def _completion_requirements_met(  # noqa: PLR0911
             tool_payload.get("mutation_content_verified") is True
             and tool_payload.get("port_orders_readback") is True
             and tool_payload.get("trade_messages_readback") is True
-            and tool_payload.get("cleanup_status") == "verified_no_open_order"
+            and (
+                tool_payload.get("cleanup_status") == "verified_no_open_order"
+                or cleanup_report.get("setup_cleanup_final_absent") is True
+            )
         )
     return (
         tool_payload.get("mutation_content_verified") is True
