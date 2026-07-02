@@ -148,17 +148,21 @@ async def execute_streaming_cleanup(context_id: str) -> ToolResult:
                 "cleanup_endpoint": SUBSCRIPTION_CLEANUP_PATH,
                 "cleanup_attempted": False,
                 "cleanup_status": "auth_required",
+                "remote_cleanup_accepted": False,
                 "remote_cleanup_confirmed": False,
                 "remote_cleanup_status_known": False,
+                "remote_cleanup_acceptance_status_known": False,
                 "remote_subscription_may_remain": True,
                 "remote_cleanup_claim_allowed": False,
+                "remote_cleanup_acceptance_claim_allowed": False,
                 "any_subscription_may_remain": True,
                 "open_subscription_left": after > 0,
                 "open_subscription_left_scope": "local_registry_only",
             },
         )
     remote = await delete_root_subscription(token_or_payload, str(context))
-    status = "completed" if remote.get("cleanup_status") == "accepted" else "cleanup_remote_failed"
+    remote_accepted = remote.get("cleanup_status") == "accepted"
+    status = "completed" if remote_accepted else "cleanup_remote_failed"
     return tool_result(
         {
             **base_payload("saxo_cleanup_streaming_subscriptions", status),
@@ -171,11 +175,15 @@ async def execute_streaming_cleanup(context_id: str) -> ToolResult:
             "local_open_records_left": after > 0,
             "cleanup_endpoint": SUBSCRIPTION_CLEANUP_PATH,
             "cleanup_attempted": True,
-            "remote_cleanup_confirmed": status == "completed",
-            "remote_cleanup_status_known": True,
-            "remote_subscription_may_remain": status != "completed",
-            "remote_cleanup_claim_allowed": status == "completed",
-            "any_subscription_may_remain": after > 0 or status != "completed",
+            "remote_cleanup_accepted": remote_accepted,
+            "remote_cleanup_confirmed": False,
+            "remote_cleanup_status_known": False,
+            "remote_cleanup_acceptance_status_known": remote_accepted,
+            "remote_cleanup_status_scope": "delete_request_acceptance_only",
+            "remote_subscription_may_remain": True,
+            "remote_cleanup_claim_allowed": False,
+            "remote_cleanup_acceptance_claim_allowed": remote_accepted,
+            "any_subscription_may_remain": True,
             "open_subscription_left": after > 0,
             "open_subscription_left_scope": "local_registry_only",
             **remote,

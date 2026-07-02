@@ -77,6 +77,57 @@ def test_stream_cleanup_qa_reports_remote_failure(
     assert report["open_subscription_left_scope"] == "local_registry_only"
 
 
+def test_stream_cleanup_qa_reports_remote_acceptance_not_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(tmp_path / "token.json"))
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    token = token_set()
+
+    def fake_cached_token(_tool_name: str) -> SaxoTokenSet | JsonObject:
+        return token
+
+    async def fake_delete_root_subscription(
+        _token: SaxoTokenSet,
+        _context_id: str,
+    ) -> JsonObject:
+        return {
+            "network_call_made": True,
+            "cleanup_status": "accepted",
+            "cleanup_http_status": 202,
+            "response": None,
+        }
+
+    monkeypatch.setattr("saxo_bank_mcp.streaming_execution.cached_token", fake_cached_token)
+    monkeypatch.setattr(
+        "saxo_bank_mcp.streaming_execution.delete_root_subscription",
+        fake_delete_root_subscription,
+    )
+    out = tmp_path / "cleanup_accepted.json"
+
+    result = qa.main(["stream-cleanup", "--simulate-leak", "--out", str(out)])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert result == 0
+    assert report["status"] == "passed"
+    assert report["cleanup_remote_accepted"] is True
+    assert report["cleanup_remote_verified"] is False
+    assert report["remote_cleanup_accepted"] is True
+    assert report["remote_cleanup_confirmed"] is False
+    assert report["remote_cleanup_status_known"] is False
+    assert report["remote_cleanup_acceptance_status_known"] is True
+    assert report["remote_cleanup_status_scope"] == "delete_request_acceptance_only"
+    assert report["remote_cleanup_claim_allowed"] is False
+    assert report["remote_cleanup_acceptance_claim_allowed"] is True
+    assert report["remote_subscription_may_remain"] is True
+    assert report["any_subscription_may_remain"] is True
+    assert report["open_subscription_left"] is False
+    assert report["open_subscription_left_scope"] == "local_registry_only"
+    assert report["tool_result"]["remote_cleanup_confirmed"] is False
+
+
 def test_stream_qa_fails_when_requested_limits_do_not_match_official(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -153,9 +153,16 @@ def cleanup_event_payload(
         "cleanup_endpoint": str(tool_payload.get("cleanup_endpoint", "")),
         "cleanup_attempted": tool_payload.get("cleanup_attempted") is True,
         "cleanup_status": str(tool_payload.get("cleanup_status", "")),
+        "remote_cleanup_accepted": tool_payload.get("remote_cleanup_accepted") is True,
         "remote_cleanup_confirmed": tool_payload.get("remote_cleanup_confirmed") is True,
         "remote_cleanup_status_known": (
             tool_payload.get("remote_cleanup_status_known") is True
+        ),
+        "remote_cleanup_acceptance_status_known": (
+            tool_payload.get("remote_cleanup_acceptance_status_known") is True
+        ),
+        "remote_cleanup_status_scope": str(
+            tool_payload.get("remote_cleanup_status_scope", ""),
         ),
         "remote_subscription_may_remain": (
             tool_payload.get("remote_subscription_may_remain") is True
@@ -163,8 +170,14 @@ def cleanup_event_payload(
         "remote_cleanup_claim_allowed": (
             tool_payload.get("remote_cleanup_claim_allowed") is True
         ),
+        "remote_cleanup_acceptance_claim_allowed": (
+            tool_payload.get("remote_cleanup_acceptance_claim_allowed") is True
+        ),
         "cleanup_remote_verified": (
             status == "passed" and tool_payload.get("remote_cleanup_confirmed") is True
+        ),
+        "cleanup_remote_accepted": (
+            status == "passed" and tool_payload.get("remote_cleanup_accepted") is True
         ),
         "qa_status_is_authoritative": True,
         "any_subscription_may_remain": (
