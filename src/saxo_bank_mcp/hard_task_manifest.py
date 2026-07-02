@@ -230,7 +230,11 @@ def _order_write_task(write_class: OrderWriteClass) -> HardTaskSpec:
             f"Use {spec.tool_name} to perform a realistic SIM {write_class} task, verify state, "
             "explain retry/unknown-state pitfalls, and recommend agent UX/safety improvements."
         ),
-        allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required"),
+        allowed_noncompletion_statuses=(
+            "auth_required",
+            "incomplete_auth_required",
+            "exercised",
+        ),
         requires_two_factor_approval=True,
     )
 
