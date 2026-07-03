@@ -63,6 +63,36 @@ uv run python -m saxo_bank_mcp.qa live-read --out .omo/evidence/saxo-bank-mcp/li
 Do not record raw account identifiers in evidence. If credentials are absent,
 keep the skip artifact and do not treat LIVE reads as verified.
 
+## SIM To LIVE Readiness Plan
+
+SIM proves the MCP implementation against Saxo's demo environment. It does not
+prove LIVE readiness by itself because Saxo documents separate LIVE app
+credentials, separate auth hosts, real balances, required permission/testing,
+and possible SIM/LIVE differences in version, reporting, and market data:
+https://www.developer.saxo/openapi/learn/environments
+
+Treat the move to LIVE as a staged proof:
+
+1. Configure LIVE app key, app secret, redirect URL, and token cache outside the
+   repository.
+2. Run LIVE read-only auth and account probes with `SAXO_MCP_ENABLE_LIVE_READS=1`.
+3. Verify LIVE reads for accounts, balances, positions, orders, prices, and
+   streaming without writing or placing orders.
+4. Keep LIVE writes disabled until the read-only evidence is clean.
+5. Enable LIVE writes only with all gates present: explicit live-write flag,
+   account allowlist, low value and quantity limits, kill switch, server-created
+   preview token, and two independent approval factors.
+6. Run precheck/defaults first. Do not place an order until precheck evidence is
+   clean and the exact account, instrument, side, size, and order type are
+   approved.
+7. Place one minimal real-money test order only after explicit approval, then
+   verify order state, events, account/position impact, and redacted audit logs.
+   Prefer an accepted-then-cancelled order if that proves the write path without
+   an intended fill.
+8. Run the tribunal loop again against the LIVE-tested tools. A tool is not
+   live-write-ready until tribunal has exercised it with the real tool behavior
+   and has no remaining safety or agent-use feedback.
+
 ## Tribunal Loop
 
 ```bash
