@@ -560,7 +560,11 @@ def test_plan_gate_passes_when_checked_task_has_evidence(
     assert "status: `passed`" in out.read_text(encoding="utf-8")
 
 
-def test_plan_gate_fails_task_three_without_evidence(tmp_path: Path) -> None:
+def test_plan_gate_fails_task_three_without_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
     plan = tmp_path / "plan.md"
     plan_text = "\n".join(EXPECTED_PLAN_MARKERS) + "\n- [x] 3. Safety kernel"
     plan.write_text(plan_text, encoding="utf-8")
