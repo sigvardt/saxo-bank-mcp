@@ -114,13 +114,29 @@ def test_live_write_refusal_drives_fastmcp_order_tool(
     assert report["network_call_made"] is False
     assert report["live_write_called"] is False
     assert report["order_or_subscription_created"] is False
+    assert report["verifies"] == [
+        "LIVE order tools refuse before any network call",
+        "LIVE order tools list every real-money enablement gate",
+    ]
+    assert report["does_not_verify"] == [
+        "LIVE order placement",
+        "LIVE order modification",
+        "LIVE order cancellation",
+        "LIVE account state change",
+        "LIVE trading permission",
+    ]
     assert report["missing_requirements"] == [
         "SAXO_MCP_ENABLE_LIVE_WRITES=I_UNDERSTAND_REAL_MONEY_RISK",
         "LIVE credentials",
         "LIVE account allowlist",
         "low notional and quantity limits",
         "kill switch ready",
+        "server-created preview token",
         "two independent approval factors",
+        "precheck/defaults before placement",
+        "throttling and duplicate-submit guard",
+        "redacted audit trail outside repository",
+        "daily activity review/monitoring",
         "explicit later live-write enablement decision",
     ]
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}

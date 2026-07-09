@@ -105,8 +105,13 @@ run, fixed-feedback notes, and empty remaining-actionable-feedback state.
 ## Final Verification
 
 ```bash
+uv run python -m saxo_bank_mcp.qa prod-readiness --out .omo/evidence/saxo-bank-mcp/prod-readiness.json
 uv run python -m saxo_bank_mcp.final_verify plan --plan .omo/plans/saxo-bank-mcp.md --out .omo/evidence/saxo-bank-mcp/final-plan-compliance.md
 uv run python -m saxo_bank_mcp.final_verify code --out .omo/evidence/saxo-bank-mcp/final-code-quality.md
 uv run python -m saxo_bank_mcp.final_verify mcp --out .omo/evidence/saxo-bank-mcp/final-manual-qa.md
 uv run python -m saxo_bank_mcp.final_verify scope --out .omo/evidence/saxo-bank-mcp/final-scope-fidelity.md
 ```
+
+`prod-readiness` is a code gate, not live-money approval. Inspect
+`live_read_ready`, `live_write_ready`, `does_not_verify`, and `next_action`
+before any LIVE operation.

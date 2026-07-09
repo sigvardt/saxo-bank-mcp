@@ -11,6 +11,8 @@ import pytest
 from saxo_bank_mcp import qa, qa_readme_probe, qa_safety_probes
 
 EXPECTED_CLIENT_APP_SECRET_FINDINGS = 2
+EXPECTED_PROD_READINESS_RAPID_ITERATIONS = 16
+ARGPARSE_USAGE_ERROR = 2
 EXPECTED_STREAMING_CONNECTIONS = 4
 EXPECTED_PRICE_INSTRUMENTS = 200
 REQUIRED_GITIGNORE_PATTERNS = (
@@ -266,8 +268,79 @@ def test_live_write_refusal_still_refuses_when_only_enable_var_is_set(
     assert result == 0
     assert report["status"] == "refused"
     assert report["refusal_reason"] == "missing_live_write_enablement"
-    assert "two independent approval factors" in report["missing_requirements"]
+    expected_requirements = {
+        "SAXO_MCP_ENABLE_LIVE_WRITES=I_UNDERSTAND_REAL_MONEY_RISK",
+        "LIVE credentials",
+        "LIVE account allowlist",
+        "low notional and quantity limits",
+        "kill switch ready",
+        "server-created preview token",
+        "two independent approval factors",
+        "precheck/defaults before placement",
+        "throttling and duplicate-submit guard",
+        "redacted audit trail outside repository",
+        "daily activity review/monitoring",
+        "explicit later live-write enablement decision",
+    }
+    assert expected_requirements <= set(report["missing_requirements"])
     assert report["network_call_made"] is False
+
+
+def test_prod_readiness_reports_saxo_live_access_requirements(tmp_path: Path) -> None:
+    out = tmp_path / "prod-readiness.json"
+
+    result = qa.main(["prod-readiness", "--out", str(out)])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    requirement_ids = {item["id"] for item in report["requirements"]}
+    assert result == 0
+    assert report["status"] == "passed"
+    assert report["command"] == "prod-readiness"
+    assert report["live_write_ready"] is False
+    assert report["network_call_made"] is False
+    assert report["order_or_subscription_created"] is False
+    assert report["rapid_call_probe"]["status"] == "passed"
+    assert report["rapid_call_probe"]["iterations"] == EXPECTED_PROD_READINESS_RAPID_ITERATIONS
+    assert report["rapid_call_probe"]["failures"] == []
+    assert report["live_write_refusal_probe"]["status"] == "refused"
+    assert report["live_write_refusal_probe"]["network_call_made"] is False
+    assert report["live_write_refusal_probe"]["order_or_subscription_created"] is False
+    assert report["secret_scan"]["findings"] == []
+    assert report["secret_scan"]["scan_errors"] == []
+    acceptable_statuses = {
+        "implemented",
+        "refused_until_live_enablement",
+        "evidence_required_live",
+    }
+    assert not [
+        item
+        for item in report["requirements"]
+        if item["status"] not in acceptable_statuses
+    ]
+    assert {
+        "public_secret_containment",
+        "pkce_saxo_login",
+        "monkey_rapid_calls",
+        "openapi_400_investigation",
+        "throttling_409_429",
+        "many_positions_orders",
+        "currency_and_price_display",
+        "fractional_amounts",
+        "all_order_mutation_shapes",
+        "invalid_order_prevention",
+        "automated_trading_limits",
+        "versioning_tolerance",
+        "sim_before_live",
+        "live_write_refusal",
+    } <= requirement_ids
+
+
+def test_prod_readiness_requires_output_path(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        qa.main(["prod-readiness"])
+
+    assert error.value.code == ARGPARSE_USAGE_ERROR
+    assert "--out" in capsys.readouterr().err
 
 
 def test_live_read_refusal_checks_read_env(

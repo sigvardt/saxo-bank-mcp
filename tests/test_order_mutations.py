@@ -46,6 +46,7 @@ def test_order_mutation_response_parser_covers_success_and_partial_states() -> N
         {"ErrorInfo": {"ErrorCode": "DuplicateRequest"}},
         http_status=400,
     )
+    duplicate_http = parse_order_mutation_response({}, http_status=409)
     rate_limited = parse_order_mutation_response({}, http_status=429)
 
     assert success.outcome == "success"
@@ -56,6 +57,9 @@ def test_order_mutation_response_parser_covers_success_and_partial_states() -> N
     assert partial.needs_readback is True
     assert duplicate.duplicate_request is True
     assert duplicate.outcome == "failed"
+    assert duplicate_http.duplicate_request is True
+    assert duplicate_http.outcome == "failed"
+    assert duplicate_http.needs_readback is True
     assert rate_limited.rate_limited is True
     assert rate_limited.outcome == "rate_limited"
 

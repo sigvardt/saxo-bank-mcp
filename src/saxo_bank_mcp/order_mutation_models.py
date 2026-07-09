@@ -32,6 +32,7 @@ UNKNOWN_STATE_ERROR_CODES: Final = frozenset(
     {"OrderCommandPending", "OrderCommandTimeout", "TradeNotCompleted"},
 )
 DUPLICATE_ERROR_CODES: Final = frozenset({"DuplicateRequest", "RepeatTradeOnAutoQuote"})
+HTTP_DUPLICATE_REQUEST: Final = 409
 HTTP_RATE_LIMITED: Final = 429
 HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
@@ -172,7 +173,9 @@ def parse_order_mutation_response(
     partial_success = bool(order_ids) and bool(error_codes)
     rate_limited = http_status == HTTP_RATE_LIMITED
     unknown_state = bool(UNKNOWN_STATE_ERROR_CODES.intersection(error_codes))
-    duplicate_request = bool(DUPLICATE_ERROR_CODES.intersection(error_codes))
+    duplicate_request = http_status == HTTP_DUPLICATE_REQUEST or bool(
+        DUPLICATE_ERROR_CODES.intersection(error_codes),
+    )
     outcome = _outcome(
         http_status=http_status,
         has_order_id=bool(order_ids),
@@ -185,7 +188,7 @@ def parse_order_mutation_response(
         outcome=outcome,
         order_ids=order_ids,
         error_codes=error_codes,
-        needs_readback=partial_success or unknown_state,
+        needs_readback=partial_success or unknown_state or duplicate_request,
         partial_success=partial_success,
         trade_not_completed=trade_not_completed,
         duplicate_request=duplicate_request,

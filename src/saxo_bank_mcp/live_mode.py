@@ -30,7 +30,12 @@ LIVE_WRITE_MISSING_REQUIREMENTS: Final[tuple[str, ...]] = (
     "LIVE account allowlist",
     "low notional and quantity limits",
     "kill switch ready",
+    "server-created preview token",
     "two independent approval factors",
+    "precheck/defaults before placement",
+    "throttling and duplicate-submit guard",
+    "redacted audit trail outside repository",
+    "daily activity review/monitoring",
     "explicit later live-write enablement decision",
 )
 
@@ -205,6 +210,17 @@ def live_write_refusal_payload(
         "next_action": (
             "do not perform LIVE writes until the explicit live-write enablement plan exists"
         ),
+        "verifies": [
+            "LIVE order tools refuse before any network call",
+            "LIVE order tools list every real-money enablement gate",
+        ],
+        "does_not_verify": [
+            "LIVE order placement",
+            "LIVE order modification",
+            "LIVE order cancellation",
+            "LIVE account state change",
+            "LIVE trading permission",
+        ],
     }
 
 

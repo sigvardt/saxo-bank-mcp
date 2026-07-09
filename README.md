@@ -121,6 +121,11 @@ uv run python -m saxo_bank_mcp.final_verify scope --out .omo/evidence/saxo-bank-
 Before pushing publicly:
 
 ```bash
+uv run python -m saxo_bank_mcp.qa prod-readiness --out .omo/evidence/saxo-bank-mcp/prod-readiness.json
 uv run python -m saxo_bank_mcp.qa secret-scan --paths README.md docs src tests --out .omo/evidence/saxo-bank-mcp/public-secret-scan.json
 git status --short
 ```
+
+Treat `prod-readiness` as a code gate, not live-money approval. Inspect
+`live_read_ready`, `live_write_ready`, `does_not_verify`, and `next_action`
+before any LIVE operation.
