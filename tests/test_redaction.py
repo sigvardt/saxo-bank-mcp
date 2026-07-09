@@ -37,6 +37,22 @@ def test_redact_text_masks_hostile_free_form_credentials() -> None:
     assert REDACTED in redacted
 
 
+def test_redact_text_masks_account_fields_in_raw_json() -> None:
+    raw = (
+        '{"AccountId":"acc-123","DisplayName":"Jane Doe",'
+        '"ExternalReference":"payroll-77","UserKey":"user-key-99",'
+        '"Amount":12.5}'
+    )
+
+    redacted = redact_text(raw)
+
+    assert "acc-123" not in redacted
+    assert "Jane Doe" not in redacted
+    assert "payroll-77" not in redacted
+    assert "user-key-99" not in redacted
+    assert '"Amount":12.5' in redacted
+
+
 def test_redact_json_masks_sensitive_keys_recursively() -> None:
     token = f"{string.ascii_lowercase}123456"
     acct_digits = int("".join(str(number) for number in range(10)))

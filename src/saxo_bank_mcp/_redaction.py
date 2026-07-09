@@ -37,16 +37,26 @@ _SENSITIVE_KEYS: Final = frozenset(
         "previewtoken",
     },
 )
+_INLINE_SENSITIVE_KEY_PATTERN: Final = (
+    r"(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
+    r"app[_-]?secret|client[_-]?key|app[_-]?key|authorization[_-]?url|"
+    r"approval[_-]?factor|preview[_-]?token|account[_-]?(?:key|number|id)|"
+    r"display[_-]?name|external[_-]?reference|nick[_-]?name|user[_-]?(?:id|key)|"
+    r"(?:multi[_-]?leg[_-]?)?order[_-]?ids?)"
+)
+_INLINE_QUOTED_VALUE_PATTERN: Final = re.compile(
+    r"(?i)([\"']?"
+    + _INLINE_SENSITIVE_KEY_PATTERN
+    + r"[\"']?\s*[:=]\s*[\"'])([^\"'\r\n]*)([\"'])",
+)
 _INLINE_PATTERNS: Final = (
     re.compile(
         r"(?i)(\bauthorization\s*[:=]\s*(?:bearer\s+)?)['\"]?[^'\"\s,;}]+",
     ),
     re.compile(
-        r"(?i)([\"']?(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
-        r"app[_-]?secret|client[_-]?key|app[_-]?key|approval[_-]?factor|"
-        r"preview[_-]?token|account[_-]?(?:key|number)|"
-        r"(?:multi[_-]?leg[_-]?)?order[_-]?ids?)"
-        r"[\"']?\s*[:=]\s*[\"']?)[^'\"\s,;}]+",
+        r"(?i)([\"']?"
+        + _INLINE_SENSITIVE_KEY_PATTERN
+        + r"[\"']?\s*[:=]\s*[\"']?)[^'\"\s,;}]+",
     ),
 )
 _RAW_CREDENTIAL_LINE_PATTERN: Final = re.compile(
@@ -145,6 +155,10 @@ SKIPPED_SCAN_SUFFIXES: Final = frozenset({".pyc", ".pyo"})
 
 def redact_text(text: str) -> str:
     redacted = text
+    redacted = _INLINE_QUOTED_VALUE_PATTERN.sub(
+        lambda match: f"{match.group(1)}{REDACTED}{match.group(3)}",
+        redacted,
+    )
     for pattern in _INLINE_PATTERNS:
         redacted = pattern.sub(lambda match: f"{match.group(1)}{REDACTED}", redacted)
     redacted = _RAW_CREDENTIAL_LINE_PATTERN.sub(REDACTED, redacted)

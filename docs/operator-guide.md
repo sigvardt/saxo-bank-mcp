@@ -76,8 +76,9 @@ Treat the move to LIVE as a staged proof:
 1. Configure LIVE app key, app secret, redirect URL, and token cache outside the
    repository.
 2. Run LIVE read-only auth and account probes with `SAXO_MCP_ENABLE_LIVE_READS=1`.
-3. Verify LIVE reads for accounts, balances, positions, orders, prices, and
-   streaming without writing or placing orders.
+3. Verify LIVE read-only GET tools for accounts, balances, positions, orders,
+   and prices without writing or placing orders. Streaming is a subscription
+   surface, not part of the current read-only GET tool proof.
 4. Keep LIVE writes disabled until the read-only evidence is clean.
 5. Enable LIVE writes only with all gates present: explicit live-write flag,
    account allowlist, low value and quantity limits, kill switch, server-created

@@ -62,7 +62,9 @@ uv run python -m saxo_bank_mcp.qa live-read --out .omo/evidence/saxo-bank-mcp/li
 ```
 
 If LIVE credentials are absent, the probe writes a skip artifact. LIVE evidence
-must not include raw account identifiers.
+must not include raw account identifiers. The probe covers read-only GET tools:
+accounts, balances, positions, orders, and prices. Streaming is not claimed by
+this read-only proof.
 
 ## LIVE Writes
 

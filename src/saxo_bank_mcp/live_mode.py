@@ -158,7 +158,7 @@ def live_cached_token_for_tool(tool_name: str, cache_path: Path) -> SaxoTokenSet
         return live_read_auth_required(tool_name, reason)
     if token.redacted_status()["is_expired"]:
         return live_read_auth_required(tool_name, "token_cache_expired")
-    if token.environment == "SIM":
+    if token.environment != "LIVE":
         return live_read_auth_required(tool_name, "token_environment_mismatch")
     return token
 

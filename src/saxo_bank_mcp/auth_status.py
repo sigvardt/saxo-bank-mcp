@@ -130,6 +130,11 @@ def _token_blocking_reasons(inputs: AuthStatusInputs) -> list[str]:
         reasons.append("token_cache_unreadable")
     elif inputs.token_cache_expired is True:
         reasons.append("token_cache_expired")
+    elif (
+        inputs.effective_read_environment == "LIVE"
+        and inputs.token_cache_environment != inputs.requested_environment
+    ):
+        reasons.append("token_environment_mismatch")
     return reasons
 
 
@@ -220,6 +225,10 @@ def _live_next_action(blocking_reasons: list[str]) -> str | None:
         (
             "token_cache_expired",
             "refresh or recreate the LIVE token cache before retrying LIVE reads",
+        ),
+        (
+            "token_environment_mismatch",
+            "replace the token cache with a LIVE-issued token before retrying LIVE reads",
         ),
     )
     for reason, action in actions:
