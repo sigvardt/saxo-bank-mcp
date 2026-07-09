@@ -51,6 +51,8 @@ def handle_auth_status(out: Path) -> int:
         "token_cache_present": payload["token_cache_present"],
         "token_cache_readable": payload["token_cache_readable"],
         "token_cache_expired": payload["token_cache_expired"],
+        "token_cache_refresh_supported": payload["token_cache_refresh_supported"],
+        "token_cache_environment": payload["token_cache_environment"],
         "token_cache_path": payload["token_cache_path"],
         "scope_used": payload["scope_used"],
         "verifies": payload["verifies"],

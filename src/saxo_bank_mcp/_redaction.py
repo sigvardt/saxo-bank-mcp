@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from os import environ
 from pathlib import Path
 from typing import Final
 
@@ -67,7 +68,6 @@ _RAW_CREDENTIAL_LINE_PATTERN: Final = re.compile(
     r"(?im)^(?=.*\b(?:credential line|password|private key|api key)\b).+$",
 )
 _EMAIL_PATTERN: Final = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
-_PERSON_PATTERN: Final = re.compile(r"\bJoakim\s+Sigvardt\b", re.IGNORECASE)
 SECRET_REGEXES: Final = (
     re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
@@ -176,7 +176,16 @@ def redact_text(text: str) -> str:
         redacted = pattern.sub(lambda match: f"{match.group(1)}{REDACTED}", redacted)
     redacted = _RAW_CREDENTIAL_LINE_PATTERN.sub(REDACTED, redacted)
     redacted = _EMAIL_PATTERN.sub(REDACTED_EMAIL, redacted)
-    return _PERSON_PATTERN.sub(REDACTED_PERSON, redacted)
+    for name in _person_names():
+        pattern = rf"\b{re.escape(name)}\b"
+        redacted = re.sub(pattern, REDACTED_PERSON, redacted, flags=re.IGNORECASE)
+    return redacted
+
+
+def _person_names() -> tuple[str, ...]:
+    raw = environ.get("SAXO_MCP_REDACT_PERSON_NAMES", "")
+    names = (line.strip() for line in raw.replace(";", "\n").splitlines())
+    return tuple(filter(None, names))
 
 
 def redact_json(value: JsonValue) -> JsonValue:

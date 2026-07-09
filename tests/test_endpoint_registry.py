@@ -75,6 +75,16 @@ def test_registry_resolves_documented_path_templates() -> None:
     assert registered.resolved_path == "/hist/v3/accountvalues/client-123"
 
 
+def test_registry_prefers_exact_paths_over_placeholder_matches() -> None:
+    account = find_registered_endpoint("GET", "/port/v1/accounts/me")
+    position = find_registered_endpoint("GET", "/port/v1/positions/me")
+
+    assert account is not None
+    assert account.operation.operation_id == "get.port.v1.accounts.me"
+    assert position is not None
+    assert position.operation.operation_id == "get.port.v1.positions.me"
+
+
 def test_registry_rejects_unsafe_path_template_values() -> None:
     assert find_registered_endpoint("GET", "/hist/v3/accountvalues/..") is None
     assert find_registered_endpoint("GET", "/hist/v3/accountvalues/%2Fsecret") is None

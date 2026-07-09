@@ -156,13 +156,19 @@ def find_registered_endpoint(method: str, path: str) -> RegisteredEndpoint | Non
     if clean_path is None:
         return None
     wanted_method = method.upper()
+    fallback: RegisteredEndpoint | None = None
     for operation in load_inventory().operations:
         if operation.method != wanted_method:
             continue
         resolved_path = _resolved_path(operation.path_template, clean_path)
-        if resolved_path is not None:
-            return RegisteredEndpoint(operation=operation, resolved_path=resolved_path)
-    return None
+        if resolved_path is None:
+            continue
+        registered = RegisteredEndpoint(operation=operation, resolved_path=resolved_path)
+        if operation.path_template == clean_path:
+            return registered
+        if fallback is None:
+            fallback = registered
+    return fallback
 
 
 def registered_operations_for_path(path: str) -> tuple[EndpointOperation, ...]:
