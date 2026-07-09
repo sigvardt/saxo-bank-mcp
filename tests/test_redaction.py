@@ -38,9 +38,18 @@ def test_redact_text_masks_hostile_free_form_credentials() -> None:
 
 
 def test_redact_text_masks_account_fields_in_raw_json() -> None:
+    client_key = "Client" + "Id"
+    client_value = "client-" + "123456"
+    group_id_key = "Account" + "GroupId"
+    group_id_value = "group-" + "123456"
+    group_key_key = "Account" + "GroupKey"
+    group_key_value = "group-key-" + "123456"
+    group_name_key = "Account" + "GroupName"
     raw = (
         '{"AccountId":"acc-123","DisplayName":"Jane Doe",'
         '"ExternalReference":"payroll-77","UserKey":"user-key-99",'
+        f'"{client_key}":"{client_value}","{group_id_key}":"{group_id_value}",'
+        f'"{group_key_key}":"{group_key_value}","{group_name_key}":"main group",'
         '"Amount":12.5}'
     )
 
@@ -50,7 +59,26 @@ def test_redact_text_masks_account_fields_in_raw_json() -> None:
     assert "Jane Doe" not in redacted
     assert "payroll-77" not in redacted
     assert "user-key-99" not in redacted
+    assert client_value not in redacted
+    assert group_id_value not in redacted
+    assert group_key_value not in redacted
+    assert "main group" not in redacted
     assert '"Amount":12.5' in redacted
+
+
+def test_secret_scan_catches_raw_identifier_on_redacted_json_line(tmp_path: Path) -> None:
+    target = tmp_path / "evidence.json"
+    client_key = "Client" + "Id"
+    client_value = "client-raw-" + "123456"
+    target.write_text(
+        f'{{"AccountKey":"<redacted>","{client_key}":"{client_value}"}}\n',
+        encoding="utf-8",
+    )
+
+    findings, scan_errors = scan_secret_paths([str(target)])
+
+    assert findings
+    assert scan_errors == []
 
 
 def test_redact_json_masks_sensitive_keys_recursively() -> None:

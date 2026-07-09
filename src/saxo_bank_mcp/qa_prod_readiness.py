@@ -46,6 +46,8 @@ def handle_prod_readiness(out: Path) -> int:
             "scan_errors": secret_scan_errors,
         },
         "live_read_ready": False,
+        "live_read_ready_scope": "not_evaluated_by_prod_readiness",
+        "live_read_evidence_required": "use the separate live-read probe artifact",
         "live_write_ready": False,
         "live_write_missing_requirements": live_write_refusal_probe["missing_requirements"],
         "network_call_made": False,
@@ -58,13 +60,13 @@ def handle_prod_readiness(out: Path) -> int:
         ],
         "does_not_verify": [
             "PKCE browser login completes",
-            "LIVE read credentials are valid",
+            "LIVE read credentials are valid; this command does not consume live-read evidence",
             "LIVE order placement works",
             "Saxo platform visual parity for every instrument",
             "exchange-specific legal approval",
         ],
         "next_action": (
-            "run live-read with approved LIVE credentials, then create the separate "
+            "use the live-read artifact for read proof, then create the separate "
             "live-write enablement gate before any real-money write"
         ),
     }

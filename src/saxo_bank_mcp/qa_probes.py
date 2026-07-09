@@ -19,6 +19,10 @@ from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.qa_auth_probes import handle_auth_status, handle_sim_auth, handle_token_cache
 from saxo_bank_mcp.qa_events import base_event
+from saxo_bank_mcp.qa_live_evidence import (
+    private_identifier_findings,
+    sanitize_live_read_payloads,
+)
 from saxo_bank_mcp.server import (
     SaxoHealth,
     mcp,
@@ -282,8 +286,9 @@ def handle_live_read(out: Path, skip_out: Path) -> int:
         tool_name: str(payload.get("status", "failed"))
         for tool_name, payload in payloads.items()
     }
+    evidence_payloads = sanitize_live_read_payloads(payloads)
     status = "passed" if _live_read_suite_passed(tool_statuses) else "failed"
-    event = {
+    event: dict[str, JsonValue] = {
         **base_event("live-read", status, "FastMCP live read-only probe suite returned"),
         "requested_environment": "LIVE",
         "read_scenarios_exercised": list(payloads),
@@ -294,7 +299,7 @@ def handle_live_read(out: Path, skip_out: Path) -> int:
             },
         ),
         "tool_statuses": tool_statuses,
-        "tool_results": payloads,
+        "tool_results": evidence_payloads,
         "authenticated_registered_read_passed": (
             tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
             == "passed"
@@ -329,6 +334,7 @@ def handle_live_read(out: Path, skip_out: Path) -> int:
         ),
         "prompted_user": False,
         "private_identifiers_redacted": True,
+        "private_financial_data_omitted": True,
     }
     exit_code = _write_secret_scanned_event(out, event)
     if status != "passed":
@@ -477,6 +483,13 @@ def _write_secret_scanned_event(
     redacted = redact_json(payload)
     if not isinstance(redacted, dict):
         raise TypeError("LIVE QA event redaction returned non-object")
+    identifier_findings = private_identifier_findings(redacted)
+    if "private_identifiers_redacted" in redacted:
+        redacted["private_identifiers_redacted"] = not identifier_findings
+    redacted["private_identifier_findings"] = identifier_findings
+    redacted["evidence_redaction_status"] = (
+        "passed" if not identifier_findings else "failed"
+    )
     write_json(out, redacted)
     for mirror in mirrors:
         write_json(mirror, redacted)
@@ -489,4 +502,4 @@ def _write_secret_scanned_event(
     write_json(out, scanned)
     for mirror in mirrors:
         write_json(mirror, scanned)
-    return 0 if not findings and not scan_errors else 1
+    return 0 if not findings and not scan_errors and not identifier_findings else 1

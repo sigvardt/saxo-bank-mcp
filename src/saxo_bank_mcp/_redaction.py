@@ -25,6 +25,9 @@ _SENSITIVE_KEYS: Final = frozenset(
         "accountkey",
         "accountid",
         "accountnumber",
+        "accountgroupid",
+        "accountgroupkey",
+        "accountgroupname",
         "displayname",
         "externalreference",
         "nickname",
@@ -39,8 +42,9 @@ _SENSITIVE_KEYS: Final = frozenset(
 )
 _INLINE_SENSITIVE_KEY_PATTERN: Final = (
     r"(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
-    r"app[_-]?secret|client[_-]?key|app[_-]?key|authorization[_-]?url|"
+    r"app[_-]?secret|client[_-]?(?:key|id)|app[_-]?key|authorization[_-]?url|"
     r"approval[_-]?factor|preview[_-]?token|account[_-]?(?:key|number|id)|"
+    r"account[_-]?group[_-]?(?:id|key|name)|"
     r"display[_-]?name|external[_-]?reference|nick[_-]?name|user[_-]?(?:id|key)|"
     r"(?:multi[_-]?leg[_-]?)?order[_-]?ids?)"
 )
@@ -69,6 +73,7 @@ SECRET_REGEXES: Final = (
     re.compile(r"authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
     re.compile(r"access_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
     re.compile(r"client_?secret['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
+    re.compile(r"client_?id['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
     re.compile(r"app_?secret['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
     re.compile(r"client_?key['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
     re.compile(r"refresh_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
@@ -76,6 +81,10 @@ SECRET_REGEXES: Final = (
     re.compile(r"approval_?factor['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
     re.compile(r"preview_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
     re.compile(r"account_?(key|number)['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
+    re.compile(
+        r"account_?group_?(id|key|name)['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}",
+        re.IGNORECASE,
+    ),
 )
 PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
     {
@@ -108,6 +117,9 @@ PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
         "approval_factor=approval_factor",
         '"approval_factor": TEST_APPROVAL_FACTOR',
         "compare_digest(approval_factor",
+        "client_id: str",
+        "request.client_id",
+        '"client_id": request.client_id',
         "_env_sim_app_key(",
         "environ.get(",
         "app_key=app_key",
@@ -127,6 +139,7 @@ PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
 SAFE_SECRET_PLACEHOLDERS: Final = frozenset(
     {
         "access-token-value",
+        "client-id",
         "client-secret",
         "mocked-access-token",
         "mocked-refresh-token",
@@ -189,14 +202,20 @@ def _secret_patterns_in_text(file_path: Path, text: str) -> list[str]:
     for line in text.splitlines():
         if _is_safe_secret_scan_line(file_path, line):
             continue
-        patterns.extend(pattern.pattern for pattern in SECRET_REGEXES if pattern.search(line))
+        scan_line = _placeholder_scrubbed_line(line)
+        patterns.extend(pattern.pattern for pattern in SECRET_REGEXES if pattern.search(scan_line))
     return patterns
 
 
 def _is_safe_secret_scan_line(file_path: Path, line: str) -> bool:
-    if any(placeholder in line for placeholder in SAFE_SECRET_PLACEHOLDERS):
-        return True
     return file_path.suffix == ".py" and any(part in line for part in PYTHON_SAFE_SECRET_LINE_PARTS)
+
+
+def _placeholder_scrubbed_line(line: str) -> str:
+    scrubbed = line
+    for placeholder in SAFE_SECRET_PLACEHOLDERS:
+        scrubbed = scrubbed.replace(placeholder, "ok")
+    return scrubbed
 
 
 def scan_secret_paths(

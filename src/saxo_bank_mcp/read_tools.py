@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final
 
 import httpx2
 from fastmcp.tools import ToolResult
+from pydantic import TypeAdapter, ValidationError
 
-from saxo_bank_mcp._redaction import redact_text
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json, redact_text
 from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.config import (
     LIVE_ENDPOINTS,
@@ -69,6 +72,7 @@ READINESS_PREREQUISITES: Final[tuple[str, ...]] = (
 )
 HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
+JSON_VALUE_ADAPTER: Final[TypeAdapter[JsonValue]] = TypeAdapter(JsonValue)
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,7 +359,11 @@ def _auth_required(reason: str) -> ReadToolResult:
 def _response_body(response: httpx2.Response) -> ReadLeaf:
     if not response.content:
         return None
-    return redact_text(response.text)
+    try:
+        parsed = JSON_VALUE_ADAPTER.validate_json(response.text)
+    except ValidationError:
+        return redact_text(response.text)
+    return json.dumps(redact_json(parsed), separators=(",", ":"), sort_keys=True)
 
 
 def _call_class(status: str, environment: TokenEnvironment) -> str:
