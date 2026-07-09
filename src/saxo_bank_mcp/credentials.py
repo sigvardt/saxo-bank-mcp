@@ -4,7 +4,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 from pydantic_core import PydanticCustomError
 
 type CredentialLabel = Literal[
@@ -42,10 +49,14 @@ class CredentialFileError(Exception):
 class SimPkceCredentials(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    app_key: str
-    grant_type: Literal["PKCE"]
-    auth_endpoint: str
-    token_endpoint: str
+    app_key: str = Field(validation_alias=AliasChoices("app_key", "AppKey"))
+    grant_type: Literal["PKCE"] = Field(validation_alias=AliasChoices("grant_type", "GrantType"))
+    auth_endpoint: str = Field(
+        validation_alias=AliasChoices("auth_endpoint", "AuthorizationEndpoint"),
+    )
+    token_endpoint: str = Field(
+        validation_alias=AliasChoices("token_endpoint", "TokenEndpoint"),
+    )
 
     @field_validator("app_key", "auth_endpoint", "token_endpoint")
     @classmethod
@@ -72,6 +83,13 @@ def parse_sim_pkce_credentials_file(path: Path) -> SimPkceCredentials:
 
 
 def parse_sim_pkce_credentials_text(text: str) -> SimPkceCredentials:
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            return SimPkceCredentials.model_validate_json(stripped)
+        except ValidationError as error:
+            raise CredentialFileError("credential file is not valid PKCE JSON") from error
+
     values: dict[CredentialField, str] = {}
     pending_label: CredentialLabel | None = None
 

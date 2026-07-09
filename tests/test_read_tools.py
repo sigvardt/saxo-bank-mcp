@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self
 
+import httpx2
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from saxo_bank_mcp import nontrade_policy, qa, qa_read_probes
+from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.server import mcp
+from saxo_bank_mcp.token_cache import save_token_cache
 
 EXPECTED_OPERATION_COUNT = 294
 EXPECTED_SERVICE_GROUPS = 17
@@ -32,10 +38,13 @@ async def test_read_tools_are_registered_with_agent_safe_descriptions() -> None:
     assert "saxo_list_registered_endpoints" in descriptions
     assert "saxo_call_registered_endpoint" in descriptions
     assert (
-        "registered Saxo OpenAPI operations only" in descriptions["saxo_call_registered_endpoint"]
+        "registered Saxo OpenAPI GET/read operations only"
+        in descriptions["saxo_call_registered_endpoint"]
     )
+    assert "explicitly enabled LIVE read mode" in descriptions["saxo_call_registered_endpoint"]
+    assert "safe SIM GET read operations" not in descriptions["saxo_call_registered_endpoint"]
     assert (
-        "denies unregistered or write-class operations before any network call"
+        "denies unregistered, arbitrary-host, and write-class operations before any network call"
         in descriptions["saxo_call_registered_endpoint"]
     )
 
@@ -225,3 +234,140 @@ def test_registered_endpoint_denied_probe_uses_real_fastmcp_tool(tmp_path: Path)
     assert report["network_call_made"] is False
     assert report["denial_reason"] == "unregistered_endpoint"
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}
+
+
+@pytest.mark.anyio
+async def test_registered_endpoint_can_call_live_read_when_live_read_gates_are_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="live-access-token",  # noqa: S106
+            environment="LIVE",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_CLIENT_ID", "live-client-id")
+    monkeypatch.setenv("SAXO_MCP_LIVE_CLIENT_SECRET", "live-client-secret")
+    monkeypatch.setenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", str(cache))
+
+    def create_live_client(**_kwargs: object) -> _LiveClient:
+        return _LiveClient()
+
+    monkeypatch.setattr("saxo_bank_mcp.read_tools.create_async_client", create_live_client)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_call_registered_endpoint",
+            {"method": "GET", "path": "/root/v1/diagnostics/get"},
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "passed"
+    assert payload["environment"] == "LIVE"
+    assert payload["live_access"] is True
+    assert payload["network_call_made"] is True
+    assert payload["live_write"] is False
+    assert payload["response"] == '{"Status":"Ok"}'
+
+
+@pytest.mark.anyio
+async def test_registered_endpoint_live_read_uses_token_for_authenticated_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="live-access-token",  # noqa: S106
+            environment="LIVE",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_APP_KEY", "live-app-key")
+    monkeypatch.setenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", str(cache))
+
+    def create_live_client(**_kwargs: object) -> _AuthenticatedLiveClient:
+        return _AuthenticatedLiveClient()
+
+    monkeypatch.setattr("saxo_bank_mcp.read_tools.create_async_client", create_live_client)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_call_registered_endpoint",
+            {"method": "GET", "path": "/port/v1/accounts/me"},
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "passed"
+    assert payload["environment"] == "LIVE"
+    assert payload["auth_exercised"] is True
+    assert payload["response"] == '{"Data":[]}'
+
+
+class _LiveClient:
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+    ) -> httpx2.Response:
+        assert path == "root/v1/diagnostics/get"
+        assert params == {}
+        assert headers == {"Accept": "application/json"}
+        return httpx2.Response(
+            200,
+            text='{"Status":"Ok"}',
+            request=httpx2.Request(
+                "GET",
+                "https://gateway.saxobank.com/openapi/root/v1/diagnostics/get",
+            ),
+        )
+
+
+class _AuthenticatedLiveClient:
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+    ) -> httpx2.Response:
+        assert path == "port/v1/accounts/me"
+        assert params == {}
+        assert headers == {
+            "Accept": "application/json",
+            "Authorization": "Bearer live-access-token",
+        }
+        return httpx2.Response(
+            200,
+            json={"Data": []},
+            headers={"content-type": "application/json"},
+            request=httpx2.Request(
+                "GET",
+                "https://gateway.saxobank.com/openapi/port/v1/accounts/me",
+            ),
+        )

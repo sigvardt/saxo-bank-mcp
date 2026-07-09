@@ -26,6 +26,7 @@ from saxo_bank_mcp.pkce import (
 )
 from saxo_bank_mcp.token_cache import (
     pending_authorization_path,
+    save_token_cache,
 )
 
 
@@ -86,6 +87,71 @@ def test_runtime_config_allows_live_reads_only_with_flag_and_credentials(
     assert status["effective_read_environment"] == "LIVE"
     assert status["live_reads"] is True
     assert status["live_writes"] is False
+
+
+def test_runtime_config_accepts_live_pkce_credential_file_without_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    credential_file = tmp_path / "live_credentials.json"
+    credential_file.write_text(
+        json.dumps(
+            {
+                "AppKey": "live-key",
+                "GrantType": "PKCE",
+                "AuthorizationEndpoint": "https://live.logonvalidation.net/authorize",
+                "TokenEndpoint": "https://live.logonvalidation.net/token",
+            },
+        ),
+        encoding="utf-8",
+    )
+    config = SaxoRuntimeConfig.from_env(
+        {
+            "SAXO_MCP_ENVIRONMENT": "LIVE",
+            "SAXO_MCP_ENABLE_LIVE_READS": "1",
+            "SAXO_MCP_LIVE_CREDENTIAL_FILE": str(credential_file),
+        },
+        repo_root=tmp_path / "repo",
+    )
+
+    status = config.redacted_status()
+
+    assert status["requested_environment"] == "LIVE"
+    assert status["effective_read_environment"] == "LIVE"
+    assert status["live_credentials_present"] is True
+    assert "live-key" not in json.dumps(status)
+
+
+def test_auth_status_uses_live_token_cache_path_in_live_mode(tmp_path: Path) -> None:
+    live_cache = tmp_path / "state" / "live-token.json"
+    token = SaxoTokenSet(
+        access_token="live-access-token",  # noqa: S106
+        environment="LIVE",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    save_token_cache(
+        live_cache,
+        token,
+    )
+    config = SaxoRuntimeConfig.from_env(
+        {
+            "SAXO_MCP_ENVIRONMENT": "LIVE",
+            "SAXO_MCP_ENABLE_LIVE_READS": "1",
+            "SAXO_MCP_LIVE_APP_KEY": "live-key",
+            "SAXO_MCP_LIVE_TOKEN_CACHE_PATH": str(live_cache),
+        },
+        repo_root=tmp_path / "repo",
+    )
+
+    status = config.redacted_status()
+
+    assert status["effective_read_environment"] == "LIVE"
+    assert status["token_cache_path"] == str(live_cache)
+    assert status["token_cache_environment"] == token.environment
+    assert status["token_cache_expired"] is False
+    assert status["blocking_reasons"] == []
+    assert "SIM token" not in status["next_action"]
 
 
 def test_runtime_config_accepts_sim_pkce_app_key_without_secret(

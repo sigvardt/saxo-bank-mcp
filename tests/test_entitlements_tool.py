@@ -15,6 +15,7 @@ from saxo_bank_mcp.entitlements import (
     read_user_entitlements,
     summarize_user_entitlements,
 )
+from saxo_bank_mcp.live_mode import ReadOnlySettings
 from saxo_bank_mcp.server import mcp
 from saxo_bank_mcp.token_cache import save_token_cache
 
@@ -209,4 +210,70 @@ async def test_get_entitlements_live_refusal_has_agent_next_action(
     payload = result.structured_content
     assert payload is not None
     assert payload["status"] == "live_not_called"
-    assert "SAXO_MCP_ENVIRONMENT=SIM" in str(payload["next_action"])
+    assert "SAXO_MCP_ENABLE_LIVE_READS=1" in str(payload["next_action"])
+
+
+@pytest.mark.anyio
+async def test_get_entitlements_can_call_live_when_live_read_gates_are_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="live-access-token",  # noqa: S106
+            environment="LIVE",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_CLIENT_ID", "live-client-id")
+    monkeypatch.setenv("SAXO_MCP_LIVE_CLIENT_SECRET", "live-client-secret")
+    monkeypatch.setenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", str(cache))
+
+    async def read_entitlements(
+        settings: ReadOnlySettings,
+        live_token: SaxoTokenSet,
+    ) -> UserEntitlementsFields:
+        assert settings.rest_base_url == "https://gateway.saxobank.com/openapi"
+        assert live_token.environment == "LIVE"
+        return {
+            "Data": [
+                {
+                    "ExchangeId": "XNAS",
+                    "Entitlements": [
+                        {
+                            "DelayedFullBook": [],
+                            "DelayedGreeks": [],
+                            "Greeks": [],
+                            "RealTimeFullBook": [],
+                            "RealTimeTopOfBook": ["Stock"],
+                        },
+                    ],
+                },
+            ],
+            "MaxRows": 99,
+            "Count": 1,
+            "HasNextPage": False,
+        }
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.mcp_entitlement_tools.read_user_entitlements",
+        read_entitlements,
+    )
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("saxo_get_entitlements", {})
+
+    payload = result.structured_content
+    assert payload is not None
+    serialized = str(payload)
+    assert payload["status"] == "passed"
+    assert payload["environment"] == "LIVE"
+    assert payload["network_call_made"] is True
+    assert payload["live_write_called"] is False
+    assert payload["order_or_subscription_created"] is False
+    assert payload["entitlement_summary"]["exchange_count"] == 1
+    assert "live-access-token" not in serialized

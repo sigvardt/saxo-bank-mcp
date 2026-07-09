@@ -5,6 +5,7 @@ import sys
 import tomllib
 from importlib import import_module
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastmcp import Client
@@ -16,7 +17,8 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.anyio
-async def test_saxo_health_returns_sim_safe_status() -> None:
+async def test_saxo_health_returns_sim_safe_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
     module = import_module("saxo_bank_mcp.server")
 
     async with Client(module.mcp) as client:
@@ -53,6 +55,24 @@ async def test_saxo_health_returns_sim_safe_status() -> None:
         "trading readiness/order placement",
         "live write readiness",
     ]
+
+
+@pytest.mark.anyio
+async def test_saxo_health_reports_live_read_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_APP_KEY", "live-app-key")
+    module = import_module("saxo_bank_mcp.server")
+
+    async with Client(module.mcp) as client:
+        result = await client.call_tool("saxo_health", {})
+
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "passed"
+    assert payload["mode"] == "LIVE"
+    assert payload["live_writes"] is False
+    assert payload["scope"] == "local_mcp_server_liveness_only"
 
 
 @pytest.mark.anyio
@@ -103,6 +123,7 @@ async def test_safety_tool_descriptions_prevent_false_write_confidence() -> None
 
     async with Client(module.mcp) as client:
         tools = await client.list_tools()
+        safety = await client.call_tool("saxo_safety_status", {})
 
     descriptions = {tool.name: tool.description or "" for tool in tools}
     expected_fragments = {
@@ -129,6 +150,16 @@ async def test_safety_tool_descriptions_prevent_false_write_confidence() -> None
         assert tool_name in descriptions
         for fragment in fragments:
             assert fragment in descriptions[tool_name]
+    payload = safety.structured_content
+    assert payload is not None
+    metadata = cast("dict[str, dict[str, object]]", payload["tool_metadata"])
+    assert isinstance(metadata, dict)
+    assert sorted(metadata) == sorted(descriptions)
+    assert metadata["saxo_call_registered_endpoint"]["safe_in_live_read_mode"] is True
+    assert metadata["saxo_get_multileg_order_defaults"]["tool_class"] == (
+        "sim_only_network_read"
+    )
+    assert metadata["saxo_get_multileg_order_defaults"]["safe_in_live_read_mode"] is False
 
 
 @pytest.mark.anyio

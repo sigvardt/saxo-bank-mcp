@@ -29,6 +29,7 @@ from saxo_bank_mcp.qa_probes import (
     handle_secret_scan,
     handle_sim_auth,
     handle_token_cache,
+    handle_tool_inventory,
     write_incomplete,
 )
 from saxo_bank_mcp.qa_prod_readiness import handle_prod_readiness
@@ -71,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         "readme-smoke",
         "hard-task-manifest",
         "prod-readiness",
+        "tool-inventory",
     ):
         add_common(subparsers.add_parser(name))
 
@@ -177,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_live_write_refusal(args.out)
     elif command == "prod-readiness":
         result = handle_prod_readiness(args.out)
+    elif command == "tool-inventory":
+        result = handle_tool_inventory(args.out)
     elif command == "live-read-refusal":
         result = handle_live_read_refusal(args.out)
     elif command == "secret-scan":

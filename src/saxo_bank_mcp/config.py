@@ -43,6 +43,9 @@ type SimAuthSettingsErrorCode = Literal[
 ]
 
 DEFAULT_SIM_CREDENTIAL_FILE: Final = Path("/Users/user/Desktop/saxo_bank_mcp_DEMO_credentials.txt")
+DEFAULT_LIVE_CREDENTIAL_FILE: Final = Path(
+    "/Users/user/Desktop/saxo_bank_mcp_LIVE_credentials.txt",
+)
 TRUSTED_SIM_AUTH_HOST: Final = "sim.logonvalidation.net"
 
 
@@ -106,7 +109,10 @@ class SaxoRuntimeConfig(BaseModel):
         requested = SaxoEnvironment(source.get("SAXO_MCP_ENVIRONMENT", "SIM").upper())
         cache_refused = False
         try:
-            cache = token_cache_path(_requested_token_cache_path(source), repo_root=repo_root)
+            cache = token_cache_path(
+                _requested_token_cache_path(source, requested),
+                repo_root=repo_root,
+            )
         except TokenCachePathError as error:
             cache = error.path.expanduser()
             cache_refused = True
@@ -117,7 +123,7 @@ class SaxoRuntimeConfig(BaseModel):
             live_reads_enabled=source.get("SAXO_MCP_ENABLE_LIVE_READS") == "1",
             sim_credentials_present=sim_credential_source != "missing",
             sim_credential_source=sim_credential_source,
-            live_credentials_present=_credentials_present(source, "LIVE"),
+            live_credentials_present=_live_credentials_present(source),
             sim_redirect_uri_present=bool(redirect_uri),
             cache_path=cache,
             token_cache_path_refused=cache_refused,
@@ -193,7 +199,10 @@ def resolve_sim_auth_settings(
 ) -> SimAuthSettings:
     source = os.environ if environ is None else environ
     try:
-        cache = token_cache_path(_requested_token_cache_path(source), repo_root=repo_root)
+        cache = token_cache_path(
+            _requested_token_cache_path(source, SaxoEnvironment.SIM),
+            repo_root=repo_root,
+        )
     except TokenCachePathError as error:
         raise SimAuthSettingsError("token_cache_path_refused", str(error)) from error
     redirect_uri = _sim_redirect_uri(source, cache, allow_pending=allow_pending_redirect)
@@ -237,13 +246,29 @@ def resolve_sim_auth_settings(
     )
 
 
-def _credentials_present(environ: Mapping[str, str], prefix: Literal["SIM", "LIVE"]) -> bool:
-    client_id = environ.get(f"SAXO_MCP_{prefix}_CLIENT_ID", "")
-    client_secret = environ.get(f"SAXO_MCP_{prefix}_CLIENT_SECRET", "")
-    return bool(client_id.strip() and client_secret.strip())
+def _live_credentials_present(environ: Mapping[str, str]) -> bool:
+    if _env_live_app_key(environ) is not None:
+        return True
+    credential_file = Path(
+        environ.get("SAXO_MCP_LIVE_CREDENTIAL_FILE", str(DEFAULT_LIVE_CREDENTIAL_FILE)),
+    )
+    if not credential_file.exists():
+        return False
+    try:
+        parse_sim_pkce_credentials_file(credential_file)
+    except CredentialFileError:
+        return False
+    return True
 
 
-def _requested_token_cache_path(environ: Mapping[str, str]) -> Path:
+def _requested_token_cache_path(
+    environ: Mapping[str, str],
+    requested: SaxoEnvironment,
+) -> Path:
+    if requested == SaxoEnvironment.LIVE:
+        live_cache = environ.get("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", "").strip()
+        if live_cache:
+            return Path(live_cache)
     if "SAXO_MCP_TOKEN_CACHE_PATH" in environ:
         return Path(environ["SAXO_MCP_TOKEN_CACHE_PATH"])
     return default_token_cache_path()
@@ -251,6 +276,14 @@ def _requested_token_cache_path(environ: Mapping[str, str]) -> Path:
 
 def _env_sim_app_key(environ: Mapping[str, str]) -> str | None:
     for key in ("SAXO_MCP_SIM_APP_KEY", "SAXO_MCP_SIM_CLIENT_ID"):
+        value = environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _env_live_app_key(environ: Mapping[str, str]) -> str | None:
+    for key in ("SAXO_MCP_LIVE_APP_KEY", "SAXO_MCP_LIVE_CLIENT_ID"):
         value = environ.get(key, "").strip()
         if value:
             return value

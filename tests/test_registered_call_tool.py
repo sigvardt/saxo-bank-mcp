@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
 import httpx2
 import pytest
 from fastmcp import Client
 
+from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.endpoint_registry import EndpointOperation, RegisteredEndpoint
 from saxo_bank_mcp.server import mcp
+from saxo_bank_mcp.token_cache import save_token_cache
 
 
 @pytest.fixture
@@ -175,8 +180,18 @@ async def test_registered_endpoint_calls_public_diagnostic_get(
 @pytest.mark.anyio
 async def test_registered_endpoint_uses_resolved_path_template(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     seen_urls: list[str] = []
+    cache = tmp_path / "sim-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="sim-access-token",  # noqa: S106
+            environment="SIM",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        ),
+    )
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         seen_urls.append(str(request.url))
@@ -192,11 +207,10 @@ async def test_registered_endpoint_uses_resolved_path_template(
             transport=httpx2.MockTransport(handler) if transport is None else transport,
         )
 
-    def no_token(_operation: EndpointOperation) -> None:
-        return None
-
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(cache))
     monkeypatch.setattr("saxo_bank_mcp.read_tools.create_async_client", client_factory)
-    monkeypatch.setattr("saxo_bank_mcp.read_tools._token_for_operation", no_token)
 
     async with Client(mcp) as client:
         result = await client.call_tool(

@@ -107,7 +107,34 @@ async def test_token_exchange_and_refresh_use_documented_forms(tmp_path: Path) -
     assert seen_forms[1]["code_verifier"] == ["exchange-verifier"]
     assert "client_id" not in seen_forms[1]
     assert "scope" not in seen_forms[1]
+    assert exchanged.environment == "SIM"
     assert refreshed.redacted_status()["has_code_verifier"] is True
+
+
+@pytest.mark.anyio
+async def test_token_exchange_can_mark_live_token(tmp_path: Path) -> None:
+    settings = sim_settings(tmp_path)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "access_token": "lat",
+                "refresh_token": "lrt",
+                "expires_in": 60,
+            },
+            request=request,
+        )
+
+    exchanged = await exchange_authorization_code(
+        settings,
+        code="auth-code",
+        code_verifier="exchange-verifier",
+        environment="LIVE",
+        transport=httpx2.MockTransport(handler),
+    )
+
+    assert exchanged.environment == "LIVE"
 
 
 @pytest.mark.anyio

@@ -139,6 +139,10 @@ def _next_action(inputs: AuthStatusInputs, blocking_reasons: list[str]) -> str:
             "call saxo_cache_sim_access_token with a fresh Saxo developer portal SIM "
             "token, then call saxo_get_session_capabilities"
         )
+    if inputs.requested_environment == "LIVE":
+        live_action = _live_next_action(blocking_reasons)
+        if live_action is not None:
+            return live_action
     actions: tuple[tuple[str, str], ...] = (
         (
             "sim_credentials_missing",
@@ -187,7 +191,41 @@ def _next_action(inputs: AuthStatusInputs, blocking_reasons: list[str]) -> str:
     for reason, action in actions:
         if reason in blocking_reasons:
             return action
+    if inputs.requested_environment == "LIVE":
+        return (
+            "call saxo_get_session_capabilities to verify the current LIVE "
+            "session capability fields"
+        )
     return "call saxo_get_session_capabilities to verify the current SIM session capability fields"
+
+
+def _live_next_action(blocking_reasons: list[str]) -> str | None:
+    actions: tuple[tuple[str, str], ...] = (
+        (
+            "token_cache_path_refused",
+            "move SAXO_MCP_LIVE_TOKEN_CACHE_PATH outside the repository and common synced folders",
+        ),
+        (
+            "token_cache_unreadable",
+            "remove or replace the unreadable LIVE token cache, then restart LIVE PKCE login",
+        ),
+        (
+            "pending_pkce_authorization_present",
+            "complete the Saxo LIVE login already started, then exchange the returned code",
+        ),
+        (
+            "token_cache_missing",
+            "complete LIVE PKCE login and save a LIVE token cache before retrying",
+        ),
+        (
+            "token_cache_expired",
+            "refresh or recreate the LIVE token cache before retrying LIVE reads",
+        ),
+    )
+    for reason, action in actions:
+        if reason in blocking_reasons:
+            return action
+    return None
 
 
 def _needs_fresh_portal_token(
@@ -195,7 +233,8 @@ def _needs_fresh_portal_token(
     blocking_reasons: list[str],
 ) -> bool:
     return (
-        inputs.token_cache_present
+        inputs.requested_environment == "SIM"
+        and inputs.token_cache_present
         and inputs.token_cache_readable
         and inputs.token_cache_refresh_supported is False
         and (

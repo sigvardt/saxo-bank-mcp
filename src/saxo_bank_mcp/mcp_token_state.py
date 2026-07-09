@@ -25,6 +25,8 @@ def cached_token_for_tool(tool_name: str, cache_path: Path) -> CachedTokenCheck:
     inspection = inspect_token_cache(cache_path)
     token = inspection["token"]
     if token is not None:
+        if token.environment == "LIVE":
+            return CachedTokenBlocked(auth_required(tool_name, "token_environment_mismatch"))
         return CachedTokenReady(token)
     reason = (
         "token_cache_unreadable"

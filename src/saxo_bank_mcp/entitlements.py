@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, Literal, TypedDict
+from typing import Final, Literal, Protocol, TypedDict
 
 import httpx2
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from saxo_bank_mcp.auth import SaxoTokenSet
-from saxo_bank_mcp.config import SimAuthSettings
 from saxo_bank_mcp.http_client import create_async_client
 
 ENTITLEMENTS_PATH: Final = "/port/v1/users/me/entitlements"
@@ -50,6 +49,10 @@ class EntitlementsSummary(TypedDict):
     has_next_page: bool
     possibly_truncated: bool
     entitlement_bucket_counts: dict[str, int]
+
+
+class EntitlementReadSettings(Protocol):
+    rest_base_url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +115,7 @@ _ENTITLEMENTS_ADAPTER = TypeAdapter(UserEntitlementsResponse)
 
 
 async def read_user_entitlements(
-    settings: SimAuthSettings,
+    settings: EntitlementReadSettings,
     token: SaxoTokenSet,
     *,
     transport: httpx2.AsyncBaseTransport | None = None,

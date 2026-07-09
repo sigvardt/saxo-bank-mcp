@@ -83,7 +83,7 @@ def resolve_live_read_settings(
                 )
             raise LiveReadSettingsError(
                 "live_credentials_missing",
-                "SAXO_MCP_LIVE_CLIENT_ID and SAXO_MCP_LIVE_CLIENT_SECRET are required",
+                "LIVE PKCE credentials are required",
             )
         case "SIM":
             raise LiveReadSettingsError(

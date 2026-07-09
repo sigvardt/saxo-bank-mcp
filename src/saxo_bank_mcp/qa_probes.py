@@ -23,6 +23,7 @@ from saxo_bank_mcp.server import (
     SaxoHealth,
     mcp,
 )
+from saxo_bank_mcp.tool_metadata import tool_metadata
 
 GITIGNORE_SECRET_DUMMIES = (
     (".omo/", Path(".omo/task-1-qa-ignore-dummy.txt")),
@@ -64,9 +65,63 @@ async def call_live_session_capabilities_payload() -> dict[str, JsonValue]:
     return await call_tool_payload("saxo_get_session_capabilities", arguments)
 
 
+async def call_live_read_payloads() -> dict[str, dict[str, JsonValue]]:
+    return {
+        "saxo_get_session_capabilities": await call_live_session_capabilities_payload(),
+        "saxo_get_entitlements": await call_tool_payload("saxo_get_entitlements", {}),
+        "saxo_list_registered_endpoints": await call_tool_payload(
+            "saxo_list_registered_endpoints",
+            {"limit": 1},
+        ),
+        "saxo_call_registered_endpoint_public_diagnostics": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {"method": "GET", "path": "/root/v1/diagnostics/get"},
+        ),
+        "saxo_call_registered_endpoint_authenticated_account": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {"method": "GET", "path": "/port/v1/accounts/me"},
+        ),
+    }
+
+
 async def call_live_write_refusal_payload() -> dict[str, JsonValue]:
     arguments: dict[str, JsonValue] = {"preview_token": "LIVE-WRITE-REFUSAL-PROBE"}
     return await call_tool_payload("saxo_place_sim_order", arguments, raise_on_error=False)
+
+
+async def call_tool_inventory_payload() -> dict[str, JsonValue]:
+    async with Client(mcp) as client:
+        tools = await client.list_tools()
+    all_tools = sorted(tool.name for tool in tools)
+    metadata = tool_metadata()
+    missing_metadata = [name for name in all_tools if name not in metadata]
+    unregistered_metadata = [name for name in sorted(metadata) if name not in all_tools]
+    local_metadata_reads = _tools_by_class(metadata, ("local_metadata_read",))
+    live_network_reads = [
+        name
+        for name, item in metadata.items()
+        if item["tool_class"] == "network_read" and item["safe_in_live_read_mode"] is True
+    ]
+    sim_only_network_reads = _tools_by_class(metadata, ("sim_only_network_read",))
+    state_changing_or_write = [
+        name
+        for name, item in metadata.items()
+        if item["state_changing"] is True or item["write_effect"] != "none"
+    ]
+    return {
+        "status": "passed" if not missing_metadata and not unregistered_metadata else "failed",
+        "tool_count": len(all_tools),
+        "all_tools": all_tools,
+        "tool_metadata": metadata,
+        "local_metadata_read_tools": local_metadata_reads,
+        "live_network_read_tools": live_network_reads,
+        "sim_only_network_read_tools": sim_only_network_reads,
+        "write_or_state_changing_tools": state_changing_or_write,
+        "metadata_missing_tools": missing_metadata,
+        "metadata_unregistered_tools": unregistered_metadata,
+        "live_write_called": False,
+        "order_or_subscription_created": False,
+    }
 
 
 def handle_health(out: Path) -> int:
@@ -194,13 +249,45 @@ def handle_live_read(out: Path, skip_out: Path) -> int:
         return _write_secret_scanned_event(out, event, mirrors=(skip_out,))
 
     with _temporary_env({"SAXO_MCP_ENVIRONMENT": "LIVE"}):
-        payload = anyio.run(call_live_session_capabilities_payload)
-    status = str(payload.get("status", "failed"))
+        payloads = anyio.run(call_live_read_payloads)
+    tool_statuses = {
+        tool_name: str(payload.get("status", "failed"))
+        for tool_name, payload in payloads.items()
+    }
+    status = "passed" if _live_read_suite_passed(tool_statuses) else "failed"
     event = {
-        **base_event("live-read", status, "FastMCP live read-only session probe returned"),
-        **payload,
-        "live_write_called": bool(payload.get("live_write_called", False)),
-        "order_or_subscription_created": bool(payload.get("order_or_subscription_created", False)),
+        **base_event("live-read", status, "FastMCP live read-only probe suite returned"),
+        "requested_environment": "LIVE",
+        "read_scenarios_exercised": list(payloads),
+        "read_tools_exercised": sorted(
+            {
+                str(payload.get("tool_name", scenario_name))
+                for scenario_name, payload in payloads.items()
+            },
+        ),
+        "tool_statuses": tool_statuses,
+        "tool_results": payloads,
+        "authenticated_registered_read_passed": (
+            tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
+            == "passed"
+            and payloads["saxo_call_registered_endpoint_authenticated_account"].get(
+                "auth_exercised",
+            )
+            is True
+        ),
+        "network_call_made": any(
+            bool(payload.get("network_call_made", False)) for payload in payloads.values()
+        ),
+        "network_read_count": sum(
+            1 for payload in payloads.values() if payload.get("network_call_made") is True
+        ),
+        "live_write_called": any(
+            bool(payload.get("live_write_called", False)) for payload in payloads.values()
+        ),
+        "order_or_subscription_created": any(
+            bool(payload.get("order_or_subscription_created", False))
+            for payload in payloads.values()
+        ),
         "prompted_user": False,
         "private_identifiers_redacted": True,
     }
@@ -224,6 +311,13 @@ def handle_live_write_refusal(out: Path) -> int:
     if status != "refused" or payload.get("refusal_reason") != "missing_live_write_enablement":
         return 1
     return exit_code
+
+
+def handle_tool_inventory(out: Path) -> int:
+    payload = anyio.run(call_tool_inventory_payload)
+    payload["git"] = current_git_state().model_dump(mode="json")
+    exit_code = _write_secret_scanned_event(out, payload)
+    return 0 if payload["status"] == "passed" and exit_code == 0 else 1
 
 
 def handle_live_read_refusal(out: Path) -> int:
@@ -294,6 +388,27 @@ def _live_read_probe_missing_requirements(runtime: SaxoRuntimeConfig) -> list[st
         missing.append("LIVE credentials")
     missing.append("SAXO_MCP_LIVE_TOKEN_CACHE_PATH")
     return missing
+
+
+def _live_read_suite_passed(tool_statuses: Mapping[str, str]) -> bool:
+    return (
+        tool_statuses.get("saxo_get_session_capabilities") == "passed"
+        and tool_statuses.get("saxo_get_entitlements") == "passed"
+        and tool_statuses.get("saxo_list_registered_endpoints")
+        == "metadata_only_not_ready_for_trading"
+        and tool_statuses.get("saxo_call_registered_endpoint_public_diagnostics") == "passed"
+        and tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
+        == "passed"
+    )
+
+
+def _tools_by_class(
+    metadata: Mapping[str, Mapping[str, JsonValue]],
+    tool_classes: tuple[str, ...],
+) -> list[str]:
+    return sorted(
+        name for name, item in metadata.items() if item.get("tool_class") in tool_classes
+    )
 
 
 @contextmanager

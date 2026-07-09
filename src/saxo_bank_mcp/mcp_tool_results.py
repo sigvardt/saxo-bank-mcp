@@ -89,6 +89,10 @@ _AUTH_NEXT_ACTIONS: Final[Mapping[str, str]] = MappingProxyType(
         "token_cache_unreadable": (
             "remove or replace the unreadable token cache, then restart the SIM PKCE login"
         ),
+        "token_environment_mismatch": (
+            "use a SIM token cache for SIM tools, or switch to LIVE read tools with "
+            "SAXO_MCP_ENVIRONMENT=LIVE and SAXO_MCP_ENABLE_LIVE_READS=1"
+        ),
         "pending_pkce_state_missing": (
             "call saxo_start_pkce_login before exchanging an authorization code"
         ),

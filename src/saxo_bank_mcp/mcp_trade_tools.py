@@ -13,6 +13,8 @@ from saxo_bank_mcp._redaction import redact_json, redact_text
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import (
     SIM_ENDPOINTS,
+    SaxoEnvironment,
+    SaxoRuntimeConfig,
     SimAuthSettingsError,
     resolve_sim_auth_settings,
 )
@@ -42,17 +44,18 @@ from saxo_bank_mcp.trade_preview import (
 )
 
 ORDER_PREVIEW_TOOL_DESCRIPTION: Final = (
-    "Runs a Saxo trade pre-check or evaluates a supplied redacted pre-check fixture, then creates "
-    "a local preview token only when account-currency risk and disclaimer state are known. It "
-    "does not place, modify, or cancel orders."
+    "Runs a SIM Saxo trade pre-check or evaluates a supplied redacted pre-check fixture, then "
+    "creates a local preview token only when account-currency risk and disclaimer state are known. "
+    "It refuses before network when configured for LIVE and does not place, modify, "
+    "or cancel orders."
 )
 MULTILEG_DEFAULTS_TOOL_DESCRIPTION: Final = (
     "Fetches SIM multi-leg order defaults from Saxo when a token cache is available. It does not "
-    "create orders or prove order readiness."
+    "create orders or prove order readiness. It refuses before network when configured for LIVE."
 )
 DISCLAIMER_LOOKUP_TOOL_DESCRIPTION: Final = (
     "Fetches SIM disclaimer details for tokens returned by order pre-check. It does not accept or "
-    "submit disclaimer responses."
+    "submit disclaimer responses. It refuses before network when configured for LIVE."
 )
 DISCLAIMER_RESPONSE_TOOL_DESCRIPTION: Final = (
     "Submits a SIM disclaimer response only after an explicit approval factor. It never places an "
@@ -353,6 +356,8 @@ def _order_input_reasons(
 
 
 def _cached_token(tool_name: str) -> SaxoTokenSet | ToolResult:
+    if SaxoRuntimeConfig.from_env().requested_environment == SaxoEnvironment.LIVE:
+        return _sim_only_refusal(tool_name)
     try:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
@@ -364,6 +369,30 @@ def _cached_token(tool_name: str) -> SaxoTokenSet | ToolResult:
         case CachedTokenReady(token=token):
             return token
     raise AssertionError("unreachable cached token result")
+
+
+def _sim_only_refusal(tool_name: str) -> ToolResult:
+    return _tool_result(
+        {
+            "status": "denied",
+            "tool_name": tool_name,
+            "environment": "SIM",
+            "requested_environment": "LIVE",
+            "reason": "sim_only_tool_in_live_environment",
+            "network_call_made": False,
+            "preview_created": False,
+            "disclaimer_response_submitted": False,
+            "order_placed": False,
+            "order_modified": False,
+            "order_cancelled": False,
+            "live_write": False,
+            "next_action": (
+                "Use saxo_call_registered_endpoint for LIVE read checks, or switch "
+                "SAXO_MCP_ENVIRONMENT back to SIM before using this SIM-only helper."
+            ),
+            "does_not_verify": list(TRADE_DOES_NOT_VERIFY),
+        },
+    )
 
 
 def _headers(token: SaxoTokenSet) -> dict[str, str]:

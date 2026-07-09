@@ -6,7 +6,7 @@ from typing import Final, Literal, TypedDict
 
 from fastmcp import FastMCP
 
-from saxo_bank_mcp.auth_status import SaxoAuthStatus
+from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, SaxoAuthStatus
 from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.mcp_auth_tools import (
     saxo_exchange_pkce_code,
@@ -112,7 +112,7 @@ AUTH_STATUS_TOOL_DESCRIPTION: Final = (
 class SaxoHealth(TypedDict):
     status: Literal["passed"]
     service: Literal["saxo-bank-mcp"]
-    mode: Literal["SIM"]
+    mode: EffectiveReadEnvironment
     live_writes: Literal[False]
     scope: Literal["local_mcp_server_liveness_only"]
     verifies: list[HealthVerification]
@@ -124,10 +124,11 @@ mcp: Final = FastMCP(SERVICE_NAME)
 
 @mcp.tool(description=HEALTH_TOOL_DESCRIPTION)
 def saxo_health() -> SaxoHealth:
+    runtime = SaxoRuntimeConfig.from_env()
     return {
         "status": "passed",
         "service": SERVICE_NAME,
-        "mode": "SIM",
+        "mode": runtime.effective_read_environment(),
         "live_writes": False,
         "scope": HEALTH_SCOPE,
         "verifies": list(HEALTH_VERIFIES),

@@ -228,6 +228,40 @@ async def test_order_preview_without_fixture_requires_auth_before_network(
     assert payload["order_placed"] is False
 
 
+@pytest.mark.anyio
+async def test_sim_only_trade_read_helpers_refuse_in_live_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_APP_KEY", "live-app-key")
+
+    async with Client(mcp) as client:
+        defaults = await client.call_tool(
+            "saxo_get_multileg_order_defaults",
+            {
+                "account_key": FIXTURE_ACCOUNT,
+                "option_root_id": 123,
+                "options_strategy_type": "Straddle",
+            },
+            raise_on_error=False,
+        )
+        disclaimers = await client.call_tool(
+            "saxo_get_required_disclaimers",
+            {"disclaimer_tokens": ["fixture-token"]},
+            raise_on_error=False,
+        )
+
+    for result in (defaults, disclaimers):
+        payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+        assert result.is_error is True
+        assert payload["status"] == "denied"
+        assert payload["reason"] == "sim_only_tool_in_live_environment"
+        assert payload["network_call_made"] is False
+        assert payload["live_write"] is False
+        assert payload["order_placed"] is False
+
+
 def test_trade_precheck_qa_probe(tmp_path: Path) -> None:
     out = tmp_path / "precheck.json"
 

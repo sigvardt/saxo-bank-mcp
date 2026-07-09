@@ -116,12 +116,13 @@ async def exchange_authorization_code(
     *,
     code: str,
     code_verifier: str,
+    environment: TokenEnvironment = "SIM",
     transport: httpx2.AsyncBaseTransport | None = None,
 ) -> SaxoTokenSet:
     form = authorization_code_form(settings, code=code, code_verifier=code_verifier)
     response = await _post_token_form(settings.token_url, form, transport=transport)
     parsed = _parse_token_response(response)
-    return parsed.to_token_set(code_verifier=code_verifier, environment="SIM")
+    return parsed.to_token_set(code_verifier=code_verifier, environment=environment)
 
 
 async def refresh_access_token(

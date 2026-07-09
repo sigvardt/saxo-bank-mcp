@@ -17,6 +17,7 @@ from saxo_bank_mcp.safety import (
     SafetyKernel,
     WritePreviewRequest,
 )
+from saxo_bank_mcp.tool_metadata import tool_metadata
 
 SAFETY_STATUS_TOOL_DESCRIPTION: Final = (
     "Reports local write-safety configuration and preview state. Does not call Saxo or prove "
@@ -35,7 +36,9 @@ COMMIT_TOOL_DESCRIPTION: Final = (
 
 
 def saxo_safety_status() -> dict[str, JsonValue]:
-    return SafetyKernel().status()
+    status = SafetyKernel().status()
+    status["tool_metadata"] = tool_metadata()
+    return status
 
 
 def saxo_create_write_preview(  # noqa: PLR0913

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Final
 
 import httpx2
 from fastmcp.tools import ToolResult
 
 from saxo_bank_mcp._redaction import redact_text
-from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.config import (
+    LIVE_ENDPOINTS,
     SIM_ENDPOINTS,
     SaxoRuntimeConfig,
     SimAuthSettingsError,
@@ -22,6 +24,13 @@ from saxo_bank_mcp.endpoint_registry import (
     registered_operations_for_path,
 )
 from saxo_bank_mcp.http_client import create_async_client
+from saxo_bank_mcp.live_mode import (
+    LiveReadSettingsError,
+    live_cached_token_for_tool,
+    live_read_missing_requirements_for_reason,
+    live_read_next_action,
+    resolve_live_read_settings,
+)
 from saxo_bank_mcp.mcp_token_state import (
     CachedTokenBlocked,
     CachedTokenReady,
@@ -35,11 +44,12 @@ type ReadToolValue = (
 )
 type ReadToolResult = dict[str, ReadToolValue]
 type EndpointPreflightResult = RegisteredEndpoint | ReadToolResult
+type ReadExecutionResult = ReadExecutionContext | ReadToolResult
 
 REGISTERED_CALL_TOOL_DESCRIPTION: Final = (
-    "Calls registered Saxo OpenAPI operations only. In this phase it allows safe SIM GET "
-    "read operations and denies unregistered or write-class operations before any network call. "
-    "It never accepts arbitrary hosts or LIVE writes."
+    "Calls registered Saxo OpenAPI GET/read operations only in SIM or explicitly enabled "
+    "LIVE read mode. It denies unregistered, arbitrary-host, and write-class operations "
+    "before any network call. It never performs LIVE writes."
 )
 READ_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
     "Saxo connectivity",
@@ -61,6 +71,13 @@ HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
 
 
+@dataclass(frozen=True, slots=True)
+class ReadExecutionContext:
+    environment: TokenEnvironment
+    rest_base_url: str
+    token: SaxoTokenSet | None
+
+
 async def saxo_call_registered_endpoint(
     method: str,
     path: str,
@@ -72,45 +89,42 @@ async def saxo_call_registered_endpoint(
             operation = registered.operation
         case dict() as result:
             return _tool_result(result)
-    token_or_result = _token_for_operation(operation)
-    match token_or_result:
-        case SaxoTokenSet() as token:
-            headers = {
-                "Accept": "application/json",
-                "Authorization": f"Bearer {token.access_token}",
-            }
-        case None:
-            headers = {"Accept": "application/json"}
+    context_or_result = _execution_context(operation)
+    match context_or_result:
+        case ReadExecutionContext() as context:
+            headers = _read_headers(context.token)
         case dict() as result:
             return _tool_result({**result, "network_call_made": False, "live_write": False})
     try:
-        async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
+        async with create_async_client(base_url=context.rest_base_url) as client:
             response = await client.get(
                 registered.resolved_path.lstrip("/"),
                 params={} if params is None else dict(params),
                 headers=headers,
             )
     except httpx2.HTTPError as error:
-        return _tool_result(_network_error(operation, type(error).__name__))
+        return _tool_result(_network_error(operation, context.environment, type(error).__name__))
     body = _response_body(response)
     ok = HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX
     status = "passed" if ok else "http_error"
+    environment = context.environment
+    live_access = environment == "LIVE"
     return _tool_result(
         {
             "status": status,
             "tool_name": "saxo_call_registered_endpoint",
-            "call_class": ("sim_read_succeeded" if status == "passed" else "sim_read_http_error"),
+            "call_class": _call_class(status, environment),
             "operation_id": operation.operation_id,
             "service_group": operation.service_group,
             "method": operation.method,
             "path": operation.path_template,
             "resolved_path": registered.resolved_path,
-            "environment": "SIM",
+            "environment": environment,
             "network_call_made": True,
             "arbitrary_url_allowed": False,
             "live_write": False,
-            "live_access": False,
-            "auth_exercised": operation.auth_requirement != "none",
+            "live_access": live_access,
+            "auth_exercised": context.token is not None,
             "trading_ready": False,
             "http_status": response.status_code,
             "response": body,
@@ -123,7 +137,7 @@ def _tool_result(result: ReadToolResult) -> ToolResult:
     return ToolResult(structured_content=result, is_error=result.get("status") == "denied")
 
 
-def _registered_endpoint_or_refusal(  # noqa: PLR0911
+def _registered_endpoint_or_refusal(
     method: str,
     path: str,
 ) -> EndpointPreflightResult:
@@ -141,15 +155,27 @@ def _registered_endpoint_or_refusal(  # noqa: PLR0911
         return _denied(method, path, operation.refusal_reason, operation=operation)
     if operation.method != "GET" or operation.read_write_class != "read":
         return _denied(method, path, "write_class_not_allowed", operation=operation)
-    runtime = SaxoRuntimeConfig.from_env()
-    if runtime.effective_read_environment() != "SIM":
-        return _live_refusal(operation)
     return registered
 
 
-def _token_for_operation(operation: EndpointOperation) -> SaxoTokenSet | ReadToolResult | None:
+def _execution_context(operation: EndpointOperation) -> ReadExecutionResult:
+    runtime = SaxoRuntimeConfig.from_env()
+    match runtime.effective_read_environment():
+        case "SIM":
+            return _sim_execution_context(operation)
+        case "LIVE_READ_DISABLED":
+            return _live_refusal(operation, runtime)
+        case "LIVE":
+            return _live_execution_context(operation)
+
+
+def _sim_execution_context(operation: EndpointOperation) -> ReadExecutionResult:
     if operation.auth_requirement == "none":
-        return None
+        return ReadExecutionContext(
+            environment="SIM",
+            rest_base_url=SIM_ENDPOINTS.rest_base_url,
+            token=None,
+        )
     try:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
@@ -159,7 +185,47 @@ def _token_for_operation(operation: EndpointOperation) -> SaxoTokenSet | ReadToo
         case CachedTokenBlocked(result=result):
             return _auth_required(str(result.get("reason", "token_missing")))
         case CachedTokenReady(token=token):
-            return token
+            return ReadExecutionContext(
+                environment="SIM",
+                rest_base_url=SIM_ENDPOINTS.rest_base_url,
+                token=token,
+            )
+
+
+def _live_execution_context(operation: EndpointOperation) -> ReadExecutionResult:
+    try:
+        settings = resolve_live_read_settings()
+    except LiveReadSettingsError as error:
+        return _live_auth_required(operation, error.code)
+    if operation.auth_requirement == "none":
+        return ReadExecutionContext(
+            environment="LIVE",
+            rest_base_url=LIVE_ENDPOINTS.rest_base_url,
+            token=None,
+        )
+    token_or_result = live_cached_token_for_tool(
+        "saxo_call_registered_endpoint",
+        settings.cache_path,
+    )
+    if isinstance(token_or_result, dict):
+        return _live_auth_required(
+            operation,
+            str(token_or_result.get("reason", "token_cache_missing")),
+        )
+    return ReadExecutionContext(
+        environment="LIVE",
+        rest_base_url=settings.rest_base_url,
+        token=token_or_result,
+    )
+
+
+def _read_headers(token: SaxoTokenSet | None) -> dict[str, str]:
+    if token is None:
+        return {"Accept": "application/json"}
+    return {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token.access_token}",
+    }
 
 
 def _denied(
@@ -193,7 +259,7 @@ def _denied(
     }
 
 
-def _live_refusal(operation: EndpointOperation) -> ReadToolResult:
+def _live_refusal(operation: EndpointOperation, runtime: SaxoRuntimeConfig) -> ReadToolResult:
     return {
         "status": "live_not_called",
         "tool_name": "saxo_call_registered_endpoint",
@@ -201,6 +267,8 @@ def _live_refusal(operation: EndpointOperation) -> ReadToolResult:
         "operation_id": operation.operation_id,
         "method": operation.method,
         "path": operation.path_template,
+        "requested_environment": runtime.requested_environment.value,
+        "effective_read_environment": runtime.effective_read_environment(),
         "network_call_made": False,
         "reason": "missing_live_read_enablement",
         "arbitrary_url_allowed": False,
@@ -212,15 +280,46 @@ def _live_refusal(operation: EndpointOperation) -> ReadToolResult:
     }
 
 
-def _network_error(operation: EndpointOperation, detail: str) -> ReadToolResult:
+def _live_auth_required(operation: EndpointOperation, reason: str) -> ReadToolResult:
     return {
-        "status": "network_error",
+        "status": "auth_required",
         "tool_name": "saxo_call_registered_endpoint",
-        "call_class": "sim_read_attempted",
+        "requested_environment": "LIVE",
+        "environment": "LIVE",
+        "reason": reason,
+        "missing_requirements": live_read_missing_requirements_for_reason(reason),
+        "scope_used": False,
+        "network_call_made": False,
+        "live_write_called": False,
+        "order_or_subscription_created": False,
+        "next_action": live_read_next_action(reason),
+        "verifies": [],
+        "does_not_verify": list(READ_DOES_NOT_VERIFY),
+        "call_class": "live_read_auth_required_before_network",
         "operation_id": operation.operation_id,
         "method": operation.method,
         "path": operation.path_template,
-        "environment": "SIM",
+        "arbitrary_url_allowed": False,
+        "live_write": False,
+        "live_access": False,
+        "auth_exercised": False,
+        "trading_ready": False,
+    }
+
+
+def _network_error(
+    operation: EndpointOperation,
+    environment: TokenEnvironment,
+    detail: str,
+) -> ReadToolResult:
+    return {
+        "status": "network_error",
+        "tool_name": "saxo_call_registered_endpoint",
+        "call_class": _call_class("network_error", environment),
+        "operation_id": operation.operation_id,
+        "method": operation.method,
+        "path": operation.path_template,
+        "environment": environment,
         "network_call_made": True,
         "detail": detail,
         "network_error_type": detail,
@@ -228,7 +327,7 @@ def _network_error(operation: EndpointOperation, detail: str) -> ReadToolResult:
         "network_error_message_redacted": redact_text(detail),
         "arbitrary_url_allowed": False,
         "live_write": False,
-        "live_access": False,
+        "live_access": environment == "LIVE",
         "auth_exercised": operation.auth_requirement != "none",
         "trading_ready": False,
         "does_not_verify": list(READ_DOES_NOT_VERIFY),
@@ -257,6 +356,17 @@ def _response_body(response: httpx2.Response) -> ReadLeaf:
     if not response.content:
         return None
     return redact_text(response.text)
+
+
+def _call_class(status: str, environment: TokenEnvironment) -> str:
+    prefix = "live" if environment == "LIVE" else "sim"
+    match status:
+        case "passed":
+            return f"{prefix}_read_succeeded"
+        case "network_error":
+            return f"{prefix}_read_attempted"
+        case _:
+            return f"{prefix}_read_http_error"
 
 
 def _denied_class(reason: str) -> str:
