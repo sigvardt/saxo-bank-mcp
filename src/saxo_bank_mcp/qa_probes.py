@@ -14,7 +14,12 @@ from fastmcp import Client
 from pydantic import TypeAdapter
 
 from saxo_bank_mcp._evidence import JsonValue, now_utc, write_json
-from saxo_bank_mcp._redaction import redact_json, redact_text, scan_secret_paths
+from saxo_bank_mcp._redaction import (
+    redact_json,
+    redact_text,
+    scan_secret_paths,
+    secret_scan_pattern_classes,
+)
 from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.qa_auth_probes import handle_auth_status, handle_sim_auth, handle_token_cache
@@ -400,6 +405,7 @@ def handle_secret_scan(out: Path, paths: list[str]) -> int:
                 "credential regex scan",
             ),
             "paths": list(paths),
+            "pattern_classes": list(secret_scan_pattern_classes()),
             "findings": findings,
             "scan_errors": scan_errors,
         },

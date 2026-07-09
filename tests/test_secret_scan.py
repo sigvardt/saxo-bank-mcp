@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
 
+import pytest
+
 from saxo_bank_mcp._redaction import scan_secret_paths
 
 
@@ -39,6 +41,7 @@ def test_secret_scan_still_reports_literal_python_token_values(tmp_path: Path) -
     assert findings == [
         {
             "path": str(source),
+            "pattern_class": "credential_regex",
             "pattern": "access_?token['\\\"]?\\s*[:=]\\s*['\\\"]?[^'\\\"\\s{}&?=]{12,}",
         },
     ]
@@ -60,4 +63,43 @@ def test_secret_scan_reports_bare_jwt_shaped_token(tmp_path: Path) -> None:
     assert scan_errors == []
     assert len(findings) == 1
     assert findings[0]["path"] == str(source)
+    assert findings[0]["pattern_class"] == "credential_regex"
     assert "eyJ" in str(findings[0]["pattern"])
+
+
+def test_secret_scan_reports_email_addresses(tmp_path: Path) -> None:
+    source = tmp_path / "email.txt"
+    address = "person" + "@example.invalid"
+    source.write_text(f"contact={address}\n", encoding="utf-8")
+
+    findings, scan_errors = scan_secret_paths([str(source)])
+
+    assert scan_errors == []
+    assert findings == [
+        {
+            "path": str(source),
+            "pattern_class": "email_address",
+            "pattern": "\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b",
+        },
+    ]
+
+
+def test_secret_scan_reports_configured_person_identifier_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "review.md"
+    sensitive_name = "Sensitive Person"
+    monkeypatch.setenv("SAXO_MCP_REDACT_PERSON_NAMES", sensitive_name)
+    source.write_text("search pattern mentioned Sensitive\n", encoding="utf-8")
+
+    findings, scan_errors = scan_secret_paths([str(source)])
+
+    assert scan_errors == []
+    assert findings == [
+        {
+            "path": str(source),
+            "pattern_class": "person_identifier_token",
+            "pattern": "<person-identifier-token>",
+        },
+    ]
