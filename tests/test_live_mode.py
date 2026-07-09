@@ -14,7 +14,7 @@ from saxo_bank_mcp.live_mode import live_cached_token_for_tool
 from saxo_bank_mcp.mcp_token_state import CachedTokenBlocked, cached_token_for_tool
 from saxo_bank_mcp.token_cache import save_token_cache
 
-EXPECTED_LIVE_NETWORK_READ_COUNT: Final = 4
+EXPECTED_LIVE_NETWORK_READ_COUNT: Final = 8
 
 
 def test_live_read_probe_writes_no_credentials_artifact(
@@ -127,6 +127,30 @@ def test_live_read_probe_records_all_read_tool_payloads(
                 "network_call_made": True,
                 "auth_exercised": True,
             },
+            "saxo_call_registered_endpoint_balances": {
+                "status": "passed",
+                "tool_name": "saxo_call_registered_endpoint",
+                "network_call_made": True,
+                "auth_exercised": True,
+            },
+            "saxo_call_registered_endpoint_positions": {
+                "status": "passed",
+                "tool_name": "saxo_call_registered_endpoint",
+                "network_call_made": True,
+                "auth_exercised": True,
+            },
+            "saxo_call_registered_endpoint_orders": {
+                "status": "passed",
+                "tool_name": "saxo_call_registered_endpoint",
+                "network_call_made": True,
+                "auth_exercised": True,
+            },
+            "saxo_call_registered_endpoint_prices": {
+                "status": "passed",
+                "tool_name": "saxo_call_registered_endpoint",
+                "network_call_made": True,
+                "auth_exercised": True,
+            },
         }
 
     monkeypatch.setattr("saxo_bank_mcp.qa_probes.call_live_read_payloads", fake_live_payloads)
@@ -148,7 +172,19 @@ def test_live_read_probe_records_all_read_tool_payloads(
         "saxo_list_registered_endpoints",
         "saxo_call_registered_endpoint_public_diagnostics",
         "saxo_call_registered_endpoint_authenticated_account",
+        "saxo_call_registered_endpoint_balances",
+        "saxo_call_registered_endpoint_positions",
+        "saxo_call_registered_endpoint_orders",
+        "saxo_call_registered_endpoint_prices",
     ]
+    assert report["live_read_coverage"] == {
+        "accounts": True,
+        "balances": True,
+        "positions": True,
+        "orders": True,
+        "prices": True,
+        "streaming": "not_applicable_to_read_only_get_tools",
+    }
     assert report["authenticated_registered_read_passed"] is True
     assert report["network_read_count"] == EXPECTED_LIVE_NETWORK_READ_COUNT
     assert report["live_write_called"] is False

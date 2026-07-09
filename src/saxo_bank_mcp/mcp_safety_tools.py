@@ -35,10 +35,10 @@ COMMIT_TOOL_DESCRIPTION: Final = (
 )
 
 
-def saxo_safety_status() -> dict[str, JsonValue]:
+def saxo_safety_status() -> ToolResult:
     status = SafetyKernel().status()
     status["tool_metadata"] = tool_metadata()
-    return status
+    return ToolResult(structured_content=status)
 
 
 def saxo_create_write_preview(  # noqa: PLR0913

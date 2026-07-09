@@ -81,6 +81,34 @@ async def call_live_read_payloads() -> dict[str, dict[str, JsonValue]]:
             "saxo_call_registered_endpoint",
             {"method": "GET", "path": "/port/v1/accounts/me"},
         ),
+        "saxo_call_registered_endpoint_balances": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {"method": "GET", "path": "/port/v1/balances/me"},
+        ),
+        "saxo_call_registered_endpoint_positions": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {
+                "method": "GET",
+                "path": "/port/v1/positions/me",
+                "params": {"$top": "1"},
+            },
+        ),
+        "saxo_call_registered_endpoint_orders": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {
+                "method": "GET",
+                "path": "/port/v1/orders/me",
+                "params": {"$top": "1"},
+            },
+        ),
+        "saxo_call_registered_endpoint_prices": await call_tool_payload(
+            "saxo_call_registered_endpoint",
+            {
+                "method": "GET",
+                "path": "/trade/v1/infoprices",
+                "params": {"Uic": "21", "AssetType": "FxSpot"},
+            },
+        ),
     }
 
 
@@ -275,6 +303,17 @@ def handle_live_read(out: Path, skip_out: Path) -> int:
             )
             is True
         ),
+        "live_read_coverage": {
+            "accounts": tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
+            == "passed",
+            "balances": tool_statuses.get("saxo_call_registered_endpoint_balances")
+            == "passed",
+            "positions": tool_statuses.get("saxo_call_registered_endpoint_positions")
+            == "passed",
+            "orders": tool_statuses.get("saxo_call_registered_endpoint_orders") == "passed",
+            "prices": tool_statuses.get("saxo_call_registered_endpoint_prices") == "passed",
+            "streaming": "not_applicable_to_read_only_get_tools",
+        },
         "network_call_made": any(
             bool(payload.get("network_call_made", False)) for payload in payloads.values()
         ),
@@ -399,6 +438,10 @@ def _live_read_suite_passed(tool_statuses: Mapping[str, str]) -> bool:
         and tool_statuses.get("saxo_call_registered_endpoint_public_diagnostics") == "passed"
         and tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
         == "passed"
+        and tool_statuses.get("saxo_call_registered_endpoint_balances") == "passed"
+        and tool_statuses.get("saxo_call_registered_endpoint_positions") == "passed"
+        and tool_statuses.get("saxo_call_registered_endpoint_orders") == "passed"
+        and tool_statuses.get("saxo_call_registered_endpoint_prices") == "passed"
     )
 
 
