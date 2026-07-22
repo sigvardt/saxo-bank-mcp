@@ -8,6 +8,8 @@ from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.tool_metadata_live import LIVE_TOOL_METADATA
 from saxo_bank_mcp.tool_metadata_types import ToolEnvironment, ToolMetadata, WriteEffect
 
+# SIZE_OK: declarative reviewed metadata table; splitting hides one-to-one auditability.
+
 __all__ = (
     "ToolEnvironment",
     "ToolMetadata",
@@ -154,13 +156,15 @@ _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
             "agent_hint": "Approves only local simulation. It does not call Saxo.",
         },
         "saxo_create_order_preview": {
-            "tool_class": "sim_trade_precheck",
-            "environment_support": ["SIM"],
-            "write_effect": "sim_network",
-            "state_changing": False,
+            "tool_class": "order_precheck_preview",
+            "environment_support": ["SIM", "LIVE_WRITE"],
+            "write_effect": "live_network",
+            "state_changing": True,
             "safe_in_live_read_mode": False,
             "agent_hint": (
-                "SIM-only trade pre-check. It refuses before network when configured for LIVE."
+                "Runs Saxo order precheck in configured SIM or LIVE-write mode and creates "
+                "only a local preview/approval token. The preview/precheck does not place, "
+                "modify, or cancel an order."
             ),
         },
         "saxo_get_multileg_order_defaults": {
