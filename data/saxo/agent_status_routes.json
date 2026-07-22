@@ -1,0 +1,665 @@
+{
+  "source": "reviewed Todo 4 status and recovery source",
+  "status_module_classification": {
+    "excluded": [
+      {
+        "module": "src/saxo_bank_mcp/endpoint_registry.py",
+        "reason": "OpenAPI inventory status values, not MCP tool result statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/hard_task_manifest.py",
+        "reason": "Evidence manifest/report status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/hard_task_summary.py",
+        "reason": "Evidence summary status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_evidence_bundle.py",
+        "reason": "Evidence bundle status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_evidence_gate_validation.py",
+        "reason": "Evidence gate status model, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_evidence_release_models.py",
+        "reason": "Evidence release model status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_evidence_release_proof_models.py",
+        "reason": "Evidence release proof model status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_login.py",
+        "reason": "Standalone LIVE login CLI status, not an MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_accepted_models.py",
+        "reason": "Proof model for accepted precheck artifacts, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_ledger_models.py",
+        "reason": "Safe ledger artifact status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_proof_artifact.py",
+        "reason": "Proof artifact status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_proof_models.py",
+        "reason": "Proof state model statuses, not runtime MCP tool results."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_proof_publication.py",
+        "reason": "Proof publication status, not a runtime MCP tool result."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_token_refresh.py",
+        "reason": "Internal token refresh state, converted to auth_required before tool response."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_live_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_manual_live.py",
+        "reason": "Manual QA report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_mcp_probe_calls.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_nontrade_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_order_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_prod_readiness.py",
+        "reason": "QA readiness report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_read_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_safety_probes.py",
+        "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/streaming_transport.py",
+        "reason": "Streaming transport helper has internal snapshot status; final tool statuses are in streaming_execution."
+      },
+      {
+        "module": "src/saxo_bank_mcp/tribunal_index.py",
+        "reason": "Tribunal report status, not production MCP tool response truth."
+      }
+    ],
+    "included": [
+      {
+        "module": "src/saxo_bank_mcp/fastmcp_logging_safety.py",
+        "reason": "FastMCP validation and unknown-tool wrappers return agent-visible ToolResult statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_mode.py",
+        "reason": "LIVE read/write gate helpers return ToolResult payloads used by registered tools."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_results.py",
+        "reason": "LIVE precheck result builder returns registered tool payload statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/live_precheck_tool.py",
+        "reason": "LIVE precheck tool validation returns registered tool payload statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_auth_tools.py",
+        "reason": "Registered auth/session tools return these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_entitlement_tools.py",
+        "reason": "Registered entitlement tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_live_account_tools.py",
+        "reason": "Registered LIVE account list tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_live_session_tools.py",
+        "reason": "Registered session capability tool can route through LIVE helpers and passed status."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_live_trade_tools.py",
+        "reason": "Registered LIVE precheck tool returns these account and instrument statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_portal_token_tools.py",
+        "reason": "Registered portal token cache tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_request_ledger_tools.py",
+        "reason": "Registered safe request ledger tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_safety_tools.py",
+        "reason": "Registered safety tools return denial statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_tool_results.py",
+        "reason": "Shared registered auth/session tool result helpers return these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_trade_tools.py",
+        "reason": "Registered trade helper tools return these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_trading_write_tools.py",
+        "reason": "Registered generic trading write tools return these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/order_mutation_execution.py",
+        "reason": "Registered order mutation execution returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/read_tool_execution.py",
+        "reason": "Registered read gateway returns live_not_called through this helper."
+      },
+      {
+        "module": "src/saxo_bank_mcp/read_tool_results.py",
+        "reason": "Registered read gateway result helpers return these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/read_tools.py",
+        "reason": "Registered read gateway tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/registry_list_tools.py",
+        "reason": "Registered endpoint catalog tool returns metadata status."
+      },
+      {
+        "module": "src/saxo_bank_mcp/safety.py",
+        "reason": "Safety kernel returns preview, approval, denial, and status-tool payloads."
+      },
+      {
+        "module": "src/saxo_bank_mcp/safety_models.py",
+        "reason": "Safety result TypedDict literals define registered safety statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/server.py",
+        "reason": "Registered health tool returns passed status."
+      },
+      {
+        "module": "src/saxo_bank_mcp/streaming_execution.py",
+        "reason": "Registered streaming tools return these final statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/streaming_tool_payloads.py",
+        "reason": "Registered streaming tools route auth, denial, and propagated payload statuses through these helpers."
+      },
+      {
+        "module": "src/saxo_bank_mcp/trading_write_execution.py",
+        "reason": "Registered generic trading write execution returns these statuses."
+      }
+    ]
+  },
+  "status_routes": [
+    {
+      "mutation_possible": false,
+      "next_action": "choose an account ID from the current LIVE account list before retrying the read-only precheck",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The selected LIVE account ID is not valid for the current login. No order was placed.",
+      "source": "mcp_live_trade_tools._select_account",
+      "status": "account_id_invalid",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "inspect the LIVE account-list HTTP status before retrying the read-only account call",
+      "retry_class": "inspect_status_then_retry",
+      "safe_user_wording": "The LIVE account list call failed. No write was sent.",
+      "source": "mcp_live_account_tools.saxo_list_live_accounts",
+      "status": "account_lookup_failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "retry after account lookup service recovery or inspect the account lookup HTTP failure",
+      "retry_class": "wait_then_retry_read_precheck",
+      "safe_user_wording": "The account lookup step was unavailable. No order was placed.",
+      "source": "live_precheck_results.http_failure_result",
+      "status": "account_lookup_unavailable",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "choose a current process-scoped account reference before retrying the read-only precheck",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The selected LIVE account reference is not valid for the current login. No order was placed.",
+      "source": "mcp_live_trade_tools._select_account",
+      "status": "account_ref_invalid",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "list LIVE accounts and pass account_id or account_ref before retrying the read-only precheck",
+      "retry_class": "choose_account_then_retry",
+      "safe_user_wording": "A LIVE account must be selected before precheck. No order was placed.",
+      "source": "mcp_live_trade_tools._select_account",
+      "status": "account_selection_required",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "use the visible account ID or process-scoped account reference for a later read-only precheck",
+      "retry_class": "not_needed",
+      "safe_user_wording": "LIVE accounts were listed. No order was placed.",
+      "source": "mcp_live_account_tools.saxo_list_live_accounts",
+      "status": "accounts_listed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "execute the exact approved request once",
+      "retry_class": "execute_once_with_bound_request",
+      "safe_user_wording": "The request is approved for one execution only.",
+      "source": "safety_models.SafetyStatus",
+      "status": "approved_for_execution",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "execute the bound SIM request once",
+      "retry_class": "execute_once_in_sim",
+      "safe_user_wording": "The SIM preview is approved for one simulated execution.",
+      "source": "safety_models.SafetyStatus",
+      "status": "approved_for_simulation",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "fix the named auth or cache requirement",
+      "retry_class": "correct_auth_then_retry",
+      "safe_user_wording": "Authentication or session setup is missing. No write was sent.",
+      "source": "mcp_tool_results/read_tool_results/order/trading/streaming tools",
+      "status": "auth_required",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "refresh LIVE authentication before retrying the read-only precheck",
+      "retry_class": "correct_live_auth_then_retry",
+      "safe_user_wording": "The LIVE precheck authentication failed. No order was placed.",
+      "source": "live_precheck_results._HTTP_FAILURE_STATUSES",
+      "status": "authentication_required",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "complete Saxo login and exchange the returned code",
+      "retry_class": "continue_pkce",
+      "safe_user_wording": "The login URL is ready. It does not prove account access.",
+      "source": "mcp_auth_tools",
+      "status": "authorization_url_ready",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "retry with replace_existing_cache=true only after deciding to discard the existing SIM cache or pending login",
+      "retry_class": "explicit_replace_only",
+      "safe_user_wording": "The existing SIM token cache or pending login was left unchanged.",
+      "source": "mcp_portal_token_tools.saxo_cache_sim_access_token",
+      "status": "cache_replace_blocked",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "retry remote subscription cleanup and reconcile local context state",
+      "retry_class": "cleanup_before_retry",
+      "safe_user_wording": "A remote streaming subscription may still exist. Cleanup did not complete.",
+      "source": "streaming_execution",
+      "status": "cleanup_remote_failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "run the bounded scenario before claiming negative proof",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The local request ledger was cleared.",
+      "source": "mcp_request_ledger_tools",
+      "status": "cleared",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "record identifiers and readback proof",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The mutation completed.",
+      "source": "order_mutation_execution/trading_write_execution",
+      "status": "completed",
+      "unqualified_mutation_success": true
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "read back orders and trade messages",
+      "retry_class": "blind_retry_forbidden",
+      "safe_user_wording": "The write likely occurred, but proof is incomplete.",
+      "source": "order_mutation_execution",
+      "status": "completed_unverified",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "clean up the subscription context before any new attempt",
+      "retry_class": "cleanup_before_retry",
+      "safe_user_wording": "A streaming subscription may exist, but no usable price frame arrived.",
+      "source": "streaming_execution",
+      "status": "control_only_no_data",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "fix the named blocker or use the allowed alternative",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The request was denied before a mutation was sent.",
+      "source": "read_tool_results/mcp_safety_tools/order/trading/trade tools",
+      "status": "denied",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "fetch, show, and record required disclaimer handling",
+      "retry_class": "handle_disclaimer_first",
+      "safe_user_wording": "A required disclaimer blocks execution until it is handled.",
+      "source": "live_precheck_results",
+      "status": "disclaimer_required",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "check whether the prior request was accepted",
+      "retry_class": "blind_retry_forbidden",
+      "safe_user_wording": "The broker reported a duplicate or conflict. The prior write may exist.",
+      "source": "trading_write_execution",
+      "status": "duplicate_or_conflict",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "refresh auth or inspect redacted entitlement response shape",
+      "retry_class": "correct_auth_or_response_then_retry",
+      "safe_user_wording": "Entitlements were not verified. No write was sent.",
+      "source": "mcp_entitlement_tools",
+      "status": "entitlements_failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "inspect error and operation boundary before retry",
+      "retry_class": "inspect_before_retry",
+      "safe_user_wording": "The operation failed. Do not treat it as completed.",
+      "source": "order_mutation_models/trading_write_execution",
+      "status": "failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "resolve LIVE permission or security blocker before retrying the read-only precheck",
+      "retry_class": "resolve_permission_then_retry",
+      "safe_user_wording": "Saxo forbade the LIVE precheck request. No order was placed.",
+      "source": "live_precheck_results._HTTP_FAILURE_STATUSES",
+      "status": "forbidden",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "handle the HTTP status and any retry-after value",
+      "retry_class": "inspect_status_then_retry",
+      "safe_user_wording": "The broker returned an HTTP error. No success is proven.",
+      "source": "read_tools/mcp_trade_tools/live_precheck_results",
+      "status": "http_error",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "clean up local and remote subscription state",
+      "retry_class": "cleanup_before_retry",
+      "safe_user_wording": "A streaming subscription may exist, but no frame completed the scenario.",
+      "source": "streaming_execution",
+      "status": "incomplete_no_frame",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "retry after instrument lookup service recovery or inspect the instrument lookup HTTP failure",
+      "retry_class": "wait_then_retry_read_precheck",
+      "safe_user_wording": "The instrument lookup step was unavailable. No order was placed.",
+      "source": "live_precheck_results.http_failure_result",
+      "status": "instrument_lookup_unavailable",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "choose a tradable instrument before retrying the read-only precheck",
+      "retry_class": "choose_eligible_instrument_then_retry",
+      "safe_user_wording": "The instrument is not eligible for the LIVE precheck. No order was placed.",
+      "source": "mcp_live_trade_tools._validate_instrument",
+      "status": "instrument_not_eligible",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "treat account data as unverified and inspect the sanitized response shape",
+      "retry_class": "inspect_response_shape",
+      "safe_user_wording": "The LIVE account response shape was invalid. No order was placed.",
+      "source": "mcp_live_account_tools/mcp_live_trade_tools",
+      "status": "invalid_account_response",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "correct the MCP tool arguments using the tool schema",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The tool arguments were invalid. The tool body did not run.",
+      "source": "fastmcp_logging_safety._ValidationSafeFunctionTool",
+      "status": "invalid_arguments",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "treat precheck as unverified and inspect sanitized shape",
+      "retry_class": "inspect_response_shape",
+      "safe_user_wording": "The precheck response was invalid. No order approval is proven.",
+      "source": "live_precheck_results",
+      "status": "invalid_precheck_response",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "correct only the fields named by validation",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The request shape is invalid. Submitted values are not echoed.",
+      "source": "live_precheck_tool/trading_write_execution",
+      "status": "invalid_request",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "treat read data as unverified",
+      "retry_class": "inspect_response_shape",
+      "safe_user_wording": "The read response shape was invalid.",
+      "source": "read_tool_results",
+      "status": "invalid_response",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "enable LIVE reads and token cache if a LIVE read is required",
+      "retry_class": "configure_live_read_then_retry",
+      "safe_user_wording": "LIVE was not called because live-read gates are absent.",
+      "source": "mcp_entitlement_tools/read_tool_execution",
+      "status": "live_not_called",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "use the catalog to choose a registered route",
+      "retry_class": "not_needed",
+      "safe_user_wording": "This is local metadata only and does not prove trading readiness.",
+      "source": "registry_list_tools",
+      "status": "metadata_only_not_ready_for_trading",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "read back state before any retry if a mutation boundary may have been crossed",
+      "retry_class": "reconcile_if_post_boundary",
+      "safe_user_wording": "The network result is unclear. A write may already have reached Saxo.",
+      "source": "read_tool_results/order_mutation_execution/mcp_trade_tools",
+      "status": "network_error",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "preserve returned IDs and reconcile each component",
+      "retry_class": "blind_retry_forbidden",
+      "safe_user_wording": "Part of the write may have succeeded. Reconcile before doing anything else.",
+      "source": "order_mutation_models/trading_write_execution",
+      "status": "partial_success",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "interpret the tool-specific proof fields",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The read or local check passed. This is not mutation success.",
+      "source": "read_tools/mcp_trade_tools/mcp_entitlement_tools/mcp_request_ledger_tools",
+      "status": "passed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "record precheck proof; do not call it approval",
+      "retry_class": "not_needed",
+      "safe_user_wording": "Saxo accepted a read-only precheck. No order was placed.",
+      "source": "live_precheck_results",
+      "status": "precheck_accepted",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "resolve blockers before preview or execution",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "The precheck rejected the order. No order was placed.",
+      "source": "live_precheck_results",
+      "status": "precheck_rejected",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "retry the read-only precheck only after service recovery or retry-after handling",
+      "retry_class": "wait_then_retry_read_precheck",
+      "safe_user_wording": "The read-only precheck endpoint was unavailable. No order was placed.",
+      "source": "live_precheck_results.http_failure_result",
+      "status": "precheck_unavailable",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "execute once in SIM or get exact LIVE chat approval first",
+      "retry_class": "execute_once_if_allowed",
+      "safe_user_wording": "A preview was created. It did not place, change, or cancel anything.",
+      "source": "safety_models/trading_write_execution/mcp_trade_tools",
+      "status": "preview_created",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "honor backoff and reconcile if request may have reached the write boundary",
+      "retry_class": "wait_then_reconcile",
+      "safe_user_wording": "Saxo rate-limited the request. Do not retry blindly.",
+      "source": "order_mutation_models/trading_write_execution/live_precheck_results",
+      "status": "rate_limited",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "satisfy the named LIVE read or write gate before retrying",
+      "retry_class": "satisfy_gate_then_retry",
+      "safe_user_wording": "The LIVE request was refused before a write was sent.",
+      "source": "live_mode/mcp_live_account_tools/mcp_live_trade_tools",
+      "status": "refused",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "refresh or replace token before using capability fields",
+      "retry_class": "correct_session_then_retry",
+      "safe_user_wording": "Session capabilities were not verified.",
+      "source": "mcp_tool_results",
+      "status": "session_capabilities_failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "call session capabilities or required read proof next",
+      "retry_class": "verify_session_next",
+      "safe_user_wording": "A token was cached locally. Account access is not proven yet.",
+      "source": "mcp_auth_tools/mcp_portal_token_tools",
+      "status": "token_cached",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "call session capabilities or required read proof next",
+      "retry_class": "verify_session_next",
+      "safe_user_wording": "The token was refreshed. Trading readiness is not proven yet.",
+      "source": "mcp_auth_tools",
+      "status": "token_refreshed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "inspect logs and reconcile state for mutation-capable tools before retrying",
+      "retry_class": "inspect_before_retry",
+      "safe_user_wording": "The tool failed unexpectedly. Do not treat the result as completed.",
+      "source": "fastmcp_logging_safety.generic_tool_error_result",
+      "status": "tool_error",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "reconcile using broker IDs, request IDs, orders, and messages",
+      "retry_class": "blind_retry_forbidden",
+      "safe_user_wording": "The outcome is unknown and may already be committed.",
+      "source": "order_mutation_models/trading_write_execution",
+      "status": "unknown_state",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "call a registered Saxo MCP tool name from the catalog",
+      "retry_class": "correct_tool_name_then_retry",
+      "safe_user_wording": "The requested tool name is not registered.",
+      "source": "fastmcp_logging_safety.SafeFastMCP.call_tool",
+      "status": "unknown_tool",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "read back order state and preserve evidence",
+      "retry_class": "reconcile_immediately",
+      "safe_user_wording": "The precheck response unexpectedly contained an order identifier. Treat state as unsafe.",
+      "source": "live_precheck_results",
+      "status": "unsafe_precheck_response",
+      "unqualified_mutation_success": false
+    }
+  ]
+}
