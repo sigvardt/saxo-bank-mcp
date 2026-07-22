@@ -7,7 +7,7 @@ from pydantic import TypeAdapter
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.order_mutation_models import JsonObject, OrderWriteSpec
-from saxo_bank_mcp.safety_models import WritePreviewRequest
+from saxo_bank_mcp.safety_models import SafetyConfig, WritePreviewRequest
 
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
 FLOAT_EPSILON: Final = 0.000_000_001
@@ -33,6 +33,33 @@ def request_body_coherence_reasons(
         reasons.extend(_required_float_reasons(body_quantity, request.quantity, "quantity"))
     if body_quantity is not None and not _same_number(body_quantity, request.quantity):
         reasons.append("request_body_quantity_mismatch")
+    return tuple(reasons)
+
+
+def multileg_body_safety_reasons(
+    body: Mapping[str, JsonValue],
+    config: SafetyConfig,
+) -> tuple[str, ...]:
+    raw_legs = body.get("Legs")
+    if isinstance(raw_legs, str) or not isinstance(raw_legs, Sequence) or not raw_legs:
+        return ("request_body_legs_missing",)
+    legs = tuple(_object(value) for value in raw_legs)
+    if any(leg is None for leg in legs):
+        return ("request_body_leg_invalid",)
+
+    reasons: list[str] = []
+    uics = tuple(_number(leg.get("Uic")) for leg in legs if leg is not None)
+    quantities = tuple(_number(leg.get("Amount")) for leg in legs if leg is not None)
+    if any(value is None for value in uics):
+        reasons.append("request_body_leg_instrument_uic_missing")
+    elif not config.instrument_allowlist:
+        reasons.append("instrument_allowlist_missing")
+    elif any(int(value) not in config.instrument_allowlist for value in uics if value is not None):
+        reasons.append("instrument_not_allowlisted")
+    if any(value is None for value in quantities):
+        reasons.append("request_body_leg_quantity_missing")
+    elif any(abs(value) > config.max_quantity for value in quantities if value is not None):
+        reasons.append("quantity_limit_exceeded")
     return tuple(reasons)
 
 

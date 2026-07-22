@@ -37,17 +37,19 @@ not add arbitrary host, URL, or method escape hatches.
 ## Safety Config
 
 Keep raw audit logs outside git. Keep token caches outside the repository and
-common sync folders. Use the safety status and approval probes before any SIM
+common sync folders. Use the safety status and preview probes before any SIM
 write test:
 
 ```bash
 uv run python -m saxo_bank_mcp.qa approval-happy --out .omo/evidence/saxo-bank-mcp/approval-happy.json
-uv run python -m saxo_bank_mcp.qa approval-denied --missing approval-factor --out .omo/evidence/saxo-bank-mcp/approval-denied.json
+uv run python -m saxo_bank_mcp.qa approval-denied --missing preview-token --out .omo/evidence/saxo-bank-mcp/approval-denied.json
 ```
 
-LIVE writes are disabled by default. A future live-write plan must provide a
-kill switch, account allowlist, low limits, and two independent approval
-factors.
+LIVE writes are disabled by default. Enablement requires a kill switch, account
+allowlist, low limits, and one exact-action approval statement sent by the human
+in agent chat. It is single-use and bound to the preview fingerprint. No second
+person or second factor is required. The kill switch, allowlists, limits, and
+environment are checked again immediately before execution.
 
 ## LIVE Read-Only Setup
 
@@ -108,9 +110,9 @@ disclaimers are blocking tool errors. `saxo_precheck_live_order` cannot place,
 change, or cancel an order, or respond to a disclaimer.
 
 Agent-run prechecks set `ManualOrder=false` because no person has confirmed an
-order for transmission. A future LIVE placement may set `ManualOrder=true` only
-after the exact order receives both required human approval factors. Precheck
-acceptance is never one of those approval factors.
+order for transmission. A LIVE placement may set `ManualOrder=true` only
+after the exact order receives the required human approval in agent chat.
+Precheck acceptance is never that approval.
 
 For agent-visible request evidence, call `saxo_get_safe_request_ledger` with
 `clear=true` before the task and without `clear` after it. The result is scoped
@@ -180,7 +182,7 @@ span rather than the rest of the line.
 Do not record raw account identifiers in evidence. If credentials are absent,
 keep the skip artifact and do not treat LIVE reads as verified.
 
-## Future LIVE Write Plan
+## LIVE Write Validation Plan
 
 SIM proves the MCP implementation against Saxo's demo environment. It does not
 prove LIVE readiness by itself because Saxo documents separate LIVE app
@@ -190,6 +192,11 @@ https://www.developer.saxo/openapi/learn/environments
 
 This plan does not authorize a LIVE write. Keep writes disabled until the
 operator starts this separate phase and approves the exact real-money test.
+
+The production order and registered Trading-write paths are implemented. SIM
+verification does not replace the separate LIVE validation below. Required
+disclaimer responses use `saxo_register_disclaimer_response` for the preview and
+`saxo_execute_trading_write` after the exact one-chat approval.
 
 Treat the move to LIVE writes as a staged proof:
 
@@ -202,7 +209,7 @@ Treat the move to LIVE writes as a staged proof:
 4. Keep LIVE writes disabled until the read-only evidence is clean.
 5. Enable LIVE writes only with all gates present: explicit live-write flag,
    account allowlist, low value and quantity limits, kill switch, server-created
-   preview token, and two independent approval factors.
+   preview token, and one exact-action human approval statement in agent chat.
 6. Run precheck/defaults first. Do not place an order until precheck evidence is
    clean and the exact account, instrument, side, size, and order type are
    approved.

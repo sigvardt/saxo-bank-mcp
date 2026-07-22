@@ -29,9 +29,9 @@ PREVIEW_TOOL_DESCRIPTION: Final = (
     "authorizes a later local simulation commit."
 )
 COMMIT_TOOL_DESCRIPTION: Final = (
-    "Simulates local approval only when the preview token and a separate out-of-band approval "
-    "factor are present. Agents must not derive or expose that factor. Does not call Saxo, place "
-    "orders, change account state, or prove live-write readiness."
+    "Consumes a local SIM preview token without human approval. It does not call Saxo, place "
+    "orders, change account state, or prove LIVE-write readiness. Future LIVE writes use one "
+    "exact-action approval statement sent by the human in the agent chat."
 )
 
 
@@ -170,7 +170,7 @@ def saxo_commit_write_preview(
     ],
     approval_factor: Annotated[
         str | None,
-        Field(description="Separate approval factor; SIM tests use a test-only factor"),
+        Field(description="Deprecated compatibility value; ignored for SIM previews"),
     ] = None,
 ) -> PreviewResult:
     return SafetyKernel().commit_preview(preview_token, approval_factor=approval_factor)

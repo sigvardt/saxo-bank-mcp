@@ -31,7 +31,7 @@ LIVE_WRITE_MISSING_REQUIREMENTS: Final[tuple[str, ...]] = (
     "low notional and quantity limits",
     "kill switch ready",
     "server-created preview token",
-    "two independent approval factors",
+    "one exact-action approval statement sent by the human in agent chat",
     "precheck/defaults before placement",
     "throttling and duplicate-submit guard",
     "redacted audit trail outside repository",

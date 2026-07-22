@@ -29,7 +29,7 @@ from saxo_bank_mcp.qa_trade_probes import (
     disclaimer_response_status,
 )
 
-EXPECTED_HARD_TASK_TOOL_COUNT = 13
+EXPECTED_HARD_TASK_TOOL_COUNT = 23
 
 
 async def resolve_test_account(
@@ -67,7 +67,7 @@ def test_hard_task_manifest_rejects_live_write_payload() -> None:
 
 
 def test_hard_task_manifest_rejects_risky_task_without_approval_gate() -> None:
-    spec = HARD_TASK_SPECS[0].model_copy(update={"requires_two_factor_approval": False})
+    spec = HARD_TASK_SPECS[0].model_copy(update={"requires_live_chat_approval": False})
 
     manifest = validate_hard_task_manifest(
         (spec,),
@@ -77,7 +77,7 @@ def test_hard_task_manifest_rejects_risky_task_without_approval_gate() -> None:
 
     assert manifest.status == "failed"
     assert manifest.validation_errors == (
-        f"{spec.tool_id}: risky task requires two-factor approval gate",
+        f"{spec.tool_id}: risky LIVE task requires one chat approval gate",
     )
 
 

@@ -12,7 +12,12 @@ from pydantic_core import PydanticCustomError
 from saxo_bank_mcp._evidence import JsonValue
 
 type SafetyEnvironment = Literal["SIM", "LIVE"]
-type SafetyStatus = Literal["preview_created", "approved_for_simulation", "denied"]
+type SafetyStatus = Literal[
+    "preview_created",
+    "approved_for_simulation",
+    "approved_for_execution",
+    "denied",
+]
 
 TEST_APPROVAL_FACTOR: Final = "SIM_TEST_APPROVED"
 PREVIEW_TTL_SECONDS: Final = 300
@@ -110,6 +115,8 @@ class PreviewResult(TypedDict):
     denial_reasons: NotRequired[list[str]]
     denial_reason: NotRequired[str]
     approval_factor_mode: NotRequired[str]
+    approval_prompt: NotRequired[str]
+    approval_summary: NotRequired[dict[str, JsonValue]]
     audit_path: NotRequired[str]
     audit_path_inside_repo: NotRequired[bool]
     audit_mode: NotRequired[str | None]
@@ -120,6 +127,7 @@ class StoredPreview:
     request: WritePreviewRequest
     request_fingerprint: str
     expires_at: datetime
+    environment: SafetyEnvironment
 
 
 def _safety_environment(raw: str | None) -> SafetyEnvironment:

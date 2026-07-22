@@ -97,6 +97,7 @@ def create_async_client(
     *,
     base_url: str = "",
     transport: httpx2.AsyncBaseTransport | None = None,
+    retries: int | None = None,
 ) -> httpx2.AsyncClient:
     sentinel = _TRANSPORT_SENTINEL.get()
     if sentinel is not None:
@@ -105,7 +106,7 @@ def create_async_client(
     effective_transport = (
         httpx2.AsyncHTTPTransport(
             http2=True,
-            retries=0 if request_ledger_active() else 3,
+            retries=(0 if request_ledger_active() else 3) if retries is None else retries,
             limits=_LIMITS,
             socket_options=_SOCKET_OPTIONS,
         )

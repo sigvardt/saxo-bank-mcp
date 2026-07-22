@@ -4,7 +4,9 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.audit import AuditPathError, append_audit_event
+from saxo_bank_mcp.live_approval import live_approval_statement
 from saxo_bank_mcp.safety_audit import (
     audit_mode,
     is_inside_repo,
@@ -12,7 +14,7 @@ from saxo_bank_mcp.safety_audit import (
     token_fingerprint,
     try_audit_denial,
 )
-from saxo_bank_mcp.safety_checks import preview_denial_reasons
+from saxo_bank_mcp.safety_checks import current_safety_reasons, preview_denial_reasons
 from saxo_bank_mcp.safety_models import (
     PREVIEW_TTL_SECONDS,
     SAFETY_TOOL_DOES_NOT_VERIFY,
@@ -28,6 +30,7 @@ from saxo_bank_mcp.safety_state import (
     committed_fingerprint_count,
     get_preview,
     is_committed,
+    is_preview_token_committed,
     mark_committed,
     pending_preview_count,
     rate_limit_reason,
@@ -81,6 +84,7 @@ class SafetyKernel:
             return self._deny_preview(request, fingerprint, denial_reasons)
 
         token = secrets.token_urlsafe(32)
+        preview_token_fingerprint = token_fingerprint(token)
         expires_at = datetime.now(UTC) + timedelta(seconds=PREVIEW_TTL_SECONDS)
         try:
             audit_path = append_audit_event(
@@ -92,36 +96,58 @@ class SafetyKernel:
                     "account_key": request.account_key,
                     "instrument_uic": request.instrument_uic,
                     "request_fingerprint": fingerprint,
-                    "preview_token_fingerprint": token_fingerprint(token),
+                    "preview_token_fingerprint": preview_token_fingerprint,
                 },
             )
         except (AuditPathError, OSError):
             return self._deny_preview(request, fingerprint, ["audit_write_failed"])
-        store_preview(token, StoredPreview(request, fingerprint, expires_at))
-        return {
+        store_preview(
+            token,
+            StoredPreview(request, fingerprint, expires_at, self.config.environment),
+        )
+        result: PreviewResult = {
             "status": "preview_created",
             "tool_name": "saxo_create_write_preview",
             "environment": self.config.environment,
             "request_fingerprint": fingerprint,
             "preview_token": token,
-            "preview_token_fingerprint": token_fingerprint(token),
+            "preview_token_fingerprint": preview_token_fingerprint,
             "preview_token_sensitivity": "sensitive local commit token; do not log or expose",
             "preview_token_expires_at": expires_at.isoformat(),
-            "approval_factor_mode": "test_only_sim",
+            "approval_factor_mode": (
+                "one_exact_action_chat_approval"
+                if self.config.environment == "LIVE"
+                else "autonomous_sim"
+            ),
             "audit_path": str(audit_path),
             "audit_path_inside_repo": is_inside_repo(audit_path),
             "audit_mode": audit_mode(audit_path),
             "saxo_endpoint_called": False,
             "execution_performed": False,
-            "simulation_only": True,
+            "simulation_only": self.config.environment == "SIM",
             "order_placed": False,
             "verifies": list(SAFETY_TOOL_VERIFIES),
             "does_not_verify": list(SAFETY_TOOL_DOES_NOT_VERIFY),
             "next_action": (
-                "operator supplies out-of-band approval_factor to "
-                "saxo_commit_write_preview; agent must not generate or guess it"
+                "ask the human to send approval_prompt in agent chat, then pass it unchanged "
+                "to saxo_commit_write_preview"
+                if self.config.environment == "LIVE"
+                else "call saxo_commit_write_preview; SIM needs no human approval"
             ),
         }
+        if self.config.environment == "LIVE":
+            result["approval_prompt"] = live_approval_statement(
+                f"{fingerprint}:{preview_token_fingerprint}",
+            )
+            result["approval_summary"] = {
+                "account_key_redacted": True,
+                "estimated_notional": request.estimated_notional,
+                "instrument_uic": request.instrument_uic,
+                "operation_id": request.operation_id,
+                "quantity": request.quantity,
+                "request_body": redact_json(request.request_body),
+            }
+        return result
 
     def commit_preview(
         self,
@@ -150,24 +176,34 @@ class SafetyKernel:
             )
         except (AuditPathError, OSError):
             return self._deny_commit(stored, "audit_write_failed")
-        mark_committed(stored.request_fingerprint)
+        mark_committed(
+            stored.request_fingerprint,
+            token_fingerprint(preview_token),
+        )
+        live = self.config.environment == "LIVE"
         return {
-            "status": "approved_for_simulation",
+            "status": "approved_for_execution" if live else "approved_for_simulation",
             "tool_name": "saxo_commit_write_preview",
             "environment": self.config.environment,
             "request_fingerprint": stored.request_fingerprint,
             "preview_token_fingerprint": token_fingerprint(preview_token),
-            "approval_factor_mode": "test_only_sim",
+            "approval_factor_mode": (
+                "one_exact_action_chat_approval" if live else "autonomous_sim"
+            ),
             "audit_path": str(audit_path),
             "audit_path_inside_repo": is_inside_repo(audit_path),
             "audit_mode": audit_mode(audit_path),
             "saxo_endpoint_called": False,
             "execution_performed": False,
-            "simulation_only": True,
+            "simulation_only": not live,
             "order_placed": False,
             "verifies": list(SAFETY_TOOL_VERIFIES),
             "does_not_verify": list(SAFETY_TOOL_DOES_NOT_VERIFY),
-            "next_action": "simulation approved; no order was placed",
+            "next_action": (
+                "exact LIVE request approved once; execution has not started"
+                if live
+                else "simulation approved; no order was placed"
+            ),
         }
 
     def _commit_denial_reason(
@@ -180,26 +216,36 @@ class SafetyKernel:
         stored = get_preview(preview_token)
         if stored is None:
             return None, "preview_token_invalid"
-        reasons = self._stored_commit_denial_reasons(stored, approval_factor)
+        reasons = self._stored_commit_denial_reasons(
+            stored,
+            preview_token,
+            approval_factor,
+        )
         return stored, reasons[0] if reasons else None
 
     def _stored_commit_denial_reasons(
         self,
         stored: StoredPreview,
+        preview_token: str,
         approval_factor: str | None,
     ) -> list[str]:
         reasons: list[str] = []
         if stored.expires_at <= datetime.now(UTC):
             reasons.append("preview_token_expired")
-        if approval_factor is None or not approval_factor.strip():
-            reasons.append("approval_factor_missing")
-        elif not secrets.compare_digest(approval_factor, TEST_APPROVAL_FACTOR):
-            reasons.append("approval_factor_invalid")
+        if stored.environment != self.config.environment:
+            reasons.append("preview_environment_changed")
+        reasons.extend(current_safety_reasons(self.config, stored.request))
         if self.config.environment == "LIVE":
-            reasons.append("live_environment_not_allowed")
-        if self.config.live_writes_enabled:
-            reasons.append("live_write_execution_disabled")
-        if is_committed(stored.request_fingerprint):
+            expected = live_approval_statement(
+                f"{stored.request_fingerprint}:{token_fingerprint(preview_token)}",
+            )
+            if approval_factor is None or not approval_factor.strip():
+                reasons.append("chat_approval_missing")
+            elif not secrets.compare_digest(approval_factor, expected):
+                reasons.append("chat_approval_mismatch")
+        if is_preview_token_committed(token_fingerprint(preview_token)) or is_committed(
+            stored.request_fingerprint,
+        ):
             reasons.append("duplicate_request")
         limited = rate_limit_reason()
         if limited is not None:

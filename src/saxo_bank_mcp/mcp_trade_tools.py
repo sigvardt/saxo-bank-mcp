@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import secrets
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Annotated, Final, cast
 
 import httpx2
@@ -19,12 +19,20 @@ from saxo_bank_mcp.config import (
     resolve_sim_auth_settings,
 )
 from saxo_bank_mcp.http_client import create_async_client
+from saxo_bank_mcp.live_mode import (
+    LiveReadSettingsError,
+    live_cached_token_for_tool,
+    live_read_auth_required,
+    resolve_live_read_settings,
+)
 from saxo_bank_mcp.mcp_token_state import (
     CachedTokenBlocked,
     CachedTokenReady,
     cached_token_for_tool,
 )
-from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, SafetyKernel, WritePreviewRequest
+from saxo_bank_mcp.order_mutation_guards import multileg_body_safety_reasons
+from saxo_bank_mcp.safety import SafetyKernel, WritePreviewRequest
+from saxo_bank_mcp.safety_models import SafetyConfig
 from saxo_bank_mcp.trade_preview import (
     DISCLAIMER_RESPONSE_ENDPOINT_PATH,
     TRADE_DOES_NOT_VERIFY,
@@ -42,12 +50,16 @@ from saxo_bank_mcp.trade_preview import (
     order_quantity,
     precheck_endpoint_for_order_kind,
 )
+from saxo_bank_mcp.trading_write_execution import prepare_registered_trading_write
+from saxo_bank_mcp.trading_write_registry import TradingWriteSpec
+from saxo_bank_mcp.trading_write_state import TradingWriteRequest
 
 ORDER_PREVIEW_TOOL_DESCRIPTION: Final = (
-    "Runs a SIM Saxo trade pre-check or evaluates a supplied redacted pre-check fixture, then "
+    "Runs a Saxo trade pre-check in the configured environment, or evaluates a supplied redacted "
+    "SIM fixture, then "
     "creates a local preview token only when account-currency risk and disclaimer state are known. "
-    "It refuses before network when configured for LIVE and does not place, modify, "
-    "or cancel orders."
+    "LIVE fixtures are refused. A LIVE preview returns the one exact-action approval statement "
+    "that must be sent by the human in agent chat. It does not place, modify, or cancel orders."
 )
 MULTILEG_DEFAULTS_TOOL_DESCRIPTION: Final = (
     "Fetches SIM multi-leg order defaults from Saxo when a token cache is available. It does not "
@@ -58,11 +70,34 @@ DISCLAIMER_LOOKUP_TOOL_DESCRIPTION: Final = (
     "submit disclaimer responses. It refuses before network when configured for LIVE."
 )
 DISCLAIMER_RESPONSE_TOOL_DESCRIPTION: Final = (
-    "Submits a SIM disclaimer response only after an explicit approval factor. It never places an "
-    "order and LIVE writes remain disabled."
+    "Submits a SIM disclaimer response without human approval. In LIVE it creates a short-lived "
+    "exact-request preview; one human must send the returned approval statement in agent chat, "
+    "then the agent calls saxo_execute_trading_write. It never places an order by itself."
+)
+DISCLAIMER_WRITE_SPEC: Final = TradingWriteSpec(
+    operation_id="post.dm.v2.disclaimers",
+    method="POST",
+    path_template=DISCLAIMER_RESPONSE_ENDPOINT_PATH,
+    service="Disclaimer Management",
+    documentation_url=(
+        "https://www.developer.saxo/openapi/referencedocs/dm/v2/disclaimermanagement"
+    ),
+    cleanup_rule=None,
+    risk="state_change",
+    path_parameter_names=(),
+    query_parameter_names=(),
+    required_query_parameter_names=(),
+    specialized_tool="saxo_register_disclaimer_response",
 )
 HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
+
+
+@dataclass(frozen=True, slots=True)
+class TradePrecheckAccess:
+    environment: SaxoEnvironment
+    rest_base_url: str
+    token: SaxoTokenSet
 
 
 async def saxo_create_order_preview(
@@ -89,15 +124,35 @@ async def saxo_create_order_preview(
     endpoint = precheck_endpoint_for_order_kind(order_kind)
     network_call_made = False
     source_precheck = precheck_response
+    environment = SaxoRuntimeConfig.from_env().requested_environment
+    if environment == SaxoEnvironment.LIVE and source_precheck is not None:
+        return _tool_result(
+            _denied(
+                "saxo_create_order_preview",
+                ["live_precheck_fixture_forbidden"],
+                order_kind=order_kind,
+                precheck_endpoint=endpoint,
+            ),
+        )
+    if environment == SaxoEnvironment.LIVE and order_body.get("ManualOrder") is not True:
+        return _tool_result(
+            _denied(
+                "saxo_create_order_preview",
+                ["live_manual_order_confirmation_required"],
+                order_kind=order_kind,
+                precheck_endpoint=endpoint,
+            ),
+        )
     if source_precheck is None:
-        token_or_result = _cached_token("saxo_create_order_preview")
-        if isinstance(token_or_result, ToolResult):
-            return token_or_result
+        access_or_result = _precheck_access("saxo_create_order_preview", environment)
+        if isinstance(access_or_result, ToolResult):
+            return access_or_result
         fetched = await _post_saxo_json(
             endpoint,
-            order_body,
-            token_or_result,
+            _precheck_body(order_body, environment),
+            access_or_result.token,
             tool_name="saxo_create_order_preview",
+            base_url=access_or_result.rest_base_url,
         )
         if isinstance(fetched, ToolResult):
             return fetched
@@ -174,18 +229,18 @@ async def saxo_register_disclaimer_response(
     user_input: Annotated[str | None, Field(description="UserInput if required")] = None,
     approval_factor: Annotated[
         str | None,
-        Field(description="Separate approval factor; SIM tests use a test-only factor"),
+        Field(description="Deprecated compatibility value; SIM does not require approval"),
     ] = None,
 ) -> ToolResult:
+    _ = approval_factor
     missing = [
         name
         for name, value in (
             ("disclaimer_context", disclaimer_context),
             ("disclaimer_token", disclaimer_token),
             ("response_type", response_type),
-            ("approval_factor", approval_factor),
         )
-        if value is None or not value.strip()
+        if not value.strip()
     ]
     if missing:
         return _tool_result(
@@ -194,16 +249,6 @@ async def saxo_register_disclaimer_response(
                 [f"{name}_missing" for name in missing],
             ),
         )
-    if approval_factor is None or not secrets.compare_digest(
-        approval_factor,
-        TEST_APPROVAL_FACTOR,
-    ):
-        return _tool_result(
-            _denied("saxo_register_disclaimer_response", ["approval_factor_invalid"]),
-        )
-    token_or_result = _cached_token("saxo_register_disclaimer_response")
-    if isinstance(token_or_result, ToolResult):
-        return token_or_result
     body: dict[str, JsonValue] = {
         "DisclaimerContext": disclaimer_context,
         "DisclaimerToken": disclaimer_token,
@@ -211,6 +256,28 @@ async def saxo_register_disclaimer_response(
     }
     if user_input is not None:
         body["UserInput"] = user_input
+    if SaxoRuntimeConfig.from_env().requested_environment == SaxoEnvironment.LIVE:
+        prepared = prepare_registered_trading_write(
+            TradingWriteRequest(
+                operation_id=DISCLAIMER_WRITE_SPEC.operation_id,
+                request_body=body,
+            ),
+            DISCLAIMER_WRITE_SPEC,
+            reported_tool_name="saxo_register_disclaimer_response",
+        )
+        payload = dict(prepared.structured_content or {})
+        payload.update(
+            {
+                "disclaimer_response_submitted": False,
+                "execution_tool": "saxo_execute_trading_write",
+                "order_placed": False,
+                "live_write": False,
+            },
+        )
+        return _tool_result(payload)
+    token_or_result = _cached_token("saxo_register_disclaimer_response")
+    if isinstance(token_or_result, ToolResult):
+        return token_or_result
     fetched = await _post_saxo_json(
         DISCLAIMER_RESPONSE_ENDPOINT_PATH,
         body,
@@ -251,6 +318,11 @@ def _preview_result(  # noqa: PLR0913
     )
     reasons = [
         *_order_input_reasons(order_body, precheck_response),
+        *(
+            multileg_body_safety_reasons(order_body, SafetyConfig.from_env())
+            if order_kind == "multileg"
+            else ()
+        ),
         *risk_reasons,
         *disclaimer_reasons,
     ]
@@ -319,9 +391,10 @@ async def _post_saxo_json(
     token: SaxoTokenSet,
     *,
     tool_name: str,
+    base_url: str = SIM_ENDPOINTS.rest_base_url,
 ) -> JsonObject | ToolResult:
     try:
-        async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
+        async with create_async_client(base_url=base_url, retries=0) as client:
             response = await client.post(path.lstrip("/"), json=body, headers=_headers(token))
     except httpx2.HTTPError as error:
         return _error_result(tool_name, "network_error", str(error))
@@ -369,6 +442,50 @@ def _cached_token(tool_name: str) -> SaxoTokenSet | ToolResult:
         case CachedTokenReady(token=token):
             return token
     raise AssertionError("unreachable cached token result")
+
+
+def _precheck_access(
+    tool_name: str,
+    environment: SaxoEnvironment,
+) -> TradePrecheckAccess | ToolResult:
+    match environment:
+        case SaxoEnvironment.SIM:
+            token_or_result = _cached_token(tool_name)
+            if isinstance(token_or_result, ToolResult):
+                return token_or_result
+            return TradePrecheckAccess(environment, SIM_ENDPOINTS.rest_base_url, token_or_result)
+        case SaxoEnvironment.LIVE:
+            try:
+                settings = resolve_live_read_settings()
+            except LiveReadSettingsError as error:
+                return ToolResult(
+                    structured_content=live_read_auth_required(tool_name, error.code),
+                    is_error=True,
+                )
+            token_or_result = live_cached_token_for_tool(tool_name, settings.cache_path)
+            if isinstance(token_or_result, dict):
+                return ToolResult(
+                    structured_content=token_or_result,
+                    is_error=True,
+                )
+            return TradePrecheckAccess(environment, settings.rest_base_url, token_or_result)
+
+
+def _precheck_body(
+    order_body: dict[str, JsonValue],
+    environment: SaxoEnvironment,
+) -> dict[str, JsonValue]:
+    if environment == SaxoEnvironment.SIM:
+        return order_body
+    body = dict(order_body)
+    body["ManualOrder"] = False
+    orders = body.get("Orders")
+    if isinstance(orders, list):
+        body["Orders"] = [
+            {**row, "ManualOrder": False} if isinstance(row, dict) else row
+            for row in orders
+        ]
+    return body
 
 
 def _sim_only_refusal(tool_name: str) -> ToolResult:

@@ -44,7 +44,7 @@ def test_live_write_refusal_still_refuses_when_only_enable_var_is_set(
         "low notional and quantity limits",
         "kill switch ready",
         "server-created preview token",
-        "two independent approval factors",
+        "one exact-action approval statement sent by the human in agent chat",
         "precheck/defaults before placement",
         "throttling and duplicate-submit guard",
         "redacted audit trail outside repository",

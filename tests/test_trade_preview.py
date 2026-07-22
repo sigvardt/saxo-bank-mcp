@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx2
 import pytest
 from fastmcp import Client
 from pydantic import TypeAdapter
 
+from saxo_bank_mcp import mcp_trade_tools as trade_tools
 from saxo_bank_mcp import qa
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.config import SaxoEnvironment
 from saxo_bank_mcp.safety import reset_safety_state
 from saxo_bank_mcp.server import mcp
 
@@ -73,6 +78,75 @@ async def test_order_preview_creates_token_from_known_precheck_fixture() -> None
     assert payload["order_placed"] is False
     assert payload["order_modified"] is False
     assert payload["order_cancelled"] is False
+
+
+@pytest.mark.anyio
+async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
+    sent: list[dict[str, JsonValue]] = []
+
+    def access(
+        _tool_name: str,
+        environment: SaxoEnvironment,
+    ) -> trade_tools.TradePrecheckAccess:
+        return trade_tools.TradePrecheckAccess(
+            environment=environment,
+            rest_base_url="https://gateway.saxobank.com/openapi/",
+            token=SaxoTokenSet(
+                access_token="live-access-token",  # noqa: S106
+                environment="LIVE",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(JSON_OBJECT_ADAPTER.validate_json(request.content))
+        return httpx2.Response(200, json=precheck_response(), request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(trade_tools, "_precheck_access", access)
+    monkeypatch.setattr(trade_tools, "create_async_client", client_factory)
+    intended_order = {**order_body(), "ManualOrder": True}
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": intended_order,
+                "disclaimer_response_state": "none",
+            },
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert payload["status"] == "preview_created"
+    assert payload["environment"] == "LIVE"
+    assert payload["approval_factor_mode"] == "one_exact_action_chat_approval"
+    assert str(payload["request_fingerprint"]) in str(payload["approval_prompt"])
+    summary = JSON_OBJECT_ADAPTER.validate_python(payload["approval_summary"])
+    summary_body = JSON_OBJECT_ADAPTER.validate_python(summary["request_body"])
+    assert summary["operation_id"] == "post.trade.v2.orders"
+    assert summary["instrument_uic"] == intended_order["Uic"]
+    assert summary["quantity"] == intended_order["Amount"]
+    assert summary_body["AccountKey"] == "<redacted>"
+    assert summary_body["BuySell"] == intended_order["BuySell"]
+    assert payload["network_call_made"] is True
+    assert payload["order_placed"] is False
+    assert sent[0]["ManualOrder"] is False
+    assert intended_order["ManualOrder"] is True
 
 
 @pytest.mark.anyio
@@ -260,6 +334,37 @@ async def test_sim_only_trade_read_helpers_refuse_in_live_environment(
         assert payload["network_call_made"] is False
         assert payload["live_write"] is False
         assert payload["order_placed"] is False
+
+
+@pytest.mark.anyio
+async def test_live_disclaimer_response_returns_exact_chat_approval_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_register_disclaimer_response",
+            {
+                "disclaimer_context": "sensitive-context",
+                "disclaimer_token": "sensitive-token",
+                "response_type": "Accepted",
+            },
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert payload["status"] == "preview_created"
+    assert payload["tool_name"] == "saxo_register_disclaimer_response"
+    assert payload["environment"] == "LIVE"
+    assert payload["approval_mode"] == "one_exact_action_chat_approval"
+    assert payload["approval_required"] is True
+    assert payload["network_call_made"] is False
+    assert payload["disclaimer_response_submitted"] is False
+    assert payload["execution_tool"] == "saxo_execute_trading_write"
+    assert str(payload["request_fingerprint"]) in str(payload["approval_prompt"])
+    assert "sensitive-context" not in str(payload)
+    assert "sensitive-token" not in str(payload)
 
 
 def test_trade_precheck_qa_probe(tmp_path: Path) -> None:

@@ -111,7 +111,7 @@ def test_live_write_refusal_drives_fastmcp_order_tool(
         "low notional and quantity limits",
         "kill switch ready",
         "server-created preview token",
-        "two independent approval factors",
+        "one exact-action approval statement sent by the human in agent chat",
         "precheck/defaults before placement",
         "throttling and duplicate-submit guard",
         "redacted audit trail outside repository",

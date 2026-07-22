@@ -92,9 +92,9 @@ remain internal. Persistent proof artifacts redact the visible account ID.
 disclaimers are blocking tool errors. `saxo_precheck_live_order` cannot place,
 change, or cancel an order, or respond to a disclaimer.
 It verifies instrument tradability and sends `ManualOrder=false`, because an
-unattended agent precheck is not a human-confirmed order. A future LIVE order
-may use `ManualOrder=true` only after two human approval factors confirm the
-exact order.
+unattended agent precheck is not a human-confirmed order. A LIVE order
+may use `ManualOrder=true` only after the human confirms the exact order once in
+the agent chat.
 
 For a task that needs safe request evidence, call
 `saxo_get_safe_request_ledger` with `clear=true` before the task and without
@@ -148,8 +148,7 @@ orders, and prices. Streaming is not claimed by that probe.
 
 ## LIVE Writes
 
-LIVE writes remain disabled until a later explicit live-write enablement plan.
-The current refusal checklist intentionally includes:
+LIVE writes are disabled by default and require explicit runtime enablement:
 
 ```bash
 SAXO_MCP_ENABLE_LIVE_WRITES=I_UNDERSTAND_REAL_MONEY_RISK
@@ -157,19 +156,28 @@ SAXO_MCP_ENABLE_LIVE_WRITES=I_UNDERSTAND_REAL_MONEY_RISK
 
 That flag alone is not enough. LIVE writes also require live credentials, an
 account allowlist, low notional and quantity limits, a ready kill switch, and
-two independent approval factors.
+one exact-action approval statement sent by the human in the agent chat. The
+statement is bound to the request fingerprint, expires with the preview, and is
+single-use. The kill switch, allowlists, limits, and environment are checked
+again immediately before execution. No second person or second approval factor
+is required.
+
+Use `saxo_create_order_preview` before placement, then the matching production
+order tool. For a required disclaimer, `saxo_register_disclaimer_response`
+returns a LIVE preview and exact approval statement; after approval, execute it
+once with `saxo_execute_trading_write` before repeating the order precheck.
 
 ## Safety And Audit
 
-Risky SIM writes use a server-created preview token plus a separate approval
-factor. Raw audit JSONL lives outside git under the local state directory with
+SIM writes use a server-created preview token and do not require human input.
+Raw audit JSONL lives outside git under the local state directory with
 owner-only permissions. Evidence under `.omo/evidence` must be redacted.
 
 Useful probes:
 
 ```bash
 uv run python -m saxo_bank_mcp.qa approval-happy --out .omo/evidence/saxo-bank-mcp/approval-happy.json
-uv run python -m saxo_bank_mcp.qa approval-denied --missing approval-factor --out .omo/evidence/saxo-bank-mcp/approval-denied.json
+uv run python -m saxo_bank_mcp.qa approval-denied --missing preview-token --out .omo/evidence/saxo-bank-mcp/approval-denied.json
 uv run python -m saxo_bank_mcp.qa stream-cleanup --simulate-leak --out .omo/evidence/saxo-bank-mcp/stream-cleanup.json
 ```
 

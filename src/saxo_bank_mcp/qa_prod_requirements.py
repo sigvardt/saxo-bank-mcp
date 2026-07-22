@@ -97,7 +97,7 @@ def prod_readiness_requirements() -> list[dict[str, JsonValue]]:
         _requirement(
             "automated_trading_limits",
             "implemented",
-            "Automated write paths require preview plus approval factors and "
+            "LIVE write paths require a preview plus one exact-action chat approval and "
             "enforce configured size limits.",
             ["src/saxo_bank_mcp/safety.py", "src/saxo_bank_mcp/safety_models.py"],
         ),

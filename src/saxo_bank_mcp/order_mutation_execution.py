@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import secrets
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -15,21 +15,28 @@ from saxo_bank_mcp._redaction import redact_json, redact_text
 from saxo_bank_mcp.audit import AuditPathError, append_audit_event
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import (
-    SIM_ENDPOINTS,
     SaxoEnvironment,
     SaxoRuntimeConfig,
     SimAuthSettingsError,
     resolve_sim_auth_settings,
 )
 from saxo_bank_mcp.http_client import create_async_client
-from saxo_bank_mcp.live_mode import live_write_refusal_payload
+from saxo_bank_mcp.live_mode import (
+    LiveReadSettingsError,
+    live_cached_token_for_tool,
+    live_write_refusal_payload,
+    resolve_live_read_settings,
+)
 from saxo_bank_mcp.mcp_token_state import (
     CachedTokenBlocked,
     CachedTokenReady,
     cached_token_for_tool,
 )
 from saxo_bank_mcp.mcp_tool_results import auth_next_action
-from saxo_bank_mcp.order_mutation_guards import request_body_coherence_reasons
+from saxo_bank_mcp.order_mutation_guards import (
+    multileg_body_safety_reasons,
+    request_body_coherence_reasons,
+)
 from saxo_bank_mcp.order_mutation_models import (
     HTTP_SUCCESS_MAX,
     HTTP_SUCCESS_MIN,
@@ -61,24 +68,45 @@ READBACK_TRADE_MESSAGES_PATH: Final = "/trade/v1/messages"
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
 
 
-async def execute_sim_order_write(  # noqa: C901, PLR0911
+@dataclass(frozen=True, slots=True)
+class OrderExecutionAccess:
+    environment: SaxoEnvironment
+    rest_base_url: str
+    token: SaxoTokenSet
+
+
+async def execute_sim_order_write(
     write_class: OrderWriteClass,
     preview_token: str,
     approval_factor: str | None,
 ) -> ToolResult:
     spec = ORDER_WRITE_SPECS[write_class]
-    live_refusal = _live_write_refusal_if_requested(spec)
-    if live_refusal is not None:
-        return _tool_result(live_refusal)
+    if SaxoRuntimeConfig.from_env().requested_environment == SaxoEnvironment.LIVE:
+        return _tool_result(
+            live_write_refusal_payload(
+                tool_name=spec.tool_name,
+                write_class=spec.write_class,
+                operation_id=spec.operation_id,
+            ),
+        )
+    return await execute_order_write(write_class, preview_token, approval_factor)
+
+
+async def execute_order_write(  # noqa: C901, PLR0911
+    write_class: OrderWriteClass,
+    preview_token: str,
+    approval_factor: str | None,
+    reported_tool_name: str | None = None,
+) -> ToolResult:
+    base_spec = ORDER_WRITE_SPECS[write_class]
+    spec = (
+        base_spec
+        if reported_tool_name is None
+        else replace(base_spec, tool_name=reported_tool_name)
+    )
+    environment = SaxoRuntimeConfig.from_env().requested_environment
     if not preview_token.strip():
         return _tool_result(_denied(spec, "preview_token_missing"))
-    if approval_factor is None or not approval_factor.strip():
-        commit = SafetyKernel().commit_preview(preview_token, approval_factor=None)
-        return _tool_result(_commit_denied(spec, commit))
-    if not secrets.compare_digest(approval_factor, TEST_APPROVAL_FACTOR):
-        commit = SafetyKernel().commit_preview(preview_token, approval_factor=approval_factor)
-        return _tool_result(_commit_denied(spec, commit))
-
     stored = get_preview(preview_token)
     if stored is None:
         return _tool_result(_denied(spec, "preview_token_invalid"))
@@ -87,14 +115,43 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
     coherence_reasons = request_body_coherence_reasons(spec, stored.request)
     if coherence_reasons:
         return _tool_result(_body_mismatch(spec, coherence_reasons))
+    if spec.write_class in {"multileg-place", "multileg-modify"}:
+        body_safety_reasons = multileg_body_safety_reasons(
+            stored.request.request_body,
+            SafetyConfig.from_env(),
+        )
+        if body_safety_reasons:
+            return _tool_result(_body_mismatch(spec, body_safety_reasons))
 
-    token = _cached_token(spec)
-    if isinstance(token, dict):
-        return _tool_result(token)
+    if environment == SaxoEnvironment.LIVE and _manual_order_required(
+        spec,
+        stored.request.request_body,
+    ):
+        return _tool_result(
+            _denied_for_environment(
+                spec,
+                "manual_order_confirmation_required",
+                environment,
+            ),
+        )
 
-    commit = SafetyKernel().commit_preview(preview_token, approval_factor=approval_factor)
-    if commit.get("status") != "approved_for_simulation":
-        return _tool_result(_commit_denied(spec, commit))
+    access = _execution_access(spec, environment)
+    if isinstance(access, dict):
+        return _tool_result(access)
+
+    commit = SafetyKernel().commit_preview(
+        preview_token,
+        approval_factor=(
+            approval_factor if environment == SaxoEnvironment.LIVE else TEST_APPROVAL_FACTOR
+        ),
+    )
+    expected_commit_status = (
+        "approved_for_execution"
+        if environment == SaxoEnvironment.LIVE
+        else "approved_for_simulation"
+    )
+    if commit.get("status") != expected_commit_status:
+        return _tool_result(_commit_denied(spec, commit, environment))
 
     request_id = str(uuid.uuid4())
     request_body = stored.request.request_body
@@ -104,14 +161,14 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
 
     response = await _send_order_write(
         spec=spec,
-        token=token,
+        access=access,
         request_id=request_id,
         route=route_or_denial,
         request_body=request_body,
     )
     if isinstance(response, dict):
         if response.get("status") == "network_error":
-            readback = await _readback(token, ())
+            readback = await _readback(access, ())
             response.update(
                 {
                     **readback,
@@ -130,7 +187,7 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
         _object_payload(raw_response_body),
         http_status=response.status_code,
     )
-    readback = await _readback(token, parsed.order_ids)
+    readback = await _readback(access, parsed.order_ids)
     cleanup_status = _cleanup_status(spec, parsed, readback)
     status = _status_with_cleanup(_execution_status(spec, parsed), cleanup_status)
     reason = _order_write_reason(status=status, http_status=response.status_code, parsed=parsed)
@@ -148,12 +205,17 @@ async def execute_sim_order_write(  # noqa: C901, PLR0911
             "write_class": spec.write_class,
             "operation_id": spec.operation_id,
             "endpoint_path": spec.endpoint_path,
-            "environment": "SIM",
+            "environment": environment.value,
             "fastmcp_called": True,
             "network_call_made": True,
-            "live_write": False,
+            "live_write": environment == SaxoEnvironment.LIVE,
+            "live_write_called": environment == SaxoEnvironment.LIVE,
             "preview_token_redacted": True,
-            "approval_factor_mode": "test_only_sim",
+            "approval_factor_mode": (
+                "one_exact_action_chat_approval"
+                if environment == SaxoEnvironment.LIVE
+                else "autonomous_sim"
+            ),
             "x_request_id_present": bool(request_id),
             "x_request_id_generated": bool(request_id),
             "x_request_id_response_echo_verified": False,
@@ -224,34 +286,72 @@ def _order_write_reason(
     )
 
 
+def _execution_access(
+    spec: OrderWriteSpec,
+    environment: SaxoEnvironment,
+) -> OrderExecutionAccess | JsonObject:
+    match environment:
+        case SaxoEnvironment.SIM:
+            token_or_result = _cached_token(spec)
+            if isinstance(token_or_result, dict):
+                return token_or_result
+            return OrderExecutionAccess(environment, _sim_rest_base_url(), token_or_result)
+        case SaxoEnvironment.LIVE:
+            try:
+                settings = resolve_live_read_settings()
+            except LiveReadSettingsError as error:
+                return _auth_required(spec, error.code, environment)
+            token_or_result = live_cached_token_for_tool(spec.tool_name, settings.cache_path)
+            if isinstance(token_or_result, dict):
+                reason = str(token_or_result.get("reason", "token_cache_missing"))
+                return _auth_required(spec, reason, environment)
+            return OrderExecutionAccess(environment, settings.rest_base_url, token_or_result)
+
+
 def _cached_token(spec: OrderWriteSpec) -> SaxoTokenSet | JsonObject:
     try:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
-        return _auth_required(spec, error.code)
+        return _auth_required(spec, error.code, SaxoEnvironment.SIM)
     cache_check = cached_token_for_tool(spec.tool_name, settings.cache_path)
     match cache_check:
         case CachedTokenReady(token=token):
             return token
         case CachedTokenBlocked(result=result):
             reason = result.get("reason", "token_cache_missing")
-            return _auth_required(spec, str(reason))
+            return _auth_required(spec, str(reason), SaxoEnvironment.SIM)
 
 
-def _auth_required(spec: OrderWriteSpec, reason: str) -> JsonObject:
+def _sim_rest_base_url() -> str:
+    try:
+        return resolve_sim_auth_settings(require_redirect=False).rest_base_url
+    except SimAuthSettingsError:
+        return "https://gateway.saxobank.com/sim/openapi/"
+
+
+def _auth_required(
+    spec: OrderWriteSpec,
+    reason: str,
+    environment: SaxoEnvironment,
+) -> JsonObject:
     return {
         "status": "auth_required",
         "tool_name": spec.tool_name,
         "write_class": spec.write_class,
         "write_class_status": "incomplete",
-        "environment": "SIM",
+        "environment": environment.value,
         "reason": reason,
         "next_action": auth_next_action(reason),
         "fastmcp_called": True,
         "network_call_made": False,
         "live_write": False,
+        "live_write_called": False,
         "preview_token_redacted": True,
-        "approval_factor_mode": "test_only_sim",
+        "approval_factor_mode": (
+            "one_exact_action_chat_approval"
+            if environment == SaxoEnvironment.LIVE
+            else "autonomous_sim"
+        ),
         "order_placed": False,
         "order_modified": False,
         "order_cancelled": False,
@@ -263,21 +363,17 @@ def _auth_required(spec: OrderWriteSpec, reason: str) -> JsonObject:
     }
 
 
-def _live_write_refusal_if_requested(spec: OrderWriteSpec) -> JsonObject | None:
-    match SaxoRuntimeConfig.from_env().requested_environment:
-        case SaxoEnvironment.LIVE:
-            return live_write_refusal_payload(
-                tool_name=spec.tool_name,
-                write_class=spec.write_class,
-                operation_id=spec.operation_id,
-            )
-        case SaxoEnvironment.SIM:
-            return None
-
-
-def _commit_denied(spec: OrderWriteSpec, commit: Mapping[str, object]) -> JsonObject:
+def _commit_denied(
+    spec: OrderWriteSpec,
+    commit: Mapping[str, object],
+    environment: SaxoEnvironment,
+) -> JsonObject:
     return {
-        **_denied(spec, str(commit.get("denial_reason", "commit_denied"))),
+        **_denied_for_environment(
+            spec,
+            str(commit.get("denial_reason", "commit_denied")),
+            environment,
+        ),
         "request_fingerprint": str(commit.get("request_fingerprint", "")),
         "audit_path": str(commit.get("audit_path", "")),
         "audit_path_inside_repo": bool(commit.get("audit_path_inside_repo", False)),
@@ -301,16 +397,26 @@ def _body_mismatch(spec: OrderWriteSpec, reasons: tuple[str, ...]) -> JsonObject
 
 
 def _denied(spec: OrderWriteSpec, reason: str) -> JsonObject:
+    environment = SaxoRuntimeConfig.from_env().requested_environment
+    return _denied_for_environment(spec, reason, environment)
+
+
+def _denied_for_environment(
+    spec: OrderWriteSpec,
+    reason: str,
+    environment: SaxoEnvironment,
+) -> JsonObject:
     return {
         "status": "denied",
         "tool_name": spec.tool_name,
         "write_class": spec.write_class,
         "operation_id": spec.operation_id,
-        "environment": "SIM",
+        "environment": environment.value,
         "denial_reason": reason,
         "fastmcp_called": True,
         "network_call_made": False,
         "live_write": False,
+        "live_write_called": False,
         "preview_token_redacted": True,
         "order_placed": False,
         "order_modified": False,
@@ -321,6 +427,16 @@ def _denied(spec: OrderWriteSpec, reason: str) -> JsonObject:
         "mutation_may_have_occurred": False,
         "retry_unsafe": False,
     }
+
+
+def _manual_order_required(
+    spec: OrderWriteSpec,
+    request_body: Mapping[str, JsonValue],
+) -> bool:
+    return (
+        spec.write_class in {"place", "modify", "multileg-place", "multileg-modify"}
+        and request_body.get("ManualOrder") is not True
+    )
 
 
 def _mutation_flag(
@@ -428,7 +544,7 @@ def _resolved_route(
 async def _send_order_write(
     *,
     spec: OrderWriteSpec,
-    token: SaxoTokenSet,
+    access: OrderExecutionAccess,
     request_id: str,
     route: str,
     request_body: Mapping[str, JsonValue],
@@ -436,12 +552,12 @@ async def _send_order_write(
     params = _query_params(spec, request_body)
     headers = {
         "Accept": "application/json",
-        "Authorization": f"Bearer {token.access_token}",
+        "Authorization": f"Bearer {access.token.access_token}",
         "Content-Type": "application/json",
         "x-request-id": request_id,
     }
     try:
-        async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
+        async with create_async_client(base_url=access.rest_base_url, retries=0) as client:
             match spec.method:
                 case "POST":
                     return await client.post(route, json=dict(request_body), headers=headers)
@@ -453,10 +569,16 @@ async def _send_order_write(
         return _network_error(spec, type(error).__name__)
 
 
-async def _readback(token: SaxoTokenSet, response_order_ids: tuple[str, ...]) -> JsonObject:
-    headers = {"Accept": "application/json", "Authorization": f"Bearer {token.access_token}"}
+async def _readback(
+    access: OrderExecutionAccess,
+    response_order_ids: tuple[str, ...],
+) -> JsonObject:
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access.token.access_token}",
+    }
     try:
-        async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
+        async with create_async_client(base_url=access.rest_base_url) as client:
             port = await client.get(
                 READBACK_PORT_ORDERS_PATH.lstrip("/"),
                 headers=headers,
@@ -469,15 +591,19 @@ async def _readback(token: SaxoTokenSet, response_order_ids: tuple[str, ...]) ->
             "open_order_readback_matched_response_order": False,
             "open_order_readback_confirmed_absent": False,
         }
-    open_order_ids = _order_ids_from_json(_raw_response_body(port))
+    orders_valid, open_order_ids = _portfolio_order_ids(_raw_response_body(port))
     matched_open_order = bool(frozenset(response_order_ids).intersection(open_order_ids))
     return {
-        "port_orders_readback": HTTP_SUCCESS_MIN <= port.status_code < HTTP_SUCCESS_MAX,
+        "port_orders_readback": (
+            HTTP_SUCCESS_MIN <= port.status_code < HTTP_SUCCESS_MAX and orders_valid
+        ),
         "trade_messages_readback": (
             HTTP_SUCCESS_MIN <= messages.status_code < HTTP_SUCCESS_MAX
         ),
         "open_order_readback_matched_response_order": matched_open_order,
-        "open_order_readback_confirmed_absent": bool(response_order_ids) and not matched_open_order,
+        "open_order_readback_confirmed_absent": (
+            orders_valid and bool(response_order_ids) and not matched_open_order
+        ),
     }
 
 
@@ -499,10 +625,18 @@ def _cleanup_status(
     return "open_order_status_unverified"
 
 
-def _order_ids_from_json(value: JsonValue) -> frozenset[str]:
+def _portfolio_order_ids(value: JsonValue) -> tuple[bool, frozenset[str]]:
+    if not isinstance(value, Mapping):
+        return False, frozenset()
+    data = value.get("Data")
+    if isinstance(data, str) or not isinstance(data, Sequence):
+        return False, frozenset()
     found: set[str] = set()
-    _collect_order_ids(value, found)
-    return frozenset(found)
+    for row in data:
+        if not isinstance(row, Mapping):
+            return False, frozenset()
+        _collect_order_ids(row, found)
+    return True, frozenset(found)
 
 
 def _collect_order_ids(value: JsonValue, found: set[str]) -> None:

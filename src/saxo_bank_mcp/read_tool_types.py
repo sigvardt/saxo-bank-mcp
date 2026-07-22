@@ -36,7 +36,7 @@ READINESS_PREREQUISITES: Final[tuple[str, ...]] = (
     "valid Saxo session",
     "required account entitlements",
     "instrument/account suitability checks",
-    "two-factor approval for write-class tools",
+    "one exact-action human chat approval for LIVE write-class tools",
 )
 
 

@@ -16,6 +16,30 @@ __all__ = (
     "tool_metadata",
 )
 
+_PRODUCTION_ORDER_TOOL_NAMES = (
+    "saxo_place_order",
+    "saxo_modify_order",
+    "saxo_cancel_order",
+    "saxo_cancel_orders_by_instrument",
+    "saxo_place_multileg_order",
+    "saxo_modify_multileg_order",
+    "saxo_cancel_multileg_order",
+)
+_PRODUCTION_ORDER_TOOL_METADATA: dict[str, ToolMetadata] = {
+    name: {
+        "tool_class": "order_mutation",
+        "environment_support": ["SIM", "LIVE_WRITE"],
+        "write_effect": "live_network",
+        "state_changing": True,
+        "safe_in_live_read_mode": False,
+        "agent_hint": (
+            "Use only after exact precheck/current-order preview. SIM is autonomous; LIVE needs "
+            "one exact-action approval statement sent by the human in agent chat."
+        ),
+    }
+    for name in _PRODUCTION_ORDER_TOOL_NAMES
+}
+
 
 _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
     {
@@ -160,13 +184,50 @@ _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
             ),
         },
         "saxo_register_disclaimer_response": {
-            "tool_class": "sim_trade_state_change",
-            "environment_support": ["SIM"],
-            "write_effect": "sim_network",
+            "tool_class": "disclaimer_write_preview_or_execution",
+            "environment_support": ["SIM", "LIVE_WRITE"],
+            "write_effect": "live_network",
             "state_changing": True,
             "safe_in_live_read_mode": False,
-            "agent_hint": "SIM-only disclaimer response. Do not use for LIVE read validation.",
+            "agent_hint": (
+                "SIM submits autonomously. LIVE creates an exact-request preview; one human "
+                "chat approval is required before saxo_execute_trading_write."
+            ),
         },
+        "saxo_list_trading_write_operations": {
+            "tool_class": "local_write_metadata",
+            "environment_support": ["LOCAL", "SIM", "LIVE_READ", "LIVE_WRITE"],
+            "write_effect": "none",
+            "state_changing": False,
+            "safe_in_live_read_mode": True,
+            "agent_hint": (
+                "Inspect this before preparing a write. Order mutations are routed to their "
+                "specialized precheck tools."
+            ),
+        },
+        "saxo_prepare_trading_write": {
+            "tool_class": "registered_write_preview",
+            "environment_support": ["SIM", "LIVE_WRITE"],
+            "write_effect": "local_state",
+            "state_changing": True,
+            "safe_in_live_read_mode": False,
+            "agent_hint": (
+                "SIM needs no human approval. LIVE returns one exact approval statement that "
+                "must be sent by the human in agent chat."
+            ),
+        },
+        "saxo_execute_trading_write": {
+            "tool_class": "registered_write_execution",
+            "environment_support": ["SIM", "LIVE_WRITE"],
+            "write_effect": "live_network",
+            "state_changing": True,
+            "safe_in_live_read_mode": False,
+            "agent_hint": (
+                "Consumes one prepared request. Never retry an unknown-state result; inspect "
+                "account state and the audit record first."
+            ),
+        },
+        **_PRODUCTION_ORDER_TOOL_METADATA,
         "saxo_place_sim_order": {
             "tool_class": "sim_order_mutation",
             "environment_support": ["SIM"],

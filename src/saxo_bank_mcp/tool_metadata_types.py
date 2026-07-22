@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from typing import Literal, NotRequired, TypedDict
 
-type ToolEnvironment = Literal["SIM", "LIVE_READ", "LOCAL"]
-type WriteEffect = Literal["none", "local_state", "sim_network", "sim_streaming"]
+type ToolEnvironment = Literal["SIM", "LIVE_READ", "LIVE_WRITE", "LOCAL"]
+type WriteEffect = Literal[
+    "none",
+    "local_state",
+    "sim_network",
+    "sim_streaming",
+    "live_network",
+]
 
 
 class ToolMetadata(TypedDict):

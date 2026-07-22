@@ -120,7 +120,7 @@ def test_safety_preview_denies_exact_missing_condition(
     assert result["saxo_endpoint_called"] is False
 
 
-def test_safety_preview_commit_requires_separate_factor_and_writes_owner_only_audit(
+def test_safety_preview_commit_is_autonomous_in_sim_and_writes_owner_only_audit(
     tmp_path: Path,
 ) -> None:
     reset_safety_state()
@@ -130,23 +130,15 @@ def test_safety_preview_commit_requires_separate_factor_and_writes_owner_only_au
     assert preview["status"] == "preview_created"
     assert "preview_token" in preview
     preview_token = str(preview.get("preview_token", ""))
-    denied = kernel.commit_preview(preview_token, approval_factor=None)
-    approved = kernel.commit_preview(
-        preview_token,
-        approval_factor=TEST_APPROVAL_FACTOR,
-    )
+    approved = kernel.commit_preview(preview_token, approval_factor=None)
 
-    assert denied["status"] == "denied"
-    assert denied.get("denial_reason") == "approval_factor_missing"
-    assert denied["request_fingerprint"] == preview["request_fingerprint"]
     assert approved["status"] == "approved_for_simulation"
     assert approved["execution_performed"] is False
     assert approved["saxo_endpoint_called"] is False
     assert approved["simulation_only"] is True
     assert approved["order_placed"] is False
     assert "safe for later write layer" not in approved["next_action"]
-    assert "operator supplies out-of-band approval_factor" in preview["next_action"]
-    assert "agent must not generate or guess it" in preview["next_action"]
+    assert "SIM needs no human approval" in preview["next_action"]
 
     path = audit_log_path(tmp_path / "audit")
     assert not path.resolve(strict=False).is_relative_to(Path.cwd().resolve(strict=False))
@@ -155,7 +147,6 @@ def test_safety_preview_commit_requires_separate_factor_and_writes_owner_only_au
     events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     assert {event["event"] for event in events} >= {
         "preview_created",
-        "commit_denied",
         "commit_approved",
     }
 
@@ -174,6 +165,21 @@ def test_safety_duplicate_and_rate_guards_block_reuse(tmp_path: Path) -> None:
     duplicate_preview = kernel.create_preview(write_fixture())
     assert duplicate_preview["status"] == "denied"
     assert "duplicate_request" in duplicate_preview.get("denial_reasons", [])
+
+
+def test_commit_rechecks_current_kill_switch(tmp_path: Path) -> None:
+    reset_safety_state()
+    preview = SafetyKernel(safety_config(tmp_path)).create_preview(write_fixture())
+    assert preview["status"] == "preview_created"
+    token = str(preview.get("preview_token", ""))
+
+    stopped = SafetyKernel(
+        safety_config(tmp_path).model_copy(update={"global_kill_switch": True}),
+    ).commit_preview(token, approval_factor=None)
+
+    assert stopped["status"] == "denied"
+    assert stopped.get("denial_reason") == "global_kill_switch_active"
+    assert stopped["saxo_endpoint_called"] is False
 
 
 def test_preview_audit_failure_does_not_store_token(
@@ -251,7 +257,7 @@ def test_audit_path_refuses_repository(tmp_path: Path) -> None:
     assert "audit_path_refused" in result.get("denial_reasons", [])
 
 
-def test_fastmcp_safety_tools_preview_deny_and_commit(
+def test_fastmcp_safety_tools_preview_and_autonomous_sim_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -260,7 +266,7 @@ def test_fastmcp_safety_tools_preview_deny_and_commit(
     monkeypatch.setenv("SAXO_MCP_ACCOUNT_ALLOWLIST", "SIM-ACCOUNT-1")
     monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", "21")
 
-    async def call_tools() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    async def call_tools() -> tuple[dict[str, object], dict[str, object]]:
         async with Client(mcp) as client:
             listed = await client.list_tools()
             names = {tool.name for tool in listed}
@@ -276,56 +282,82 @@ def test_fastmcp_safety_tools_preview_deny_and_commit(
             )
             preview = preview_result.structured_content
             assert isinstance(preview, dict)
-            denied_result = await client.call_tool(
+            approved_result = await client.call_tool(
                 "saxo_commit_write_preview",
                 {"preview_token": preview["preview_token"]},
             )
-            denied = denied_result.structured_content
-            approved_result = await client.call_tool(
-                "saxo_commit_write_preview",
-                {
-                    "preview_token": preview["preview_token"],
-                    "approval_factor": TEST_APPROVAL_FACTOR,
-                },
-            )
             approved = approved_result.structured_content
-        assert isinstance(denied, dict)
         assert isinstance(approved, dict)
-        return preview, denied, approved
+        return preview, approved
 
-    preview, denied, approved = anyio.run(call_tools)
+    preview, approved = anyio.run(call_tools)
 
     assert preview["status"] == "preview_created"
-    assert denied["status"] == "denied"
-    assert denied["denial_reason"] == "approval_factor_missing"
     assert approved["status"] == "approved_for_simulation"
+    assert approved["approval_factor_mode"] == "autonomous_sim"
     assert "SIM-ACCOUNT-1" not in json.dumps(approved)
 
 
-def test_live_configuration_is_denied_without_inverted_reason(tmp_path: Path) -> None:
+def test_live_configuration_requires_enablement_then_one_exact_chat_approval(
+    tmp_path: Path,
+) -> None:
     reset_safety_state()
     live_config = safety_config(tmp_path).model_copy(update={"environment": "LIVE"})
     live_preview = SafetyKernel(live_config).create_preview(write_fixture())
 
     assert live_preview["status"] == "denied"
     assert live_preview["order_placed"] is False
-    assert "live_environment_not_allowed" in live_preview.get("denial_reasons", [])
-    assert "live_writes_disabled" not in live_preview.get("denial_reasons", [])
+    assert "live_writes_disabled" in live_preview.get("denial_reasons", [])
 
     reset_safety_state()
-    sim_kernel = SafetyKernel(safety_config(tmp_path))
-    preview = sim_kernel.create_preview(write_fixture())
+    live_kernel = SafetyKernel(live_config.model_copy(update={"live_writes_enabled": True}))
+    preview = live_kernel.create_preview(write_fixture())
     assert preview["status"] == "preview_created"
     token = str(preview.get("preview_token", ""))
+    prompt = str(preview.get("approval_prompt", ""))
 
-    live_commit = SafetyKernel(live_config).commit_preview(
-        token,
-        approval_factor=TEST_APPROVAL_FACTOR,
+    missing = live_kernel.commit_preview(token, approval_factor=None)
+    wrong = live_kernel.commit_preview(token, approval_factor="APPROVE SOMETHING ELSE")
+    approved = live_kernel.commit_preview(token, approval_factor=prompt)
+
+    assert missing.get("denial_reason") == "chat_approval_missing"
+    assert wrong.get("denial_reason") == "chat_approval_mismatch"
+    assert approved["status"] == "approved_for_execution"
+    assert approved["simulation_only"] is False
+    assert preview["request_fingerprint"] in prompt
+
+
+def test_identical_live_order_previews_require_distinct_chat_approvals(
+    tmp_path: Path,
+) -> None:
+    reset_safety_state()
+    live_kernel = SafetyKernel(
+        safety_config(tmp_path).model_copy(
+            update={"environment": "LIVE", "live_writes_enabled": True},
+        ),
     )
 
-    assert live_commit["status"] == "denied"
-    assert live_commit.get("denial_reason") == "live_environment_not_allowed"
-    assert live_commit["order_placed"] is False
+    first = live_kernel.create_preview(write_fixture())
+    second = live_kernel.create_preview(write_fixture())
+
+    assert first["status"] == "preview_created"
+    assert second["status"] == "preview_created"
+    assert first["request_fingerprint"] == second["request_fingerprint"]
+    first_token = first.get("preview_token")
+    second_token = second.get("preview_token")
+    first_prompt = first.get("approval_prompt")
+    second_prompt = second.get("approval_prompt")
+    assert isinstance(first_token, str)
+    assert isinstance(second_token, str)
+    assert isinstance(first_prompt, str)
+    assert isinstance(second_prompt, str)
+    assert first_token != second_token
+    assert first_prompt != second_prompt
+    wrong_preview = live_kernel.commit_preview(
+        second_token,
+        approval_factor=first_prompt,
+    )
+    assert wrong_preview.get("denial_reason") == "chat_approval_mismatch"
 
 
 def test_live_write_flag_is_denied_as_simulation_boundary(tmp_path: Path) -> None:
@@ -334,4 +366,4 @@ def test_live_write_flag_is_denied_as_simulation_boundary(tmp_path: Path) -> Non
     preview = SafetyKernel(config).create_preview(write_fixture())
 
     assert preview["status"] == "denied"
-    assert "live_write_execution_disabled" in preview.get("denial_reasons", [])
+    assert "live_write_flag_invalid_in_sim" in preview.get("denial_reasons", [])

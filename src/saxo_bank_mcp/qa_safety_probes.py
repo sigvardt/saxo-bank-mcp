@@ -16,7 +16,7 @@ from saxo_bank_mcp.audit import audit_log_path
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.qa_events import base_event
-from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
+from saxo_bank_mcp.safety import reset_safety_state
 from saxo_bank_mcp.server import mcp
 
 FIXTURE_ACCOUNT = "SIM-ACCOUNT-1"
@@ -47,9 +47,9 @@ async def _approval_flow(mode: Literal["approve", "deny"]) -> dict[str, JsonValu
         async with Client(mcp) as client:
             preview_result = await client.call_tool("saxo_create_write_preview", _fixture_request())
             preview = _payload(preview_result.structured_content)
-            commit_args: dict[str, JsonValue] = {"preview_token": str(preview["preview_token"])}
-            if mode == "approve":
-                commit_args["approval_factor"] = TEST_APPROVAL_FACTOR
+            commit_args: dict[str, JsonValue] = {
+                "preview_token": str(preview["preview_token"]) if mode == "approve" else "",
+            }
             commit_result = await client.call_tool("saxo_commit_write_preview", commit_args)
             commit = _payload(commit_result.structured_content)
         raw_audit_dir = os.environ.get(
@@ -71,7 +71,7 @@ async def _approval_flow(mode: Literal["approve", "deny"]) -> dict[str, JsonValu
             "denial_reason": str(commit.get("denial_reason", "")),
             "same_request_fingerprint": commit.get("request_fingerprint") == request_fingerprint,
             "prompted_user": False,
-            "approval_factor_mode": str(commit.get("approval_factor_mode", "test_only_sim")),
+            "approval_factor_mode": str(commit.get("approval_factor_mode", "autonomous_sim")),
             "preview_token_redacted": True,
             "audit_path": str(audit_path),
             "audit_path_inside_repo": _is_inside_repo(audit_path),
@@ -120,8 +120,8 @@ def _write_redacted_with_secret_scan(
 
 
 def _missing_to_reason(missing: str) -> str:
-    if missing == "approval-factor":
-        return "approval_factor_missing"
+    if missing == "preview-token":
+        return "preview_token_missing"
     return missing.replace("-", "_")
 
 

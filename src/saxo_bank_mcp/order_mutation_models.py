@@ -33,6 +33,7 @@ UNKNOWN_STATE_ERROR_CODES: Final = frozenset(
 )
 DUPLICATE_ERROR_CODES: Final = frozenset({"DuplicateRequest", "RepeatTradeOnAutoQuote"})
 HTTP_DUPLICATE_REQUEST: Final = 409
+HTTP_ACCEPTED: Final = 202
 HTTP_RATE_LIMITED: Final = 429
 HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
@@ -141,6 +142,17 @@ ORDER_WRITE_SPECS: Final[Mapping[OrderWriteClass, OrderWriteSpec]] = MappingProx
         ),
     },
 )
+PRODUCTION_ORDER_TOOL_NAMES: Final[Mapping[OrderWriteClass, str]] = MappingProxyType(
+    {
+        "place": "saxo_place_order",
+        "modify": "saxo_modify_order",
+        "cancel": "saxo_cancel_order",
+        "cancel-by-instrument": "saxo_cancel_orders_by_instrument",
+        "multileg-place": "saxo_place_multileg_order",
+        "multileg-modify": "saxo_modify_multileg_order",
+        "multileg-cancel": "saxo_cancel_multileg_order",
+    },
+)
 ORDER_WRITE_CLASSES: Final[tuple[OrderWriteClass, ...]] = tuple(ORDER_WRITE_SPECS)
 
 
@@ -172,7 +184,9 @@ def parse_order_mutation_response(
     trade_not_completed = "TradeNotCompleted" in error_codes
     partial_success = bool(order_ids) and bool(error_codes)
     rate_limited = http_status == HTTP_RATE_LIMITED
-    unknown_state = bool(UNKNOWN_STATE_ERROR_CODES.intersection(error_codes))
+    unknown_state = http_status == HTTP_ACCEPTED or bool(
+        UNKNOWN_STATE_ERROR_CODES.intersection(error_codes),
+    )
     duplicate_request = http_status == HTTP_DUPLICATE_REQUEST or bool(
         DUPLICATE_ERROR_CODES.intersection(error_codes),
     )

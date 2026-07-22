@@ -18,23 +18,30 @@ def preview_denial_reasons(
             "request_fingerprint": fingerprint,
         },
     )
-    reasons = [
-        *_environment_reasons(config),
-        *_allowlist_reasons(config, request),
-        *_limit_reasons(config, request),
-        *_risk_reasons(request),
-    ]
+    reasons = current_safety_reasons(config, request)
     if is_committed(fingerprint):
         reasons.append("duplicate_request")
     return reasons
 
 
+def current_safety_reasons(
+    config: SafetyConfig,
+    request: WritePreviewRequest,
+) -> list[str]:
+    return [
+        *_environment_reasons(config),
+        *_allowlist_reasons(config, request),
+        *_limit_reasons(config, request),
+        *_risk_reasons(request),
+    ]
+
+
 def _environment_reasons(config: SafetyConfig) -> list[str]:
     reasons: list[str] = []
-    if config.environment == "LIVE":
-        reasons.append("live_environment_not_allowed")
-    if config.live_writes_enabled:
-        reasons.append("live_write_execution_disabled")
+    if config.environment == "LIVE" and not config.live_writes_enabled:
+        reasons.append("live_writes_disabled")
+    if config.environment == "SIM" and config.live_writes_enabled:
+        reasons.append("live_write_flag_invalid_in_sim")
     if config.global_kill_switch:
         reasons.append("global_kill_switch_active")
     return reasons

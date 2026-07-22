@@ -9,7 +9,8 @@ EXPECTED_OPERATION_COUNT = 294
 TRADING_IMPLEMENTED_READS = 7
 TRADING_OPERATION_COUNT = 45
 TRADING_PAGE_LIMIT = 25
-TRADING_REFUSED_OPERATIONS = 38
+TRADING_REFUSED_OPERATIONS = 0
+TRADING_REGISTERED_WRITES = 38
 
 
 @pytest.fixture
@@ -88,6 +89,7 @@ async def test_list_registered_endpoints_uses_registry_safe_status_and_counts() 
         assert missing_check in payload["does_not_verify"]
     support = {item["service_group"]: item for item in payload["service_group_support"]}
     assert support["Trading"]["registered_read_definitions"] == TRADING_IMPLEMENTED_READS
+    assert support["Trading"]["registered_write_definitions"] == TRADING_REGISTERED_WRITES
     assert support["Trading"]["refused_operations"] == TRADING_REFUSED_OPERATIONS
     assert all(
         "implemented" not in key and "ready" not in key and "available" not in key

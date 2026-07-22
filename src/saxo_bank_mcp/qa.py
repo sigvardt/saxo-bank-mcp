@@ -19,6 +19,7 @@ from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_write,
 )
 from saxo_bank_mcp.qa_order_probes import (
+    handle_production_order_mutation,
     handle_sim_order_mutation,
     handle_trade_write_denied,
 )
@@ -51,6 +52,7 @@ from saxo_bank_mcp.qa_trade_probes import (
     handle_trade_multileg_defaults,
     handle_trade_precheck,
 )
+from saxo_bank_mcp.qa_trading_write_probes import handle_trading_write_matrix
 from saxo_bank_mcp.tribunal_index import list_registered_mcp_tool_ids
 
 
@@ -71,6 +73,8 @@ def build_parser() -> argparse.ArgumentParser:
         "trade-disclaimer-lookup",
         "trade-disclaimer-response",
         "sim-order-mutation",
+        "production-order-mutation",
+        "trading-write-matrix",
         "stream",
         "readme-smoke",
         "hard-task-manifest",
@@ -230,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_trade_disclaimer_blocked(args.out)
     elif command == "sim-order-mutation":
         result = handle_sim_order_mutation(args.out, args.classes)
+    elif command == "production-order-mutation":
+        result = handle_production_order_mutation(args.out, args.classes)
+    elif command == "trading-write-matrix":
+        result = handle_trading_write_matrix(args.out)
     elif command == "trade-write-denied":
         result = handle_trade_write_denied(args.out, str(args.missing))
     elif command == "stream":

@@ -269,7 +269,7 @@ async def _trade_disclaimer_response() -> dict[str, JsonValue]:
         **base_event(
             "trade-disclaimer-response",
             status,
-            "FastMCP disclaimer response exercised with test-only SIM approval factor",
+            "FastMCP disclaimer response exercised autonomously in SIM",
         ),
         "tool_name": "saxo_register_disclaimer_response",
         "fastmcp_called": True,

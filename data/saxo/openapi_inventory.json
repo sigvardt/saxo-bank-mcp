@@ -1649,13 +1649,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Disclaimer Management",
       "service_group": "Disclaimer Management",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4385,13 +4385,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Allocation Keys",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4421,13 +4421,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Allocation Keys",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4493,13 +4493,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Info Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4511,13 +4511,13 @@
       "query_template": "Tag={Tag}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Info Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4529,13 +4529,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Info Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4565,13 +4565,13 @@
       "query_template": "MessageIds={MessageIds}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Messages",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4583,13 +4583,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Messages",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4601,13 +4601,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Messages",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4619,13 +4619,13 @@
       "query_template": "Tag={Tag}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Messages",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4637,13 +4637,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Messages",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4655,13 +4655,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Options Chain",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4673,13 +4673,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Options Chain",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4691,13 +4691,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Options Chain",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4709,13 +4709,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Options Chain",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4727,13 +4727,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4745,13 +4745,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4763,13 +4763,13 @@
       "query_template": "AccountKey={AccountKey}&AssetType={AssetType}&Uic={Uic}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4781,13 +4781,13 @@
       "query_template": "AccountKey={AccountKey}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4799,13 +4799,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4817,13 +4817,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4835,13 +4835,13 @@
       "query_template": "AccountKey={AccountKey}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4871,13 +4871,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4889,13 +4889,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Orders",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4907,13 +4907,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Positions",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4925,13 +4925,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Positions",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4943,13 +4943,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Positions",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4961,13 +4961,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4979,13 +4979,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -4997,13 +4997,13 @@
       "query_template": "Tag={Tag}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5015,13 +5015,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5033,13 +5033,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5051,13 +5051,13 @@
       "query_template": "Tag={Tag}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5069,13 +5069,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5087,13 +5087,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "Prices",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5105,13 +5105,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "v1 Trades",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5123,13 +5123,13 @@
       "query_template": "AccountKey={AccountKey}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "v1 Trades",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5141,13 +5141,13 @@
       "query_template": "",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "v2 Trades",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",
@@ -5159,13 +5159,13 @@
       "query_template": "AccountKey={AccountKey}",
       "rate_rule": "saxo_response_headers_and_global_backoff",
       "read_write_class": "write_or_subscription",
-      "refusal_reason": "write_operations_disabled_by_policy",
+      "refusal_reason": "",
       "request_model": "documented_path_query_and_body_parameters",
       "response_model": "documented_response_schema",
       "risk_class": "non_get_side_effect_or_protocol_probe",
       "service": "v2 Trades",
       "service_group": "Trading",
-      "status": "refused"
+      "status": "implemented"
     },
     {
       "auth_requirement": "bearer_token",

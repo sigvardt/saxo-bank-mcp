@@ -150,7 +150,7 @@ def test_approval_happy_probe_uses_fastmcp_and_redacts_sensitive_values(
     assert report["status"] == "passed"
     assert report["preview_status"] == "preview_created"
     assert report["commit_status"] == "approved_for_simulation"
-    assert report["approval_factor_mode"] == "test_only_sim"
+    assert report["approval_factor_mode"] == "autonomous_sim"
     assert report["preview_token_redacted"] is True
     assert report["audit_path_inside_repo"] is False
     assert report["audit_mode"] == "0o600"
@@ -186,7 +186,7 @@ def test_approval_happy_probe_fails_when_redacted_evidence_scan_finds_secret(
     }
 
 
-def test_approval_denied_probe_names_missing_approval_factor(
+def test_approval_denied_probe_names_missing_preview_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -194,15 +194,15 @@ def test_approval_denied_probe_names_missing_approval_factor(
     out = tmp_path / "approval-denied.json"
 
     result = qa.main(
-        ["approval-denied", "--missing", "approval-factor", "--out", str(out)],
+        ["approval-denied", "--missing", "preview-token", "--out", str(out)],
     )
 
     report = json.loads(out.read_text(encoding="utf-8"))
     assert result == 0
     assert report["status"] == "denied"
     assert report["commit_status"] == "denied"
-    assert report["denial_reason"] == "approval_factor_missing"
-    assert report["same_request_fingerprint"] is True
+    assert report["denial_reason"] == "preview_token_missing"
+    assert report["same_request_fingerprint"] is False
     assert report["audit_path_inside_repo"] is False
 
 

@@ -31,9 +31,16 @@ def test_nontrade_policy_classifies_risky_write_groups() -> None:
     assert groups["Client Management"] == "client_or_account_setup_change"
     assert groups["Partner Integration"] == "partner_action_on_behalf"
     assert groups["Regulatory Services"] == "regulatory_data_change"
-    assert all(str(row["registry_status"]) == "refused" for row in rows)
+    disclaimer = next(
+        row for row in rows if row["operation_id"] == "post.dm.v2.disclaimers"
+    )
+    refused_rows = [row for row in rows if row is not disclaimer]
+    assert disclaimer["registry_status"] == "implemented"
+    assert disclaimer["policy_refusal_reason"] == ""
+    assert all(str(row["registry_status"]) == "refused" for row in refused_rows)
     assert all(
-        str(row["policy_refusal_reason"]) == "risky_non_trading_write_refused" for row in rows
+        str(row["policy_refusal_reason"]) == "risky_non_trading_write_refused"
+        for row in refused_rows
     )
     assert nontrade_policy.safe_nontrade_write_operations() == ()
     assert nontrade_policy.all_nontrade_writes_are_refused() is True

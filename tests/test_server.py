@@ -139,11 +139,11 @@ async def test_safety_tool_descriptions_prevent_false_write_confidence() -> None
             "local simulation commit",
         ),
         "saxo_commit_write_preview": (
-            "separate out-of-band approval factor",
-            "Agents must not derive or expose",
-            "Does not call Saxo",
+            "without human approval",
+            "one exact-action approval statement",
+            "does not call Saxo",
             "place orders",
-            "live-write readiness",
+            "LIVE-write readiness",
         ),
     }
     for tool_name, fragments in expected_fragments.items():

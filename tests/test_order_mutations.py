@@ -14,12 +14,14 @@ import saxo_bank_mcp.qa_order_probes as order_probes
 from saxo_bank_mcp import qa
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.config import SaxoEnvironment
+from saxo_bank_mcp.order_mutation_guards import multileg_body_safety_reasons
 from saxo_bank_mcp.order_mutation_models import (
     ORDER_WRITE_SPECS,
     OrderWriteSpec,
     parse_order_mutation_response,
 )
-from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
+from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, SafetyConfig, reset_safety_state
 from saxo_bank_mcp.server import mcp
 
 
@@ -48,6 +50,7 @@ def test_order_mutation_response_parser_covers_success_and_partial_states() -> N
     )
     duplicate_http = parse_order_mutation_response({}, http_status=409)
     rate_limited = parse_order_mutation_response({}, http_status=429)
+    accepted = parse_order_mutation_response({}, http_status=202)
 
     assert success.outcome == "success"
     assert success.order_ids == ("67762872",)
@@ -62,6 +65,89 @@ def test_order_mutation_response_parser_covers_success_and_partial_states() -> N
     assert duplicate_http.needs_readback is True
     assert rate_limited.rate_limited is True
     assert rate_limited.outcome == "rate_limited"
+    assert accepted.outcome == "unknown_state"
+    assert accepted.needs_readback is True
+
+
+def test_multileg_safety_checks_every_leg(tmp_path: Path) -> None:
+    config = SafetyConfig(
+        environment="SIM",
+        live_writes_enabled=False,
+        global_kill_switch=False,
+        account_allowlist=frozenset({"SIM-ACCOUNT-1"}),
+        instrument_allowlist=frozenset({21}),
+        max_quantity=10,
+        max_notional=1_000,
+        audit_dir=tmp_path / "audit",
+    )
+    body: dict[str, JsonValue] = {
+        "Legs": [
+            {"Amount": 1, "Uic": 21},
+            {"Amount": 1_000, "Uic": 999},
+        ],
+    }
+
+    reasons = multileg_body_safety_reasons(body, config)
+
+    assert "instrument_not_allowlisted" in reasons
+    assert "quantity_limit_exceeded" in reasons
+
+
+@pytest.mark.anyio
+async def test_specialized_write_disables_retries_and_fails_closed_on_bad_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    reset_safety_state()
+    _configure_safety(monkeypatch, tmp_path)
+    observed_retries: list[int | None] = []
+
+    def ready_token(_spec: OrderWriteSpec) -> SaxoTokenSet:
+        return SaxoTokenSet(
+            access_token="access-token-value",  # noqa: S106
+            environment="SIM",
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST":
+            return httpx2.Response(200, json={"OrderId": "67762872"}, request=request)
+        if request.url.path.endswith("/port/v1/orders/me"):
+            return httpx2.Response(200, text="not-json", request=request)
+        return httpx2.Response(200, json={"Data": []}, request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        observed_retries.append(retries)
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(order_execution, "_cached_token", ready_token)
+    monkeypatch.setattr(order_execution, "create_async_client", client_factory)
+
+    async with Client(mcp) as client:
+        preview = await _create_preview(client, "post.trade.v2.orders")
+        result = await client.call_tool(
+            "saxo_place_sim_order",
+            {
+                "preview_token": str(preview["preview_token"]),
+                "approval_factor": TEST_APPROVAL_FACTOR,
+            },
+            raise_on_error=False,
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    assert observed_retries[0] == 0
+    assert payload["status"] == "completed_unverified"
+    assert payload["port_orders_readback"] is False
+    assert payload["open_order_readback_confirmed_absent"] is False
 
 
 @pytest.mark.anyio
@@ -82,13 +168,110 @@ async def test_order_write_tools_are_registered_with_safety_descriptions() -> No
     assert expected <= set(descriptions)
     for tool_name in expected:
         assert "SIM-only" in descriptions[tool_name]
-        assert "approval" in descriptions[tool_name]
+        assert "without human approval" in descriptions[tool_name]
         assert "never calls LIVE" in descriptions[tool_name]
-        assert "missing approval is denied before network" in descriptions[tool_name]
+        assert "one exact-action approval statement" in descriptions[tool_name]
 
 
 @pytest.mark.anyio
-async def test_order_write_denies_missing_approval_before_network(
+async def test_production_order_tool_requires_one_exact_live_chat_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_safety_state()
+    _configure_safety(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
+    seen: list[tuple[str, str]] = []
+
+    def ready_access(
+        _spec: OrderWriteSpec,
+        environment: SaxoEnvironment,
+    ) -> order_execution.OrderExecutionAccess:
+        assert environment == SaxoEnvironment.LIVE
+        return order_execution.OrderExecutionAccess(
+            environment=environment,
+            rest_base_url="https://gateway.saxobank.com/openapi/",
+            token=SaxoTokenSet(
+                access_token="live-access-token",  # noqa: S106
+                environment="LIVE",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append((request.method, request.url.path))
+        if request.method == "POST":
+            return httpx2.Response(200, json={"OrderId": "67762872"}, request=request)
+        return httpx2.Response(200, json={"Data": []}, request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(order_execution, "_execution_access", ready_access)
+    monkeypatch.setattr(order_execution, "create_async_client", client_factory)
+    request = _preview_request("post.trade.v2.orders")
+    request_body = request["request_body"]
+    assert isinstance(request_body, dict)
+    request_body["ManualOrder"] = True
+
+    async with Client(mcp) as client:
+        preview_result = await client.call_tool("saxo_create_write_preview", request)
+        preview = preview_result.structured_content
+        assert isinstance(preview, dict)
+        missing = await client.call_tool(
+            "saxo_place_order",
+            {"preview_token": preview["preview_token"]},
+            raise_on_error=False,
+        )
+        executed = await client.call_tool(
+            "saxo_place_order",
+            {
+                "preview_token": preview["preview_token"],
+                "approval_statement": preview["approval_prompt"],
+            },
+        )
+        duplicate = await client.call_tool(
+            "saxo_place_order",
+            {
+                "preview_token": preview["preview_token"],
+                "approval_statement": preview["approval_prompt"],
+            },
+            raise_on_error=False,
+        )
+
+    missing_payload = missing.structured_content
+    assert missing_payload is not None
+    assert missing_payload["tool_name"] == "saxo_place_order"
+    assert missing_payload["denial_reason"] == "chat_approval_missing"
+    payload = executed.structured_content
+    assert payload is not None
+    assert payload["status"] == "completed"
+    assert payload["tool_name"] == "saxo_place_order"
+    assert payload["environment"] == "LIVE"
+    assert payload["live_write"] is True
+    assert payload["approval_factor_mode"] == "one_exact_action_chat_approval"
+    assert seen == [
+        ("POST", "/openapi/trade/v2/orders"),
+        ("GET", "/openapi/port/v1/orders/me"),
+        ("GET", "/openapi/trade/v1/messages"),
+    ]
+    duplicate_payload = duplicate.structured_content
+    assert duplicate_payload is not None
+    assert duplicate_payload["denial_reason"] == "duplicate_request"
+
+
+@pytest.mark.anyio
+async def test_order_write_denies_missing_preview_before_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -101,14 +284,13 @@ async def test_order_write_denies_missing_approval_before_network(
         transport: httpx2.AsyncBaseTransport | None = None,
     ) -> httpx2.AsyncClient:
         _ = (base_url, transport)
-        raise AssertionError("missing approval must not construct an HTTP client")
+        raise AssertionError("missing preview must not construct an HTTP client")
 
     monkeypatch.setattr(order_execution, "create_async_client", fail_client)
     async with Client(mcp) as client:
-        preview = await _create_preview(client, "post.trade.v2.orders")
         result = await client.call_tool(
             "saxo_place_sim_order",
-            {"preview_token": str(preview["preview_token"])},
+            {"preview_token": ""},
             raise_on_error=False,
         )
 
@@ -116,10 +298,8 @@ async def test_order_write_denies_missing_approval_before_network(
     assert payload is not None
     assert result.is_error is True
     assert payload["status"] == "denied"
-    assert payload["denial_reason"] == "approval_factor_missing"
+    assert payload["denial_reason"] == "preview_token_missing"
     assert payload["network_call_made"] is False
-    assert payload["request_fingerprint"] == preview["request_fingerprint"]
-    assert payload["audit_path_inside_repo"] is False
 
 
 @pytest.mark.anyio
@@ -138,7 +318,6 @@ async def test_approved_order_write_without_token_is_incomplete_without_commit(
             "saxo_place_sim_order",
             {
                 "preview_token": str(preview["preview_token"]),
-                "approval_factor": TEST_APPROVAL_FACTOR,
             },
             raise_on_error=False,
         )
@@ -227,7 +406,9 @@ async def test_place_order_executes_mocked_sim_write_with_readbacks(
         *,
         base_url: str = "",
         transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
     ) -> httpx2.AsyncClient:
+        del retries
         return httpx2.AsyncClient(
             base_url=base_url,
             transport=httpx2.MockTransport(handler) if transport is None else transport,
@@ -310,7 +491,9 @@ async def test_place_order_with_open_order_is_completed_unverified(
         *,
         base_url: str = "",
         transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
     ) -> httpx2.AsyncClient:
+        del retries
         return httpx2.AsyncClient(
             base_url=base_url,
             transport=httpx2.MockTransport(handler) if transport is None else transport,
@@ -471,7 +654,9 @@ async def test_empty_success_place_order_response_is_not_proven_mutation(
         *,
         base_url: str = "",
         transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
     ) -> httpx2.AsyncClient:
+        del retries
         return httpx2.AsyncClient(
             base_url=base_url,
             transport=httpx2.MockTransport(handler) if transport is None else transport,
@@ -533,7 +718,9 @@ async def test_unknown_order_response_is_retry_unsafe_and_tri_state(
         *,
         base_url: str = "",
         transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
     ) -> httpx2.AsyncClient:
+        del retries
         return httpx2.AsyncClient(
             base_url=base_url,
             transport=httpx2.MockTransport(handler) if transport is None else transport,
@@ -590,7 +777,9 @@ async def test_network_error_after_commit_is_retry_unsafe_and_tri_state(
         *,
         base_url: str = "",
         transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
     ) -> httpx2.AsyncClient:
+        del retries
         return httpx2.AsyncClient(
             base_url=base_url,
             transport=httpx2.MockTransport(handler) if transport is None else transport,
@@ -692,21 +881,21 @@ def test_sim_order_mutation_qa_reports_incomplete_auth_not_complete(
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}
 
 
-def test_trade_write_denied_qa_probe_names_missing_approval(
+def test_trade_write_denied_qa_probe_names_missing_preview(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_safety(monkeypatch, tmp_path)
     out = tmp_path / "write-denied.json"
 
-    result = qa.main(["trade-write-denied", "--missing", "approval-factor", "--out", str(out)])
+    result = qa.main(["trade-write-denied", "--missing", "preview-token", "--out", str(out)])
 
     report = json.loads(out.read_text(encoding="utf-8"))
     assert result == 0
     assert report["status"] == "denied"
     assert report["tool_name"] == "saxo_place_sim_order"
-    assert report["denial_reason"] == "approval_factor_missing"
-    assert report["same_request_fingerprint"] is True
+    assert report["denial_reason"] == "preview_token_missing"
+    assert report["same_request_fingerprint"] is False
     assert report["network_call_made"] is False
     assert report["order_placed"] is False
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}

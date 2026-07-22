@@ -9,7 +9,8 @@ import os
 import uuid
 from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Final, Literal, NoReturn, assert_never
 
@@ -35,12 +36,13 @@ from saxo_bank_mcp.order_mutation_models import (
     HTTP_SUCCESS_MIN,
     ORDER_WRITE_CLASSES,
     ORDER_WRITE_SPECS,
+    PRODUCTION_ORDER_TOOL_NAMES,
     OrderWriteClass,
     OrderWriteSpec,
 )
 from saxo_bank_mcp.qa_account import resolve_sim_account_key
 from saxo_bank_mcp.qa_events import base_event
-from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
+from saxo_bank_mcp.safety import reset_safety_state
 from saxo_bank_mcp.server import mcp
 
 FIXTURE_ACCOUNT: Final = "SIM-ACCOUNT-1"
@@ -50,7 +52,7 @@ FIXTURE_ORDER_AMOUNT: Final = 1
 FIXTURE_ORDER_NOTIONAL: Final = 100
 FIXTURE_LIMIT_PRICE: Final = 50
 FIXTURE_MODIFIED_LIMIT_PRICE: Final = 51
-MULTILEG_FIXTURE_UICS: Final = (58026125, 58026124)
+MULTILEG_FIXTURE_UICS: Final = (30004846, 30004926)
 MULTILEG_FIXTURE_ASSET_TYPE: Final = "StockIndexOption"
 MULTILEG_LIMIT_PRICE: Final = 1
 MULTILEG_MODIFIED_LIMIT_PRICE: Final = 2
@@ -103,7 +105,17 @@ def _raise_order_probe_invariant(
 
 def handle_sim_order_mutation(out: Path, classes: str | None) -> int:
     requested = _requested_classes(classes)
-    payload = anyio.run(_sim_order_mutation, requested)
+    payload = anyio.run(partial(_sim_order_mutation, requested, production_tools=False))
+    return _write_redacted_with_secret_scan(
+        out,
+        payload,
+        ("passed", "exercised", "incomplete_auth_required"),
+    )
+
+
+def handle_production_order_mutation(out: Path, classes: str | None) -> int:
+    requested = _requested_classes(classes)
+    payload = anyio.run(partial(_sim_order_mutation, requested, production_tools=True))
     return _write_redacted_with_secret_scan(
         out,
         payload,
@@ -116,7 +128,11 @@ def handle_trade_write_denied(out: Path, missing: str) -> int:
     return _write_redacted_with_secret_scan(out, payload, ("denied",))
 
 
-async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str, JsonValue]:
+async def _sim_order_mutation(
+    classes: tuple[OrderWriteClass, ...],
+    *,
+    production_tools: bool,
+) -> dict[str, JsonValue]:
     reset_safety_state()
     per_class: list[dict[str, JsonValue]] = []
     account = await resolve_sim_account_key(
@@ -126,7 +142,15 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
     with _safety_env(account.account_key):
         async with Client(mcp) as client:
             for write_class in classes:
-                spec = ORDER_WRITE_SPECS[write_class]
+                base_spec = ORDER_WRITE_SPECS[write_class]
+                spec = (
+                    replace(
+                        base_spec,
+                        tool_name=PRODUCTION_ORDER_TOOL_NAMES[write_class],
+                    )
+                    if production_tools
+                    else base_spec
+                )
                 preview, setup = await _create_preview(client, spec, account.account_key)
                 tool_payload = await _call_order_tool(client, spec, preview)
                 cleanup = await _post_tool_cleanup(
@@ -155,16 +179,16 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
     ]
     has_failed = any(row.get("status") == "failed" for row in per_class)
     was_exercised = any(row.get("network_call_made") is True for row in per_class)
+    all_classes_complete = len(completed) == len(classes)
     status = (
-        "failed"
+        "passed"
+        if all_classes_complete
+        else "failed"
         if has_failed
-        else "passed"
-        if completed
         else "exercised"
         if was_exercised
         else "incomplete_auth_required"
     )
-    all_classes_complete = len(completed) == len(classes)
     return {
         **base_event(
             "sim-order-mutation",
@@ -172,6 +196,7 @@ async def _sim_order_mutation(classes: tuple[OrderWriteClass, ...]) -> dict[str,
             "FastMCP SIM order mutation tools exercised through safety gates",
         ),
         "environment": "SIM",
+        "tool_surface": "production" if production_tools else "sim_compatibility",
         "classes_requested": list(classes),
         "completed_classes": completed,
         "auth_required_classes": auth_required,
@@ -200,7 +225,7 @@ async def _trade_write_denied(missing: str) -> dict[str, JsonValue]:
     with _safety_env(account.account_key):
         async with Client(mcp) as client:
             preview, _ = await _create_preview(client, spec, account.account_key)
-            token = str(preview.get("preview_token", ""))
+            token = "" if missing == "preview-token" else str(preview.get("preview_token", ""))
             result = await client.call_tool(
                 spec.tool_name,
                 {"preview_token": token},
@@ -209,16 +234,16 @@ async def _trade_write_denied(missing: str) -> dict[str, JsonValue]:
     payload = _payload(result.structured_content)
     same_fingerprint = payload.get("request_fingerprint") == preview.get("request_fingerprint")
     denied = (
-        missing == "approval-factor"
+        missing == "preview-token"
         and payload.get("status") == "denied"
-        and payload.get("denial_reason") == "approval_factor_missing"
+        and payload.get("denial_reason") == "preview_token_missing"
         and payload.get("network_call_made") is False
     )
     return {
         **base_event(
             "trade-write-denied",
             "denied" if denied else "failed",
-            "FastMCP order write refused missing approval factor before network",
+            "FastMCP order write refused missing preview token before network",
         ),
         "tool_name": spec.tool_name,
         "fastmcp_called": True,
@@ -292,7 +317,7 @@ async def _call_order_tool(
     token = str(preview.get("preview_token", ""))
     result = await client.call_tool(
         spec.tool_name,
-        {"preview_token": token, "approval_factor": TEST_APPROVAL_FACTOR},
+        {"preview_token": token},
         raise_on_error=False,
     )
     payload = _payload(result.structured_content)
@@ -433,12 +458,12 @@ async def _post_tool_cleanup(
     cleanup_payload = (
         await _cancel_multileg_order(client, account_key, setup.order_id)
         if setup.order_kind == "multileg"
-        else await _cancel_fixture_orders_by_instrument(client, account_key)
+        else await _cancel_single_order(client, account_key, setup.order_id)
     )
     cleanup_tool_name = (
         ORDER_WRITE_SPECS["multileg-cancel"].tool_name
         if setup.order_kind == "multileg"
-        else ORDER_WRITE_SPECS["cancel-by-instrument"].tool_name
+        else ORDER_WRITE_SPECS["cancel"].tool_name
     )
     present_after_cleanup, cleanup_read = await _raw_setup_order_present(
         setup,
@@ -477,10 +502,10 @@ async def _post_single_place_cleanup(
     }
     if order_id is None:
         return cleanup_report
-    cleanup_payload = await _cancel_fixture_orders_by_instrument(client, account_key)
+    cleanup_payload = await _cancel_single_order(client, account_key, order_id)
     present_after_cleanup, cleanup_read = await _raw_order_id_present(
         order_id,
-        tool_name=ORDER_WRITE_SPECS["cancel-by-instrument"].tool_name,
+        tool_name=ORDER_WRITE_SPECS["cancel"].tool_name,
     )
     cleanup_report.update(
         {
@@ -600,18 +625,6 @@ async def _raw_setup_order_present(
     return await _raw_order_id_present(setup.order_id, tool_name=tool_name)
 
 
-async def _cancel_fixture_orders_by_instrument(
-    client: Client[FastMCPTransport],
-    account_key: str,
-) -> dict[str, JsonValue]:
-    spec = ORDER_WRITE_SPECS["cancel-by-instrument"]
-    preview_result = await client.call_tool(
-        "saxo_create_write_preview",
-        probe_preview_request(spec, account_key),
-    )
-    return await _call_order_tool(client, spec, _payload(preview_result.structured_content))
-
-
 async def _cancel_multileg_order(
     client: Client[FastMCPTransport],
     account_key: str,
@@ -628,6 +641,23 @@ async def _cancel_multileg_order(
                 account_key,
                 order_id=multi_leg_order_id,
             ),
+        ),
+    )
+    return await _call_order_tool(client, spec, _payload(preview_result.structured_content))
+
+
+async def _cancel_single_order(
+    client: Client[FastMCPTransport],
+    account_key: str,
+    order_id: str,
+) -> dict[str, JsonValue]:
+    spec = ORDER_WRITE_SPECS["cancel"]
+    preview_result = await client.call_tool(
+        "saxo_create_write_preview",
+        probe_preview_request(
+            spec,
+            account_key,
+            request_body=_request_body(spec, account_key, order_id=order_id),
         ),
     )
     return await _call_order_tool(client, spec, _payload(preview_result.structured_content))
@@ -768,14 +798,15 @@ async def _raw_open_orders(
             )
     except httpx2.HTTPError as error:
         return (), _raw_read_report("network_error", reason=type(error).__name__)
-    rows = _order_rows(_response_json(response))
+    rows, response_valid = _order_rows(_response_json(response))
+    http_success = HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX
     return (
         rows,
         {
             "setup_raw_read_status": (
-                "passed"
-                if HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX
-                else "http_error"
+                "passed" if http_success and response_valid else (
+                    "invalid_response" if http_success else "http_error"
+                )
             ),
             "setup_raw_read_network_call_made": True,
             "setup_raw_read_http_status": response.status_code,
@@ -801,13 +832,16 @@ def _response_json(response: httpx2.Response) -> JsonValue:
         return None
 
 
-def _order_rows(value: JsonValue) -> tuple[dict[str, JsonValue], ...]:
+def _order_rows(value: JsonValue) -> tuple[tuple[dict[str, JsonValue], ...], bool]:
     if not isinstance(value, Mapping):
-        return ()
+        return (), False
     data = value.get("Data")
     if isinstance(data, str) or not isinstance(data, Sequence):
-        return ()
-    return tuple(row for item in data if (row := _object(item)) is not None)
+        return (), False
+    rows = tuple(_object(item) for item in data)
+    if any(row is None for row in rows):
+        return (), False
+    return tuple(row for row in rows if row is not None), True
 
 
 def _is_fixture_stock_order(row: Mapping[str, JsonValue], account_key: str) -> bool:
@@ -1325,6 +1359,7 @@ def _setup_place_body(account_key: str) -> dict[str, JsonValue]:
         "OrderType": "Limit",
         "OrderPrice": FIXTURE_LIMIT_PRICE,
         "OrderDuration": {"DurationType": "DayOrder"},
+        "ExternalReference": _external_reference("setup-stock"),
     }
 
 

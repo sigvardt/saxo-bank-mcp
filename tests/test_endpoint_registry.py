@@ -17,6 +17,8 @@ from saxo_bank_mcp.endpoint_registry import (
     validate_inventory,
 )
 
+EXPECTED_TRADING_WRITE_COUNT = 38
+
 
 def test_checked_in_inventory_matches_official_service_group_counts() -> None:
     loaded = load_inventory()
@@ -41,6 +43,18 @@ def test_inventory_validation_has_no_undecided_or_unclassified_operations() -> N
     assert isinstance(refused_count, int)
     assert implemented_count > 0
     assert refused_count > 0
+
+
+def test_trading_write_inventory_matches_registered_gateway_support() -> None:
+    writes = [
+        operation
+        for operation in load_inventory().operations
+        if operation.service_group == "Trading" and operation.method != "GET"
+    ]
+
+    assert len(writes) == EXPECTED_TRADING_WRITE_COUNT
+    assert all(operation.status == "implemented" for operation in writes)
+    assert all(operation.refusal_reason == "" for operation in writes)
 
 
 def test_inventory_cli_writes_validation_report(tmp_path: Path) -> None:

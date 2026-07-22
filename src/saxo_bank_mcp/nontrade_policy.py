@@ -30,6 +30,9 @@ SERVICE_ALIASES: Final[dict[str, str]] = {
     "disclaimer management": "Disclaimer Management",
 }
 SAFE_NONTRADE_WRITE_OPERATION_IDS: Final[frozenset[str]] = frozenset()
+SPECIALIZED_NONTRADE_WRITE_OPERATION_IDS: Final = frozenset(
+    {"post.dm.v2.disclaimers"},
+)
 
 
 def service_group_for_slug(service: str) -> str | None:
@@ -95,6 +98,8 @@ def nontrade_safety_class(operation: EndpointOperation) -> str:
 
 
 def nontrade_refusal_reason(operation: EndpointOperation) -> str:
+    if operation.operation_id in SPECIALIZED_NONTRADE_WRITE_OPERATION_IDS:
+        return ""
     if operation.operation_id in SAFE_NONTRADE_WRITE_OPERATION_IDS:
         return ""
     if operation.service_group in NONTRADE_SERVICE_CLASSES:
@@ -126,4 +131,8 @@ def nontrade_classification_rows() -> list[dict[str, JsonValue]]:
 
 
 def all_nontrade_writes_are_refused() -> bool:
-    return all(operation.status == "refused" for operation in nontrade_write_operations())
+    return all(
+        operation.status == "refused"
+        for operation in nontrade_write_operations()
+        if operation.operation_id not in SPECIALIZED_NONTRADE_WRITE_OPERATION_IDS
+    )

@@ -139,6 +139,13 @@ def _service_group_support(operations: tuple[EndpointOperation, ...]) -> list[Re
                     and operation.method == "GET"
                     and operation.read_write_class == "read"
                 ),
+                "registered_write_definitions": sum(
+                    1
+                    for operation in group_operations
+                    if operation.status == "implemented"
+                    and operation.method != "GET"
+                    and operation.read_write_class == "write_or_subscription"
+                ),
                 "refused_operations": sum(
                     1 for operation in group_operations if operation.status == "refused"
                 ),
@@ -158,6 +165,8 @@ def _service_group_support(operations: tuple[EndpointOperation, ...]) -> list[Re
 
 
 def _support_policy(operation: EndpointOperation) -> str:
+    if operation.status == "implemented" and operation.method != "GET":
+        return "registered_write_gateway_or_specialized_tool"
     if operation.status == "implemented":
         return "read_only_definition_registered"
     if operation.read_write_class == "write_or_subscription":

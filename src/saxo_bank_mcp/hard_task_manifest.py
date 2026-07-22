@@ -1,4 +1,4 @@
-# noqa: SIZE_OK - static hard-task manifest definitions are one auditable policy table.
+# allow: SIZE_OK - static hard-task manifest definitions are one auditable policy table.
 from __future__ import annotations
 
 from collections import Counter
@@ -12,7 +12,12 @@ from saxo_bank_mcp._evidence import JsonValue, now_utc
 from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.loop_manifest import GitState, current_git_state
-from saxo_bank_mcp.order_mutation_models import ORDER_WRITE_SPECS, OrderWriteClass, OrderWriteSpec
+from saxo_bank_mcp.order_mutation_models import (
+    ORDER_WRITE_SPECS,
+    PRODUCTION_ORDER_TOOL_NAMES,
+    OrderWriteClass,
+    OrderWriteSpec,
+)
 
 type EndpointClass = Literal["sim_demo", "safe_no_secret_fixture"]
 type HardTaskRiskClass = Literal[
@@ -34,6 +39,16 @@ DEFAULT_INCOMPLETE_TOOL_IDS: Final[tuple[str, ...]] = (
     "saxo_get_required_disclaimers",
     "saxo_modify_multileg_sim_order",
     "saxo_modify_sim_order",
+    "saxo_cancel_multileg_order",
+    "saxo_cancel_order",
+    "saxo_cancel_orders_by_instrument",
+    "saxo_execute_trading_write",
+    "saxo_list_trading_write_operations",
+    "saxo_modify_multileg_order",
+    "saxo_modify_order",
+    "saxo_place_multileg_order",
+    "saxo_place_order",
+    "saxo_prepare_trading_write",
     "saxo_place_multileg_sim_order",
     "saxo_place_sim_order",
     "saxo_register_disclaimer_response",
@@ -64,7 +79,7 @@ class HardTaskSpec(BaseModel):
     human_input_required_for_sim: Literal[False] = False
     redaction_required: Literal[True] = True
     secret_scan_required: Literal[True] = True
-    requires_two_factor_approval: bool
+    requires_live_chat_approval: bool
 
 
 class HardTaskManifest(BaseModel):
@@ -186,8 +201,8 @@ def _guard_errors(spec: HardTaskSpec) -> tuple[str, ...]:
             f"{spec.tool_id}: missing credentials must fail as "
             "auth_required/incomplete_auth_required",
         )
-    if spec.risk_class in RISK_CLASSES_REQUIRING_APPROVAL and not spec.requires_two_factor_approval:
-        errors.append(f"{spec.tool_id}: risky task requires two-factor approval gate")
+    if spec.risk_class in RISK_CLASSES_REQUIRING_APPROVAL and not spec.requires_live_chat_approval:
+        errors.append(f"{spec.tool_id}: risky LIVE task requires one chat approval gate")
     return tuple(errors)
 
 
@@ -215,7 +230,7 @@ def _order_write_task(write_class: OrderWriteClass) -> HardTaskSpec:
         risk_class="money_moving",
         setup_steps=(
             "Set SIM environment, fixture account allowlist, fixture instrument allowlist, "
-            "and test approval factor.",
+            "with autonomous SIM execution.",
             f"Create a write preview for {spec.operation_id} through saxo_create_write_preview.",
         ),
         input_constraints=_order_input_constraints(spec),
@@ -241,7 +256,70 @@ def _order_write_task(write_class: OrderWriteClass) -> HardTaskSpec:
             "incomplete_auth_required",
             "exercised",
         ),
-        requires_two_factor_approval=True,
+        requires_live_chat_approval=True,
+    )
+
+
+def _production_order_write_task(write_class: OrderWriteClass) -> HardTaskSpec:
+    compatibility_spec = ORDER_WRITE_SPECS[write_class]
+    tool_name = PRODUCTION_ORDER_TOOL_NAMES[write_class]
+    return HardTaskSpec(
+        tool_id=tool_name,
+        fastmcp_tool_name=tool_name,
+        qa_command=_qa_command("production-order-mutation", "--classes", write_class),
+        endpoint_class="sim_demo",
+        risk_class="money_moving",
+        setup_steps=(
+            "Set SIM environment and safety limits; SIM execution requires no human approval.",
+            "Create the exact preview required by the production order tool.",
+        ),
+        input_constraints=_order_input_constraints(compatibility_spec),
+        success_oracle=(
+            "FastMCP invokes the production tool name in SIM.",
+            "Saxo accepts the mutation and the class-specific readback proves the result.",
+            "The driver restores open-order state during cleanup.",
+        ),
+        cleanup_steps=(
+            "Cancel every order created by setup or execution.",
+            "Verify the SIM open-order baseline is restored.",
+        ),
+        tribunal_task=(
+            f"Use {tool_name} for a realistic SIM {write_class} task, verify the resulting "
+            "state and cleanup, then identify any agent safety or usability defect."
+        ),
+        allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required"),
+        requires_live_chat_approval=True,
+    )
+
+
+def _trading_gateway_task(tool_name: str, *, mutating: bool) -> HardTaskSpec:
+    return HardTaskSpec(
+        tool_id=tool_name,
+        fastmcp_tool_name=tool_name,
+        qa_command=_qa_command("trading-write-matrix"),
+        endpoint_class="sim_demo",
+        risk_class="money_moving" if mutating else "trade_lookup",
+        setup_steps=(
+            "Use the current registered Saxo Trading write inventory and SIM credentials.",
+        ),
+        input_constraints=(
+            "Use only an operation id returned by saxo_list_trading_write_operations.",
+            "Bind money-moving requests to account, instrument, quantity, and notional limits.",
+        ),
+        success_oracle=(
+            "Every generic Trading write is prepared through FastMCP.",
+            "Every generic route reaches Saxo SIM without automatic mutation retries.",
+            "Account-specific prerequisite or entitlement responses remain explicit limitations.",
+        ),
+        cleanup_steps=(
+            "Delete created subscriptions and restore order and position baselines.",
+        ),
+        tribunal_task=(
+            f"Use {tool_name} in the full SIM Trading-write matrix and determine whether an "
+            "agent can select, preview, execute, interpret, and clean up writes safely."
+        ),
+        allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required", "denied"),
+        requires_live_chat_approval=mutating,
     )
 
 
@@ -257,6 +335,9 @@ def _order_input_constraints(spec: OrderWriteSpec) -> tuple[str, ...]:
 
 
 HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
+    _production_order_write_task("multileg-cancel"),
+    _production_order_write_task("cancel"),
+    _production_order_write_task("cancel-by-instrument"),
     _order_write_task("multileg-cancel"),
     _order_write_task("cancel"),
     _order_write_task("cancel-by-instrument"),
@@ -281,7 +362,7 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "where agents could miss leaked contexts or over-delete active streams."
         ),
         allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required"),
-        requires_two_factor_approval=False,
+        requires_live_chat_approval=False,
     ),
     HardTaskSpec(
         tool_id="saxo_create_order_preview",
@@ -306,7 +387,7 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "agent-facing risk/disclaimer guidance."
         ),
         allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required", "denied"),
-        requires_two_factor_approval=False,
+        requires_live_chat_approval=False,
     ),
     HardTaskSpec(
         tool_id="saxo_create_streaming_price_subscription",
@@ -337,7 +418,7 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "cleanup and critique leak prevention for agents."
         ),
         allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required"),
-        requires_two_factor_approval=False,
+        requires_live_chat_approval=False,
     ),
     HardTaskSpec(
         tool_id="saxo_get_multileg_order_defaults",
@@ -360,7 +441,7 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "from order placement."
         ),
         allowed_noncompletion_statuses=("auth_required", "incomplete_auth_required"),
-        requires_two_factor_approval=False,
+        requires_live_chat_approval=False,
     ),
     HardTaskSpec(
         tool_id="saxo_get_required_disclaimers",
@@ -395,12 +476,19 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "denied",
             "exercised",
         ),
-        requires_two_factor_approval=False,
+        requires_live_chat_approval=False,
     ),
     _order_write_task("multileg-modify"),
     _order_write_task("modify"),
+    _production_order_write_task("multileg-modify"),
+    _production_order_write_task("modify"),
+    _production_order_write_task("multileg-place"),
+    _production_order_write_task("place"),
     _order_write_task("multileg-place"),
     _order_write_task("place"),
+    _trading_gateway_task("saxo_execute_trading_write", mutating=True),
+    _trading_gateway_task("saxo_list_trading_write_operations", mutating=False),
+    _trading_gateway_task("saxo_prepare_trading_write", mutating=True),
     HardTaskSpec(
         tool_id="saxo_register_disclaimer_response",
         fastmcp_tool_name="saxo_register_disclaimer_response",
@@ -411,11 +499,11 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "Attempt to discover real disclaimer context/tokens from SIM order pre-check.",
             "If no outstanding SIM disclaimer is available, use synthetic invalid context/token "
             "only as explicit safe endpoint-exercise coverage.",
-            "Use the SIM test approval factor for the target tool call.",
+            "SIM executes autonomously after the exact disclaimer response is supplied.",
         ),
         input_constraints=(
-            "DisclaimerContext, DisclaimerToken, ResponseType, and approval factor are required.",
-            "Approval factor and disclaimer token must not be written to evidence.",
+            "DisclaimerContext, DisclaimerToken, and ResponseType are required.",
+            "Disclaimer token and submitted response must not be written to evidence.",
         ),
         success_oracle=(
             "FastMCP disclaimer response tool is called.",
@@ -428,7 +516,7 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "response alone.",
         ),
         tribunal_task=(
-            "Register a disclaimer response only after the required approval factor and critique "
+            "Register a SIM disclaimer response and critique "
             "whether agents can avoid accidental consent."
         ),
         allowed_noncompletion_statuses=(
@@ -437,6 +525,6 @@ HARD_TASK_SPECS: Final[tuple[HardTaskSpec, ...]] = (
             "denied",
             "exercised",
         ),
-        requires_two_factor_approval=True,
+        requires_live_chat_approval=True,
     ),
 )

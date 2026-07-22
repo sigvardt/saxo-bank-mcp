@@ -28,12 +28,20 @@ from saxo_bank_mcp.mcp_live_account_tools import (
 )
 from saxo_bank_mcp.mcp_order_tools import (
     ORDER_WRITE_TOOL_DESCRIPTION,
+    PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION,
+    saxo_cancel_multileg_order,
     saxo_cancel_multileg_sim_order,
+    saxo_cancel_order,
+    saxo_cancel_orders_by_instrument,
     saxo_cancel_sim_order,
     saxo_cancel_sim_orders_by_instrument,
+    saxo_modify_multileg_order,
     saxo_modify_multileg_sim_order,
+    saxo_modify_order,
     saxo_modify_sim_order,
+    saxo_place_multileg_order,
     saxo_place_multileg_sim_order,
+    saxo_place_order,
     saxo_place_sim_order,
 )
 from saxo_bank_mcp.mcp_portal_token_tools import (
@@ -74,6 +82,14 @@ from saxo_bank_mcp.mcp_trade_tools import (
     saxo_get_multileg_order_defaults,
     saxo_get_required_disclaimers,
     saxo_register_disclaimer_response,
+)
+from saxo_bank_mcp.mcp_trading_write_tools import (
+    TRADING_WRITE_EXECUTE_DESCRIPTION,
+    TRADING_WRITE_LIST_DESCRIPTION,
+    TRADING_WRITE_PREPARE_DESCRIPTION,
+    saxo_execute_trading_write,
+    saxo_list_trading_write_operations,
+    saxo_prepare_trading_write,
 )
 from saxo_bank_mcp.read_tools import (
     REGISTERED_CALL_TOOL_DESCRIPTION,
@@ -175,6 +191,16 @@ mcp.tool(description=ORDER_PREVIEW_TOOL_DESCRIPTION)(saxo_create_order_preview)
 mcp.tool(description=MULTILEG_DEFAULTS_TOOL_DESCRIPTION)(saxo_get_multileg_order_defaults)
 mcp.tool(description=DISCLAIMER_LOOKUP_TOOL_DESCRIPTION)(saxo_get_required_disclaimers)
 mcp.tool(description=DISCLAIMER_RESPONSE_TOOL_DESCRIPTION)(saxo_register_disclaimer_response)
+mcp.tool(description=TRADING_WRITE_LIST_DESCRIPTION)(saxo_list_trading_write_operations)
+mcp.tool(description=TRADING_WRITE_PREPARE_DESCRIPTION)(saxo_prepare_trading_write)
+mcp.tool(description=TRADING_WRITE_EXECUTE_DESCRIPTION)(saxo_execute_trading_write)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_order)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_order)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_order)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_orders_by_instrument)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_multileg_order)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_multileg_order)
+mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_multileg_order)
 mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_sim_order)
 mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_sim_order)
 mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_sim_order)
