@@ -145,7 +145,13 @@ async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approv
     assert summary_body["BuySell"] == intended_order["BuySell"]
     assert payload["network_call_made"] is True
     assert payload["order_placed"] is False
+    prompt = str(payload["approval_prompt"])
+    assert "PLACE a BUY order for 10 Stock units (UIC 21)" in prompt
+    assert "Market order" in prompt
+    assert "valid for DayOrder" in prompt
+    assert FIXTURE_ACCOUNT not in prompt
     assert sent[0]["ManualOrder"] is False
+    assert sent[0]["FieldGroups"] == ["MarginImpactBuySell", "Costs"]
     assert intended_order["ManualOrder"] is True
 
 
@@ -164,6 +170,56 @@ async def test_order_preview_normalizes_disclaimer_state_when_none_present() -> 
     payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
     assert payload["status"] == "preview_created"
     assert payload["disclaimer_response_state"] == "none"  # normalized to none on success
+
+
+@pytest.mark.anyio
+async def test_stock_preview_uses_unit_contract_multiplier_when_saxo_omits_it() -> None:
+    stock_order = {key: value for key, value in order_body().items() if key != "ContractMultiplier"}
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": stock_order,
+                "precheck_response": precheck_response(),
+                "disclaimer_response_state": "none",
+            },
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert payload["status"] == "preview_created"
+    assert payload["preview_created"] is True
+
+
+@pytest.mark.anyio
+async def test_order_preview_blocks_saxo_error_info_without_exposing_message() -> None:
+    precheck = {
+        **precheck_response(),
+        "ErrorInfo": {
+            "ErrorCode": "InsufficientCash",
+            "Message": "sensitive submitted value",
+        },
+    }
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": order_body(),
+                "precheck_response": precheck,
+                "disclaimer_response_state": "none",
+            },
+            raise_on_error=False,
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert result.is_error is True
+    assert payload["status"] == "denied"
+    assert "precheck_error_info_present" in string_list(payload["denial_reasons"])
+    assert payload["precheck_error_code"] == "InsufficientCash"
+    assert "sensitive submitted value" not in str(payload)
+    assert payload["preview_created"] is False
+    assert payload["order_placed"] is False
 
 
 @pytest.mark.anyio

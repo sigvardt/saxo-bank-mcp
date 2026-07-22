@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -325,6 +326,13 @@ def test_live_configuration_requires_enablement_then_one_exact_chat_approval(
     assert approved["status"] == "approved_for_execution"
     assert approved["simulation_only"] is False
     assert preview["request_fingerprint"] in prompt
+    assert "PLACE a BUY order for 10 instrument units (UIC 21)" in prompt
+    assert "Market order" in prompt
+    assert "estimated account impact 500 USD" in prompt
+    assert "SIM-ACCOUNT-1" not in prompt
+    expires_at = datetime.fromisoformat(str(preview.get("preview_token_expires_at", "")))
+    remaining = expires_at - datetime.now(UTC)
+    assert timedelta(hours=4, minutes=59) < remaining <= timedelta(hours=5)
 
 
 def test_identical_live_order_previews_require_distinct_chat_approvals(

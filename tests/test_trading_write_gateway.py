@@ -139,9 +139,15 @@ async def test_live_preview_binds_one_chat_approval_to_exact_action(
     assert payload["approval_mode"] == "one_exact_action_chat_approval"
     prompt = payload["approval_prompt"]
     assert isinstance(prompt, str)
-    assert prompt.startswith("APPROVE SAXO LIVE WRITE ")
+    assert prompt.startswith("APPROVE SAXO LIVE WRITE: ")
+    assert "UPDATE Messages" in prompt
+    assert "put.trade.v1.messages.seen.messageid" in prompt
+    assert "target field MessageId (value hidden)" in prompt
     assert payload["request_fingerprint"] in prompt
     assert "message-123" not in prompt
+    expires_at = datetime.fromisoformat(str(payload["preview_token_expires_at"]))
+    remaining = expires_at - datetime.now(UTC)
+    assert timedelta(hours=4, minutes=59) < remaining <= timedelta(hours=5)
     assert payload["approval_summary"] == {
         "method": "PUT",
         "operation_id": "put.trade.v1.messages.seen.messageid",

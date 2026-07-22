@@ -44,11 +44,13 @@ from saxo_bank_mcp.trade_preview import (
     disclaimer_blockers,
     disclaimer_context,
     disclaimer_tokens,
+    has_precheck_error,
     operation_id_for_order_kind,
     order_account_key,
     order_instrument_uic,
     order_quantity,
     precheck_endpoint_for_order_kind,
+    precheck_error_code,
 )
 from saxo_bank_mcp.trading_write_execution import prepare_registered_trading_write
 from saxo_bank_mcp.trading_write_registry import TradingWriteSpec
@@ -418,6 +420,8 @@ def _order_input_reasons(
         reasons.append("quantity_missing")
     if account_currency(precheck_response) is None:
         reasons.append("account_currency_unknown")
+    if has_precheck_error(precheck_response):
+        reasons.append("precheck_error_info_present")
 
     precheck_result = precheck_response.get("PreCheckResult")
     if precheck_result is None:
@@ -479,11 +483,11 @@ def _precheck_body(
         return order_body
     body = dict(order_body)
     body["ManualOrder"] = False
+    body["FieldGroups"] = ["MarginImpactBuySell", "Costs"]
     orders = body.get("Orders")
     if isinstance(orders, list):
         body["Orders"] = [
-            {**row, "ManualOrder": False} if isinstance(row, dict) else row
-            for row in orders
+            {**row, "ManualOrder": False} if isinstance(row, dict) else row for row in orders
         ]
     return body
 
@@ -592,12 +596,14 @@ def _denied(  # noqa: PLR0913
     precheck_response: Mapping[str, JsonValue] | None = None,
     disclaimer_details: list[JsonObject] | None = None,
 ) -> dict[str, JsonValue]:
+    error_code = None if precheck_response is None else precheck_error_code(precheck_response)
     return {
         "status": "denied",
         "tool_name": tool_name,
         "order_kind": "" if order_kind is None else order_kind,
         "denial_reasons": reasons,
         "precheck_endpoint": "" if precheck_endpoint is None else precheck_endpoint,
+        "precheck_error_code": "" if error_code is None else redact_text(error_code),
         "response_endpoint_path": DISCLAIMER_RESPONSE_ENDPOINT_PATH,
         "network_call_made": network_call_made,
         "fastmcp_called": True,
