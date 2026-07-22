@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo OpenAPI"
+  short_description: "Guide Saxo operation discovery"
+  default_prompt: "Use $saxo-openapi to plan registered Saxo OpenAPI calls without executing them."
