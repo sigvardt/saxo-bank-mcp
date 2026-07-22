@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo auth session"
+  short_description: "Guide safe Saxo auth recovery"
+  default_prompt: "Use $saxo-auth-session to diagnose Saxo auth state safely without sharing secrets."
