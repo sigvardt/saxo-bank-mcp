@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo trading"
+  short_description: "Guide safe Saxo trading workflows"
+  default_prompt: "Use $saxo-bank-mcp:saxo-trading to plan Saxo order precheck, approval, execution, readback, and cleanup without taking unsafe shortcuts."
