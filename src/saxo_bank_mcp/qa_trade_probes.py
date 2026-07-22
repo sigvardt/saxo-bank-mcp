@@ -1,3 +1,5 @@
+"""# noqa: SIZE_OK - one cohesive trade QA driver; splitting shared setup adds risk."""
+
 from __future__ import annotations
 
 import os
@@ -5,20 +7,20 @@ from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 import anyio
 import httpx2
 from fastmcp import Client
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.config import SIM_ENDPOINTS, SimAuthSettingsError, resolve_sim_auth_settings
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.mcp_token_state import (
-    CachedTokenBlocked,
     CachedTokenReady,
     cached_token_for_tool,
 )
@@ -79,6 +81,15 @@ class DisclaimerDiscoveryFallback:
     http_status: int | None = None
     error_code: str = ""
     candidate_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class TradeProbeRedactionError(Exception):
+    actual_type: str
+
+    def __str__(self) -> str:
+        """Return a safe diagnostic message."""
+        return f"trade probe redaction returned {self.actual_type}, not a JSON object"
 
 
 def handle_trade_precheck(out: Path) -> int:
@@ -375,7 +386,7 @@ def _blocking_disclaimer_details() -> dict[str, JsonValue]:
     }
 
 
-def _payload(value: object) -> dict[str, JsonValue]:
+def _payload(value: JsonValue) -> dict[str, JsonValue]:
     return JSON_OBJECT_ADAPTER.validate_python(value)
 
 
@@ -385,14 +396,12 @@ async def _discover_pretrade_disclaimer_input() -> DisclaimerProbeInput:
     except SimAuthSettingsError as error:
         return _synthetic_disclaimer_input("auth_unavailable", error.code)
     cache_check = cached_token_for_tool("saxo_create_order_preview", settings.cache_path)
-    match cache_check:
-        case CachedTokenReady(token=token):
-            return await _try_discover_pretrade_disclaimer_input(token.access_token)
-        case CachedTokenBlocked(result=result):
-            return _synthetic_disclaimer_input(
-                "auth_unavailable",
-                str(result.get("reason", "token_missing")),
-            )
+    if isinstance(cache_check, CachedTokenReady):
+        return await _try_discover_pretrade_disclaimer_input(cache_check.token.access_token)
+    return _synthetic_disclaimer_input(
+        "auth_unavailable",
+        str(cache_check.result.get("reason", "token_missing")),
+    )
 
 
 async def _try_discover_pretrade_disclaimer_input(
@@ -517,18 +526,16 @@ def _first_disclaimer_input(value: JsonValue) -> tuple[str, str] | None:
     return None
 
 
-def _disclaimer_input_from_container(value: object) -> tuple[str, str] | None:
+def _disclaimer_input_from_container(value: JsonValue) -> tuple[str, str] | None:
     if not isinstance(value, Mapping):
         return None
-    container = cast("Mapping[str, object]", value)
-    context: object = container.get("DisclaimerContext")
-    tokens: object = container.get("DisclaimerTokens")
+    context = value.get("DisclaimerContext")
+    tokens = value.get("DisclaimerTokens")
     if not isinstance(context, str) or not context.strip():
         return None
     if isinstance(tokens, str) or not isinstance(tokens, Sequence):
         return None
-    tokens_sequence = cast("Sequence[object]", tokens)
-    for token in tokens_sequence:
+    for token in tokens:
         if isinstance(token, str) and token.strip():
             return context.strip(), token.strip()
     return None
@@ -630,13 +637,10 @@ def _write_redacted_with_secret_scan(
 ) -> int:
     redacted = redact_json(payload)
     if not isinstance(redacted, dict):
-        raise TypeError("trade probe redaction returned non-object")
-    write_json(out, redacted)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    redacted["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, redacted)
-    clean = not findings and not scan_errors
-    return 0 if redacted.get("status") in success_statuses and clean else 1
+        raise TradeProbeRedactionError(actual_type=type(redacted).__name__)
+    redacted["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted.get("status") in success_statuses and published else 1
 
 
 @contextmanager

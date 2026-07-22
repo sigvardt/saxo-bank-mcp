@@ -10,7 +10,7 @@ type EnvironmentName = Literal["SIM", "LIVE"]
 AUTH_STATUS_VERIFIES: Final[tuple[str, ...]] = (
     "local Saxo environment selection",
     "local credential-source presence without exposing credentials",
-    "local token-cache path, presence, readability, and expiry metadata",
+    "local token-cache presence, readability, and expiry metadata",
 )
 AUTH_STATUS_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
     "Saxo login/server-side authentication",
@@ -37,7 +37,6 @@ class SaxoAuthStatus(TypedDict):
     token_cache_expired: bool | None
     token_cache_refresh_supported: bool | None
     token_cache_environment: EnvironmentName | None
-    token_cache_path: str
     scope_used: Literal[False]
     verifies: list[str]
     does_not_verify: list[str]
@@ -61,7 +60,6 @@ class AuthStatusInputs:
     token_cache_expired: bool | None
     token_cache_refresh_supported: bool | None
     token_cache_environment: EnvironmentName | None
-    token_cache_path: str
 
 
 def build_auth_status(inputs: AuthStatusInputs) -> SaxoAuthStatus:
@@ -81,7 +79,6 @@ def build_auth_status(inputs: AuthStatusInputs) -> SaxoAuthStatus:
         "token_cache_expired": inputs.token_cache_expired,
         "token_cache_refresh_supported": inputs.token_cache_refresh_supported,
         "token_cache_environment": inputs.token_cache_environment,
-        "token_cache_path": inputs.token_cache_path,
         "scope_used": False,
         "verifies": list(AUTH_STATUS_VERIFIES),
         "does_not_verify": list(AUTH_STATUS_DOES_NOT_VERIFY),

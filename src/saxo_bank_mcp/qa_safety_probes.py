@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final, Literal
@@ -10,9 +10,10 @@ import anyio
 from fastmcp import Client
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.audit import audit_log_path
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.safety import TEST_APPROVAL_FACTOR, reset_safety_state
@@ -21,6 +22,10 @@ from saxo_bank_mcp.server import mcp
 FIXTURE_ACCOUNT = "SIM-ACCOUNT-1"
 FIXTURE_INSTRUMENT = "21"
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+
+
+class QaSafetyProbeSerializationError(TypeError):
+    pass
 
 
 def handle_approval_happy(out: Path) -> int:
@@ -96,7 +101,7 @@ def _fixture_request() -> dict[str, JsonValue]:
     }
 
 
-def _payload(value: object) -> dict[str, JsonValue]:
+def _payload(value: JsonValue) -> dict[str, JsonValue]:
     return JSON_OBJECT_ADAPTER.validate_python(value)
 
 
@@ -105,15 +110,13 @@ def _write_redacted_with_secret_scan(
     payload: dict[str, JsonValue],
     success_status: str,
 ) -> int:
-    redacted = redact_json(payload)
-    if not isinstance(redacted, dict):
-        raise TypeError("safety approval redaction returned non-object")
-    write_json(out, redacted)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    redacted["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, redacted)
-    clean = not findings and not scan_errors
-    return 0 if redacted.get("status") == success_status and clean else 1
+    redacted_value = redact_json(payload)
+    if not isinstance(redacted_value, Mapping):
+        raise QaSafetyProbeSerializationError
+    redacted = dict(redacted_value)
+    redacted["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted.get("status") == success_status and published else 1
 
 
 def _missing_to_reason(missing: str) -> str:

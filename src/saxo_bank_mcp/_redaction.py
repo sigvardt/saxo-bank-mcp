@@ -7,6 +7,7 @@ from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.secret_scan import scan_secret_paths, secret_scan_pattern_classes
+from saxo_bank_mcp.secret_scan_private_paths import PRIVATE_ROOT_PATTERN
 
 REDACTED: Final = "<redacted>"
 REDACTED_EMAIL: Final = "<redacted-email>"
@@ -35,6 +36,7 @@ _SENSITIVE_KEYS: Final = frozenset(
         "accountkey",
         "accountid",
         "accountnumber",
+        "accountref",
         "accountgroupid",
         "accountgroupkey",
         "accountgroupname",
@@ -48,12 +50,18 @@ _SENSITIVE_KEYS: Final = frozenset(
         "userid",
         "userkey",
         "previewtoken",
+        "tokencachepath",
+        "auditpath",
+        "rawauditpath",
+        "credentialpath",
+        "credentialrealpath",
     },
 )
 _INLINE_SENSITIVE_KEY_PATTERN: Final = (
     r"(?:access[_-]?token|refresh[_-]?token|client[_-]?secret|"
     r"app[_-]?secret|client[_-]?(?:key|id)|app[_-]?key|authorization[_-]?url|"
-    r"approval[_-]?factor|preview[_-]?token|account[_-]?(?:key|number|id)|"
+    r"approval[_-]?factor|preview[_-]?token|token[_-]?cache[_-]?path|"
+    r"account[_-]?(?:key|number|id|ref)|"
     r"account[_-]?group[_-]?(?:id|key|name)|"
     r"display[_-]?name|external[_-]?reference|nick[_-]?name|user[_-]?(?:id|key)|"
     r"(?:multi[_-]?leg[_-]?)?order[_-]?ids?)"
@@ -103,7 +111,7 @@ def _person_names() -> tuple[str, ...]:
 
 def redact_json(value: JsonValue) -> JsonValue:
     if isinstance(value, str):
-        return redact_text(value)
+        return REDACTED if PRIVATE_ROOT_PATTERN.search(value) is not None else redact_text(value)
     if isinstance(value, bool | int | float) or value is None:
         return value
     if isinstance(value, Mapping):

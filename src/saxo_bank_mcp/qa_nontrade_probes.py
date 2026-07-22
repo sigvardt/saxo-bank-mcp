@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
 
@@ -8,8 +9,9 @@ import anyio
 from fastmcp import Client
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.nontrade_policy import (
     NO_SAFE_NONTRADE_OPERATION_REASON,
     all_nontrade_writes_are_refused,
@@ -25,6 +27,10 @@ from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.server import mcp
 
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+
+
+class QaNontradeProbeSerializationError(TypeError):
+    pass
 
 
 def handle_nontrade_write(out: Path, *, safe_only: bool) -> int:
@@ -232,7 +238,7 @@ def _sample_path(path_template: str) -> str:
     return re.sub(r"\{[^/{}]+\}", "sample-id", path_template)
 
 
-def _payload(value: object) -> dict[str, JsonValue]:
+def _payload(value: JsonValue) -> dict[str, JsonValue]:
     return JSON_OBJECT_ADAPTER.validate_python(value)
 
 
@@ -241,12 +247,10 @@ def _write_with_secret_scan(
     payload: dict[str, JsonValue],
     success_statuses: tuple[str, ...],
 ) -> int:
-    redacted = redact_json(payload)
-    if not isinstance(redacted, dict):
-        raise TypeError("nontrade probe redaction returned non-object")
-    write_json(out, redacted)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    redacted["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, redacted)
-    clean = not findings and not scan_errors
-    return 0 if redacted.get("status") in success_statuses and clean else 1
+    redacted_value = redact_json(payload)
+    if not isinstance(redacted_value, Mapping):
+        raise QaNontradeProbeSerializationError
+    redacted = dict(redacted_value)
+    redacted["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted.get("status") in success_statuses and published else 1

@@ -227,11 +227,9 @@ def _resolved_path(template: str, clean_path: str) -> str | None:
 
 
 def _safe_path_value(path_part: str) -> bool:
-    lowered = path_part.lower()
     return (
         bool(path_part)
         and path_part not in {".", ".."}
-        and "%2f" not in lowered
-        and "%5c" not in lowered
+        and "%" not in path_part
         and all(char.isprintable() for char in path_part)
     )

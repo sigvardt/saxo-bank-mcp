@@ -1,3 +1,5 @@
+"""Single explicit QA CLI command dispatcher. # noqa: SIZE_OK."""
+
 from __future__ import annotations
 
 import argparse
@@ -6,10 +8,11 @@ import shlex
 import sys
 from pathlib import Path
 
-from saxo_bank_mcp._evidence import write_json
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
 from saxo_bank_mcp.hard_task_summary import handle_hard_task_summary
 from saxo_bank_mcp.loop_manifest import GitState, ManifestSpec, build_manifest
+from saxo_bank_mcp.qa_manual_live import handle_manual_live_boundary
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
     handle_nontrade_denied,
@@ -71,6 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
         "stream",
         "readme-smoke",
         "hard-task-manifest",
+        "manual-live-boundary",
         "prod-readiness",
         "tool-inventory",
     ):
@@ -177,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_live_read(args.out, args.skip_out)
     elif command == "live-write-refusal":
         result = handle_live_write_refusal(args.out)
+    elif command == "manual-live-boundary":
+        result = handle_manual_live_boundary(args.out)
     elif command == "prod-readiness":
         result = handle_prod_readiness(args.out)
     elif command == "tool-inventory":
@@ -195,8 +201,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
                 evidence_paths=tuple(str(value) for value in args.evidence_path),
             ),
         )
-        write_json(args.out, manifest.to_json_value())
-        result = 0
+        result = 0 if write_scanned_json(args.out, manifest.to_json_value()) else 1
     elif command == "registered-endpoint-denied":
         result = handle_registered_endpoint_denied(
             args.out,

@@ -7,14 +7,19 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue, now_utc, write_json
+from saxo_bank_mcp._evidence import JsonValue, now_utc
 from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.hard_task_manifest import DEFAULT_INCOMPLETE_TOOL_IDS
 from saxo_bank_mcp.loop_manifest import GitState, current_git_state
 
 JSON_OBJECT_ADAPTER = TypeAdapter(dict[str, JsonValue])
 PASSED_RECEIPT_STATUS: Final = "passed"
 EXERCISED_RECEIPT_STATUS: Final = "exercised"
+
+
+class HardTaskSummaryPublicationError(TypeError):
+    pass
 
 
 class HardTaskSummaryRow(BaseModel):
@@ -92,6 +97,13 @@ def handle_hard_task_summary(
     expected_tool_ids: Iterable[str] = DEFAULT_INCOMPLETE_TOOL_IDS,
     git: GitState | None = None,
 ) -> int:
+    findings, scan_errors = scan_secret_paths([str(receipts_dir)])
+    if findings or scan_errors:
+        write_scanned_json(
+            out,
+            {"status": "failed", "reason": "evidence_secret_scan_failed"},
+        )
+        return 1
     summary = build_hard_task_execution_summary(
         receipts_dir,
         expected_tool_ids=expected_tool_ids,
@@ -99,13 +111,12 @@ def handle_hard_task_summary(
     )
     payload = redact_json(summary.to_json_value())
     if not isinstance(payload, dict):
-        raise TypeError("hard task summary redaction returned non-object")
-    write_json(out, payload)
-    findings, scan_errors = scan_secret_paths([str(out), str(receipts_dir)])
-    payload["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, payload)
-    clean = not findings and not scan_errors
-    return 0 if summary.status == "passed" and clean else 1
+        raise HardTaskSummaryPublicationError(
+            "hard task summary redaction returned non-object",
+        )
+    payload["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, payload)
+    return 0 if summary.status == "passed" and published else 1
 
 
 def _summary_row(path: Path, tool_id: str, current_git: GitState) -> HardTaskSummaryRow:

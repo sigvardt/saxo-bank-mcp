@@ -20,13 +20,12 @@ from saxo_bank_mcp.entitlements import (
 )
 from saxo_bank_mcp.live_mode import (
     LiveReadSettingsError,
-    live_cached_token_for_tool,
     live_read_auth_required,
-    resolve_live_read_settings,
 )
+from saxo_bank_mcp.live_oauth_settings import resolve_live_oauth_settings
+from saxo_bank_mcp.live_token_refresh import live_token_for_tool
 from saxo_bank_mcp.mcp_token_state import (
     CachedTokenBlocked,
-    CachedTokenReady,
     cached_token_for_tool,
 )
 from saxo_bank_mcp.mcp_tool_results import (
@@ -84,13 +83,12 @@ _ENTITLEMENTS_NEXT_ACTIONS: Final[Mapping[str, str]] = MappingProxyType(
 
 async def saxo_get_entitlements() -> ToolResult:
     runtime = SaxoRuntimeConfig.from_env()
-    match runtime.effective_read_environment():
-        case "SIM":
-            return await _read_sim_entitlements()
-        case "LIVE_READ_DISABLED":
-            return _live_entitlements_refused(runtime)
-        case "LIVE":
-            return await _read_live_entitlements()
+    environment = runtime.effective_read_environment()
+    if environment == "SIM":
+        return await _read_sim_entitlements()
+    if environment == "LIVE_READ_DISABLED":
+        return _live_entitlements_refused(runtime)
+    return await _read_live_entitlements()
 
 
 async def _read_sim_entitlements() -> ToolResult:
@@ -102,14 +100,12 @@ async def _read_sim_entitlements() -> ToolResult:
             does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
         )
     cache_check = cached_token_for_tool("saxo_get_entitlements", settings.cache_path)
-    match cache_check:
-        case CachedTokenBlocked(result=result):
-            return entitlement_auth_result(
-                result,
-                does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
-            )
-        case CachedTokenReady(token=token):
-            pass
+    if isinstance(cache_check, CachedTokenBlocked):
+        return entitlement_auth_result(
+            cache_check.result,
+            does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
+        )
+    token = cache_check.token
     refreshed = False
     if token.redacted_status()["is_expired"]:
         try:
@@ -141,13 +137,13 @@ async def _read_sim_entitlements() -> ToolResult:
 
 async def _read_live_entitlements() -> ToolResult:
     try:
-        settings = resolve_live_read_settings()
+        settings = resolve_live_oauth_settings()
     except LiveReadSettingsError as error:
         return entitlement_auth_result(
             live_read_auth_required("saxo_get_entitlements", error.code),
             does_not_verify=LIVE_ENTITLEMENTS_DOES_NOT_VERIFY,
         )
-    token_or_result = live_cached_token_for_tool("saxo_get_entitlements", settings.cache_path)
+    token_or_result = await live_token_for_tool("saxo_get_entitlements", settings)
     if isinstance(token_or_result, dict):
         return entitlement_auth_result(
             token_or_result,

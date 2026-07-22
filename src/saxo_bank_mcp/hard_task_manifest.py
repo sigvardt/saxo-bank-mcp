@@ -1,3 +1,4 @@
+# noqa: SIZE_OK - static hard-task manifest definitions are one auditable policy table.
 from __future__ import annotations
 
 from collections import Counter
@@ -7,8 +8,9 @@ from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from saxo_bank_mcp._evidence import JsonValue, now_utc, write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._evidence import JsonValue, now_utc
+from saxo_bank_mcp._redaction import redact_json
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.loop_manifest import GitState, current_git_state
 from saxo_bank_mcp.order_mutation_models import ORDER_WRITE_SPECS, OrderWriteClass, OrderWriteSpec
 
@@ -38,6 +40,10 @@ DEFAULT_INCOMPLETE_TOOL_IDS: Final[tuple[str, ...]] = (
 )
 RISK_CLASSES_REQUIRING_APPROVAL: Final = frozenset({"disclaimer_write", "money_moving"})
 AUTH_MISSING_STATUSES: Final = frozenset({"auth_required", "incomplete_auth_required"})
+
+
+class HardTaskManifestPublicationError(TypeError):
+    pass
 
 
 class HardTaskSpec(BaseModel):
@@ -134,12 +140,12 @@ def handle_hard_task_manifest(out: Path, registered_tool_ids: Iterable[str]) -> 
     manifest = validate_hard_task_manifest(registered_tool_ids=registered_tool_ids)
     payload = redact_json(manifest.to_json_value())
     if not isinstance(payload, dict):
-        raise TypeError("hard task manifest redaction returned non-object")
-    write_json(out, payload)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    payload["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, payload)
-    return 0 if manifest.status == "passed" and not findings and not scan_errors else 1
+        raise HardTaskManifestPublicationError(
+            "hard task manifest redaction returned non-object",
+        )
+    payload["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, payload)
+    return 0 if manifest.status == "passed" and published else 1
 
 
 def _registered_tool_errors(

@@ -7,9 +7,10 @@ import anyio
 from fastmcp import Client
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.auth_status import SaxoAuthStatus
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.server import mcp
 from saxo_bank_mcp.token_cache import TokenCachePathError, token_cache_path
@@ -19,6 +20,10 @@ SAXO_AUTH_REFERENCE_URLS: Final = (
     "https://www.developer.saxo/openapi/learn/oauth-authorization-code-grant-pkce",
     "https://www.developer.saxo/openapi/learn/security",
 )
+
+
+class AuthProbePayloadError(TypeError):
+    pass
 
 
 async def call_saxo_auth_status() -> SaxoAuthStatus:
@@ -32,7 +37,7 @@ async def call_tool_payload(name: str, arguments: dict[str, JsonValue]) -> dict[
         result = await client.call_tool(name, arguments)
     payload = result.structured_content
     if not isinstance(payload, dict):
-        raise TypeError(f"{name} returned non-object structured content")
+        raise AuthProbePayloadError(f"{name} returned non-object structured content")
     return cast("dict[str, JsonValue]", payload)
 
 
@@ -53,7 +58,6 @@ def handle_auth_status(out: Path) -> int:
         "token_cache_expired": payload["token_cache_expired"],
         "token_cache_refresh_supported": payload["token_cache_refresh_supported"],
         "token_cache_environment": payload["token_cache_environment"],
-        "token_cache_path": payload["token_cache_path"],
         "scope_used": payload["scope_used"],
         "verifies": payload["verifies"],
         "does_not_verify": payload["does_not_verify"],
@@ -67,18 +71,17 @@ def handle_auth_status(out: Path) -> int:
     }
     redacted = redact_json(event)
     if not isinstance(redacted, dict):
-        raise TypeError("auth status event redaction returned non-object")
-    write_json(out, redacted)
-    return 0
+        raise AuthProbePayloadError("auth status event redaction returned non-object")
+    return 0 if write_scanned_json(out, redacted) else 1
 
 
 def handle_sim_auth(out: Path) -> int:
     payload = anyio.run(call_sim_auth_flow)
     redacted = redact_json(payload)
     if not isinstance(redacted, dict):
-        raise TypeError("sim auth event redaction returned non-object")
-    write_json(out, redacted)
-    return 0 if redacted["status"] == "passed" else 1
+        raise AuthProbePayloadError("sim auth event redaction returned non-object")
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted["status"] == "passed" and published else 1
 
 
 async def call_sim_auth_flow() -> dict[str, JsonValue]:
@@ -137,7 +140,7 @@ def handle_token_cache(out: Path) -> int:
         "sync_path_refused": _path_refused(Path.home() / "Desktop" / "saxo-token.json", repo_root),
     }
     passed = all(checks.values())
-    write_json(
+    published = write_scanned_json(
         out,
         {
             **base_event(
@@ -148,7 +151,7 @@ def handle_token_cache(out: Path) -> int:
             **checks,
         },
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1
 
 
 def _safe_auth_status(payload: SaxoAuthStatus) -> dict[str, JsonValue]:

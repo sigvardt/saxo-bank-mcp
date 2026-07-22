@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from saxo_bank_mcp._evidence import write_text
+from saxo_bank_mcp.evidence_publication import write_scanned_text
 from saxo_bank_mcp.final_verify_common import GitStateProvider, command_check, render_report
 
 CODE_REQUIRED_PATHS = (
@@ -28,7 +28,7 @@ def verify_code(out: Path, git_state_provider: GitStateProvider) -> int:
     )
     checks.extend(
         (
-            command_check("pytest", ("uv", "run", "pytest")),
+            command_check("pytest", ("uv", "run", "pytest"), timeout=300),
             command_check("ruff", ("uv", "run", "ruff", "check", ".")),
             command_check("basedpyright", ("uv", "run", "basedpyright")),
             command_check(
@@ -73,7 +73,7 @@ def verify_code(out: Path, git_state_provider: GitStateProvider) -> int:
         ),
     )
     passed = all(ok for _, ok, _ in checks)
-    write_text(
+    published = write_scanned_text(
         out,
         render_report(
             "Code Quality Gate",
@@ -82,4 +82,4 @@ def verify_code(out: Path, git_state_provider: GitStateProvider) -> int:
             git_state_provider=git_state_provider,
         ),
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1

@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from saxo_bank_mcp import hard_task_summary as summary_module
 from saxo_bank_mcp import qa
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.hard_task_summary import build_hard_task_execution_summary
 from saxo_bank_mcp.loop_manifest import GitState
 
@@ -14,7 +18,7 @@ def write_receipt(
     sha: str,
     dirty: bool = False,
     status: str = "passed",
-    extra: dict[str, object] | None = None,
+    extra: dict[str, JsonValue] | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -177,3 +181,36 @@ def test_hard_task_summary_qa_command_writes_report(tmp_path: Path) -> None:
     assert report["status"] == "passed"
     assert report["rows"][0]["tool_id"] == "saxo_create_order_preview"
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}
+
+
+def test_hard_task_summary_scans_before_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts = tmp_path / "receipts"
+    receipts.mkdir()
+    write_receipt(receipts / "saxo_create_order_preview.json", sha="abc123")
+    out = tmp_path / "summary.json"
+    marker = "rejected-summary-marker"
+
+    def finding_scan(
+        _paths: list[str],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        return ([{"path": marker, "pattern": "synthetic"}], [])
+
+    monkeypatch.setattr(summary_module, "scan_secret_paths", finding_scan)
+
+    result = summary_module.handle_hard_task_summary(
+        out,
+        receipts,
+        expected_tool_ids=("saxo_create_order_preview",),
+        git=GitState(sha="abc123", dirty=False),
+    )
+
+    raw = out.read_text(encoding="utf-8")
+    assert result == 1
+    assert marker not in raw
+    assert json.loads(raw) == {
+        "reason": "evidence_secret_scan_failed",
+        "status": "failed",
+    }

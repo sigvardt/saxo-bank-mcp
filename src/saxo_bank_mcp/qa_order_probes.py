@@ -1,3 +1,7 @@
+"""Run the cohesive SIM order QA safety flow. # noqa: SIZE_OK.
+
+Keep setup, writes, readback, cleanup, and evidence in one ordered driver.
+"""
 from __future__ import annotations
 
 import json
@@ -7,7 +11,7 @@ from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn, assert_never
 
 import anyio
 import httpx2
@@ -15,9 +19,10 @@ from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.config import SIM_ENDPOINTS, SimAuthSettingsError, resolve_sim_auth_settings
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.mcp_token_state import (
@@ -68,6 +73,32 @@ class SetupOrder:
     order_id: str
     order_kind: Literal["single", "multileg"]
     report: dict[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class OrderProbeRedactionError(Exception):
+    received_type: str
+
+    def __str__(self) -> str:
+        """Describe the incompatible redaction value."""
+        return f"order probe redaction returned {self.received_type}, expected a JSON object"
+
+
+@dataclass(frozen=True, slots=True)
+class OrderProbeInvariantError(Exception):
+    subject: Literal["cached_token", "order_write_spec"]
+    observed: str
+
+    def __str__(self) -> str:
+        """Describe an impossible QA driver state."""
+        return f"order probe invariant failed for {self.subject}: {self.observed}"
+
+
+def _raise_order_probe_invariant(
+    subject: Literal["cached_token", "order_write_spec"],
+    observed: str,
+) -> NoReturn:
+    raise OrderProbeInvariantError(subject=subject, observed=observed)
 
 
 def handle_sim_order_mutation(out: Path, classes: str | None) -> int:
@@ -719,13 +750,16 @@ async def _raw_open_orders(
         return (), _raw_read_report("auth_unavailable", reason=error.code)
     cache_check = cached_token_for_tool(tool_name, settings.cache_path)
     match cache_check:
-        case CachedTokenReady(token=token):
+        case CachedTokenReady(token=token) if token.environment != "LIVE":
             access_token = token.access_token
         case CachedTokenBlocked(result=result):
             return (), _raw_read_report(
                 "auth_unavailable",
                 reason=str(result.get("reason", "token_missing")),
             )
+        case _ as unreachable:
+            _raise_order_probe_invariant("cached_token", type(unreachable).__name__)
+            assert_never(unreachable)
     try:
         async with create_async_client(base_url=SIM_ENDPOINTS.rest_base_url) as client:
             response = await client.get(
@@ -833,7 +867,7 @@ def _unique_strings(values: Iterable[str | None]) -> tuple[str, ...]:
     return tuple(unique)
 
 
-def _object(value: object) -> dict[str, JsonValue] | None:
+def _object(value: JsonValue) -> dict[str, JsonValue] | None:
     if not isinstance(value, Mapping):
         return None
     return JSON_OBJECT_ADAPTER.validate_python(value)
@@ -1247,6 +1281,17 @@ def _request_body(  # noqa: PLR0911
 ) -> dict[str, JsonValue]:
     common: dict[str, JsonValue] = {"AccountKey": account_key}
     match spec.write_class:
+        case "place" if spec.operation_id == "post.trade.v2.orders":
+            return {
+                **common,
+                "Uic": FIXTURE_INSTRUMENT,
+                "AssetType": FIXTURE_ASSET_TYPE,
+                "Amount": FIXTURE_ORDER_AMOUNT,
+                "BuySell": "Buy",
+                "ManualOrder": False,
+                "OrderType": "Market",
+                "OrderDuration": {"DurationType": "DayOrder"},
+            }
         case "cancel":
             return {**common, "OrderIds": order_id or "fixture-order-id"}
         case "modify":
@@ -1264,17 +1309,9 @@ def _request_body(  # noqa: PLR0911
                 multi_leg_order_id=order_id or "fixture-multileg-order-id",
                 order_price=MULTILEG_MODIFIED_LIMIT_PRICE,
             )
-        case _:
-            return {
-                **common,
-                "Uic": FIXTURE_INSTRUMENT,
-                "AssetType": FIXTURE_ASSET_TYPE,
-                "Amount": FIXTURE_ORDER_AMOUNT,
-                "BuySell": "Buy",
-                "ManualOrder": False,
-                "OrderType": "Market",
-                "OrderDuration": {"DurationType": "DayOrder"},
-            }
+        case _ as unreachable:
+            _raise_order_probe_invariant("order_write_spec", unreachable)
+            assert_never(unreachable)
 
 
 def _setup_place_body(account_key: str) -> dict[str, JsonValue]:
@@ -1354,7 +1391,7 @@ def _parse_order_write_class(raw: str) -> OrderWriteClass | None:
     return ORDER_WRITE_CLASS_BY_NAME.get(raw.strip())
 
 
-def _payload(value: object) -> dict[str, JsonValue]:
+def _payload(value: JsonValue) -> dict[str, JsonValue]:
     return JSON_OBJECT_ADAPTER.validate_python(value)
 
 
@@ -1365,13 +1402,10 @@ def _write_redacted_with_secret_scan(
 ) -> int:
     redacted = redact_json(payload)
     if not isinstance(redacted, dict):
-        raise TypeError("order probe redaction returned non-object")
-    write_json(out, redacted)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    redacted["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, redacted)
-    clean = not findings and not scan_errors
-    return 0 if redacted.get("status") in success_statuses and clean else 1
+        raise OrderProbeRedactionError(received_type=type(redacted).__name__)
+    redacted["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted.get("status") in success_statuses and published else 1
 
 
 @contextmanager

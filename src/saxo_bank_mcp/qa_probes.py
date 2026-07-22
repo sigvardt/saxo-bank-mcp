@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
-from collections.abc import Generator, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from pathlib import Path
 from typing import Final
 
@@ -13,26 +11,30 @@ import anyio
 from fastmcp import Client
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, now_utc, write_json
+from saxo_bank_mcp._evidence import JsonValue, now_utc
 from saxo_bank_mcp._redaction import (
     redact_json,
     redact_text,
     scan_secret_paths,
     secret_scan_pattern_classes,
 )
-from saxo_bank_mcp.config import SaxoRuntimeConfig
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.qa_auth_probes import handle_auth_status, handle_sim_auth, handle_token_cache
 from saxo_bank_mcp.qa_events import base_event
-from saxo_bank_mcp.qa_live_evidence import (
-    private_identifier_findings,
-    sanitize_live_read_payloads,
+from saxo_bank_mcp.qa_live_probes import (
+    handle_live_read,
+    handle_live_read_refusal,
+    handle_live_write_refusal,
+    handle_tool_inventory,
 )
-from saxo_bank_mcp.server import (
-    SaxoHealth,
-    mcp,
+from saxo_bank_mcp.qa_mcp_probe_calls import (
+    call_live_read_payloads,
+    call_live_write_refusal_payload,
+    call_tool_inventory_payload,
+    call_tool_payload,
 )
-from saxo_bank_mcp.tool_metadata import tool_metadata
+from saxo_bank_mcp.server import SaxoHealth, mcp
 
 GITIGNORE_SECRET_DUMMIES = (
     (".omo/", Path(".omo/task-1-qa-ignore-dummy.txt")),
@@ -44,121 +46,34 @@ GITIGNORE_SECRET_DUMMIES = (
     ("*.log", Path("task-1-qa.log")),
 )
 HEALTH_ADAPTER: Final = TypeAdapter(SaxoHealth)
-TOOL_PAYLOAD_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+
 __all__ = (
+    "call_live_read_payloads",
+    "call_live_write_refusal_payload",
+    "call_tool_inventory_payload",
+    "call_tool_payload",
     "handle_auth_status",
+    "handle_gitignore_secret",
+    "handle_health",
+    "handle_live_read",
+    "handle_live_read_refusal",
+    "handle_live_write_refusal",
+    "handle_secret_scan",
     "handle_sim_auth",
     "handle_token_cache",
+    "handle_tool_inventory",
+    "write_incomplete",
 )
+
+
+class QaProbeSerializationError(TypeError):
+    pass
 
 
 async def call_saxo_health() -> SaxoHealth:
     async with Client(mcp) as client:
         result = await client.call_tool("saxo_health", {})
     return HEALTH_ADAPTER.validate_python(result.structured_content)
-
-
-async def call_tool_payload(
-    name: str,
-    arguments: dict[str, JsonValue],
-    *,
-    raise_on_error: bool = True,
-) -> dict[str, JsonValue]:
-    async with Client(mcp) as client:
-        result = await client.call_tool(name, arguments, raise_on_error=raise_on_error)
-    return TOOL_PAYLOAD_ADAPTER.validate_python(result.structured_content)
-
-
-async def call_live_session_capabilities_payload() -> dict[str, JsonValue]:
-    arguments: dict[str, JsonValue] = {}
-    return await call_tool_payload("saxo_get_session_capabilities", arguments)
-
-
-async def call_live_read_payloads() -> dict[str, dict[str, JsonValue]]:
-    return {
-        "saxo_get_session_capabilities": await call_live_session_capabilities_payload(),
-        "saxo_get_entitlements": await call_tool_payload("saxo_get_entitlements", {}),
-        "saxo_list_registered_endpoints": await call_tool_payload(
-            "saxo_list_registered_endpoints",
-            {"limit": 1},
-        ),
-        "saxo_call_registered_endpoint_public_diagnostics": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {"method": "GET", "path": "/root/v1/diagnostics/get"},
-        ),
-        "saxo_call_registered_endpoint_authenticated_account": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {"method": "GET", "path": "/port/v1/accounts/me"},
-        ),
-        "saxo_call_registered_endpoint_balances": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {"method": "GET", "path": "/port/v1/balances/me"},
-        ),
-        "saxo_call_registered_endpoint_positions": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {
-                "method": "GET",
-                "path": "/port/v1/positions/me",
-                "params": {"$top": "1"},
-            },
-        ),
-        "saxo_call_registered_endpoint_orders": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {
-                "method": "GET",
-                "path": "/port/v1/orders/me",
-                "params": {"$top": "1"},
-            },
-        ),
-        "saxo_call_registered_endpoint_prices": await call_tool_payload(
-            "saxo_call_registered_endpoint",
-            {
-                "method": "GET",
-                "path": "/trade/v1/infoprices",
-                "params": {"Uic": "21", "AssetType": "FxSpot"},
-            },
-        ),
-    }
-
-
-async def call_live_write_refusal_payload() -> dict[str, JsonValue]:
-    arguments: dict[str, JsonValue] = {"preview_token": "LIVE-WRITE-REFUSAL-PROBE"}
-    return await call_tool_payload("saxo_place_sim_order", arguments, raise_on_error=False)
-
-
-async def call_tool_inventory_payload() -> dict[str, JsonValue]:
-    async with Client(mcp) as client:
-        tools = await client.list_tools()
-    all_tools = sorted(tool.name for tool in tools)
-    metadata = tool_metadata()
-    missing_metadata = [name for name in all_tools if name not in metadata]
-    unregistered_metadata = [name for name in sorted(metadata) if name not in all_tools]
-    local_metadata_reads = _tools_by_class(metadata, ("local_metadata_read",))
-    live_network_reads = [
-        name
-        for name, item in metadata.items()
-        if item["tool_class"] == "network_read" and item["safe_in_live_read_mode"] is True
-    ]
-    sim_only_network_reads = _tools_by_class(metadata, ("sim_only_network_read",))
-    state_changing_or_write = [
-        name
-        for name, item in metadata.items()
-        if item["state_changing"] is True or item["write_effect"] != "none"
-    ]
-    return {
-        "status": "passed" if not missing_metadata and not unregistered_metadata else "failed",
-        "tool_count": len(all_tools),
-        "all_tools": all_tools,
-        "tool_metadata": metadata,
-        "local_metadata_read_tools": local_metadata_reads,
-        "live_network_read_tools": live_network_reads,
-        "sim_only_network_read_tools": sim_only_network_reads,
-        "write_or_state_changing_tools": state_changing_or_write,
-        "metadata_missing_tools": missing_metadata,
-        "metadata_unregistered_tools": unregistered_metadata,
-        "live_write_called": False,
-        "order_or_subscription_created": False,
-    }
 
 
 def handle_health(out: Path) -> int:
@@ -183,13 +98,12 @@ def handle_health(out: Path) -> int:
     }
     redacted = redact_json(event)
     if not isinstance(redacted, dict):
-        raise TypeError("health event redaction returned non-object")
-    write_json(out, redacted)
-    return 0
+        raise QaProbeSerializationError
+    return 0 if write_scanned_json(out, redacted) else 1
 
 
 def write_incomplete(out: Path, command: str, detail: str) -> int:
-    write_json(out, base_event(command, "incomplete", detail))
+    write_scanned_json(out, base_event(command, "incomplete", detail))
     return 1
 
 
@@ -199,8 +113,7 @@ def handle_gitignore_secret(out: Path) -> int:
     dummy_paths = [path for _, path in GITIGNORE_SECRET_DUMMIES]
     created_dirs: list[Path] = []
     cleanup_removed: list[str] = []
-    git_check: dict[str, JsonValue]
-
+    git_check: dict[str, JsonValue] = {"status": "failed", "error": "not_run"}
     try:
         for path in dummy_paths:
             if path.exists():
@@ -211,7 +124,6 @@ def handle_gitignore_secret(out: Path) -> int:
                 parent.mkdir(parents=True)
                 created_dirs.append(parent)
             path.write_text("dummy ignore probe\n", encoding="utf-8")
-
         git = shutil.which("git")
         if git is None:
             git_check = {"status": "failed", "error": "git_not_found"}
@@ -240,11 +152,10 @@ def handle_gitignore_secret(out: Path) -> int:
         for path in reversed(created_dirs):
             with suppress(OSError):
                 path.rmdir()
-
     remaining_exists = [str(path) for path in dummy_paths if path.exists()]
     missing = sorted(set(missing))
     passed = not missing and not remaining_exists and git_check.get("status") == "passed"
-    write_json(
+    published = write_scanned_json(
         out,
         {
             **base_event(
@@ -259,145 +170,12 @@ def handle_gitignore_secret(out: Path) -> int:
             "missing_patterns": missing,
         },
     )
-    return 0 if passed else 1
-
-
-def handle_live_read(out: Path, skip_out: Path) -> int:
-    live_environ = _live_probe_environ()
-    runtime = SaxoRuntimeConfig.from_env(live_environ)
-    if runtime.effective_read_environment() != "LIVE":
-        event = {
-            **base_event(
-                "live-read",
-                "skipped_no_live_credentials",
-                "LIVE read env vars or credentials are absent",
-            ),
-            "requested_environment": "LIVE",
-            "effective_read_environment": runtime.effective_read_environment(),
-            "live_reads_enabled": runtime.live_reads_enabled,
-            "live_credentials_present": runtime.live_credentials_present,
-            "network_call_made": False,
-            "live_write_called": False,
-            "order_or_subscription_created": False,
-            "prompted_user": False,
-            "private_identifiers_present": False,
-            "missing_requirements": _live_read_probe_missing_requirements(runtime),
-        }
-        return _write_secret_scanned_event(out, event, mirrors=(skip_out,))
-
-    with _temporary_env({"SAXO_MCP_ENVIRONMENT": "LIVE"}):
-        payloads = anyio.run(call_live_read_payloads)
-    tool_statuses = {
-        tool_name: str(payload.get("status", "failed"))
-        for tool_name, payload in payloads.items()
-    }
-    evidence_payloads = sanitize_live_read_payloads(payloads)
-    status = "passed" if _live_read_suite_passed(tool_statuses) else "failed"
-    event: dict[str, JsonValue] = {
-        **base_event("live-read", status, "FastMCP live read-only probe suite returned"),
-        "requested_environment": "LIVE",
-        "read_scenarios_exercised": list(payloads),
-        "read_tools_exercised": sorted(
-            {
-                str(payload.get("tool_name", scenario_name))
-                for scenario_name, payload in payloads.items()
-            },
-        ),
-        "tool_statuses": tool_statuses,
-        "tool_results": evidence_payloads,
-        "authenticated_registered_read_passed": (
-            tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
-            == "passed"
-            and payloads["saxo_call_registered_endpoint_authenticated_account"].get(
-                "auth_exercised",
-            )
-            is True
-        ),
-        "live_read_coverage": {
-            "accounts": tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
-            == "passed",
-            "balances": tool_statuses.get("saxo_call_registered_endpoint_balances")
-            == "passed",
-            "positions": tool_statuses.get("saxo_call_registered_endpoint_positions")
-            == "passed",
-            "orders": tool_statuses.get("saxo_call_registered_endpoint_orders") == "passed",
-            "prices": tool_statuses.get("saxo_call_registered_endpoint_prices") == "passed",
-            "streaming": "not_applicable_to_read_only_get_tools",
-        },
-        "network_call_made": any(
-            bool(payload.get("network_call_made", False)) for payload in payloads.values()
-        ),
-        "network_read_count": sum(
-            1 for payload in payloads.values() if payload.get("network_call_made") is True
-        ),
-        "live_write_called": any(
-            bool(payload.get("live_write_called", False)) for payload in payloads.values()
-        ),
-        "order_or_subscription_created": any(
-            bool(payload.get("order_or_subscription_created", False))
-            for payload in payloads.values()
-        ),
-        "prompted_user": False,
-        "private_identifiers_redacted": True,
-        "private_financial_data_omitted": True,
-    }
-    exit_code = _write_secret_scanned_event(out, event)
-    if status != "passed":
-        return 1
-    return exit_code
-
-
-def handle_live_write_refusal(out: Path) -> int:
-    with _temporary_env({"SAXO_MCP_ENVIRONMENT": "LIVE"}):
-        payload = anyio.run(call_live_write_refusal_payload)
-    status = str(payload.get("status", "failed"))
-    event = {
-        **base_event("live-write-refusal", status, "FastMCP order tool refused LIVE write"),
-        **payload,
-        "live_write_called": bool(payload.get("live_write_called", False)),
-        "order_or_subscription_created": bool(payload.get("order_or_subscription_created", False)),
-    }
-    exit_code = _write_secret_scanned_event(out, event)
-    if status != "refused" or payload.get("refusal_reason") != "missing_live_write_enablement":
-        return 1
-    return exit_code
-
-
-def handle_tool_inventory(out: Path) -> int:
-    payload = anyio.run(call_tool_inventory_payload)
-    payload["git"] = current_git_state().model_dump(mode="json")
-    exit_code = _write_secret_scanned_event(out, payload)
-    return 0 if payload["status"] == "passed" and exit_code == 0 else 1
-
-
-def handle_live_read_refusal(out: Path) -> int:
-    enabled = os.environ.get("SAXO_MCP_ENABLE_LIVE_READS") == "1"
-    requested_environment = os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").upper()
-    status = "failed" if enabled else "refused"
-    detail = (
-        "LIVE read env var is enabled before read tooling exists"
-        if enabled
-        else "LIVE read enablement is absent"
-    )
-    write_json(
-        out,
-        {
-            **base_event("live-read-refusal", status, detail),
-            "environment": requested_environment,
-            "live_reads": enabled,
-            "live_writes": False,
-            "scope_used": False,
-            "network_call_made": False,
-            "reason": "live_reads_enabled" if enabled else "missing_live_read_enablement",
-        },
-    )
-    return 1 if enabled else 0
+    return 0 if passed and published else 1
 
 
 def handle_secret_scan(out: Path, paths: list[str]) -> int:
     findings, scan_errors = scan_secret_paths(paths)
-    write_json(
-        out,
+    candidate = redact_json(
         {
             **base_event(
                 "secret-scan",
@@ -410,102 +188,20 @@ def handle_secret_scan(out: Path, paths: list[str]) -> int:
             "scan_errors": scan_errors,
         },
     )
-    return 0 if not findings and not scan_errors else 1
+    if not isinstance(candidate, dict):
+        raise QaProbeSerializationError
+    published = write_scanned_json(
+        out,
+        candidate,
+    )
+    return 0 if not findings and not scan_errors and published else 1
 
 
 def handle_denial(args: argparse.Namespace) -> int:
     command = str(args.command)
-    detail = "fail-closed policy denied the operation before MCP tools exist"
-    payload = base_event(command, "denied", detail)
+    payload = base_event(command, "denied", "fail-closed policy denied the operation")
     for key in ("missing", "method", "path", "service"):
         value = getattr(args, key, None)
         if value is not None:
             payload[key] = str(value)
-    write_json(args.out, payload)
-    return 0
-
-
-def _live_probe_environ() -> dict[str, str]:
-    source = dict(os.environ)
-    source["SAXO_MCP_ENVIRONMENT"] = "LIVE"
-    return source
-
-
-def _live_read_probe_missing_requirements(runtime: SaxoRuntimeConfig) -> list[str]:
-    missing: list[str] = []
-    if not runtime.live_reads_enabled:
-        missing.append("SAXO_MCP_ENABLE_LIVE_READS=1")
-    if not runtime.live_credentials_present:
-        missing.append("LIVE credentials")
-    missing.append("SAXO_MCP_LIVE_TOKEN_CACHE_PATH")
-    return missing
-
-
-def _live_read_suite_passed(tool_statuses: Mapping[str, str]) -> bool:
-    return (
-        tool_statuses.get("saxo_get_session_capabilities") == "passed"
-        and tool_statuses.get("saxo_get_entitlements") == "passed"
-        and tool_statuses.get("saxo_list_registered_endpoints")
-        == "metadata_only_not_ready_for_trading"
-        and tool_statuses.get("saxo_call_registered_endpoint_public_diagnostics") == "passed"
-        and tool_statuses.get("saxo_call_registered_endpoint_authenticated_account")
-        == "passed"
-        and tool_statuses.get("saxo_call_registered_endpoint_balances") == "passed"
-        and tool_statuses.get("saxo_call_registered_endpoint_positions") == "passed"
-        and tool_statuses.get("saxo_call_registered_endpoint_orders") == "passed"
-        and tool_statuses.get("saxo_call_registered_endpoint_prices") == "passed"
-    )
-
-
-def _tools_by_class(
-    metadata: Mapping[str, Mapping[str, JsonValue]],
-    tool_classes: tuple[str, ...],
-) -> list[str]:
-    return sorted(
-        name for name, item in metadata.items() if item.get("tool_class") in tool_classes
-    )
-
-
-@contextmanager
-def _temporary_env(updates: Mapping[str, str]) -> Generator[None]:
-    previous = {key: os.environ.get(key) for key in updates}
-    os.environ.update(updates)
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-def _write_secret_scanned_event(
-    out: Path,
-    payload: dict[str, JsonValue],
-    *,
-    mirrors: tuple[Path, ...] = (),
-) -> int:
-    redacted = redact_json(payload)
-    if not isinstance(redacted, dict):
-        raise TypeError("LIVE QA event redaction returned non-object")
-    identifier_findings = private_identifier_findings(redacted)
-    if "private_identifiers_redacted" in redacted:
-        redacted["private_identifiers_redacted"] = not identifier_findings
-    redacted["private_identifier_findings"] = identifier_findings
-    redacted["evidence_redaction_status"] = (
-        "passed" if not identifier_findings else "failed"
-    )
-    write_json(out, redacted)
-    for mirror in mirrors:
-        write_json(mirror, redacted)
-
-    findings, scan_errors = scan_secret_paths([str(out), *(str(mirror) for mirror in mirrors)])
-    scanned: dict[str, JsonValue] = {
-        **redacted,
-        "secret_scan": {"findings": findings, "scan_errors": scan_errors},
-    }
-    write_json(out, scanned)
-    for mirror in mirrors:
-        write_json(mirror, scanned)
-    return 0 if not findings and not scan_errors and not identifier_findings else 1
+    return 0 if write_scanned_json(args.out, payload) else 1

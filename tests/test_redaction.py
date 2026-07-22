@@ -92,10 +92,14 @@ def test_redact_json_masks_sensitive_keys_recursively() -> None:
     acct_digits = int("".join(str(number) for number in range(10)))
     secret_detail = f"{'Client' + 'Secret'}={'client' + 'secret' + string.ascii_lowercase}"
     acct_num_key = "account" + "Number"
+    account_ref_key = "account" + "_ref"
+    token_cache_path_key = "token" + "_cache_path"
     payload = {
         "nested": {
             "access_token": token,
             acct_num_key: acct_digits,
+            account_ref_key: "process-scoped-reference",
+            token_cache_path_key: "/private/operator/token.json",
         },
         "detail": secret_detail,
         "authorization_url": "https://sim.logonvalidation.net/authorize?client_id=abc&state=def",
@@ -108,6 +112,8 @@ def test_redact_json_masks_sensitive_keys_recursively() -> None:
         "nested": {
             "access_token": REDACTED,
             acct_num_key: REDACTED,
+            account_ref_key: REDACTED,
+            token_cache_path_key: REDACTED,
         },
         "detail": f"ClientSecret={REDACTED}",
         "authorization_url": REDACTED,

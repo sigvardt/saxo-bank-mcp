@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from saxo_bank_mcp import inventory
+import pytest
+
+from saxo_bank_mcp import evidence_publication, inventory
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.endpoint_registry import (
     EXPECTED_OPERATION_COUNT,
     EXPECTED_SERVICE_GROUP_COUNTS,
@@ -52,6 +55,44 @@ def test_inventory_cli_writes_validation_report(tmp_path: Path) -> None:
     assert report["secret_scan"] == {"findings": [], "scan_errors": []}
 
 
+def test_inventory_cli_scans_candidate_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "inventory.json"
+    rejected_value = "rejected-inventory-candidate"
+
+    def rejected_report(_inventory: JsonValue) -> dict[str, JsonValue]:
+        return {"status": "passed", "unsafe_value": rejected_value}
+
+    def reject_candidate(
+        _label: str,
+        text: str,
+    ) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
+        findings: list[dict[str, JsonValue]] = (
+            [{"pattern_class": "credential_regex"}] if rejected_value in text else []
+        )
+        return findings, []
+
+    def clean_source_scan(
+        _paths: list[str],
+    ) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
+        return [], []
+
+    monkeypatch.setattr(inventory, "validate_inventory", rejected_report)
+    monkeypatch.setattr(inventory, "scan_secret_paths", clean_source_scan)
+    monkeypatch.setattr(evidence_publication, "scan_secret_text", reject_candidate)
+
+    result = inventory.handle_validate(out)
+
+    assert result == 1
+    assert json.loads(out.read_text(encoding="utf-8")) == {
+        "reason": "evidence_secret_scan_failed",
+        "status": "failed",
+    }
+    assert rejected_value not in out.read_text(encoding="utf-8")
+
+
 def test_registry_finds_only_registered_relative_saxo_paths() -> None:
     diagnostics = find_registered_operation("GET", "/root/v1/diagnostics/get")
     unregistered = find_registered_operation("GET", "/not-a-registered-saxo-path")
@@ -87,6 +128,8 @@ def test_registry_prefers_exact_paths_over_placeholder_matches() -> None:
 
 def test_registry_rejects_unsafe_path_template_values() -> None:
     assert find_registered_endpoint("GET", "/hist/v3/accountvalues/..") is None
+    assert find_registered_endpoint("GET", "/hist/v3/accountvalues/%2e%2e") is None
+    assert find_registered_endpoint("GET", "/hist/v3/accountvalues/%252e%252e") is None
     assert find_registered_endpoint("GET", "/hist/v3/accountvalues/%2Fsecret") is None
 
 

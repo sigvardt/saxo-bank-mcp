@@ -40,3 +40,19 @@ jobs:
 
       - name: QA health probe
         run: uv run python -m saxo_bank_mcp.qa health --out .omo/evidence/saxo-bank-mcp/ci-health.json
+
+      - name: QA public secret scan
+        run: >-
+          uv run python -m saxo_bank_mcp.qa secret-scan
+          --out /tmp/saxo-ci-secret-scan.json
+          --paths README.md docs src tests pyproject.toml uv.lock .github .gitignore
+
+      - name: QA LIVE write refusal
+        run: >-
+          uv run python -m saxo_bank_mcp.qa live-write-refusal
+          --out /tmp/saxo-ci-live-write-refusal.json
+
+      - name: QA LIVE read refusal
+        run: >-
+          uv run python -m saxo_bank_mcp.qa live-read-refusal
+          --out /tmp/saxo-ci-live-read-refusal.json

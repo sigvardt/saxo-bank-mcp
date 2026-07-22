@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import anyio
 from fastmcp import Client
 
-from saxo_bank_mcp._evidence import write_json
-from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp._redaction import redact_json
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_streaming_payloads import (
     JsonObject,
     StreamCleanupProbeOptions,
@@ -25,6 +26,10 @@ from saxo_bank_mcp.streaming import (
 )
 
 STREAM_FRAME_WAIT_SECONDS = 10.0
+
+
+class QaStreamingProbeSerializationError(TypeError):
+    pass
 
 
 def handle_stream(
@@ -100,12 +105,10 @@ def write_redacted_with_secret_scan(
     payload_value: JsonObject,
     success_statuses: tuple[str, ...],
 ) -> int:
-    redacted = redact_json(payload_value)
-    if not isinstance(redacted, dict):
-        raise TypeError("streaming probe redaction returned non-object")
-    write_json(out, redacted)
-    findings, scan_errors = scan_secret_paths([str(out)])
-    redacted["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
-    write_json(out, redacted)
-    clean = not findings and not scan_errors
-    return 0 if redacted.get("status") in success_statuses and clean else 1
+    redacted_value = redact_json(payload_value)
+    if not isinstance(redacted_value, Mapping):
+        raise QaStreamingProbeSerializationError
+    redacted = dict(redacted_value)
+    redacted["secret_scan"] = {"findings": [], "scan_errors": []}
+    published = write_scanned_json(out, redacted)
+    return 0 if redacted.get("status") in success_statuses and published else 1

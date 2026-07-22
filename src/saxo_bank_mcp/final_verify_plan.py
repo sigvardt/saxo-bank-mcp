@@ -6,7 +6,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue, write_text
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.evidence_publication import write_scanned_text
 from saxo_bank_mcp.final_verify_common import (
     JSON_MAPPING_ADAPTER,
     GitStateProvider,
@@ -81,7 +82,7 @@ def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider
                 plan_task_evidence_check(task_num, path, git_state_provider) for path in paths
             )
     passed = plan_path.exists() and all(ok for _, ok, _ in checks)
-    write_text(
+    published = write_scanned_text(
         out,
         render_report(
             "Plan Compliance",
@@ -90,7 +91,7 @@ def verify_plan(plan_path: Path, out: Path, git_state_provider: GitStateProvider
             git_state_provider=git_state_provider,
         ),
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1
 
 
 def plan_task_evidence_check(

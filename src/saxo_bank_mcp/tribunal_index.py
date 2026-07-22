@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
 from collections import Counter
+from contextlib import suppress
 from pathlib import Path
 
+import anyio
 from fastmcp import Client
 from pydantic import TypeAdapter, ValidationError
 
-from saxo_bank_mcp._evidence import now_utc, write_json, write_text
+from saxo_bank_mcp._evidence import now_utc
+from saxo_bank_mcp.evidence_publication import write_scanned_json, write_scanned_text
 from saxo_bank_mcp.loop_manifest import current_git_state
 from saxo_bank_mcp.loop_schema import CompletionStatus, validate_completion_artifact
 from saxo_bank_mcp.server import mcp
@@ -47,7 +49,7 @@ async def _list_registered_mcp_tool_ids() -> frozenset[str]:
 
 
 def list_registered_mcp_tool_ids() -> frozenset[str]:
-    return asyncio.run(_list_registered_mcp_tool_ids())
+    return anyio.run(_list_registered_mcp_tool_ids)
 
 
 def resolve_expected_tools(path: Path | None) -> tuple[frozenset[str], str]:
@@ -62,11 +64,31 @@ def find_completion_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(root.glob("*/**/tribunal-completion.json")))
 
 
+def _safe_root_label(root: Path) -> str:
+    if not root.is_absolute():
+        return root.as_posix()
+    try:
+        return root.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except (OSError, ValueError):
+        return "<external-root>"
+
+
+def _root_relative_error(error: str, root: Path) -> str:
+    roots = {str(root)}
+    with suppress(OSError):
+        roots.add(str(root.resolve()))
+    safe = error
+    for prefix in sorted(roots, key=len, reverse=True):
+        safe = safe.replace(f"{prefix.rstrip('/')}/", "")
+        safe = safe.replace(prefix, ".")
+    return safe
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     out: Path = args.out
     if args.self_test_missing_artifact:
-        write_text(
+        write_scanned_text(
             out,
             "missing tool_id=self_test_missing_tool\n"
             "network_call_made=false\n"
@@ -78,9 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     expected_tools, expected_source = resolve_expected_tools(args.tools_file)
     artifacts = find_completion_files(args.root)
     validations = tuple(validate_completion_artifact(path) for path in artifacts)
-    seen_tool_values = tuple(
-        result.tool_id for result in validations if result.tool_id is not None
-    )
+    seen_tool_values = tuple(result.tool_id for result in validations if result.tool_id is not None)
     seen_tools = frozenset(seen_tool_values)
     missing_expected = tuple(sorted(expected_tools - seen_tools))
     duplicate_tool_ids = tuple(
@@ -88,17 +108,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     unexpected_tool_ids = tuple(sorted(seen_tools - expected_tools))
     validation_errors = tuple(
-        f"{result.path}: {error}" for result in validations for error in result.errors
+        _root_relative_error(f"{result.path}: {error}", args.root)
+        for result in validations
+        for error in result.errors
     )
     coverage_errors = (
-        tuple(
-            f"missing expected tool artifact: {tool_id}"
-            for tool_id in missing_expected
-        )
-        + tuple(
-            f"duplicate tool artifact: {tool_id}"
-            for tool_id in duplicate_tool_ids
-        )
+        tuple(f"missing expected tool artifact: {tool_id}" for tool_id in missing_expected)
+        + tuple(f"duplicate tool artifact: {tool_id}" for tool_id in duplicate_tool_ids)
         + tuple(
             f"unexpected tool artifact (unregistered tool_id): {tool_id}"
             for tool_id in unexpected_tool_ids
@@ -114,9 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             result.tool_id
             for result in validations
             if result.tool_id is not None
-            and any(
-                "remaining_actionable_feedback" in error for error in result.errors
-            )
+            and any("remaining_actionable_feedback" in error for error in result.errors)
         ),
     )
     status_counts = Counter(
@@ -143,7 +157,7 @@ def main(argv: list[str] | None = None) -> int:
         if result.status is CompletionStatus.EXEMPT and result.tool_id is not None
     )
     passed = not error_lines
-    write_json(
+    published = write_scanned_json(
         out,
         {
             "checked_at": now_utc(),
@@ -151,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
             "driver": "loop_harness",
             "git": current_git_state().model_dump(mode="json"),
             "status": "passed" if passed else "failed",
-            "root": str(args.root),
+            "root": _safe_root_label(args.root),
             "source": expected_source,
             "artifact_count": len(validations),
             "no_artifacts_seen": len(validations) == 0,
@@ -179,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             "errors": list(error_lines),
         },
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1
 
 
 if __name__ == "__main__":

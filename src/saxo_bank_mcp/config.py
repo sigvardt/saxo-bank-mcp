@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum, unique
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, assert_never
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict
@@ -16,6 +16,12 @@ from saxo_bank_mcp.auth_status import (
     SaxoAuthStatus,
     SimCredentialSource,
     build_auth_status,
+)
+from saxo_bank_mcp.config_credentials import (
+    DEFAULT_SIM_CREDENTIAL_FILE,
+    env_sim_app_key,
+    live_credentials_present,
+    sim_credential_source,
 )
 from saxo_bank_mcp.credentials import CredentialFileError, parse_sim_pkce_credentials_file
 from saxo_bank_mcp.token_cache import (
@@ -42,10 +48,6 @@ type SimAuthSettingsErrorCode = Literal[
     "token_cache_path_refused",
 ]
 
-DEFAULT_SIM_CREDENTIAL_FILE: Final = Path("/Users/user/Desktop/saxo_bank_mcp_DEMO_credentials.txt")
-DEFAULT_LIVE_CREDENTIAL_FILE: Final = Path(
-    "/Users/user/Desktop/saxo_bank_mcp_LIVE_credentials.txt",
-)
 TRUSTED_SIM_AUTH_HOST: Final = "sim.logonvalidation.net"
 
 
@@ -116,27 +118,27 @@ class SaxoRuntimeConfig(BaseModel):
         except TokenCachePathError as error:
             cache = error.path.expanduser()
             cache_refused = True
-        sim_credential_source = _sim_credential_source(source)
+        credential_source = sim_credential_source(source)
         redirect_uri = _sim_redirect_uri(source, cache, allow_pending=False)
         return cls(
             requested_environment=requested,
             live_reads_enabled=source.get("SAXO_MCP_ENABLE_LIVE_READS") == "1",
-            sim_credentials_present=sim_credential_source != "missing",
-            sim_credential_source=sim_credential_source,
-            live_credentials_present=_live_credentials_present(source),
+            sim_credentials_present=credential_source != "missing",
+            sim_credential_source=credential_source,
+            live_credentials_present=live_credentials_present(source),
             sim_redirect_uri_present=bool(redirect_uri),
             cache_path=cache,
             token_cache_path_refused=cache_refused,
         )
 
     def effective_read_environment(self) -> EffectiveReadEnvironment:
-        match self.requested_environment:
-            case SaxoEnvironment.SIM:
-                return "SIM"
-            case SaxoEnvironment.LIVE:
-                if self.live_reads_enabled and self.live_credentials_present:
-                    return "LIVE"
-                return "LIVE_READ_DISABLED"
+        if self.requested_environment == SaxoEnvironment.SIM:
+            return "SIM"
+        if self.requested_environment == SaxoEnvironment.LIVE:
+            if self.live_reads_enabled and self.live_credentials_present:
+                return "LIVE"
+            return "LIVE_READ_DISABLED"
+        assert_never(self.requested_environment)
 
     def redacted_status(self) -> SaxoAuthStatus:
         cache: TokenCacheInspection
@@ -170,17 +172,16 @@ class SaxoRuntimeConfig(BaseModel):
                 token_cache_environment=(
                     None if token_status is None else token_status["environment"]
                 ),
-                token_cache_path=str(self.cache_path),
             ),
         )
 
 
 def environment_endpoints(environment: SaxoEnvironment) -> SaxoEndpoints:
-    match environment:
-        case SaxoEnvironment.SIM:
-            return SIM_ENDPOINTS
-        case SaxoEnvironment.LIVE:
-            return LIVE_ENDPOINTS
+    if environment == SaxoEnvironment.SIM:
+        return SIM_ENDPOINTS
+    if environment == SaxoEnvironment.LIVE:
+        return LIVE_ENDPOINTS
+    assert_never(environment)
 
 
 def _pending_pkce_authorization_present(cache_path: Path) -> bool:
@@ -212,7 +213,7 @@ def resolve_sim_auth_settings(
             "SAXO_MCP_SIM_REDIRECT_URI is required and must match the Saxo app redirect URL",
         )
 
-    app_key = _env_sim_app_key(source)
+    app_key = env_sim_app_key(source)
     endpoints = SIM_ENDPOINTS
     if app_key is None:
         credential_file = Path(
@@ -246,21 +247,6 @@ def resolve_sim_auth_settings(
     )
 
 
-def _live_credentials_present(environ: Mapping[str, str]) -> bool:
-    if _env_live_app_key(environ) is not None:
-        return True
-    credential_file = Path(
-        environ.get("SAXO_MCP_LIVE_CREDENTIAL_FILE", str(DEFAULT_LIVE_CREDENTIAL_FILE)),
-    )
-    if not credential_file.exists():
-        return False
-    try:
-        parse_sim_pkce_credentials_file(credential_file)
-    except CredentialFileError:
-        return False
-    return True
-
-
 def _requested_token_cache_path(
     environ: Mapping[str, str],
     requested: SaxoEnvironment,
@@ -272,22 +258,6 @@ def _requested_token_cache_path(
     if "SAXO_MCP_TOKEN_CACHE_PATH" in environ:
         return Path(environ["SAXO_MCP_TOKEN_CACHE_PATH"])
     return default_token_cache_path()
-
-
-def _env_sim_app_key(environ: Mapping[str, str]) -> str | None:
-    for key in ("SAXO_MCP_SIM_APP_KEY", "SAXO_MCP_SIM_CLIENT_ID"):
-        value = environ.get(key, "").strip()
-        if value:
-            return value
-    return None
-
-
-def _env_live_app_key(environ: Mapping[str, str]) -> str | None:
-    for key in ("SAXO_MCP_LIVE_APP_KEY", "SAXO_MCP_LIVE_CLIENT_ID"):
-        value = environ.get(key, "").strip()
-        if value:
-            return value
-    return None
 
 
 def _sim_redirect_uri(
@@ -315,19 +285,3 @@ def _require_trusted_sim_endpoint(label: str, url: str) -> None:
         "sim_endpoint_untrusted",
         f"SIM {label} endpoint must use https://{TRUSTED_SIM_AUTH_HOST}",
     )
-
-
-def _sim_credential_source(environ: Mapping[str, str]) -> SimCredentialSource:
-    if _env_sim_app_key(environ) is not None:
-        return "env"
-
-    credential_file = Path(
-        environ.get("SAXO_MCP_SIM_CREDENTIAL_FILE", str(DEFAULT_SIM_CREDENTIAL_FILE)),
-    )
-    if not credential_file.exists():
-        return "missing"
-    try:
-        parse_sim_pkce_credentials_file(credential_file)
-    except CredentialFileError:
-        return "missing"
-    return "file"

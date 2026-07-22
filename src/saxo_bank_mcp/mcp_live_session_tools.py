@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from saxo_bank_mcp.live_mode import (
     LiveReadSettingsError,
-    live_cached_token_for_tool,
     live_read_auth_required,
     live_session_error,
-    resolve_live_read_settings,
 )
+from saxo_bank_mcp.live_oauth_settings import resolve_live_oauth_settings
+from saxo_bank_mcp.live_token_refresh import live_token_for_tool
 from saxo_bank_mcp.mcp_tool_results import ToolResult, session_capabilities
 from saxo_bank_mcp.session import (
     SESSION_CAPABILITIES_PATH,
@@ -17,12 +17,12 @@ from saxo_bank_mcp.session import (
 
 async def read_live_session_capabilities() -> ToolResult:
     try:
-        settings = resolve_live_read_settings()
+        settings = resolve_live_oauth_settings()
     except LiveReadSettingsError as error:
         return live_read_auth_required("saxo_get_session_capabilities", error.code)
-    token_or_result = live_cached_token_for_tool(
+    token_or_result = await live_token_for_tool(
         "saxo_get_session_capabilities",
-        settings.cache_path,
+        settings,
     )
     if isinstance(token_or_result, dict):
         return token_or_result

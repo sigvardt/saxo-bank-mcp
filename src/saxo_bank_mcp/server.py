@@ -4,10 +4,14 @@ import argparse
 import sys
 from typing import Final, Literal, TypedDict
 
-from fastmcp import FastMCP
-
 from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, SaxoAuthStatus
 from saxo_bank_mcp.config import SaxoRuntimeConfig
+from saxo_bank_mcp.fastmcp_logging_safety import (
+    FASTMCP_VALIDATION_SAFETY_TRANSFORM,
+    SafeFastMCP,
+    install_fastmcp_argument_log_filter,
+)
+from saxo_bank_mcp.live_precheck_tool import create_live_precheck_tool
 from saxo_bank_mcp.mcp_auth_tools import (
     saxo_exchange_pkce_code,
     saxo_get_session_capabilities,
@@ -17,6 +21,10 @@ from saxo_bank_mcp.mcp_auth_tools import (
 from saxo_bank_mcp.mcp_entitlement_tools import (
     ENTITLEMENTS_TOOL_DESCRIPTION,
     saxo_get_entitlements,
+)
+from saxo_bank_mcp.mcp_live_account_tools import (
+    LIVE_ACCOUNTS_TOOL_DESCRIPTION,
+    saxo_list_live_accounts,
 )
 from saxo_bank_mcp.mcp_order_tools import (
     ORDER_WRITE_TOOL_DESCRIPTION,
@@ -31,6 +39,11 @@ from saxo_bank_mcp.mcp_order_tools import (
 from saxo_bank_mcp.mcp_portal_token_tools import (
     SIM_ACCESS_CACHE_TOOL_DESCRIPTION,
     saxo_cache_sim_access_token,
+)
+from saxo_bank_mcp.mcp_request_ledger_tools import (
+    SAFE_REQUEST_LEDGER_MIDDLEWARE,
+    SAFE_REQUEST_LEDGER_TOOL_DESCRIPTION,
+    saxo_get_safe_request_ledger,
 )
 from saxo_bank_mcp.mcp_safety_tools import (
     COMMIT_TOOL_DESCRIPTION,
@@ -119,7 +132,10 @@ class SaxoHealth(TypedDict):
     does_not_verify: list[HealthNonVerification]
 
 
-mcp: Final = FastMCP(SERVICE_NAME)
+install_fastmcp_argument_log_filter()
+mcp: Final = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
+mcp.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
+mcp.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
 
 
 @mcp.tool(description=HEALTH_TOOL_DESCRIPTION)
@@ -147,6 +163,9 @@ mcp.tool(description=SIM_ACCESS_CACHE_TOOL_DESCRIPTION)(saxo_cache_sim_access_to
 mcp.tool(description=REFRESH_TOOL_DESCRIPTION)(saxo_refresh_token)
 mcp.tool(description=SESSION_CAPABILITIES_TOOL_DESCRIPTION)(saxo_get_session_capabilities)
 mcp.tool(description=ENTITLEMENTS_TOOL_DESCRIPTION)(saxo_get_entitlements)
+mcp.tool(description=LIVE_ACCOUNTS_TOOL_DESCRIPTION)(saxo_list_live_accounts)
+mcp.add_tool(create_live_precheck_tool())
+mcp.tool(description=SAFE_REQUEST_LEDGER_TOOL_DESCRIPTION)(saxo_get_safe_request_ledger)
 mcp.tool(description=READ_LIST_TOOL_DESCRIPTION)(saxo_list_registered_endpoints)
 mcp.tool(description=REGISTERED_CALL_TOOL_DESCRIPTION)(saxo_call_registered_endpoint)
 mcp.tool(description=SAFETY_STATUS_TOOL_DESCRIPTION)(saxo_safety_status)
@@ -186,13 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     transport = str(args.transport)
-    match transport:
-        case "stdio":
-            run_stdio()
-        case "http":
-            run_http(host=str(args.host), port=int(args.port))
-        case _:
-            raise SystemExit(f"unsupported transport: {transport}")
+    if transport == "stdio":
+        run_stdio()
+    elif transport == "http":
+        run_http(host=str(args.host), port=int(args.port))
+    else:
+        raise SystemExit(f"unsupported transport: {transport}")
     return 0
 
 

@@ -56,6 +56,16 @@ def test_token_cache_path_auto_discovers_repo_root_if_none_provided() -> None:
     assert "inside repository" in str(error.value)
 
 
+def test_token_cache_path_error_string_omits_private_path(tmp_path: Path) -> None:
+    private_path = tmp_path / "token-cache.json"
+    error = TokenCachePathError(private_path, "inside repository")
+
+    rendered = str(error)
+
+    assert str(private_path) not in rendered
+    assert "inside repository" in rendered
+
+
 def test_token_cache_save_uses_owner_only_file_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

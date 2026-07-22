@@ -6,118 +6,44 @@ import subprocess
 from functools import cache
 from os import environ
 from pathlib import Path
-from typing import Final, Literal, NamedTuple
 
 from saxo_bank_mcp._evidence import JsonValue
-
-type PatternClass = Literal["credential_regex", "email_address", "person_identifier_token"]
-
-
-class SecretPattern(NamedTuple):
-    pattern_class: PatternClass
-    pattern: re.Pattern[str]
-
-
-SECRET_REGEXES: Final = (
-    re.compile(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{12,}", re.IGNORECASE),
-    re.compile(r"access_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"client_?secret['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"client_?id['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
-    re.compile(r"app_?secret['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"client_?key['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"refresh_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"app_?key['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"approval_?factor['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
-    re.compile(r"preview_?token['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{12,}", re.IGNORECASE),
-    re.compile(r"account_?(key|number)['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}", re.IGNORECASE),
-    re.compile(
-        r"account_?group_?(id|key|name)['\"]?\s*[:=]\s*['\"]?[^'\"\s{}&?=]{8,}",
-        re.IGNORECASE,
-    ),
+from saxo_bank_mcp.secret_scan_patterns import (
+    EMAIL_PATTERN,
+    GENERIC_PERSON_TOKENS,
+    MAX_SECRET_SCAN_BYTES,
+    MIN_PERSON_TOKEN_LENGTH,
+    SECRET_REGEXES,
+    SKIPPED_SCAN_PARTS,
+    SKIPPED_SCAN_SUFFIXES,
+    PatternClass,
+    SecretPattern,
 )
-EMAIL_PATTERN: Final = re.compile(
-    r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
-    re.IGNORECASE,
+from saxo_bank_mcp.secret_scan_private_paths import (
+    PRIVATE_FINANCIAL_VALUE_PATTERN,
+    PRIVATE_PATH_PATTERN,
+    private_financial_value_finding_count,
+    private_path_finding_count,
 )
-PYTHON_SAFE_SECRET_LINE_PARTS: Final = frozenset(
-    {
-        "# noqa: S106",
-        "AliasChoices(",
-        "Field(",
-        "access_token: Annotated[",
-        "access_token=access_token",
-        "access_token=PORTAL_ACCESS_FIXTURE",
-        '"access_token": PORTAL_ACCESS_FIXTURE',
-        "account_key: Annotated[",
-        "account_key: Annotated[str",
-        "account_key=account_key",
-        "account_key = _string(",
-        "account_key = _string_or_int(",
-        "account_key is None",
-        "account_key != expected_account_key",
-        '"account_key": request.account_key',
-        '"account_key": account.account_key',
-        '"account_key": account_key',
-        '"account_key": FIXTURE_ACCOUNT',
-        '"AccountKey": account_key',
-        "expected_account_key: str",
-        "account_key = _first_account_key(",
-        "account_key=default_account_key",
-        "account_key=env_value",
-        "approval_factor: Annotated[",
-        "approval_factor: str | None",
-        "approval_factor=TEST_APPROVAL_FACTOR",
-        "approval_factor=approval_factor",
-        '"approval_factor": TEST_APPROVAL_FACTOR',
-        "compare_digest(approval_factor",
-        "client_id: str",
-        "request.client_id",
-        '"client_id": request.client_id',
-        "_env_sim_app_key(",
-        "environ.get(",
-        "app_key=app_key",
-        "parsed.",
-        '"preview_token": token',
-        "preview_token: str",
-        "preview_token: NotRequired[str]",
-        "preview_token_fingerprint",
-        'preview["preview_token"]',
-        'preview.get("preview_token"',
-        '"refresh_token": refresh.refresh_token',
-        "self.",
-        "settings.",
-        "token.",
-    },
+from saxo_bank_mcp.secret_scan_python import (
+    python_credential_candidates,
+    python_line_credential_candidates,
 )
-SAFE_SECRET_PLACEHOLDERS: Final = frozenset(
-    (
-        "access-token-value", "client-id", "client-secret", "mocked-access-token",
-        "mocked-refresh-token", "new-access-token", "new-refresh-token", "qa-probe-key",
-        "refresh-token-value", "sim-app-key", "SIM_TEST_APPROVED", "SIM-ACCOUNT-1",
-        "SIM-OVERRIDE", "FIXTURE_ACCOUNT", "LIVE-WRITE-REFUSAL-PROBE", "<redacted>",
-        "approval_factor_invalid", "approval_factor_missing", "preview_token_expired",
-        "preview_token_invalid", "preview_token_missing",
-    ),
-)
-SAFE_EMAIL_PATTERN_PARTS: Final = frozenset(
-    (
-        "EMAIL_PATTERN", "_EMAIL_PATTERN", "sensitive.person@example.com",
-        "[A-Z0-9._%+-]+@[A-Z0-9.-]+", "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+",
-        "@[a-z0-9._%+-]+",
-    ),
-)
-MAX_SECRET_SCAN_BYTES: Final = 2_000_000
-SKIPPED_SCAN_PARTS: Final = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".venv"})
-SKIPPED_SCAN_SUFFIXES: Final = frozenset({".pyc", ".pyo"})
-MIN_PERSON_TOKEN_LENGTH: Final = 5
-GENERIC_PERSON_TOKENS: Final = frozenset(
-    ("email", "identifier", "local", "operator", "person", "redacted", "token", "user"),
+from saxo_bank_mcp.secret_scan_safe_values import (
+    SAFE_EMAIL_PATTERN_PARTS,
+    SAFE_SECRET_PLACEHOLDERS,
+    scrub_bounded_fragments,
 )
 
 
 def secret_scan_pattern_classes() -> tuple[PatternClass, ...]:
-    return ("credential_regex", "email_address", "person_identifier_token")
+    return (
+        "credential_regex",
+        "email_address",
+        "person_identifier_token",
+        "private_financial_value",
+        "private_path_value",
+    )
 
 
 def scan_secret_paths(
@@ -138,6 +64,25 @@ def scan_secret_paths(
         for file_path in files:
             _scan_file(file_path, findings, scan_errors)
     return findings, scan_errors
+
+
+def scan_secret_text(
+    label: str,
+    text: str,
+) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
+    encoded_size = len(text.encode("utf-8"))
+    if encoded_size > MAX_SECRET_SCAN_BYTES:
+        return [], [{"path": label, "error": "oversize_not_scanned"}]
+    path = Path(label)
+    findings: list[dict[str, JsonValue]] = [
+        {
+            "path": label,
+            "pattern_class": pattern.pattern_class,
+            "pattern": _public_pattern(pattern),
+        }
+        for pattern in _secret_patterns_in_text(path, text)
+    ]
+    return findings, []
 
 
 def _scan_file(
@@ -172,12 +117,41 @@ def _scan_file(
 
 
 def _secret_patterns_in_text(file_path: Path, text: str) -> list[SecretPattern]:
-    patterns: list[SecretPattern] = []
+    private_patterns = list(_private_value_patterns(file_path, text))
+    if file_path.suffix == ".py":
+        return [*private_patterns, *_python_secret_patterns(text)]
+    patterns = private_patterns
     for line in text.splitlines():
-        if _is_safe_secret_scan_line(file_path, line):
-            continue
         scan_line = _placeholder_scrubbed_line(line)
         patterns.extend(_credential_patterns(scan_line))
+        patterns.extend(_email_patterns(scan_line))
+        patterns.extend(_person_identifier_patterns(scan_line))
+    return patterns
+
+
+def _python_secret_patterns(text: str) -> list[SecretPattern]:
+    candidates = python_credential_candidates(text)
+    if candidates is None:
+        return _invalid_python_secret_patterns(text)
+    patterns: list[SecretPattern] = []
+    for candidate in candidates:
+        patterns.extend(_credential_patterns(_placeholder_scrubbed_line(candidate)))
+    for line in text.splitlines():
+        scan_line = _placeholder_scrubbed_line(line)
+        patterns.extend(_email_patterns(scan_line))
+        patterns.extend(_person_identifier_patterns(scan_line))
+    return patterns
+
+
+def _invalid_python_secret_patterns(text: str) -> list[SecretPattern]:
+    patterns: list[SecretPattern] = []
+    for line in text.splitlines():
+        candidates = python_line_credential_candidates(line)
+        if candidates is None:
+            candidates = (line,)
+        for candidate in candidates:
+            patterns.extend(_credential_patterns(_placeholder_scrubbed_line(candidate)))
+        scan_line = _placeholder_scrubbed_line(line)
         patterns.extend(_email_patterns(scan_line))
         patterns.extend(_person_identifier_patterns(scan_line))
     return patterns
@@ -186,7 +160,23 @@ def _secret_patterns_in_text(file_path: Path, text: str) -> list[SecretPattern]:
 def _public_pattern(pattern: SecretPattern) -> str:
     if pattern.pattern_class == "person_identifier_token":
         return "<person-identifier-token>"
+    if pattern.pattern_class == "private_path_value":
+        return "<private-path-value>"
+    if pattern.pattern_class == "private_financial_value":
+        return "<private-financial-value>"
     return pattern.pattern.pattern
+
+
+def _private_value_patterns(file_path: Path, text: str) -> tuple[SecretPattern, ...]:
+    path_patterns = tuple(
+        SecretPattern("private_path_value", PRIVATE_PATH_PATTERN)
+        for _index in range(private_path_finding_count(file_path, text))
+    )
+    financial_patterns = tuple(
+        SecretPattern("private_financial_value", PRIVATE_FINANCIAL_VALUE_PATTERN)
+        for _index in range(private_financial_value_finding_count(file_path, text))
+    )
+    return path_patterns + financial_patterns
 
 
 def _credential_patterns(line: str) -> tuple[SecretPattern, ...]:
@@ -198,16 +188,19 @@ def _credential_patterns(line: str) -> tuple[SecretPattern, ...]:
 
 
 def _email_patterns(line: str) -> tuple[SecretPattern, ...]:
-    if any(part in line for part in SAFE_EMAIL_PATTERN_PARTS):
-        return ()
-    return (SecretPattern("email_address", EMAIL_PATTERN),) if EMAIL_PATTERN.search(line) else ()
+    candidate = scrub_bounded_fragments(
+        line,
+        SAFE_EMAIL_PATTERN_PARTS,
+        adjacent_character_pattern=r"[A-Za-z0-9._%+-]",
+    )
+    return (
+        (SecretPattern("email_address", EMAIL_PATTERN),) if EMAIL_PATTERN.search(candidate) else ()
+    )
 
 
 def _person_identifier_patterns(line: str) -> tuple[SecretPattern, ...]:
     return tuple(
-        pattern
-        for pattern in _person_identifier_scan_patterns()
-        if pattern.pattern.search(line)
+        pattern for pattern in _person_identifier_scan_patterns() if pattern.pattern.search(line)
     )
 
 
@@ -239,8 +232,7 @@ def _person_identifier_tokens(
         sorted(
             token
             for token in tokens
-            if len(token) >= MIN_PERSON_TOKEN_LENGTH
-            and token.lower() not in GENERIC_PERSON_TOKENS
+            if len(token) >= MIN_PERSON_TOKEN_LENGTH and token.lower() not in GENERIC_PERSON_TOKENS
         ),
     )
 
@@ -280,12 +272,9 @@ def _git_config_value(key: str) -> str:
     return result.stdout.strip()
 
 
-def _is_safe_secret_scan_line(file_path: Path, line: str) -> bool:
-    return file_path.suffix == ".py" and any(part in line for part in PYTHON_SAFE_SECRET_LINE_PARTS)
-
-
 def _placeholder_scrubbed_line(line: str) -> str:
-    scrubbed = line
-    for placeholder in SAFE_SECRET_PLACEHOLDERS:
-        scrubbed = scrubbed.replace(placeholder, "ok")
-    return scrubbed
+    return scrub_bounded_fragments(
+        line,
+        SAFE_SECRET_PLACEHOLDERS,
+        adjacent_character_pattern="[^'\"\\s{}&?=]",
+    )

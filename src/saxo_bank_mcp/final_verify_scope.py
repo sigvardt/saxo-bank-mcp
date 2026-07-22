@@ -5,8 +5,8 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from saxo_bank_mcp import tribunal_index
-from saxo_bank_mcp._evidence import write_text
 from saxo_bank_mcp.endpoint_registry import load_inventory, validate_inventory
+from saxo_bank_mcp.evidence_publication import write_scanned_text
 from saxo_bank_mcp.final_verify_common import (
     JSON_MAPPING_ADAPTER,
     GitStateProvider,
@@ -92,7 +92,7 @@ def verify_scope(out: Path, git_state_provider: GitStateProvider) -> int:
     checks.append(run_scope_tribunal_index())
     checks.append(tribunal_index_state_check())
     passed = all(ok for _, ok, _ in checks)
-    write_text(
+    published = write_scanned_text(
         out,
         render_report(
             "Scope Fidelity Gate",
@@ -101,4 +101,4 @@ def verify_scope(out: Path, git_state_provider: GitStateProvider) -> int:
             git_state_provider=git_state_provider,
         ),
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1

@@ -4,8 +4,9 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue, write_text
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import scan_secret_paths
+from saxo_bank_mcp.evidence_publication import write_scanned_text
 from saxo_bank_mcp.final_verify_common import (
     JSON_MAPPING_ADAPTER,
     GitStateProvider,
@@ -14,9 +15,7 @@ from saxo_bank_mcp.final_verify_common import (
 )
 
 HARD_TASK_RECEIPTS_DIR = Path(".omo/evidence/saxo-bank-mcp/strict-g003-hard-tasks")
-MCP_HARD_TASK_SUMMARY = (
-    ".omo/evidence/saxo-bank-mcp/strict-g003-hard-task-execution-summary.json"
-)
+MCP_HARD_TASK_SUMMARY = ".omo/evidence/saxo-bank-mcp/strict-g003-hard-task-execution-summary.json"
 MCP_REQUIRED_EVIDENCE = (
     ".omo/evidence/saxo-bank-mcp/task-2-sim-auth.json",
     ".omo/evidence/saxo-bank-mcp/task-4-read-smoke.json",
@@ -151,7 +150,7 @@ def verify_mcp(out: Path, git_state_provider: GitStateProvider) -> int:
     checks.append(hard_task_summary_check(MCP_HARD_TASK_SUMMARY, git_state_provider))
     checks.append(mcp_evidence_secret_scan_check())
     passed = all(ok for _, ok, _ in checks)
-    write_text(
+    published = write_scanned_text(
         out,
         render_report(
             "MCP Manual QA Gate",
@@ -160,4 +159,4 @@ def verify_mcp(out: Path, git_state_provider: GitStateProvider) -> int:
             git_state_provider=git_state_provider,
         ),
     )
-    return 0 if passed else 1
+    return 0 if passed and published else 1

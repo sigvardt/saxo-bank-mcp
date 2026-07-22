@@ -55,16 +55,96 @@ repository:
 ```bash
 export SAXO_MCP_ENVIRONMENT=LIVE
 export SAXO_MCP_ENABLE_LIVE_READS=1
-export SAXO_MCP_LIVE_CLIENT_ID
-export SAXO_MCP_LIVE_CLIENT_SECRET
+export SAXO_MCP_LIVE_CREDENTIAL_FILE="$HOME/Desktop/saxo_bank_mcp_LIVE_credentials.txt"
 export SAXO_MCP_LIVE_TOKEN_CACHE_PATH
+export SAXO_MCP_LIVE_REDIRECT_URI=http://localhost:8080/callback
+uv run saxo-bank-live-login
 uv run python -m saxo_bank_mcp.qa live-read --out .omo/evidence/saxo-bank-mcp/live-read.json --skip-out .omo/evidence/saxo-bank-mcp/live-read-skipped.json
 ```
 
-If LIVE credentials are absent, the probe writes a skip artifact. LIVE evidence
-must not include raw account identifiers. The probe covers read-only GET tools:
-accounts, balances, positions, orders, and prices. Streaming is not claimed by
-this read-only proof.
+`uv run saxo-bank-live-login` keeps the localhost callback receiver open for up
+to one hour by default. The command must still be running when Saxo redirects
+the browser to `http://localhost:8080/callback`. After the callback succeeds,
+the command stores the LIVE token in the configured owner-only cache.
+
+The external `saxo-bank-live-session-keeper` refreshes the LIVE token before
+expiry. LIVE tools refresh an expired access token on demand under the same
+cross-process lock. If the computer remains offline beyond Saxo's refresh-token
+lifetime, rerun the browser login with `uv run saxo-bank-live-login`.
+
+To keep the session alive independently of an MCP client, run
+`uv run saxo-bank-live-session-keeper`. On the primary macOS workstation this
+command is installed as the `com.saxobank.mcp-live-session`
+LaunchAgent with `RunAtLoad` and `KeepAlive`; it restarts after login or a crash.
+It can refresh a valid cached session, but it cannot recover a refresh token
+that expired while the keeper was stopped. That case requires one new browser
+login.
+
+For an agent precheck, call `saxo_list_live_accounts` first and select an active
+account by visible `account_id` or process-scoped `account_ref` in the `order`
+passed to `saxo_precheck_live_order`. If exactly one active account exists,
+omitting both selectors auto-selects it. The account tool intentionally exposes
+Saxo's visible account ID for agent selection. Technical account and client keys
+remain internal. Persistent proof artifacts redact the visible account ID.
+
+`precheck_accepted` means Saxo accepted only the read-only precheck request.
+`trade_readiness` always remains `not_assessed`. Qualifiers and pre-trade
+disclaimers are blocking tool errors. `saxo_precheck_live_order` cannot place,
+change, or cancel an order, or respond to a disclaimer.
+It verifies instrument tradability and sends `ManualOrder=false`, because an
+unattended agent precheck is not a human-confirmed order. A future LIVE order
+may use `ManualOrder=true` only after two human approval factors confirm the
+exact order.
+
+For a task that needs safe request evidence, call
+`saxo_get_safe_request_ledger` with `clear=true` before the task and without
+`clear` afterward. It returns only HTTP methods, sanitized paths, completion
+status, and a summary of non-GET calls for the current MCP session. It never
+stores headers, bodies, tokens, account identifiers, instrument identifiers, or
+balances. Only allowlisted Saxo query parameter names are visible; other names
+and every value are redacted. Ledger overflow disables negative proof. Balance
+operations require
+`response_mode=fingerprint_only`; body mode is denied before networking, and
+the fingerprint covers a modeled set of validated account cash-state fields.
+
+Create a fail-closed LIVE proof of a single read-only precheck with:
+
+```bash
+uv run saxo-bank-live-precheck-proof \
+  --allow-live \
+  --out .omo/evidence/saxo-bank-mcp/live-precheck/proof.json \
+  --uic 30031 --asset-type Stock --amount 1 --buy-sell Buy \
+  --account-position 1
+```
+
+The proof succeeds only when the exposed MCP session ledger and in-process
+audit trace match a sanitized transport-boundary trace collected by a separate
+process. Account-wide `/me` reads require no technical account or client keys;
+orders and positions must include `__count`, and it must match returned rows. Nonempty collections
+are supported when their fingerprints and counts are unchanged before and after.
+Orders and positions require Saxo's `Data` envelope. LIVE trade messages use
+their observed top-level array shape. The artifact records endpoint-specific
+shape and declared-count telemetry, and any mismatch aborts before precheck.
+The sole POST is precheck. Saxo must report HTTP 200, a tradable instrument, an
+explicit `Ok` root and every returned child result, and no error or disclaimer
+object. The request uses `ManualOrder=false`. The no-change conclusion combines
+an unchanged modeled money-state fingerprint with complete request-ledger and
+transport evidence showing no write operation; it does not claim every possible
+Saxo balance field was modeled. Duplicate JSON members, non-finite numbers,
+coercible safety fields,
+nested error/disclaimer/order/result signals, unknown precheck fields, and
+error-flagged FastMCP results are rejected before acceptance. JSON decoder
+resource-limit failures return the same structured `invalid_precheck_response`
+result as other malformed upstream responses. Collector output also passes
+duplicate-safe strict JSON parsing before event validation.
+Dirty-file provenance must be complete, and the artifact must pass
+an in-memory secret scan before atomic publication. Aborted proofs include a
+sanitized stage and reason.
+
+If LIVE credentials are absent, the separate `live-read` probe writes a skip
+artifact. LIVE evidence must not include raw account identifiers. The
+`live-read` probe covers read-only GET tools: accounts, balances, positions,
+orders, and prices. Streaming is not claimed by that probe.
 
 ## LIVE Writes
 

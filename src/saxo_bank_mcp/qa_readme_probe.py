@@ -8,8 +8,9 @@ from typing import Final
 
 from pydantic import TypeAdapter
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json, scan_secret_paths
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_auth_probes import handle_auth_status
 from saxo_bank_mcp.qa_events import base_event
 from saxo_bank_mcp.qa_probes import handle_health
@@ -38,6 +39,10 @@ README_REQUIRED_MARKERS: Final[tuple[str, ...]] = (
 )
 FINAL_VERIFY_HELP_COMMANDS: Final[tuple[str, ...]] = ("plan", "code", "mcp", "scope")
 JSON_OBJECT_ADAPTER: Final = TypeAdapter(dict[str, JsonValue])
+
+
+class ReadmeProbePublicationError(TypeError):
+    pass
 
 
 def handle_readme_smoke(out: Path) -> int:
@@ -103,9 +108,9 @@ def handle_readme_smoke(out: Path) -> int:
     }
     redacted = redact_json(event)
     if not isinstance(redacted, dict):
-        raise TypeError("readme smoke event redaction returned non-object")
-    write_json(out, redacted)
-    return 0 if passed else 1
+        raise ReadmeProbePublicationError("readme smoke event redaction returned non-object")
+    published = write_scanned_json(out, redacted)
+    return 0 if passed and published else 1
 
 
 def _final_verify_help_exit_code(command: str) -> int:

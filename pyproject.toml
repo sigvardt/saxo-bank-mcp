@@ -12,6 +12,10 @@ dependencies = [
 
 [project.scripts]
 saxo-bank-mcp = "saxo_bank_mcp.__main__:main"
+saxo-bank-live-login = "saxo_bank_mcp.live_login:main"
+saxo-bank-live-precheck-proof = "saxo_bank_mcp.live_precheck_proof:main"
+saxo-bank-live-session-keeper = "saxo_bank_mcp.live_session_keeper:main"
+saxo-bank-bind-live-evidence = "saxo_bank_mcp.live_evidence_bundle:main"
 
 [build-system]
 requires = ["hatchling"]

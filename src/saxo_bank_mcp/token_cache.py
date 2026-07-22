@@ -32,7 +32,7 @@ class TokenCachePathError(Exception):
 
     def __str__(self) -> str:
         """Return a safe cache-path refusal message."""
-        return f"refusing token cache path {self.path}: {self.reason}"
+        return f"refusing token cache path: {self.reason}"
 
 
 class TokenCacheInspection(TypedDict):

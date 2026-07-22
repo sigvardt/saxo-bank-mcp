@@ -4,9 +4,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import scan_secret_paths
 from saxo_bank_mcp.endpoint_registry import load_inventory, validate_inventory
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,11 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     command = str(args.command)
-    match command:
-        case "validate":
-            return handle_validate(args.out)
-        case unreachable:
-            raise SystemExit(f"unsupported inventory command: {unreachable}")
+    if command == "validate":
+        return handle_validate(args.out)
+    raise SystemExit(f"unsupported inventory command: {command}")
 
 
 def handle_validate(out: Path | None) -> int:
@@ -33,9 +32,8 @@ def handle_validate(out: Path | None) -> int:
     report["secret_scan"] = {"findings": findings, "scan_errors": scan_errors}
     if findings or scan_errors:
         report["status"] = "failed"
-    if out is not None:
-        write_json(out, report)
-    return 0 if report["status"] == "passed" else 1
+    published = out is None or write_scanned_json(out, report)
+    return 0 if report["status"] == "passed" and published else 1
 
 
 if __name__ == "__main__":

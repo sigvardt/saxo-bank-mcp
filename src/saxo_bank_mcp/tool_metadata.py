@@ -2,21 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Literal, TypedDict, cast
+from typing import cast
 
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.tool_metadata_live import LIVE_TOOL_METADATA
+from saxo_bank_mcp.tool_metadata_types import ToolEnvironment, ToolMetadata, WriteEffect
 
-type ToolEnvironment = Literal["SIM", "LIVE_READ", "LOCAL"]
-type WriteEffect = Literal["none", "local_state", "sim_network", "sim_streaming"]
-
-
-class ToolMetadata(TypedDict):
-    tool_class: str
-    environment_support: list[ToolEnvironment]
-    write_effect: WriteEffect
-    state_changing: bool
-    safe_in_live_read_mode: bool
-    agent_hint: str
+__all__ = (
+    "ToolEnvironment",
+    "ToolMetadata",
+    "WriteEffect",
+    "metadata_for_tool",
+    "tool_metadata",
+)
 
 
 _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
@@ -243,6 +241,7 @@ _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
                 "Cleans SIM streaming subscriptions. Do not use for LIVE read validation."
             ),
         },
+        **LIVE_TOOL_METADATA,
     },
 )
 
