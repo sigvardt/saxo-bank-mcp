@@ -114,7 +114,7 @@ def test_secret_scan_reports_unredacted_private_path_values(
     suffix: str,
 ) -> None:
     source = tmp_path / f"evidence{suffix}"
-    private_path = str(tmp_path / "private-token-cache.json")
+    private_path = "/Users/fixture/private-token-cache.json"
     text = (
         json.dumps({"auth": {"token_cache_path": private_path}})
         if suffix == ".json"
@@ -146,7 +146,7 @@ def test_secret_scan_allows_redacted_private_path_value(tmp_path: Path) -> None:
 
 def test_secret_scan_reports_private_path_inside_unrelated_json_field(tmp_path: Path) -> None:
     source = tmp_path / "evidence.json"
-    private_path = str(tmp_path / "token-cache.json")
+    private_path = "/Users/fixture/token-cache.json"
     source.write_text(
         json.dumps({"detail": f"refusing token cache path {private_path}: denied"}),
         encoding="utf-8",

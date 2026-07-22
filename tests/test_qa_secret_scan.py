@@ -11,16 +11,20 @@ from saxo_bank_mcp import evidence_publication, qa
 EXPECTED_CLIENT_APP_SECRET_FINDINGS = 2
 
 
-def test_secret_scan_ignores_variable_names(tmp_path: Path) -> None:
+def test_secret_scan_ignores_variable_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     target = tmp_path / "source.py"
     target.write_text("refresh_token = None\n", encoding="utf-8")
     out = tmp_path / "scan.json"
+    monkeypatch.chdir(tmp_path)
 
-    result = qa.main(["secret-scan", "--paths", str(target), "--out", str(out)])
+    result = qa.main(["secret-scan", "--paths", target.name, "--out", str(out)])
 
     assert result == 0
     report = json.loads(out.read_text(encoding="utf-8"))
-    assert report["paths"] == ["<redacted>"]
+    assert report["paths"] == [target.name]
     assert report["findings"] == []
 
 
@@ -119,16 +123,20 @@ def test_secret_scan_ignores_account_key_placeholder(tmp_path: Path) -> None:
     assert json.loads(out.read_text(encoding="utf-8"))["findings"] == []
 
 
-def test_secret_scan_missing_path_fails_closed(tmp_path: Path) -> None:
+def test_secret_scan_missing_path_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     missing_path = tmp_path / "does_not_exist_at_all"
     out = tmp_path / "scan.json"
+    monkeypatch.chdir(tmp_path)
 
-    result = qa.main(["secret-scan", "--paths", str(missing_path), "--out", str(out)])
+    result = qa.main(["secret-scan", "--paths", missing_path.name, "--out", str(out)])
 
     assert result == 1
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["status"] == "failed"
-    assert report["scan_errors"] == [{"path": "<redacted>", "error": "missing_path"}]
+    assert report["scan_errors"] == [{"path": missing_path.name, "error": "missing_path"}]
 
 
 def test_secret_scan_gate_scans_candidate_before_publication(
