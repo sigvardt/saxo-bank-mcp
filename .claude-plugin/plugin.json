@@ -1,0 +1,20 @@
+{
+  "name": "saxo-bank-mcp",
+  "displayName": "Saxo Bank MCP",
+  "version": "0.1.0",
+  "description": "Saxo Bank OpenAPI MCP server for agent-safe SIM and gated LIVE workflows.",
+  "author": {
+    "name": "sigvardt",
+    "url": "https://github.com/sigvardt"
+  },
+  "homepage": "https://github.com/sigvardt/saxo-bank-mcp",
+  "repository": "https://github.com/sigvardt/saxo-bank-mcp",
+  "license": "MIT",
+  "keywords": [
+    "saxo-bank",
+    "mcp",
+    "openapi",
+    "trading"
+  ],
+  "mcpServers": "./.mcp.json"
+}
