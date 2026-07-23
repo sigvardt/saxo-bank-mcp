@@ -68,6 +68,10 @@ ADVERSARIAL_TERMS: Final = (
 )
 
 
+def _markdown_section(text: str, heading: str, next_heading: str) -> str:
+    return text.split(heading, maxsplit=1)[1].split(next_heading, maxsplit=1)[0]
+
+
 def test_trading_skill_package_has_required_files_and_metadata() -> None:
     for path in (SKILL_TEXT, *REFERENCE_FILES, OPENAI_METADATA):
         assert path.is_file(), path
@@ -93,3 +97,43 @@ def test_trading_skill_contains_exact_safety_contract_and_tool_coverage() -> Non
     assert "/saxo-bank-mcp:saxo-trading" in combined
     assert "created_at + 5h" in combined
     assert "one order per second" in combined
+
+
+def test_plan_only_contract_forbids_local_and_remote_tool_use() -> None:
+    skill = SKILL_TEXT.read_text(encoding="utf-8")
+    plan_only = _markdown_section(
+        skill,
+        "## Plan-only boundary",
+        "## Non-negotiable safety rules",
+    )
+    metadata = OPENAI_METADATA.read_text(encoding="utf-8")
+    required = (
+        "answer entirely from the injected skill context",
+        "do not run shell commands, inspect files, browse, call mcp/tools, or invoke saxo",
+        "normal execution workflows still apply when the user explicitly requests execution",
+    )
+
+    for phrase in required:
+        assert phrase in plan_only.lower()
+        assert phrase in metadata.lower()
+    assert "bounded local read-only commands" not in plan_only
+
+
+def test_sim_plan_contract_suppresses_live_approval_material() -> None:
+    skill = SKILL_TEXT.read_text(encoding="utf-8")
+    safety = _markdown_section(
+        skill,
+        "## Non-negotiable safety rules",
+        "## Tool coverage",
+    )
+    metadata = OPENAI_METADATA.read_text(encoding="utf-8")
+    required = (
+        "SIM needs no human approval.",
+        "Do not emit any LIVE approval prefix, server token/hash, copyback statement, "
+        "or LIVE approval instructions",
+        "unless the user is actually preparing a LIVE mutation",
+    )
+
+    for phrase in required:
+        assert phrase in safety
+        assert phrase in metadata

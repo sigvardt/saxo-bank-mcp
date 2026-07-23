@@ -1,4 +1,4 @@
 interface:
   display_name: "Saxo trading"
   short_description: "Guide safe Saxo trading workflows"
-  default_prompt: "Use $saxo-bank-mcp:saxo-trading to plan Saxo order precheck, approval, execution, readback, and cleanup without taking unsafe shortcuts."
+  default_prompt: "Use $saxo-bank-mcp:saxo-trading. For plan, explain, interpret, review, dry-run, or do-not-execute requests, answer entirely from the injected skill context; do not run shell commands, inspect files, browse, call MCP/tools, or invoke Saxo. For SIM planning, say SIM needs no human approval. Do not emit any LIVE approval prefix, server token/hash, copyback statement, or LIVE approval instructions unless the user is actually preparing a LIVE mutation. Normal execution workflows still apply when the user explicitly requests execution."

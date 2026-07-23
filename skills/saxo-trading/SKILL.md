@@ -17,21 +17,25 @@ Use logical tool IDs only. Do not use harness-qualified MCP names, wildcard gran
 
 ## Load references
 
-- Read [order-lifecycle.md](references/order-lifecycle.md) before planning, previewing, placing, modifying, cancelling, reading back, or cleaning up any order.
-- Read [generic-trading-writes.md](references/generic-trading-writes.md) before using `saxo_list_trading_write_operations`, `saxo_prepare_trading_write`, `saxo_execute_trading_write`, or `saxo_register_disclaimer_response`.
-- Read [approval-dialogue.md](references/approval-dialogue.md) before any LIVE preview, approval check, execution, denial, uncertainty, retry, validation-error, disclaimer, or user copyback response.
+Reference loading applies only to explicit execution requests. PLAN-ONLY requests must not inspect these files.
+
+- During explicit order execution, read [order-lifecycle.md](references/order-lifecycle.md) before previewing, placing, modifying, cancelling, reading back, or cleaning up any order.
+- During explicit generic Trading execution, read [generic-trading-writes.md](references/generic-trading-writes.md) before using `saxo_list_trading_write_operations`, `saxo_prepare_trading_write`, `saxo_execute_trading_write`, or `saxo_register_disclaimer_response`.
+- During an explicit LIVE mutation, read [approval-dialogue.md](references/approval-dialogue.md) before any preview, approval check, execution, denial, uncertainty, retry, validation-error, disclaimer, or user copyback response.
 
 ## Plan-only boundary
 
-Treat a request as PLAN-ONLY when it says plan, explain, review, dry run, do not execute, do not call tools, or similar wording.
+Treat a request as PLAN-ONLY when it says plan, explain, interpret, review, dry run, do not execute, do not call tools, or similar wording.
 
-In PLAN-ONLY mode, make zero Saxo MCP calls, zero broker network calls, zero auth calls, zero browser calls, zero order calls, and zero cleanup calls. You may inspect this skill, its direct references, plugin metadata, and generated catalogs with bounded local read-only commands. Name the proposed logical tool sequence as text only.
+In PLAN-ONLY mode, answer entirely from the injected skill context. Do not run shell commands, inspect files, browse, call MCP/tools, or invoke Saxo. Name the proposed logical tool sequence as text only.
 
-Switch to execution only after the user explicitly asks to run a step. An execution request must state the environment, account alias or safe selector source, instrument, side, quantity, order type, price if any, duration, and cleanup expectation.
+Normal execution workflows still apply when the user explicitly requests execution. Switch to execution only after the user explicitly asks to run a step. An execution request must state the environment, account alias or safe selector source, instrument, side, quantity, order type, price if any, duration, and cleanup expectation.
 
 ## Non-negotiable safety rules
 
 SIM requires no human approval.
+
+For SIM planning, say exactly `SIM needs no human approval.` and stop there on approval. Do not emit any LIVE approval prefix, server token/hash, copyback statement, or LIVE approval instructions unless the user is actually preparing a LIVE mutation.
 
 LIVE requires one exact new chat statement AND the server authorization token.
 
