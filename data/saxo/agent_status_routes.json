@@ -111,6 +111,10 @@
         "reason": "Agent eval validation status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/agent_skill_install_cli_driver.py",
+        "reason": "Plugin install command/probe receipt status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/agent_skill_install_qa.py",
         "reason": "Plugin install QA status, not production MCP tool response truth."
       },
@@ -119,8 +123,16 @@
         "reason": "Plugin install evidence model status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
+        "reason": "Plugin install producer report status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/agent_skill_matrix.py",
         "reason": "Tool matrix evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_matrix_producer.py",
+        "reason": "Tool matrix producer report status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/agent_skill_release.py",

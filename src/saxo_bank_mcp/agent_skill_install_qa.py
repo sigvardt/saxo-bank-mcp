@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_evidence_io import git_output, resolve_commit
@@ -27,6 +28,7 @@ REQUIRED_CACHE_FILES = (
     "pyproject.toml",
     "uv.lock",
 )
+JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
 def write_install_fixture(fixture: str, out: Path) -> int:
@@ -36,7 +38,7 @@ def write_install_fixture(fixture: str, out: Path) -> int:
 
 
 def manifest_install_report(options: InstallManifestOptions) -> int:
-    error = _planning_error(options)
+    error = planning_error(options)
     if error is not None:
         write_json(options.out, {"status": "failed", "reason": error})
         return 1
@@ -50,8 +52,8 @@ def manifest_install_report(options: InstallManifestOptions) -> int:
         "claude_home": str(options.run_root / "claude-home"),
     }
     before = {
-        "codex": _path_fingerprint(options.codex_global_home),
-        "claude": _path_fingerprint(options.claude_global_home),
+        "codex": path_fingerprint(options.codex_global_home),
+        "claude": path_fingerprint(options.claude_global_home),
     }
     write_json(
         options.out,
@@ -114,7 +116,7 @@ def load_verified_install_report(
     return (report, ()) if not errors else (None, tuple(errors))
 
 
-def _planning_error(options: InstallManifestOptions) -> str | None:
+def planning_error(options: InstallManifestOptions) -> str | None:
     repo_valid = (
         options.repo.is_dir()
         and git_output(options.repo, "rev-parse", "--git-dir") is not None
@@ -208,6 +210,14 @@ def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:
     expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
     if (report.expected_skills, report.expected_mcp_servers, report.expected_tools) != expected:
         errors.append("expected_counts_mismatch")
+    if not report.help_syntax or not all(
+        _help_validated(item) for item in report.help_syntax.values()
+    ):
+        errors.append("help_syntax_unvalidated")
+    if report.update_probe.get("candidate_restored") is not True:
+        errors.append("update_probe_restore_missing")
+    if not _auth_metadata_owner_only(report.auth_files):
+        errors.append("auth_file_metadata_invalid")
     return errors
 
 
@@ -235,17 +245,27 @@ def _client_errors(
     expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
     if (client.skill_count, client.mcp_server_count, client.tool_count) != expected:
         errors.append(f"{name}_count_mismatch")
+    if (
+        client.identity != "saxo-bank-mcp"
+        or client.version != _project_version(clone)
+        or client.cache_root_source == "missing"
+    ):
+        errors.append(f"{name}_identity_version_invalid")
     if client.annotations_missing or client.forbidden_cache_paths:
         errors.append(f"{name}_cache_inventory_invalid")
     checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
     if any(check.tool_count != EXPECTED_TOOL_COUNT for check in checks):
         errors.append(f"{name}_startup_invalid")
-    skills = tuple(str(path.relative_to(clone)) for path in clone.glob("skills/*/SKILL.md"))
-    required = (*REQUIRED_CACHE_FILES, *skills)
+    required = _required_cache_files(clone)
     if len(required) != len(REQUIRED_CACHE_FILES) + EXPECTED_SKILL_COUNT:
         errors.append(f"{name}_skill_inventory_invalid")
     elif any(not _same_bytes(clone / relative, cache / relative) for relative in required):
         errors.append(f"{name}_installed_bytes_mismatch")
+    public_files = _tracked_public_files(clone)
+    if not public_files or any(
+        not _same_bytes(clone / relative, cache / relative) for relative in public_files
+    ):
+        errors.append(f"{name}_tracked_public_tree_mismatch")
     return errors
 
 
@@ -264,7 +284,50 @@ def _same_bytes(source: Path, installed: Path) -> bool:
     )
 
 
-def _path_fingerprint(path: Path | None) -> str:
+def _help_validated(value: JsonValue) -> bool:
+    return isinstance(value, dict) and value.get("validated") is True
+
+
+def _auth_metadata_owner_only(value: Mapping[str, JsonValue]) -> bool:
+    copied = value.get("copied")
+    if copied is None:
+        return True
+    if not isinstance(copied, list):
+        return False
+    for item in copied:
+        if not isinstance(item, dict) or item.get("mode") != "0o600":
+            return False
+    return value.get("values_published") is False
+
+
+def _project_version(root: Path) -> str:
+    payload = JSON_OBJECT_ADAPTER.validate_python(
+        tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8")),
+    )
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        return ""
+    version = project.get("version")
+    return version if isinstance(version, str) else ""
+
+
+def _required_cache_files(clone: Path) -> tuple[str, ...]:
+    skills = tuple(str(path.relative_to(clone)) for path in clone.glob("skills/*/SKILL.md"))
+    return (*REQUIRED_CACHE_FILES, *skills)
+
+
+def _tracked_public_files(clone: Path) -> tuple[str, ...]:
+    raw = git_output(clone, "ls-files", "-z") or ""
+    return tuple(
+        sorted(
+            relative
+            for relative in raw.split("\0")
+            if relative and not relative.startswith(".omo/")
+        ),
+    )
+
+
+def path_fingerprint(path: Path | None) -> str:
     if path is None or not path.exists():
         return "missing"
     digest = hashlib.sha256()

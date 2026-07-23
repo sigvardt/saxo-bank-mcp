@@ -18,6 +18,7 @@ from saxo_bank_mcp.agent_skill_matrix import (
     build_manifest_matrix_report,
     verify_matrix_report,
 )
+from saxo_bank_mcp.agent_skill_matrix_producer import run_real_matrix_report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fixture-option-uics", default=None)
     parser.add_argument("--fixture-stream-uic", default=None)
     parser.add_argument("--verify-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--require-environment", default="SIM")
     parser.add_argument("--out", type=Path, required=True)
@@ -51,7 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.install_report is None:
         write_json(args.out, {"status": "failed", "reason": "missing_install_report"})
         return 1
-    return build_manifest_matrix_report(
+    runner = build_manifest_matrix_report if args.dry_run else run_real_matrix_report
+    return runner(
         MatrixPlanOptions(
             manifest=args.manifest,
             environment=str(args.environment),

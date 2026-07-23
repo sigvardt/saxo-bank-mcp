@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_install_models import InstallManifestOptions
+from saxo_bank_mcp.agent_skill_install_producer import real_install_report
 from saxo_bank_mcp.agent_skill_install_qa import (
     manifest_install_report,
     verify_install_report,
@@ -44,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write("missing --install-report for --verify-only\n")
             return 1
         return verify_install_report(args.install_report, args.out)
-    return manifest_install_report(
+    runner = manifest_install_report if args.dry_run else real_install_report
+    return runner(
         InstallManifestOptions(
             repo=args.repo,
             commit=str(args.commit),
@@ -55,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_tools=int(args.expected_tools),
             preserve_for=str(args.preserve_for),
             out=args.out,
+            dry_run=bool(args.dry_run),
         ),
     )
 

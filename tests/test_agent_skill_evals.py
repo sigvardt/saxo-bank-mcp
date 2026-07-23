@@ -92,9 +92,10 @@ def test_dry_run_dual_runner_records_no_model_mcp_or_saxo_calls(tmp_path: Path) 
     payload = json.loads(out.read_text(encoding="utf-8"))
 
     assert result.returncode == 0, result.stderr
-    assert payload["status"] == "passed"
+    assert payload["status"] == "planned"
     assert payload["execution_mode"] == "manifest_validation"
     assert payload["case_count"] == QA_DRY_RUN_RECORDS
+    assert {record["status"] for record in payload["records"]} == {"planned"}
     assert {record["no_model_call"] for record in payload["records"]} == {True}
     assert {record["no_mcp_call"] for record in payload["records"]} == {True}
     assert {record["no_saxo_call"] for record in payload["records"]} == {True}

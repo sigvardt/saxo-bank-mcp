@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -94,12 +95,18 @@ def build_release_evidence(
             "mcp_call_observed": True,
             "result_parsed": True,
             "skipped": False,
+            "requested_tool_covered": True,
             "request_digest": "a" * 64,
             "response_digest": "b" * 64,
         }
         for name in names
     ]
-    state: dict[str, JsonValue] = {"orders": "c" * 64, "subscriptions": "d" * 64}
+    state: dict[str, JsonValue] = {
+        "open_orders": "c" * 64,
+        "positions_money": "d" * 64,
+        "subscriptions": "e" * 64,
+        "preview_write_state": "f" * 64,
+    }
     write_json(
         task15 / "tool-matrix.json",
         {
@@ -118,10 +125,57 @@ def build_release_evidence(
             "unexpected_tools": [],
             "expected_call_count": len(calls),
             "tool_calls": calls,
+            "preflight": {
+                "complete": True,
+                "auth_status_completed": True,
+                "session_capabilities_completed": True,
+                "fixture_reference_validated": True,
+                "account_allowlist_resolved": True,
+                "disclaimer_response_completed": True,
+            },
+            "transport_ledger": {
+                "sim_only": True,
+                "live_events": 0,
+                "hosts": ["sim.api.saxo.test"],
+            },
             "before_state_fingerprint": state,
             "after_state_fingerprint": state,
-            "cleanup": {"complete": True, "uncleaned_resources": 0},
+            "cleanup": {
+                "complete": True,
+                "uncleaned_resources": 0,
+                "proof": [
+                    "open_orders_equal",
+                    "positions_money_equal",
+                    "subscriptions_equal",
+                    "preview_write_state_equal",
+                ],
+            },
             "unexpected_skips": [],
+            "lifecycle_calls": [
+                "saxo_create_write_preview",
+                "saxo_commit_write_preview",
+                "saxo_create_order_preview",
+                "saxo_prepare_trading_write",
+                "saxo_register_disclaimer_response",
+                "saxo_execute_trading_write",
+                "saxo_place_order",
+                "saxo_modify_order",
+                "saxo_cancel_order",
+                "saxo_cancel_orders_by_instrument",
+                "saxo_place_multileg_order",
+                "saxo_modify_multileg_order",
+                "saxo_cancel_multileg_order",
+                "saxo_place_sim_order",
+                "saxo_modify_sim_order",
+                "saxo_cancel_sim_order",
+                "saxo_cancel_sim_orders_by_instrument",
+                "saxo_place_multileg_sim_order",
+                "saxo_modify_multileg_sim_order",
+                "saxo_cancel_multileg_sim_order",
+                "saxo_create_streaming_price_subscription",
+                "saxo_cleanup_streaming_subscriptions",
+            ],
+            "command_receipts": [],
             "errors": [],
         },
     )
@@ -166,10 +220,18 @@ def build_release_evidence(
     return evidence, plan, live
 
 
-def run_cli(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    script: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    merged_env = os.environ.copy()
+    if env is not None:
+        merged_env.update(env)
     return subprocess.run(
         [sys.executable, str(script), *args],
         cwd=ROOT,
+        env=merged_env,
         text=True,
         capture_output=True,
         timeout=30,
@@ -226,10 +288,50 @@ def _install_payload(
         "expected_tools": 39,
         "global_state": {"before": fingerprints, "after": fingerprints},
         "global_state_unchanged": True,
+        "project_version": "0.1.0",
+        "help_syntax": {
+            "codex_plugin_help": {"validated": True, "stdout_sha256": "c" * 64},
+            "codex_marketplace_help": {"validated": True, "stdout_sha256": "c" * 64},
+            "claude_plugin_help": {"validated": True, "stdout_sha256": "c" * 64},
+            "claude_marketplace_help": {"validated": True, "stdout_sha256": "c" * 64},
+        },
+        "update_probe": {
+            "original_version": "0.1.0",
+            "bumped_version": "0.1.1",
+            "candidate_restored": True,
+        },
+        "auth_files": {"copied": [], "values_published": False},
         "codex": _client_payload(caches[0]),
         "claude": _client_payload(caches[1]),
-        "installed_byte_checks": {"complete": True, "mismatches": []},
-        "process_cleanup": {"complete": True, "remaining_pids": []},
+        "installed_byte_checks": {
+            "complete": True,
+            "compared_files": 1,
+            "metadata_exceptions": [".omo/**"],
+            "required_files_present": [
+                ".mcp.json",
+                ".claude-plugin/plugin.json",
+                ".codex-plugin/plugin.json",
+                "data/saxo/openapi_inventory.json",
+                "pyproject.toml",
+                "uv.lock",
+                "skills/saxo-bank/SKILL.md",
+                "skills/saxo-auth-session/SKILL.md",
+                "skills/saxo-openapi/SKILL.md",
+                "skills/saxo-qa-operations/SKILL.md",
+                "skills/saxo-reads/SKILL.md",
+                "skills/saxo-safety-recovery/SKILL.md",
+                "skills/saxo-streaming/SKILL.md",
+                "skills/saxo-trading/SKILL.md",
+            ],
+            "forbidden_files_absent": True,
+            "mismatches": [],
+        },
+        "process_cleanup": {
+            "complete": True,
+            "remaining_pids": [],
+            "observed_pids": [1000],
+            "observed_pgids": [1000],
+        },
         "fixture_cleanup": {
             "deferred_registered": True,
             "preserve_for": "task-15,task-16",
@@ -248,6 +350,9 @@ def _client_payload(cache: Path) -> dict[str, JsonValue]:
     return {
         "installed": True,
         "cache_root": str(cache),
+        "identity": "saxo-bank-mcp",
+        "version": "0.1.0",
+        "cache_root_source": "fixture",
         "skill_count": 8,
         "mcp_server_count": 1,
         "tool_count": 39,

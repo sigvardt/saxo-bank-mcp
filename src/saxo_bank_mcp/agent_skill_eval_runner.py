@@ -74,10 +74,11 @@ def run_eval_suite(
     skipped_count = (
         len(records) if not records else sum(1 for record in records if record.status == "skipped")
     )
+    planned = bool(options.dry_run)
     failed = validation.status != "passed" or any(record.status == "failed" for record in records)
     skipped_failure = bool(options.nonzero_on_skip and (not records or skipped_count))
-    status: Literal["passed", "failed", "skipped"] = (
-        "failed" if failed or skipped_failure else "passed"
+    status: Literal["passed", "failed", "skipped", "planned"] = (
+        "failed" if failed or skipped_failure else "planned" if planned else "passed"
     )
     report = EvalRunReport(
         status=status,
@@ -99,7 +100,7 @@ def run_eval_suite(
         nonzero_on_skip=options.nonzero_on_skip,
     )
     write_json(options.out, report.to_json_value())
-    return 0 if status == "passed" else 1
+    return 0 if status in {"passed", "planned"} else 1
 
 
 def resolve_tool_grants(harness: Harness, logical_tools: Iterable[str]) -> tuple[str, ...]:
@@ -142,7 +143,7 @@ def _run_case(
         return EvalRunRecord(
             case_id=case.id,
             harness=harness,
-            status="passed",
+            status="planned",
             execution_mode="manifest_validation",
             expected_skill=case.expected_skill,
             required_logical_tools=case.required_logical_tools,

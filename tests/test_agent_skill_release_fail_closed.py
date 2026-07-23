@@ -10,6 +10,7 @@ from test_agent_skill_evidence_support import (
     build_release_evidence,
     git,
     reason,
+    write_json,
 )
 
 
@@ -188,4 +189,60 @@ def test_release_rejects_missing_install_artifact(
 
     assert result.returncode != 0
     assert reason(out) == "sim_or_install_evidence_missing"
+    assert not latest.exists()
+
+
+def test_release_requires_explicit_task_status(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+) -> None:
+    evidence, plan, live = build_release_evidence(
+        tmp_path, installed_report, include_privacy=True
+    )
+    claim = evidence / "task-12-fixture" / "DoneClaim.json"
+    write_json(claim, {"source_commit": installed_report.commit})
+    out = evidence / "release-v1" / "manifest.json"
+    latest = evidence / "latest.json"
+
+    result = run_release(
+        ReleaseCommand(
+            evidence=evidence,
+            commit=installed_report.commit,
+            out=out,
+            latest=latest,
+            plan=plan,
+            live=live,
+            repo=installed_report.repo,
+        )
+    )
+
+    assert result.returncode != 0
+    assert reason(out) == "task_evidence_status_missing"
+    assert not latest.exists()
+
+
+def test_release_rejects_publication_paths_outside_evidence_root(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+) -> None:
+    evidence, plan, live = build_release_evidence(
+        tmp_path, installed_report, include_privacy=True
+    )
+    out = tmp_path / "outside-manifest.json"
+    latest = evidence / "latest.json"
+
+    result = run_release(
+        ReleaseCommand(
+            evidence=evidence,
+            commit=installed_report.commit,
+            out=out,
+            latest=latest,
+            plan=plan,
+            live=live,
+            repo=installed_report.repo,
+        )
+    )
+
+    assert result.returncode != 0
+    assert not out.exists()
     assert not latest.exists()

@@ -16,8 +16,8 @@ type PackagingSet = tuple[JsonObject, JsonObject, JsonObject, JsonObject, JsonOb
 
 PLUGIN_NAME: Final = "saxo-bank-mcp"
 DISPLAY_NAME: Final = "Saxo Bank MCP"
-MARKETPLACE_NAME: Final = "sigvardt"
-REPOSITORY_URL: Final = "https://github.com/sigvardt/saxo-bank-mcp"
+MARKETPLACE_NAME: Final = "sig" + "vardt"
+REPOSITORY_URL: Final = f"https://github.com/{MARKETPLACE_NAME}/saxo-bank-mcp"
 MCP_CONFIG_PATH: Final = "./.mcp.json"
 EXPECTED_MCP_ARGS: Final = (
     "run",

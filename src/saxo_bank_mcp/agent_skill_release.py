@@ -42,8 +42,11 @@ def assemble_release(options: ReleaseAssembleOptions) -> int:
     try:
         commit, live_proof = _validated_request(options)
         inputs = _release_inputs(options, commit, live_proof)
+        _validate_publication_paths(options)
         manifest = _manifest(options, inputs, commit)
     except _ReleaseValidationError as exc:
+        if str(exc) in {"release_out_outside_evidence_root", "latest_outside_evidence_root"}:
+            return 1
         return _fail(options.out, str(exc))
     payload = manifest.to_json_value()
     if options.check:
@@ -92,6 +95,18 @@ def _validated_request(options: ReleaseAssembleOptions) -> tuple[str, Path]:
     return commit, options.verify_live_proof
 
 
+def _validate_publication_paths(options: ReleaseAssembleOptions) -> None:
+    root = options.evidence_root.resolve()
+    try:
+        options.out.resolve().relative_to(root)
+    except ValueError as exc:
+        raise _ReleaseValidationError("release_out_outside_evidence_root") from exc
+    try:
+        options.latest.resolve().relative_to(root)
+    except ValueError as exc:
+        raise _ReleaseValidationError("latest_outside_evidence_root") from exc
+
+
 def _task_inputs(
     options: ReleaseAssembleOptions,
     commit: str,
@@ -105,7 +120,9 @@ def _task_inputs(
         claim = _parse(matches[-1], TaskClaim)
         if claim is None or claim.bound_commit() != commit:
             raise _ReleaseValidationError("task_evidence_commit_mismatch")
-        if claim.status is not None and claim.status not in {"passed", "complete", "completed"}:
+        if claim.status is None:
+            raise _ReleaseValidationError("task_evidence_status_missing")
+        if claim.status not in {"passed", "complete", "completed"}:
             raise _ReleaseValidationError("task_evidence_not_passed")
         if not _fresh(matches[-1], options.repo, commit):
             raise _ReleaseValidationError("task_evidence_stale")

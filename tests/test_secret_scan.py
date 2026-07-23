@@ -282,6 +282,32 @@ def test_secret_scan_reports_configured_person_identifier_tokens(
     ]
 
 
+def test_secret_scan_allows_public_repository_owner_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_root = tmp_path / ".claude-plugin"
+    metadata_root.mkdir()
+    source = metadata_root / "marketplace.json"
+    public_owner = "sig" + "vardt"
+    monkeypatch.setenv("SAXO_MCP_REDACT_PERSON_NAMES", public_owner)
+    source.write_text(
+        json.dumps(
+            {
+                "name": public_owner,
+                "owner": {"name": public_owner},
+                "repository": f"https://github.com/{public_owner}/saxo-bank-mcp",
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    findings, scan_errors = scan_secret_paths([str(source)])
+
+    assert scan_errors == []
+    assert findings == []
+
+
 @pytest.mark.parametrize(
     "candidate",
     [

@@ -77,7 +77,7 @@ class EvalRunRecord(BaseModel):
 
     case_id: str
     harness: Harness
-    status: Literal["passed", "failed", "skipped"]
+    status: Literal["passed", "failed", "skipped", "planned"]
     execution_mode: Literal["manifest_validation", "model_execution"]
     expected_skill: str
     required_logical_tools: tuple[str, ...]
@@ -93,7 +93,7 @@ class EvalRunRecord(BaseModel):
 class EvalRunReport(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: Literal["passed", "failed", "skipped"]
+    status: Literal["passed", "failed", "skipped", "planned"]
     harness: HarnessSelector
     environment: str
     execution_mode: Literal["manifest_validation", "model_execution"]

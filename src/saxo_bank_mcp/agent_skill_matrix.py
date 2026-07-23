@@ -9,10 +9,35 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 
 EXPECTED_TOOL_COUNT = 39
 SCENARIO_MANIFEST = Path(__file__).resolve().parents[2] / "data/saxo/agent_tool_scenarios.json"
+LIFECYCLE_TOOLS = (
+    "saxo_create_write_preview",
+    "saxo_commit_write_preview",
+    "saxo_create_order_preview",
+    "saxo_prepare_trading_write",
+    "saxo_register_disclaimer_response",
+    "saxo_execute_trading_write",
+    "saxo_place_order",
+    "saxo_modify_order",
+    "saxo_cancel_order",
+    "saxo_cancel_orders_by_instrument",
+    "saxo_place_multileg_order",
+    "saxo_modify_multileg_order",
+    "saxo_cancel_multileg_order",
+    "saxo_place_sim_order",
+    "saxo_modify_sim_order",
+    "saxo_cancel_sim_order",
+    "saxo_cancel_sim_orders_by_instrument",
+    "saxo_place_multileg_sim_order",
+    "saxo_modify_multileg_sim_order",
+    "saxo_cancel_multileg_sim_order",
+    "saxo_create_streaming_price_subscription",
+    "saxo_cleanup_streaming_subscriptions",
+)
 
 
 class ScenarioEntry(BaseModel):
@@ -35,6 +60,7 @@ class ToolCallEvidence(BaseModel):
     mcp_call_observed: Literal[True]
     result_parsed: Literal[True]
     skipped: Literal[False]
+    requested_tool_covered: Literal[True]
     request_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     response_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -44,6 +70,26 @@ class MatrixCleanup(BaseModel):
 
     complete: Literal[True]
     uncleaned_resources: Literal[0]
+    proof: tuple[str, ...] = Field(min_length=1)
+
+
+class MatrixPreflight(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    complete: Literal[True]
+    auth_status_completed: Literal[True]
+    session_capabilities_completed: Literal[True]
+    fixture_reference_validated: Literal[True]
+    account_allowlist_resolved: Literal[True]
+    disclaimer_response_completed: Literal[True]
+
+
+class MatrixTransportLedger(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    sim_only: Literal[True]
+    live_events: Literal[0]
+    hosts: tuple[str, ...] = Field(min_length=1)
 
 
 class ExecutedMatrixReport(BaseModel):
@@ -62,10 +108,14 @@ class ExecutedMatrixReport(BaseModel):
     unexpected_tools: tuple[str, ...]
     expected_call_count: int
     tool_calls: tuple[ToolCallEvidence, ...] = Field(min_length=1)
+    preflight: MatrixPreflight
+    transport_ledger: MatrixTransportLedger
     before_state_fingerprint: dict[str, JsonValue]
     after_state_fingerprint: dict[str, JsonValue]
     cleanup: MatrixCleanup
     unexpected_skips: tuple[str, ...]
+    lifecycle_calls: tuple[str, ...] = ()
+    command_receipts: tuple[CommandReceipt, ...] = ()
     errors: tuple[str, ...]
 
 
@@ -99,8 +149,8 @@ def build_manifest_matrix_report(options: MatrixPlanOptions) -> int:
         )
         write_json(options.out, {"status": "failed", "reason": reason, "errors": install_errors})
         return 1
-    tools, manifest_errors = _manifest_tools(options.manifest)
-    fixture_errors = _fixture_errors(options.fixtures)
+    tools, manifest_errors = manifest_tools(options.manifest)
+    fixture_errors = fixture_errors_for(options.fixtures)
     errors = [*manifest_errors, *fixture_errors]
     if options.environment != "SIM":
         errors.append("environment_not_sim")
@@ -119,7 +169,7 @@ def build_manifest_matrix_report(options: MatrixPlanOptions) -> int:
             "environment": options.environment,
             "candidate_commit": install.candidate_commit,
             "install_report": str(options.install_report),
-            "install_report_sha256": _sha256_file(options.install_report),
+            "install_report_sha256": sha256_file(options.install_report),
             "tool_count": len(tools),
             "unique_tools": sorted(tools),
             "created_mcp_calls": 0,
@@ -192,7 +242,7 @@ def _install_binding_errors(report: ExecutedMatrixReport) -> list[str]:
         errors.append("install_candidate_commit_mismatch")
     if report.source_commit != report.candidate_commit:
         errors.append("source_commit_mismatch")
-    if _sha256_file(report.install_report) != report.install_report_sha256:
+    if sha256_file(report.install_report) != report.install_report_sha256:
         errors.append("install_report_digest_mismatch")
     return errors
 
@@ -206,9 +256,13 @@ def _tool_call_errors(report: ExecutedMatrixReport) -> list[str]:
         errors.append("expected_call_count_mismatch")
     if set(call_tools) != set(report.unique_tools):
         errors.append("tool_call_coverage_mismatch")
-    expected_tools, manifest_errors = _manifest_tools(SCENARIO_MANIFEST)
+    expected_tools, manifest_errors = manifest_tools(SCENARIO_MANIFEST)
     if manifest_errors or set(call_tools) != set(expected_tools):
         errors.append("scenario_tool_coverage_mismatch")
+    if report.lifecycle_calls != LIFECYCLE_TOOLS:
+        errors.append("lifecycle_tool_coverage_mismatch")
+    if any(not call.requested_tool_covered for call in report.tool_calls):
+        errors.append("tool_call_target_mismatch")
     return errors
 
 
@@ -223,10 +277,22 @@ def _matrix_state_errors(report: ExecutedMatrixReport, environment: str) -> list
         or report.before_state_fingerprint != report.after_state_fingerprint
     ):
         errors.append("state_fingerprint_mismatch")
+    required_state_keys = {
+        "open_orders",
+        "positions_money",
+        "subscriptions",
+        "preview_write_state",
+    }
+    if set(report.before_state_fingerprint) < required_state_keys:
+        errors.append("state_fingerprint_scope_missing")
+    if not report.cleanup.proof:
+        errors.append("cleanup_proof_missing")
+    if report.transport_ledger.live_events != 0 or not report.transport_ledger.sim_only:
+        errors.append("transport_ledger_not_sim_only")
     return errors
 
 
-def _manifest_tools(manifest: Path) -> tuple[frozenset[str], list[str]]:
+def manifest_tools(manifest: Path) -> tuple[frozenset[str], list[str]]:
     try:
         payload = ScenarioManifest.model_validate_json(manifest.read_text(encoding="utf-8"))
     except (OSError, ValidationError, json.JSONDecodeError):
@@ -235,7 +301,7 @@ def _manifest_tools(manifest: Path) -> tuple[frozenset[str], list[str]]:
     return frozenset(tools), []
 
 
-def _fixture_errors(fixtures: SimFixtureOptions) -> list[str]:
+def fixture_errors_for(fixtures: SimFixtureOptions) -> list[str]:
     values = {
         "stock_uic": fixtures.stock_uic,
         "amount": fixtures.amount,
@@ -247,5 +313,5 @@ def _fixture_errors(fixtures: SimFixtureOptions) -> list[str]:
     return [f"missing_fixture_{name}" for name, value in values.items() if not value]
 
 
-def _sha256_file(path: Path) -> str:
+def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "missing"

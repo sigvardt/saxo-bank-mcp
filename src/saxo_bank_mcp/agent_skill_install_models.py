@@ -9,6 +9,21 @@ from pydantic import BaseModel, ConfigDict, Field
 from saxo_bank_mcp._evidence import JsonValue
 
 
+class CommandReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    argv: tuple[str, ...] = Field(min_length=1)
+    cwd: str = Field(min_length=1)
+    pid: int | None = None
+    pgid: int | None = None
+    exit_code: int
+    stdout_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    stderr_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    timed_out: bool = False
+    cleanup_attempted: bool = False
+
+
 class StartupCheck(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -29,6 +44,9 @@ class ClientInstallEvidence(BaseModel):
 
     installed: Literal[True]
     cache_root: Path
+    identity: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    cache_root_source: str = Field(min_length=1)
     skill_count: int
     mcp_server_count: int
     tool_count: int
@@ -37,6 +55,7 @@ class ClientInstallEvidence(BaseModel):
     installed_bytes_match: Literal[True]
     install_command_exit_code: Literal[0]
     startup: StartupEvidence
+    command_receipts: tuple[CommandReceipt, ...] = ()
 
 
 class CloneEvidence(BaseModel):
@@ -60,6 +79,10 @@ class InstalledByteChecks(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     complete: Literal[True]
+    compared_files: int = Field(ge=1)
+    metadata_exceptions: tuple[str, ...]
+    required_files_present: tuple[str, ...]
+    forbidden_files_absent: Literal[True]
     mismatches: tuple[str, ...]
 
 
@@ -68,6 +91,8 @@ class ProcessCleanup(BaseModel):
 
     complete: Literal[True]
     remaining_pids: tuple[int, ...]
+    observed_pids: tuple[int, ...] = ()
+    observed_pgids: tuple[int, ...] = ()
 
 
 class FixtureCleanup(BaseModel):
@@ -96,6 +121,12 @@ class InstallEvidenceReport(BaseModel):
     installed_byte_checks: InstalledByteChecks
     process_cleanup: ProcessCleanup
     fixture_cleanup: FixtureCleanup
+    project_version: str = Field(min_length=1)
+    help_syntax: dict[str, JsonValue]
+    update_probe: dict[str, JsonValue]
+    auth_files: dict[str, JsonValue]
+    help_receipts: tuple[CommandReceipt, ...] = ()
+    update_receipts: tuple[CommandReceipt, ...] = ()
     errors: tuple[str, ...]
 
 
@@ -110,3 +141,4 @@ class InstallManifestOptions:
     expected_tools: int
     preserve_for: str
     out: Path
+    dry_run: bool = False
