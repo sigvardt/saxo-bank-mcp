@@ -95,6 +95,34 @@
         "reason": "QA probe status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_execution.py",
+        "reason": "Agent eval execution status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_models.py",
+        "reason": "Agent eval report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_runner.py",
+        "reason": "Agent eval runner status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_validation.py",
+        "reason": "Agent eval validation status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_qa.py",
+        "reason": "Plugin install QA status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_matrix.py",
+        "reason": "Tool matrix evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_release.py",
+        "reason": "Release evidence status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/streaming_transport.py",
         "reason": "Streaming transport helper has internal snapshot status; final tool statuses are in streaming_execution."
       },
