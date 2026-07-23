@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo safety recovery"
+  short_description: "Guide safe Saxo status recovery"
+  default_prompt: "Use $saxo-bank-mcp:saxo-safety-recovery. For plan, explain, interpret, review, dry-run, or do-not-execute requests, answer entirely from the injected skill context; do not run shell commands, browse, call MCP/tools, inspect files, invoke Saxo, or create Saxo events. Interpret status, reason, mutation_possible, retry class, next action, and safe wording before narrating. Reconcile before retry. Only complete non-evicted ledger with negative_proof_available=true supports no-request or no-purchase proof. Validation errors name field/rule, never submitted value. Prefer account aliases in user-facing output."
