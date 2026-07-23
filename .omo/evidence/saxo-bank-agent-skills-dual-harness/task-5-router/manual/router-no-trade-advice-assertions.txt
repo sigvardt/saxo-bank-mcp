@@ -1,0 +1,11 @@
+26:            "expected_skill": "saxo-bank",
+33:            "no_mcp_call": true,
+34:            "no_model_call": true,
+35:            "no_saxo_call": true,
+44:            "status": "planned",
+51:            "expected_skill": "saxo-bank",
+58:            "no_mcp_call": true,
+59:            "no_model_call": true,
+60:            "no_saxo_call": true,
+69:            "status": "planned",
+75:    "status": "planned"

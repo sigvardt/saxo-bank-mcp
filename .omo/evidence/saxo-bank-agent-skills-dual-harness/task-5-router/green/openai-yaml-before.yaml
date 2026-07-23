@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo Bank router"
+  short_description: "Route Saxo MCP work safely"
+  default_prompt: "Use $saxo-bank-mcp:saxo-bank to classify the Saxo environment, intent, risk, and first focused skill before executing anything."

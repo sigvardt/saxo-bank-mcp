@@ -1,0 +1,76 @@
+{
+    "after_global_state": {
+        "path_count": 0,
+        "paths": []
+    },
+    "before_global_state": {
+        "path_count": 0,
+        "paths": []
+    },
+    "case_count": 2,
+    "cleanup": {
+        "complete": true,
+        "created_mcp_calls": 0,
+        "created_processes": 0
+    },
+    "environment": "ALL",
+    "execution_mode": "manifest_validation",
+    "global_state_unchanged": true,
+    "harness": "both",
+    "nonzero_on_skip": true,
+    "records": [
+        {
+            "case_id": "router-no-trade-advice",
+            "error": "",
+            "execution_mode": "manifest_validation",
+            "expected_skill": "saxo-bank",
+            "forbidden_logical_tools": [
+                "saxo_create_order_preview",
+                "saxo_place_order",
+                "saxo_prepare_trading_write"
+            ],
+            "harness": "codex",
+            "no_mcp_call": true,
+            "no_model_call": true,
+            "no_saxo_call": true,
+            "required_logical_tools": [
+                "saxo_health",
+                "saxo_safety_status"
+            ],
+            "resolved_tool_grants": [
+                "mcp__saxo_bank_mcp__saxo_health",
+                "mcp__saxo_bank_mcp__saxo_safety_status"
+            ],
+            "status": "planned",
+            "transcript_assertions_passed": true
+        },
+        {
+            "case_id": "router-no-trade-advice",
+            "error": "",
+            "execution_mode": "manifest_validation",
+            "expected_skill": "saxo-bank",
+            "forbidden_logical_tools": [
+                "saxo_create_order_preview",
+                "saxo_place_order",
+                "saxo_prepare_trading_write"
+            ],
+            "harness": "claude",
+            "no_mcp_call": true,
+            "no_model_call": true,
+            "no_saxo_call": true,
+            "required_logical_tools": [
+                "saxo_health",
+                "saxo_safety_status"
+            ],
+            "resolved_tool_grants": [
+                "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_health",
+                "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_safety_status"
+            ],
+            "status": "planned",
+            "transcript_assertions_passed": true
+        }
+    ],
+    "selected_case_count": 1,
+    "skipped_count": 0,
+    "status": "planned"
+}

@@ -1,0 +1,4 @@
+skills/saxo-bank/SKILL.md
+skills/saxo-bank/agents/openai.yaml
+skills/saxo-bank/references/router-contract.md
+skills/saxo-bank/references/tool-catalog.md
