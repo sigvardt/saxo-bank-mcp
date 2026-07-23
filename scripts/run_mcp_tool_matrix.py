@@ -11,7 +11,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from saxo_bank_mcp.agent_skill_matrix import build_manifest_matrix_report, verify_matrix_report
+from saxo_bank_mcp._evidence import write_json
+from saxo_bank_mcp.agent_skill_matrix import (
+    MatrixPlanOptions,
+    SimFixtureOptions,
+    build_manifest_matrix_report,
+    verify_matrix_report,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,11 +48,25 @@ def main(argv: list[str] | None = None) -> int:
             require_environment=str(args.require_environment),
             out=args.out,
         )
+    if args.install_report is None:
+        write_json(args.out, {"status": "failed", "reason": "missing_install_report"})
+        return 1
     return build_manifest_matrix_report(
-        manifest=args.manifest,
-        environment=str(args.environment),
-        require_tools=int(args.require_tools),
-        out=args.out,
+        MatrixPlanOptions(
+            manifest=args.manifest,
+            environment=str(args.environment),
+            require_tools=int(args.require_tools),
+            install_report=args.install_report,
+            fixtures=SimFixtureOptions(
+                stock_uic=args.fixture_stock_uic,
+                amount=args.fixture_amount,
+                limit_price=args.fixture_limit_price,
+                modified_limit_price=args.fixture_modified_limit_price,
+                option_uics=args.fixture_option_uics,
+                stream_uic=args.fixture_stream_uic,
+            ),
+            out=args.out,
+        )
     )
 
 

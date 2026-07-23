@@ -105,21 +105,11 @@ def test_supporting_cli_fixtures_and_verify_modes(tmp_path: Path) -> None:
     install = tmp_path / "install.json"
     release = tmp_path / "manifest.json"
     latest = tmp_path / "latest.json"
+    codex_global = tmp_path / "codex-global"
+    claude_global = tmp_path / "claude-global"
+    codex_global.mkdir()
+    claude_global.mkdir()
 
-    assert (
-        _run(
-            MATRIX_RUNNER,
-            "--manifest",
-            "data/saxo/agent_tool_scenarios.json",
-            "--environment",
-            "SIM",
-            "--require-tools",
-            "39",
-            "--out",
-            str(matrix),
-        ).returncode
-        == 0
-    )
     assert (
         _run(
             INSTALL_QA,
@@ -129,16 +119,24 @@ def test_supporting_cli_fixtures_and_verify_modes(tmp_path: Path) -> None:
             "HEAD",
             "--run-root",
             str(tmp_path / "install-root"),
+            "--codex-global-home",
+            str(codex_global),
+            "--claude-global-home",
+            str(claude_global),
+            "--dry-run",
             "--out",
             str(install),
         ).returncode
         == 0
     )
+    assert json.loads(install.read_text(encoding="utf-8"))["status"] == "planned"
+    assert _run(MATRIX_RUNNER, "--out", str(matrix)).returncode != 0
+    assert json.loads(matrix.read_text(encoding="utf-8"))["reason"] == "missing_install_report"
     assert (
         _run(
             RELEASE_ASSEMBLER,
             "--evidence-root",
-            str(tmp_path),
+            str(tmp_path / "empty"),
             "--release",
             "release-v1",
             "--source-commit",
@@ -148,8 +146,9 @@ def test_supporting_cli_fixtures_and_verify_modes(tmp_path: Path) -> None:
             "--latest",
             str(latest),
         ).returncode
-        == 0
+        != 0
     )
+    assert not latest.exists()
     assert (
         _run(
             INSTALL_QA, "--self-test-fixture", "private-file", "--out", str(tmp_path / "bad.json")

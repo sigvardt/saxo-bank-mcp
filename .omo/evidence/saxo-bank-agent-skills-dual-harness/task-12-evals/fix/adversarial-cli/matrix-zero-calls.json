@@ -1,0 +1,7 @@
+{
+  "errors": [
+    "tool_matrix_report_schema_invalid",
+    "tool_call_evidence_missing"
+  ],
+  "status": "failed"
+}

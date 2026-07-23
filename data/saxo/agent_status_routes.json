@@ -115,12 +115,20 @@
         "reason": "Plugin install QA status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/agent_skill_install_models.py",
+        "reason": "Plugin install evidence model status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/agent_skill_matrix.py",
         "reason": "Tool matrix evidence status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/agent_skill_release.py",
         "reason": "Release evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_release_models.py",
+        "reason": "Release evidence model status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/streaming_transport.py",

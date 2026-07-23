@@ -12,15 +12,16 @@ import sys
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_release import (
-    ReleaseAssembleOptions,
     assemble_release,
     next_release,
     self_test_release_fixture,
 )
+from saxo_bank_mcp.agent_skill_release_models import ReleaseAssembleOptions
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Assemble Saxo agent skill release evidence.")
+    parser.add_argument("--repo", type=Path, default=Path())
     parser.add_argument("--plan", type=Path, default=None)
     parser.add_argument("--evidence-root", type=Path, required=True)
     parser.add_argument("--next-release", action="store_true")
@@ -53,9 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     return assemble_release(
         ReleaseAssembleOptions(
+            repo=args.repo,
+            plan=args.plan,
             evidence_root=args.evidence_root,
             release=str(release),
             source_commit=str(args.source_commit),
+            verify_live_proof=args.verify_live_proof,
             out=args.out,
             latest=args.latest,
             check=bool(args.check),

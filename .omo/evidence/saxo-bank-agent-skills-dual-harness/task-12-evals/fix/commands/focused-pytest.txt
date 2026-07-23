@@ -1,0 +1,4 @@
+COMMAND: uv run pytest tests/test_agent_skill_evidence_fail_closed.py tests/test_agent_skill_release_fail_closed.py tests/test_agent_skill_evidence_support.py tests/test_agent_skill_evals.py -q
+..................                                                       [100%]
+
+EXIT: 0

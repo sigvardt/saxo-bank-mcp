@@ -1,0 +1,103 @@
+{
+  "status": "passed",
+  "scenarios": [
+    {
+      "name": "focused_pytest",
+      "invocation": "uv run pytest tests/test_agent_skill_evidence_fail_closed.py tests/test_agent_skill_release_fail_closed.py tests/test_agent_skill_evidence_support.py tests/test_agent_skill_evals.py -q",
+      "exit_code": 0,
+      "observable": "18 passed",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/commands/focused-pytest.txt"
+    },
+    {
+      "name": "ruff",
+      "invocation": "uv run ruff check .",
+      "exit_code": 0,
+      "observable": "All checks passed",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/commands/ruff-check.txt"
+    },
+    {
+      "name": "basedpyright",
+      "invocation": "uv run basedpyright",
+      "exit_code": 0,
+      "observable": "0 errors, 0 warnings, 0 notes",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/commands/basedpyright.txt"
+    },
+    {
+      "name": "eval_validation_and_catalog_stability",
+      "invocation": "validate_agent_skill_evals --all and generate_agent_skill_catalogs --check, twice",
+      "exit_code": 0,
+      "observable": "validation passed twice, catalog check passed twice, pre/post diff SHA unchanged",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/commands/generated-stability.txt"
+    },
+    {
+      "name": "install_nonexistent_repo",
+      "invocation": "qa_dual_plugin_install.py --repo <missing> --out install-missing-repo.json",
+      "exit_code": 1,
+      "observable": "reason=repo_not_found",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/install-missing-repo.json"
+    },
+    {
+      "name": "install_bogus_commit",
+      "invocation": "qa_dual_plugin_install.py --repo <worktree> --commit not-a-commit --out install-bogus-commit.json",
+      "exit_code": 1,
+      "observable": "reason=commit_unresolved",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/install-bogus-commit.json"
+    },
+    {
+      "name": "matrix_missing_install_report",
+      "invocation": "run_mcp_tool_matrix.py --out matrix-missing-install-report.json",
+      "exit_code": 1,
+      "observable": "reason=missing_install_report",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/matrix-missing-install-report.json"
+    },
+    {
+      "name": "matrix_zero_calls",
+      "invocation": "run_mcp_tool_matrix.py --verify-only --report matrix-zero-call-report.json --out matrix-zero-calls.json",
+      "exit_code": 1,
+      "observable": "errors include tool_call_evidence_missing",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/matrix-zero-calls.json"
+    },
+    {
+      "name": "release_empty_evidence",
+      "invocation": "assemble_agent_skill_release.py --evidence-root empty-evidence --source-commit <valid> --latest latest.json",
+      "exit_code": 1,
+      "observable": "reason=evidence_root_empty; latest.json unchanged",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/release-empty-evidence.json"
+    },
+    {
+      "name": "release_bogus_commit",
+      "invocation": "assemble_agent_skill_release.py --source-commit not-a-commit --latest latest.json",
+      "exit_code": 1,
+      "observable": "reason=source_commit_unresolved; latest.json unchanged",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/release-bogus-commit.json"
+    },
+    {
+      "name": "release_missing_live_proof",
+      "invocation": "assemble_agent_skill_release.py without --verify-live-proof --latest latest.json",
+      "exit_code": 1,
+      "observable": "reason=live_proof_required; latest.json unchanged",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/release-missing-live-proof.json"
+    },
+    {
+      "name": "release_missing_privacy",
+      "invocation": "assemble_agent_skill_release.py with install/SIM/LIVE evidence but no privacy scan --latest latest.json",
+      "exit_code": 1,
+      "observable": "reason=privacy_evidence_missing; latest.json unchanged",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/release-missing-privacy.json"
+    },
+    {
+      "name": "dry_run_never_passed",
+      "invocation": "qa_dual_plugin_install.py --dry-run and run_mcp_tool_matrix.py manifest validation",
+      "exit_code": 0,
+      "observable": "install status=planned; matrix status=validated; neither status=passed",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/summary.json"
+    },
+    {
+      "name": "scoped_secret_scan",
+      "invocation": "uv run python -m saxo_bank_mcp.qa secret-scan --out scoped-secret-scan.json --paths [final scoped task files]",
+      "exit_code": 0,
+      "observable": "status=passed, findings=0, scan_errors=0, paths=21",
+      "artifact": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/scoped-secret-scan.json"
+    }
+  ]
+}

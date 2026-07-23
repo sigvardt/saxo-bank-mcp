@@ -1,0 +1,65 @@
+{
+  "scenarios": [
+    {
+      "assertion_passed": true,
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "<worktree>/scripts/qa_dual_plugin_install.py",
+        "--repo",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/fixture/source",
+        "--commit",
+        "HEAD",
+        "--run-root",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/install-root",
+        "--codex-global-home",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/codex-global",
+        "--claude-global-home",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/claude-global",
+        "--dry-run",
+        "--preserve-for",
+        "task-15,task-16",
+        "--out",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/install-dry-run.json"
+      ],
+      "exit_code": 0,
+      "expected_status": "planned",
+      "name": "install_dry_run_planned",
+      "never_passed": true,
+      "out": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/install-dry-run.json",
+      "status": "planned"
+    },
+    {
+      "assertion_passed": true,
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "<worktree>/scripts/run_mcp_tool_matrix.py",
+        "--install-report",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/fixture/install.json",
+        "--fixture-stock-uic",
+        "211",
+        "--fixture-amount",
+        "1",
+        "--fixture-limit-price",
+        "50",
+        "--fixture-modified-limit-price",
+        "51",
+        "--fixture-option-uics",
+        "30004846,30004926",
+        "--fixture-stream-uic",
+        "21",
+        "--out",
+        "<worktree>/.omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/matrix-manifest-validation.json"
+      ],
+      "exit_code": 0,
+      "expected_status": "validated",
+      "name": "matrix_manifest_validated",
+      "never_passed": true,
+      "out": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/matrix-manifest-validation.json",
+      "status": "validated"
+    }
+  ]
+}

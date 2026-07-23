@@ -1,0 +1,259 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.agent_skill_eval_models import load_scenario_tools
+
+ROOT: Final = Path(__file__).resolve().parents[1]
+CATALOG_TASK_NUMBER: Final = 13
+
+
+@dataclass(frozen=True, slots=True)
+class InstallFixture:
+    report: Path
+    commit: str
+    clone: Path
+    repo: Path
+
+
+def build_install_fixture(base: Path) -> InstallFixture:
+    repo = base / "source"
+    clone = base / "clone"
+    git("clone", "--no-local", "--quiet", str(ROOT), str(repo), cwd=ROOT)
+    router = repo / "skills/saxo-bank/SKILL.md"
+    router.parent.mkdir(parents=True, exist_ok=True)
+    router.write_text("---\nname: saxo-bank\ndescription: Fixture router.\n---\n", encoding="utf-8")
+    git("add", "skills/saxo-bank/SKILL.md", cwd=repo)
+    git(
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture router",
+        cwd=repo,
+    )
+    git("clone", "--no-local", "--quiet", str(repo), str(clone), cwd=repo)
+    commit = git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    caches = (base / "codex-cache", base / "claude-cache")
+    tracked = git("ls-files", cwd=clone).stdout.splitlines()
+    for cache in caches:
+        for relative in tracked:
+            source = clone / relative
+            if source.is_file():
+                target = cache / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+    report = base / "install.json"
+    write_json(report, _install_payload(repo, clone, caches, commit, base))
+    return InstallFixture(report=report, commit=commit, clone=clone, repo=repo)
+
+
+def build_release_evidence(
+    root: Path,
+    installed_report: InstallFixture,
+    *,
+    include_privacy: bool,
+) -> tuple[Path, Path, Path]:
+    evidence = root / "evidence"
+    commit = installed_report.commit
+    for number in range(1, 17):
+        task = evidence / f"task-{number}-fixture"
+        task.mkdir(parents=True)
+        payload: dict[str, JsonValue] = {"status": "passed", "source_commit": commit}
+        if number == CATALOG_TASK_NUMBER:
+            payload["counts"] = {
+                "tools": 39,
+                "operations": 294,
+                "implemented": 182,
+                "refused": 112,
+                "service_groups": 17,
+            }
+        write_json(task / "DoneClaim.json", payload)
+    task14 = evidence / "task-14-installed-cache" / "manual"
+    task15 = evidence / "task-15-sim" / "manual"
+    task16 = evidence / "task-16-live-no-purchase" / "manual"
+    for directory in (task14, task15, task16):
+        directory.mkdir(parents=True)
+    shutil.copy2(installed_report.report, task14 / "install.json")
+    names = sorted(load_scenario_tools(ROOT))
+    calls: list[JsonValue] = [
+        {
+            "tool": name,
+            "status": "completed",
+            "mcp_call_observed": True,
+            "result_parsed": True,
+            "skipped": False,
+            "request_digest": "a" * 64,
+            "response_digest": "b" * 64,
+        }
+        for name in names
+    ]
+    state: dict[str, JsonValue] = {"orders": "c" * 64, "subscriptions": "d" * 64}
+    write_json(
+        task15 / "tool-matrix.json",
+        {
+            "status": "passed",
+            "execution_mode": "sim_execution",
+            "environment": "SIM",
+            "source_commit": commit,
+            "candidate_commit": commit,
+            "install_report": str(task14 / "install.json"),
+            "install_report_sha256": hashlib.sha256(
+                (task14 / "install.json").read_bytes()
+            ).hexdigest(),
+            "tool_count": len(names),
+            "unique_tools": names,
+            "missing_tools": [],
+            "unexpected_tools": [],
+            "expected_call_count": len(calls),
+            "tool_calls": calls,
+            "before_state_fingerprint": state,
+            "after_state_fingerprint": state,
+            "cleanup": {"complete": True, "uncleaned_resources": 0},
+            "unexpected_skips": [],
+            "errors": [],
+        },
+    )
+    evals: dict[str, JsonValue] = {
+        "status": "passed",
+        "execution_mode": "model_execution",
+        "source_commit": commit,
+        "skipped_count": 0,
+        "global_state_unchanged": True,
+        "cleanup": {"complete": True},
+    }
+    write_json(task15 / "agent-evals.json", evals)
+    write_json(task16 / "agent-evals.json", {**evals, "live_mutation_calls": 0})
+    live = task16 / "proof.json"
+    write_json(
+        live,
+        {
+            "status": "passed",
+            "source_commit": commit,
+            "source": {"git_head": commit},
+            "environment": "LIVE",
+            "state_unchanged": True,
+            "ledger_complete": True,
+            "negative_proof_available": True,
+            "live_mutation_calls": 0,
+            "purchase_occurred": False,
+            "cleanup": {"complete": True},
+        },
+    )
+    if include_privacy:
+        write_json(
+            task16 / "privacy-scan.json",
+            {
+                "status": "passed",
+                "source_commit": commit,
+                "findings_count": 0,
+                "scan_errors_count": 0,
+            },
+        )
+    plan = root / "plan.md"
+    plan.write_text("# Fixture plan\n", encoding="utf-8")
+    return evidence, plan, live
+
+
+def run_cli(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(script), *args],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+    executable = shutil.which("git")
+    if executable is None:
+        msg = "git is required for evidence fixture tests"
+        raise RuntimeError(msg)
+    return subprocess.run(
+        [executable, *args], cwd=cwd, text=True, capture_output=True, check=True, timeout=30
+    )
+
+
+def write_json(path: Path, payload: dict[str, JsonValue]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def reason(path: Path) -> str:
+    return str(json.loads(path.read_text(encoding="utf-8"))["reason"])
+
+
+def errors(path: Path) -> tuple[str, ...]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return tuple(str(item) for item in payload.get("errors", []))
+
+
+def _install_payload(
+    repo: Path,
+    clone: Path,
+    caches: tuple[Path, Path],
+    commit: str,
+    run_root: Path,
+) -> dict[str, JsonValue]:
+    fingerprints: dict[str, JsonValue] = {"codex": "a" * 64, "claude": "b" * 64}
+    return {
+        "status": "passed",
+        "execution_mode": "installed_verification",
+        "repo": str(repo),
+        "candidate_commit": commit,
+        "clone": {
+            "path": str(clone),
+            "commit": commit,
+            "source_repo": str(repo),
+            "no_local": True,
+            "clean": True,
+        },
+        "expected_skills": 8,
+        "expected_mcp_servers": 1,
+        "expected_tools": 39,
+        "global_state": {"before": fingerprints, "after": fingerprints},
+        "global_state_unchanged": True,
+        "codex": _client_payload(caches[0]),
+        "claude": _client_payload(caches[1]),
+        "installed_byte_checks": {"complete": True, "mismatches": []},
+        "process_cleanup": {"complete": True, "remaining_pids": []},
+        "fixture_cleanup": {
+            "deferred_registered": True,
+            "preserve_for": "task-15,task-16",
+            "run_root": str(run_root),
+        },
+        "errors": [],
+    }
+
+
+def _client_payload(cache: Path) -> dict[str, JsonValue]:
+    startup: dict[str, JsonValue] = {
+        "source": {"status": "passed", "tool_count": 39},
+        "cache": {"status": "passed", "tool_count": 39},
+        "list_tools": {"status": "passed", "tool_count": 39},
+    }
+    return {
+        "installed": True,
+        "cache_root": str(cache),
+        "skill_count": 8,
+        "mcp_server_count": 1,
+        "tool_count": 39,
+        "annotations_missing": [],
+        "forbidden_cache_paths": [],
+        "installed_bytes_match": True,
+        "install_command_exit_code": 0,
+        "startup": startup,
+    }

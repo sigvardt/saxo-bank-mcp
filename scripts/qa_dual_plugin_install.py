@@ -11,8 +11,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from saxo_bank_mcp.agent_skill_install_models import InstallManifestOptions
 from saxo_bank_mcp.agent_skill_install_qa import (
-    InstallManifestOptions,
     manifest_install_report,
     verify_install_report,
     write_install_fixture,
@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-skills", type=int, default=8)
     parser.add_argument("--expected-tools", type=int, default=39)
     parser.add_argument("--preserve-for", default="")
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--install-report", type=Path, default=None)
     parser.add_argument("--self-test-fixture", choices=("private-file", "version-drift"))
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
             repo=args.repo,
             commit=str(args.commit),
             run_root=args.run_root,
+            codex_global_home=args.codex_global_home,
+            claude_global_home=args.claude_global_home,
             expected_skills=int(args.expected_skills),
             expected_tools=int(args.expected_tools),
             preserve_for=str(args.preserve_for),
