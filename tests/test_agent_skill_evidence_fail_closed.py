@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,23 @@ from test_agent_skill_evidence_support import (
     reason,
     run_cli,
     write_json,
+)
+
+import saxo_bank_mcp.agent_skill_matrix_producer as matrix_producer
+from saxo_bank_mcp.agent_skill_command_runner import (
+    CommandFailureError,
+    CommandResult,
+    run_command,
+)
+from saxo_bank_mcp.agent_skill_matrix import (
+    LIFECYCLE_TOOLS,
+    SCENARIO_MANIFEST,
+    MatrixPlanOptions,
+    SimFixtureOptions,
+)
+from saxo_bank_mcp.agent_skill_matrix_producer import (
+    run_real_matrix_report,
+    validated_exact_tool_receipt,
 )
 
 INSTALL_QA = ROOT / "scripts/qa_dual_plugin_install.py"
@@ -187,7 +205,7 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     log = tmp_path / "commands.jsonl"
     _write_fake_plugin_cli(fake_bin / "codex", log)
     _write_fake_plugin_cli(fake_bin / "claude", log)
-    _write_fake_uv(fake_bin / "uv", log)
+    _write_fake_uv_install_probe(fake_bin / "uv", log)
     out = tmp_path / "install.json"
     codex_global = tmp_path / "codex-global"
     claude_global = tmp_path / "claude-global"
@@ -246,45 +264,61 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     )
 
 
-def test_matrix_normal_mode_runs_instrumented_probe_commands(
+def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
     tmp_path: Path,
     installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    log = tmp_path / "commands.jsonl"
-    _write_fake_uv(fake_bin / "uv", log)
     out = tmp_path / "tool-matrix.json"
 
-    result = run_cli(
-        MATRIX_RUNNER,
-        "--install-report",
-        str(installed_report.report),
-        "--fixture-stock-uic",
-        "211",
-        "--fixture-amount",
-        "1",
-        "--fixture-limit-price",
-        "50",
-        "--fixture-modified-limit-price",
-        "51",
-        "--fixture-option-uics",
-        "30004846,30004926",
-        "--fixture-stream-uic",
-        "21",
-        "--out",
-        str(out),
-        env={"PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    def run_actual_probe(
+        cache: Path,
+        receipt_dir: Path,
+        tool: str,
+    ) -> CommandResult:
+        _ = cache
+        receipt_out = receipt_dir / f"{tool}.json"
+        return run_command(
+            f"probe_{tool}",
+            (
+                sys.executable,
+                "-m",
+                "saxo_bank_mcp.qa",
+                "exact-tool",
+                "--tool",
+                tool,
+                "--out",
+                str(receipt_out),
+            ),
+            cwd=ROOT,
+        )
+
+    monkeypatch.setattr(matrix_producer, "_run_tool_probe", run_actual_probe)
+    result = run_real_matrix_report(
+        MatrixPlanOptions(
+            manifest=SCENARIO_MANIFEST,
+            environment="SIM",
+            require_tools=EXPECTED_TOOL_CALLS,
+            install_report=installed_report.report,
+            fixtures=SimFixtureOptions(
+                stock_uic="211",
+                amount="1",
+                limit_price="50",
+                modified_limit_price="51",
+                option_uics="30004846,30004926",
+                stream_uic="21",
+            ),
+            out=out,
+        ),
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
-    commands = _logged_commands(log)
 
-    assert result.returncode == 0, result.stderr
+    assert result == 0
     assert payload["status"] == "passed"
     assert payload["execution_mode"] == "sim_execution"
     assert len(payload["tool_calls"]) == EXPECTED_TOOL_CALLS
     assert len({row["tool"] for row in payload["tool_calls"]}) == EXPECTED_TOOL_CALLS
-    assert len(payload["lifecycle_calls"]) == EXPECTED_LIFECYCLE_CALLS
+    assert tuple(payload["lifecycle_calls"]) == LIFECYCLE_TOOLS
     assert len(payload["command_receipts"]) == EXPECTED_TOOL_CALLS
     assert payload["preflight"]["complete"] is True
     assert payload["transport_ledger"]["sim_only"] is True
@@ -293,8 +327,61 @@ def test_matrix_normal_mode_runs_instrumented_probe_commands(
     assert {
         call["tool"] for call in payload["tool_calls"] if call["requested_tool_covered"]
     } == {call["tool"] for call in payload["tool_calls"]}
-    assert any("python -m saxo_bank_mcp.qa trading-write-matrix" in row for row in commands)
-    assert any("python -m saxo_bank_mcp.qa stream-cleanup" in row for row in commands)
+    receipts = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted((out.parent / "probe-receipts").glob("*.json"))
+    ]
+    assert len(receipts) == EXPECTED_TOOL_CALLS
+    assert all(receipt["fastmcp_called"] is True for receipt in receipts)
+    assert {
+        path.stem: json.loads(path.read_text(encoding="utf-8"))["logical_tool"]
+        for path in sorted((out.parent / "probe-receipts").glob("*.json"))
+    } == {tool: tool for tool in payload["unique_tools"]}
+    assert {
+        receipt["fastmcp_result_status"] for receipt in receipts
+    } <= {"invalid_arguments", "invalid_request", "refused"}
+    assert all(receipt["client_used"] is False for receipt in receipts)
+    assert all(receipt["mcp_transport_used"] is False for receipt in receipts)
+
+
+def test_matrix_rejects_wrong_tool_no_call_and_legacy_fabricated_receipts(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "saxo_health.json"
+    result = run_command(
+        "probe_saxo_health",
+        (
+            sys.executable,
+            "-m",
+            "saxo_bank_mcp.qa",
+            "exact-tool",
+            "--tool",
+            "saxo_health",
+            "--out",
+            str(out),
+        ),
+        cwd=ROOT,
+    )
+    receipt = json.loads(out.read_text(encoding="utf-8"))
+
+    with pytest.raises(CommandFailureError):
+        validated_exact_tool_receipt("saxo_auth_status", result, receipt)
+    with pytest.raises(CommandFailureError):
+        validated_exact_tool_receipt(
+            "saxo_health",
+            result,
+            {**receipt, "fastmcp_called": False},
+        )
+    with pytest.raises(CommandFailureError):
+        validated_exact_tool_receipt(
+            "saxo_health",
+            result,
+            {
+                "status": "passed",
+                "logical_tool": "saxo_health",
+                "fastmcp_called": True,
+            },
+        )
 
 
 def _write_fake_plugin_cli(path: Path, log: Path) -> None:
@@ -351,7 +438,7 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
     path.chmod(0o755)
 
 
-def _write_fake_uv(path: Path, log: Path) -> None:
+def _write_fake_uv_install_probe(path: Path, log: Path) -> None:
     path.write_text(
         "\n".join(
             (
@@ -363,20 +450,7 @@ def _write_fake_uv(path: Path, log: Path) -> None:
                 "if '-c' in sys.argv:",
                 "    print(json.dumps({'tool_count': 39, 'annotations_missing': []}))",
                 "    raise SystemExit(0)",
-                "out = None",
-                "if '--out' in sys.argv:",
-                "    out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])",
-                "if out is not None:",
-                "    out.parent.mkdir(parents=True, exist_ok=True)",
-                "    tool = out.stem if out is not None else 'saxo_health'",
-                "    payload = {'status': 'passed', 'logical_tool': tool, 'fastmcp_called': True}",
-                "    payload['environment'] = 'SIM'",
-                "    payload['transport'] = {'host': 'sim.api.saxo.test'}",
-                "    payload['network_call_made'] = True",
-                "    payload['completion_claim_allowed'] = True",
-                "    payload['secret_scan'] = {'findings': [], 'scan_errors': []}",
-                "    out.write_text(json.dumps(payload), encoding='utf-8')",
-                "print(json.dumps({'status': 'passed'}))",
+                "raise SystemExit(2)",
             )
         )
         + "\n",

@@ -7,11 +7,13 @@ import json
 import shlex
 import sys
 from pathlib import Path
+from typing import Protocol
 
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
 from saxo_bank_mcp.hard_task_summary import handle_hard_task_summary
 from saxo_bank_mcp.loop_manifest import GitState, ManifestSpec, build_manifest
+from saxo_bank_mcp.qa_exact_tool_probe import handle_exact_tool_probe
 from saxo_bank_mcp.qa_manual_live import handle_manual_live_boundary
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
@@ -56,6 +58,10 @@ from saxo_bank_mcp.qa_trading_write_probes import handle_trading_write_matrix
 from saxo_bank_mcp.tribunal_index import list_registered_mcp_tool_ids
 
 
+class ParserGroup(Protocol):
+    def add_parser(self, name: str) -> argparse.ArgumentParser: ...
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run implementation-plan QA probes.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -93,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hard_task_summary.add_argument("--expected-tool", action="append", default=[])
     hard_task_summary.add_argument("--expected-sha", default=None)
+
+    add_exact_tool_parser(subparsers)
 
     gitignore = subparsers.add_parser("gitignore-secret")
     add_common(gitignore)
@@ -160,6 +168,14 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expect-price-instruments", type=int, default=None)
 
 
+def add_exact_tool_parser(
+    subparsers: ParserGroup,
+) -> None:
+    exact_tool = subparsers.add_parser("exact-tool")
+    exact_tool.add_argument("--out", type=Path, required=True)
+    exact_tool.add_argument("--tool", required=True)
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
     args = build_parser().parse_args(argv)
     command = str(args.command)
@@ -191,6 +207,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_prod_readiness(args.out)
     elif command == "tool-inventory":
         result = handle_tool_inventory(args.out)
+    elif command == "exact-tool":
+        result = handle_exact_tool_probe(args.out, str(args.tool))
     elif command == "live-read-refusal":
         result = handle_live_read_refusal(args.out)
     elif command == "secret-scan":

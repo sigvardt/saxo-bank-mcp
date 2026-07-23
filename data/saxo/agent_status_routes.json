@@ -83,6 +83,10 @@
         "reason": "QA probe status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/qa_exact_tool_probe.py",
+        "reason": "Exact-tool QA receipt status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/qa_prod_readiness.py",
         "reason": "QA readiness report status, not production MCP tool response truth."
       },

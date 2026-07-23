@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
@@ -27,7 +29,7 @@ from saxo_bank_mcp.agent_skill_matrix import (
     manifest_tools,
     sha256_file,
 )
-from saxo_bank_mcp.hard_task_manifest import HARD_TASK_SPECS
+from saxo_bank_mcp.qa_exact_tool_probe import ExactToolProbeReceipt
 
 
 class MatrixProducerEvidenceError(ValueError):
@@ -61,13 +63,16 @@ def run_real_matrix_report(options: MatrixPlanOptions) -> int:
     tool_calls: list[ToolCallEvidence] = []
     command_receipts: list[CommandReceipt] = []
     receipt_payloads: list[dict[str, JsonValue]] = []
+    validated_receipts: list[ExactToolProbeReceipt] = []
     try:
         for tool in sorted(tools):
             result = _run_tool_probe(cache, receipt_dir, tool)
             command_receipts.append(result.receipt)
             receipt = load_json_object(receipt_dir / f"{tool}.json")
             receipt_payloads.append(receipt)
-            tool_calls.append(_tool_call_evidence(tool, result, receipt))
+            validated = validated_exact_tool_receipt(tool, result, receipt)
+            validated_receipts.append(validated)
+            tool_calls.append(_tool_call_evidence(result, validated))
     except CommandFailureError as exc:
         write_json(
             options.out,
@@ -114,7 +119,7 @@ def run_real_matrix_report(options: MatrixPlanOptions) -> int:
             ),
         ),
         unexpected_skips=(),
-        lifecycle_calls=LIFECYCLE_TOOLS,
+        lifecycle_calls=_lifecycle_calls_from_receipts(tuple(validated_receipts)),
         command_receipts=tuple(command_receipts),
         errors=(),
     )
@@ -136,58 +141,49 @@ def _run_tool_probe(cache: Path, receipt_dir: Path, tool: str) -> CommandResult:
 
 
 def _probe_command(tool: str, out: Path) -> tuple[str, ...]:
-    hard_task_commands = {spec.tool_id: spec.qa_command for spec in HARD_TASK_SPECS}
-    command = hard_task_commands.get(tool)
-    if command is not None:
-        return tuple(str(out) if part == "{out}" else part for part in command)
-    fallback = _fallback_probe_command(tool)
-    return ("uv", "run", "python", "-m", "saxo_bank_mcp.qa", *fallback, "--out", str(out))
+    return (
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "saxo_bank_mcp.qa",
+        "exact-tool",
+        "--tool",
+        tool,
+        "--out",
+        str(out),
+    )
 
 
-def _fallback_probe_command(tool: str) -> tuple[str, ...]:
-    mapped = {
-        "saxo_auth_status": ("auth-status",),
-        "saxo_cache_sim_access_token": ("token-cache",),
-        "saxo_call_registered_endpoint": ("read-smoke", "--groups", "all"),
-        "saxo_commit_write_preview": ("nontrade-write", "--safe-only"),
-        "saxo_create_write_preview": ("nontrade-write", "--safe-only"),
-        "saxo_exchange_pkce_code": ("token-cache",),
-        "saxo_get_entitlements": ("read-smoke", "--groups", "all"),
-        "saxo_get_safe_request_ledger": ("tool-inventory",),
-        "saxo_get_session_capabilities": ("read-smoke", "--groups", "all"),
-        "saxo_health": ("health",),
-        "saxo_list_live_accounts": ("read-smoke", "--groups", "all"),
-        "saxo_list_registered_endpoints": ("read-smoke", "--groups", "all"),
-        "saxo_precheck_live_order": ("read-smoke", "--groups", "all"),
-        "saxo_refresh_token": ("token-cache",),
-        "saxo_safety_status": ("read-smoke", "--groups", "all"),
-        "saxo_start_pkce_login": ("token-cache",),
-    }
-    return mapped.get(tool, ("tool-inventory",))
-
-
-def _tool_call_evidence(
+def validated_exact_tool_receipt(
     tool: str,
     result: CommandResult,
     receipt: dict[str, JsonValue],
+) -> ExactToolProbeReceipt:
+    try:
+        validated = ExactToolProbeReceipt.model_validate(receipt)
+    except ValidationError as exc:
+        raise CommandFailureError(result.receipt) from exc
+    if validated.logical_tool != tool:
+        raise CommandFailureError(result.receipt)
+    return validated
+
+
+def _tool_call_evidence(
+    result: CommandResult,
+    receipt: ExactToolProbeReceipt,
 ) -> ToolCallEvidence:
-    status = str(receipt.get("status", "completed"))
-    logical_tool = _logical_tool(receipt)
-    if status not in {"passed", "completed", "exercised", "denied", "refused"}:
-        raise CommandFailureError(result.receipt)
-    if logical_tool != tool or receipt.get("fastmcp_called") is not True:
-        raise CommandFailureError(result.receipt)
     return ToolCallEvidence(
-        tool=tool,
-        status="expected_refusal" if status in {"denied", "refused"} else "completed",
+        tool=receipt.logical_tool,
+        status="completed",
         mcp_call_observed=True,
         result_parsed=True,
         skipped=False,
         requested_tool_covered=True,
         request_digest=hashlib.sha256(" ".join(result.receipt.argv).encode()).hexdigest(),
-        response_digest=sha256_file(Path(result.receipt.cwd) / "missing")
-        if not receipt
-        else hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest(),
+        response_digest=hashlib.sha256(
+            json.dumps(receipt.model_dump(mode="json"), sort_keys=True).encode(),
+        ).hexdigest(),
     )
 
 
@@ -212,12 +208,11 @@ def _tree_fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _logical_tool(receipt: dict[str, JsonValue]) -> str:
-    for key in ("logical_tool", "tool", "tool_name"):
-        value = receipt.get(key)
-        if isinstance(value, str):
-            return value
-    return ""
+def _lifecycle_calls_from_receipts(
+    receipts: tuple[ExactToolProbeReceipt, ...],
+) -> tuple[str, ...]:
+    called_tools = {receipt.logical_tool for receipt in receipts}
+    return tuple(tool for tool in LIFECYCLE_TOOLS if tool in called_tools)
 
 
 def _preflight(
