@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
@@ -7,7 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult, run_command
 from saxo_bank_mcp.agent_skill_install_models import StartupCheck, StartupEvidence
-from saxo_bank_mcp.agent_skill_install_paths import scrub_runtime_artifacts
+from saxo_bank_mcp.agent_skill_install_paths import PLUGIN_NAME, scrub_runtime_artifacts
 
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
@@ -30,8 +31,30 @@ import anyio, json
 from pathlib import Path
 from fastmcp import Client
 
-root = Path({str(root)!r})
-config = root / ".mcp.json"
+root = Path({str(root.resolve())!r})
+payload = json.loads((root / ".mcp.json").read_text(encoding="utf-8"))
+server = payload["mcpServers"][{PLUGIN_NAME!r}]
+args = list(server.get("args", []))
+fixed = []
+skip = False
+for index, arg in enumerate(args):
+    if skip:
+        skip = False
+        continue
+    if arg == "--project" and index + 1 < len(args):
+        fixed.extend(["--project", str(root)])
+        skip = True
+        continue
+    fixed.append(arg)
+config = {{
+    "mcpServers": {{
+        {PLUGIN_NAME!r}: {{
+            "command": server["command"],
+            "args": fixed,
+            "cwd": str(root),
+        }}
+    }}
+}}
 async def main() -> None:
     async with Client(config) as client:
         tools = await client.list_tools()
