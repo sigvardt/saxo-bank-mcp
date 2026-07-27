@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
@@ -38,7 +39,7 @@ from saxo_bank_mcp.agent_skill_install_qa import (
 )
 
 
-def real_install_report(options: InstallManifestOptions) -> int:  # noqa: PLR0911, PLR0915
+def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, PLR0911, PLR0915
     error = planning_error(options)
     if error is not None:
         write_json(options.out, {"status": "failed", "reason": error})
@@ -134,15 +135,48 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: PLR091
         | set(_json_list(claude_bytes, "metadata_exceptions")),
     )
     preserve_for = options.preserve_for or "unspecified"
+    repo_root = options.repo.resolve()
+
+    def pub(path: Path) -> str:
+        return _public_path(path, repo_root)
+
+    codex_client = client_report(
+        codex_cache,
+        codex_cache_source,
+        codex_startup,
+        codex_missing,
+        (
+            *git_receipts,
+            *(result.receipt for result in codex_receipts),
+            *codex_startup_receipts,
+        ),
+        bytes_match=not _json_list(codex_bytes, "mismatches")
+        and bool(codex_bytes["forbidden_files_absent"]),
+    )
+    claude_client = client_report(
+        claude_cache,
+        claude_cache_source,
+        claude_startup,
+        claude_missing,
+        (
+            *git_receipts,
+            *(result.receipt for result in claude_receipts),
+            *claude_startup_receipts,
+        ),
+        bytes_match=not _json_list(claude_bytes, "mismatches")
+        and bool(claude_bytes["forbidden_files_absent"]),
+    )
+    codex_client = _sanitize_client_report(codex_client, repo_root)
+    claude_client = _sanitize_client_report(claude_client, repo_root)
     report: dict[str, JsonValue] = {
         "status": "passed",
         "execution_mode": "installed_verification",
-        "repo": str(options.repo.resolve()),
+        "repo": ".",
         "candidate_commit": commit,
         "clone": {
-            "path": str(clone),
+            "path": pub(clone),
             "commit": commit,
-            "source_repo": str(options.repo.resolve()),
+            "source_repo": ".",
             "no_local": True,
             "clean": True,
             "mode": owner_only_mode(clone),
@@ -155,33 +189,9 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: PLR091
         "project_version": project_version(clone),
         "help_syntax": help_syntax_evidence(help_receipts),
         "update_probe": update_probe,
-        "auth_files": auth_files,
-        "codex": client_report(
-            codex_cache,
-            codex_cache_source,
-            codex_startup,
-            codex_missing,
-            (
-                *git_receipts,
-                *(result.receipt for result in codex_receipts),
-                *codex_startup_receipts,
-            ),
-            bytes_match=not _json_list(codex_bytes, "mismatches")
-            and bool(codex_bytes["forbidden_files_absent"]),
-        ),
-        "claude": client_report(
-            claude_cache,
-            claude_cache_source,
-            claude_startup,
-            claude_missing,
-            (
-                *git_receipts,
-                *(result.receipt for result in claude_receipts),
-                *claude_startup_receipts,
-            ),
-            bytes_match=not _json_list(claude_bytes, "mismatches")
-            and bool(claude_bytes["forbidden_files_absent"]),
-        ),
+        "auth_files": _sanitize_auth_files(auth_files, repo_root),
+        "codex": codex_client,
+        "claude": claude_client,
         "installed_byte_checks": {
             "complete": True,
             "compared_files": _json_int(codex_bytes, "compared_files")
@@ -203,21 +213,27 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: PLR091
         "fixture_cleanup": {
             "deferred_registered": bool(options.preserve_for),
             "preserve_for": preserve_for,
-            "run_root": str(run_root),
+            "run_root": pub(run_root),
             "preserved_paths": [
-                str(clone),
-                str(codex_cache),
-                str(claude_cache),
-                str(home),
-                str(codex_home),
-                str(claude_home),
+                pub(clone),
+                pub(codex_cache),
+                pub(claude_cache),
+                pub(home),
+                pub(codex_home),
+                pub(claude_home),
             ],
             "owner_only": True,
             "teardown_owner": "post-final-completion-gate",
             "consumers": [item.strip() for item in preserve_for.split(",") if item.strip()],
         },
-        "help_receipts": [result.receipt.model_dump(mode="json") for result in help_receipts],
-        "update_receipts": [receipt.model_dump(mode="json") for receipt in update_receipts],
+        "help_receipts": [
+            _sanitize_receipt(result.receipt.model_dump(mode="json"), repo_root)
+            for result in help_receipts
+        ],
+        "update_receipts": [
+            _sanitize_receipt(receipt.model_dump(mode="json"), repo_root)
+            for receipt in update_receipts
+        ],
         "errors": _producer_errors(
             identity,
             version,
@@ -287,3 +303,65 @@ def _json_list(payload: dict[str, JsonValue], key: str) -> list[str]:
 def _json_int(payload: dict[str, JsonValue], key: str) -> int:
     value = payload.get(key)
     return value if isinstance(value, int) else 0
+
+
+def _public_path(path: Path, repo_root: Path) -> str:
+    resolved = path.resolve()
+    if resolved == repo_root or resolved.is_relative_to(repo_root):
+        relative = resolved.relative_to(repo_root)
+        return "." if str(relative) == "." else str(relative)
+    # Keep out-of-repo fixture paths intact for unit tests; happy-path evidence is repo-relative.
+    return str(resolved)
+
+
+def _sanitize_client_report(
+    report: dict[str, JsonValue],
+    repo_root: Path,
+) -> dict[str, JsonValue]:
+    sanitized = dict(report)
+    cache_root = report.get("cache_root")
+    if isinstance(cache_root, str):
+        sanitized["cache_root"] = _public_path(Path(cache_root), repo_root)
+    receipts = report.get("command_receipts")
+    if isinstance(receipts, list):
+        sanitized["command_receipts"] = [
+            _sanitize_receipt(item, repo_root) if isinstance(item, dict) else item
+            for item in receipts
+        ]
+    return sanitized
+
+
+def _sanitize_receipt(receipt: dict[str, JsonValue], repo_root: Path) -> dict[str, JsonValue]:
+    sanitized = dict(receipt)
+    cwd = receipt.get("cwd")
+    if isinstance(cwd, str):
+        sanitized["cwd"] = _public_path(Path(cwd), repo_root)
+    argv = receipt.get("argv")
+    if isinstance(argv, list):
+        sanitized_argv: list[JsonValue] = []
+        for item in argv:
+            if isinstance(item, str) and item.startswith("/"):
+                sanitized_argv.append(_public_path(Path(item), repo_root))
+            else:
+                sanitized_argv.append(item)
+        sanitized["argv"] = sanitized_argv
+    return sanitized
+
+
+def _sanitize_auth_files(
+    auth_files: dict[str, JsonValue],
+    repo_root: Path,
+) -> dict[str, JsonValue]:
+    copied = auth_files.get("copied")
+    if not isinstance(copied, list):
+        return auth_files
+    sanitized_copied: list[JsonValue] = []
+    for item in copied:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        target = row.get("target")
+        if isinstance(target, str):
+            row["target"] = _public_path(Path(target), repo_root)
+        sanitized_copied.append(row)
+    return {"copied": sanitized_copied, "values_published": False}
