@@ -43,10 +43,34 @@ ALLOWED_INSTALLER_METADATA: Final = (
     ".claude-plugin/.install-metadata.json",
     ".codex-plugin/.install-metadata.json",
 )
-UNSAFE_NAME_PATTERN: Final = re.compile(
-    r"(?i)(credential|credentials|token_cache|token-cache|\.env$|\.pem$|\.key$|"
-    r"secret|password|private[_-]?key|id_rsa|auth\.json|state\.json)",
+# Reject secret *data* and local-state names only. Product modules such as
+# credentials.py / secret_scan.py / token_cache.py under the public src tree must
+# remain publishable or installed caches cannot start.
+UNSAFE_BASENAMES: Final = frozenset(
+    {
+        ".env",
+        "auth.json",
+        "credentials.json",
+        "id_rsa",
+        "id_rsa.pub",
+        "state.json",
+        "token-cache.json",
+        "token_cache.json",
+    },
 )
+UNSAFE_BASENAME_PATTERN: Final = re.compile(
+    r"(?i)^("
+    r"\.env(\..+)?"
+    r"|.*credentials?\.json"
+    r"|token[_-]cache\.json"
+    r"|auth\.json"
+    r"|state\.json"
+    r"|id_rsa(\.pub)?"
+    r"|.*private[_-]?key.*"
+    r"|.*password.*"
+    r")$",
+)
+UNSAFE_SUFFIXES: Final = frozenset({".key", ".p12", ".pem", ".pfx"})
 UNSAFE_PATH_PARTS: Final = frozenset(
     {
         ".cache",
@@ -320,17 +344,13 @@ def _is_publishable_relative(relative: str) -> bool:
 
 def _is_unsafe_relative(relative: str) -> bool:
     path = Path(relative)
-    if path.name in {
-        ".env",
-        "credentials.json",
-        "state.json",
-        "token_cache.json",
-        "token-cache.json",
-    }:
+    name = path.name
+    if name in UNSAFE_BASENAMES or bool(UNSAFE_BASENAME_PATTERN.fullmatch(name)):
         return True
-    if any(part in UNSAFE_PATH_PARTS for part in path.parts):
+    if path.suffix.lower() in UNSAFE_SUFFIXES:
         return True
-    return bool(UNSAFE_NAME_PATTERN.search(relative))
+    # Directory parts only (filename is checked above).
+    return any(part in UNSAFE_PATH_PARTS for part in path.parts[:-1] or path.parts)
 
 
 def _is_runtime_artifact(relative: str) -> bool:

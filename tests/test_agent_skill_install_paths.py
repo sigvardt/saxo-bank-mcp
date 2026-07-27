@@ -43,6 +43,26 @@ def test_publishable_tree_excludes_omo_and_forbidden() -> None:
     assert relatives
     assert all(not relative.startswith(".omo/") for relative in relatives)
     assert all(".git" not in relative.split("/") for relative in relatives)
+    # Product modules with secret-adjacent names must still ship; only data/state is unsafe.
+    assert "src/saxo_bank_mcp/credentials.py" in relatives
+    assert "src/saxo_bank_mcp/config_credentials.py" in relatives
+    assert "src/saxo_bank_mcp/secret_scan.py" in relatives
+    assert "src/saxo_bank_mcp/token_cache.py" in relatives
+
+
+def test_unsafe_relative_rejects_secret_data_not_product_modules() -> None:
+    from saxo_bank_mcp.agent_skill_install_paths import _is_unsafe_relative
+
+    assert _is_unsafe_relative("src/saxo_bank_mcp/credentials.py") is False
+    assert _is_unsafe_relative("src/saxo_bank_mcp/secret_scan_patterns.py") is False
+    assert _is_unsafe_relative("src/saxo_bank_mcp/token_cache.py") is False
+    assert _is_unsafe_relative("credentials.json") is True
+    assert _is_unsafe_relative("local/token_cache.json") is True
+    assert _is_unsafe_relative("secrets/id_rsa") is True
+    assert _is_unsafe_relative("nested/.env") is True
+    assert _is_unsafe_relative("keys/app.pem") is True
+    assert _is_unsafe_relative(".omo/evidence/report.json") is True
+    assert _is_unsafe_relative("credentials/live.json") is True
 
 
 def test_export_rejects_symlinks(tmp_path: Path) -> None:
