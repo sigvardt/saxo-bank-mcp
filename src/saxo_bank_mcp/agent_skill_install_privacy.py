@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Final, Literal
@@ -32,6 +33,9 @@ PRIVACY_DIGEST_ZERO: Final = "0" * 64
 _PRIVACY_DIGEST_KEYS: Final = frozenset(
     {"privacy_report_sha256", "privacy_self_scan_sha256"},
 )
+_PRIVACY_OUTPUT_NAMES: Final = frozenset({"privacy-report.json", "privacy-self-scan.json"})
+_VERIFY_MANUAL_NAME: Final = "verify.json"
+# Known Todo 14 manuals (documentation + tests). Derivation uses every report_dir/*.json.
 TODO14_MANUAL_NAMES: Final = (
     "install.json",
     "verify.json",
@@ -43,6 +47,7 @@ TODO14_MANUAL_NAMES: Final = (
     "privacy-report.json",
     "privacy-self-scan.json",
 )
+type LexKind = Literal["missing", "dir", "file", "symlink", "special"]
 
 
 class PrivacyPipelineError(ValueError):
@@ -255,7 +260,7 @@ def verify_privacy_binding(  # noqa: C901, PLR0913
         errors.append("privacy_self_rescan_findings")
     if self_errors:
         errors.append("privacy_self_rescan_errors")
-    errors.extend(_coverage_union_errors(report, self_scan, report_dir=report_dir))
+    errors.extend(coverage_union_errors(report, self_scan, report_dir=report_dir))
     return errors
 
 
@@ -272,31 +277,18 @@ def derive_existing_privacy_targets(  # noqa: PLR0913
     """Exact existing targets only — never invent nonexistent paths."""
     _ = version
     root = run_root.resolve()
-    manual: list[str] = []
-    for name in TODO14_MANUAL_NAMES:
-        if name in {"privacy-report.json", "privacy-self-scan.json"} and (
-            not include_privacy_outputs
-        ):
-            continue
-        if name == "verify.json" and not include_verify:
-            continue
-        path = report_dir / name
-        if path.is_file():
-            manual.append(str(path.resolve()))
-    install = report_dir / "install.json"
-    if install.is_file() and str(install.resolve()) not in manual:
-        manual.append(str(install.resolve()))
+    manual = _existing_manual_json_paths(
+        report_dir,
+        include_privacy_outputs=include_privacy_outputs,
+        include_verify=include_verify,
+    )
     caches = [str(codex_cache.resolve()), str(claude_cache.resolve())]
     for cache in caches:
         if not Path(cache).exists():
             msg = f"cache_missing:{cache}"
             raise PrivacyPipelineError(msg)
     auth_root = root / "home" / ".saxo-bank-mcp-auth"
-    auth_copies = (
-        sorted(str(path.resolve()) for path in auth_root.rglob("*") if path.is_file())
-        if auth_root.is_dir()
-        else []
-    )
+    auth_copies = _existing_auth_copy_paths(auth_root)
     client_state = _retained_client_state_entries(
         root,
         exclude_prefixes=(
@@ -313,6 +305,58 @@ def derive_existing_privacy_targets(  # noqa: PLR0913
         "client_state": client_state,
         "todo13_public_clone": public_clone,
     }
+
+
+def _existing_manual_json_paths(
+    report_dir: Path,
+    *,
+    include_privacy_outputs: bool,
+    include_verify: bool,
+) -> list[str]:
+    """Every existing report_dir/*.json with fail-closed non-regular rejection."""
+    if not report_dir.is_dir():
+        return []
+    manual: list[str] = []
+    for path in sorted(report_dir.iterdir(), key=lambda item: item.name):
+        if not path.name.endswith(".json"):
+            continue
+        kind = _lex_kind(path)
+        # Never soft-skip: symlink / special / non-file manuals fail closed.
+        if kind == "symlink":
+            msg = f"manual_json_symlink_rejected:{path.name}"
+            raise PrivacyPipelineError(msg)
+        if kind == "special":
+            msg = f"manual_json_special_rejected:{path.name}"
+            raise PrivacyPipelineError(msg)
+        if kind == "dir":
+            msg = f"manual_json_directory_rejected:{path.name}"
+            raise PrivacyPipelineError(msg)
+        if kind != "file":
+            msg = f"manual_json_not_regular:{path.name}"
+            raise PrivacyPipelineError(msg)
+        name = path.name
+        if name in _PRIVACY_OUTPUT_NAMES and not include_privacy_outputs:
+            continue
+        if name == _VERIFY_MANUAL_NAME and not include_verify:
+            continue
+        manual.append(str(path.resolve(strict=False)))
+    return manual
+
+
+def _existing_auth_copy_paths(auth_root: Path) -> list[str]:
+    """Every existing auth entry (file/symlink/special); never soft-skip non-files."""
+    if not auth_root.is_dir():
+        return []
+    found: list[str] = []
+    for path in auth_root.rglob("*"):
+        kind = _lex_kind(path)
+        if kind == "dir":
+            continue
+        if kind == "missing":
+            continue
+        # List the path as-is; scanning fail-closes on specials / dangling links.
+        found.append(_lex_path_key(path))
+    return sorted(set(found))
 
 
 def canonical_install_text_for_privacy_scan(
@@ -351,21 +395,38 @@ def _scan_all_targets(
     findings: list[dict[str, JsonValue]] = []
     scan_errors: list[dict[str, JsonValue]] = []
     install_resolved = install_report_path.resolve()
+    root_resolved = run_root.resolve()
     for paths in targets.values():
         for raw in paths:
             path = Path(raw)
-            if not path.exists():
+            kind = _lex_kind(path)
+            if kind == "missing":
                 scan_errors.append({"path": raw, "error": "missing_path"})
                 continue
-            if path.resolve() == install_resolved:
+            if kind == "special":
+                scan_errors.append({"path": raw, "error": "special_node"})
+                continue
+            if kind == "symlink":
+                symlink_errors = _symlink_scan_errors(path, retained_roots=(root_resolved,))
+                if symlink_errors:
+                    scan_errors.extend(symlink_errors)
+                    continue
+                if path.is_dir():
+                    # Do not descend through directory symlinks.
+                    scan_errors.append({"path": raw, "error": "symlink_directory"})
+                    continue
+            if kind == "dir":
+                file_findings, file_errors = scan_directory_normalized(
+                    path,
+                    run_root=run_root,
+                    retained_roots=(root_resolved, path.resolve()),
+                )
+            elif path.resolve() == install_resolved:
                 text = canonical_install_text_for_privacy_scan(
                     install_report_path,
                     run_root=run_root,
                 )
                 file_findings, file_errors = scan_secret_text(raw, text)
-            elif path.is_dir():
-                # Directory: scan each file with run_root normalization.
-                file_findings, file_errors = _scan_directory_normalized(path, run_root=run_root)
             else:
                 file_findings, file_errors = _scan_file_normalized(path, run_root=run_root)
             findings.extend(file_findings)
@@ -373,20 +434,34 @@ def _scan_all_targets(
     return findings, scan_errors
 
 
-def _scan_directory_normalized(
+def scan_directory_normalized(
     directory: Path,
     *,
     run_root: Path,
+    retained_roots: tuple[Path, ...] | None = None,
 ) -> tuple[list[dict[str, JsonValue]], list[dict[str, JsonValue]]]:
     findings: list[dict[str, JsonValue]] = []
     scan_errors: list[dict[str, JsonValue]] = []
+    roots = retained_roots or (run_root.resolve(), directory.resolve())
     for path in directory.rglob("*"):
-        if not path.is_file() and not path.is_symlink():
+        kind = _lex_kind(path)
+        if kind == "dir":
             continue
-        if path.is_symlink() and not path.exists():
-            # Dangling symlink: still fail-closed as a scan target presence issue.
-            scan_errors.append({"path": str(path), "error": "dangling_symlink"})
+        if kind == "missing":
+            scan_errors.append({"path": str(path), "error": "missing_path"})
             continue
+        if kind == "special":
+            # FIFO / socket / device under a scanned directory: fail closed.
+            scan_errors.append({"path": str(path), "error": "special_node"})
+            continue
+        if kind == "symlink":
+            symlink_errors = _symlink_scan_errors(path, retained_roots=roots)
+            if symlink_errors:
+                scan_errors.extend(symlink_errors)
+                continue
+            if path.is_dir():
+                scan_errors.append({"path": str(path), "error": "symlink_directory"})
+                continue
         file_findings, file_errors = _scan_file_normalized(path, run_root=run_root)
         findings.extend(file_findings)
         scan_errors.extend(file_errors)
@@ -409,6 +484,23 @@ def _scan_file_normalized(
         return scan_secret_paths([str(path)])
     text = _normalize_run_root_prefix(text, run_root)
     return scan_secret_text(str(path), text)
+
+
+def _symlink_scan_errors(
+    path: Path,
+    *,
+    retained_roots: tuple[Path, ...],
+) -> list[dict[str, JsonValue]]:
+    """Fail closed on dangling links and links that escape retained roots."""
+    if not path.exists():
+        return [{"path": str(path), "error": "dangling_symlink"}]
+    try:
+        target = path.resolve(strict=True)
+    except OSError as exc:
+        return [{"path": str(path), "error": type(exc).__name__}]
+    if not any(_is_within_root(target, root) for root in retained_roots):
+        return [{"path": str(path), "error": "symlink_escapes_root"}]
+    return []
 
 
 def _self_scan(
@@ -494,34 +586,82 @@ def _scope_membership_errors(
     return errors
 
 
-def _coverage_union_errors(
+def coverage_union_errors(
     report: dict[str, JsonValue],
     self_scan: dict[str, JsonValue],
     *,
     report_dir: Path,
 ) -> list[str]:
-    """Union of privacy-report scope and self-scan must cover required manuals except self-scan."""
+    """Union of privacy-report scope and self-scan must cover required manuals except self-scan.
+
+    Path keys are report_dir-bound only. Bare basenames never resolve against process cwd.
+    verify.json is excluded: it is secret-scanned independently at verify publish time.
+    privacy-self-scan.json is excluded: it cannot cover itself.
+    """
     covered: set[str] = set()
     scope = report.get("scope")
     if isinstance(scope, dict):
         manual = scope.get("manual_json")
         if isinstance(manual, list):
-            covered.update(_norm(str(item)) for item in manual if isinstance(item, str))
+            covered.update(
+                _report_dir_bound_key(str(item), report_dir=report_dir)
+                for item in manual
+                if isinstance(item, str)
+            )
     self_scope = self_scan.get("scope")
     if isinstance(self_scope, dict):
         for key in ("privacy_report", "install_report_canonical"):
             value = self_scope.get(key)
             if isinstance(value, list):
-                covered.update(_norm(str(item)) for item in value if isinstance(item, str))
-    required = {
-        str((report_dir / name).resolve())
-        for name in TODO14_MANUAL_NAMES
-        if name != "privacy-self-scan.json" and (report_dir / name).is_file()
-    }
-    missing = {_norm(path) for path in required} - covered
+                covered.update(
+                    _report_dir_bound_key(str(item), report_dir=report_dir)
+                    for item in value
+                    if isinstance(item, str)
+                )
+    required = _required_manual_coverage_keys(report_dir)
+    missing = required - covered
     if missing:
         return ["privacy_manual_coverage_incomplete"]
     return []
+
+
+def _required_manual_coverage_keys(report_dir: Path) -> set[str]:
+    """Existing regular report_dir manuals that privacy union must cover."""
+    if not report_dir.is_dir():
+        return set()
+    required: set[str] = set()
+    for path in report_dir.iterdir():
+        if not path.name.endswith(".json"):
+            continue
+        if path.name in {"privacy-self-scan.json", _VERIFY_MANUAL_NAME}:
+            continue
+        if _lex_kind(path) != "file":
+            # Non-regular manuals are rejected at derive time; skip here for coverage.
+            continue
+        required.add(_report_dir_bound_key(path.name, report_dir=report_dir))
+    return required
+
+
+def _report_dir_bound_key(value: str, *, report_dir: Path) -> str:
+    """Map a reported manual path/label to a report_dir-bound absolute key.
+
+    Never resolves bare basenames against process cwd.
+    """
+    report_resolved = report_dir.resolve()
+    if value.startswith("$RUN_ROOT"):
+        return value
+    raw = Path(value)
+    if raw.is_absolute():
+        try:
+            resolved = raw.resolve(strict=False)
+        except OSError:
+            resolved = raw
+        # Absolute under report_dir stays absolute; else bind basename to report_dir.
+        if _is_within_root(resolved, report_resolved) or resolved == report_resolved:
+            return str(resolved)
+        return str((report_resolved / resolved.name).resolve(strict=False))
+    # Relative / basename labels: always join under report_dir (structural, not cwd).
+    return str((report_resolved / Path(value).name).resolve(strict=False))
 
 
 def _meta_errors(
@@ -561,22 +701,58 @@ def _retained_client_state_entries(
         if not root.exists():
             continue
         for path in root.rglob("*"):
-            try:
-                resolved = path.resolve() if not path.is_symlink() else path
-            except OSError:
+            kind = _lex_kind(path)
+            if kind in {"dir", "missing"}:
                 continue
+            # Include files, symlinks, and special nodes without soft-skip on OSError.
+            key = _lex_path_key(path)
+            try:
+                resolved_for_exclude = (
+                    path.resolve(strict=False) if kind != "symlink" else path
+                )
+            except OSError:
+                resolved_for_exclude = path
             if any(
-                resolved == prefix or resolved.is_relative_to(prefix)
+                _is_within_root(resolved_for_exclude, prefix) or resolved_for_exclude == prefix
                 for prefix in exclude
-                if prefix.is_dir() or prefix.is_file()
             ):
                 continue
-            # Include files, symlinks, and special nodes; skip plain directories as containers.
-            if path.is_dir() and not path.is_symlink():
-                continue
-            if os.path.lexists(path):
-                found.append(str(path.resolve() if path.exists() else path))
+            found.append(key)
     return sorted(set(found))
+
+
+def _lex_kind(path: Path) -> LexKind:
+    """Classify path without following symlinks. Never soft-skips specials."""
+    if not os.path.lexists(path):
+        return "missing"
+    if path.is_symlink():
+        return "symlink"
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return "special"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISREG(mode):
+        return "file"
+    return "special"
+
+
+def _lex_path_key(path: Path) -> str:
+    """Stable string key for a lexists path without requiring resolve success."""
+    try:
+        if path.is_symlink() or not path.exists():
+            return str(path)
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path)
+
+
+def _is_within_root(path: Path, root: Path) -> bool:
+    try:
+        return path == root or path.is_relative_to(root)
+    except (OSError, ValueError):
+        return False
 
 
 def _public_clone_existing(clone: Path) -> list[str]:
@@ -634,14 +810,6 @@ def _publicize_path(value: str, *, run_root: Path) -> str:
         return f"$RUN_ROOT/{resolved.relative_to(root)}"
     # Manual JSONs live beside install, outside run_root: keep basename labels.
     return resolved.name
-
-
-def _norm(value: str) -> str:
-    path = Path(value)
-    try:
-        return str(path.expanduser().resolve())
-    except OSError:
-        return value
 
 
 def _load_object(path: Path) -> dict[str, JsonValue]:

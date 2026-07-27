@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     descendant_pids,
@@ -34,8 +35,11 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
     PRIVACY_DIGEST_ZERO,
     PrivacyPipelineError,
     canonical_install_text_for_privacy_scan,
+    coverage_union_errors,
+    derive_existing_privacy_targets,
     produce_privacy_evidence,
     provisional_privacy_binding,
+    scan_directory_normalized,
 )
 from saxo_bank_mcp.agent_skill_install_verify_live import codex_registration_errors
 from saxo_bank_mcp.secret_scan import scan_secret_text
@@ -376,3 +380,114 @@ def test_detached_new_session_child_cleaned(tmp_path: Path) -> None:
     assert receipt.pid is not None
     time.sleep(0.2)
     assert remaining_live_pids(descendant_pids(receipt.pid)) == ()
+
+
+def test_coverage_union_binds_basenames_to_report_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Basename labels must resolve under report_dir, never process cwd."""
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    (report_dir / "install.json").write_text("{}\n", encoding="utf-8")
+    (report_dir / "privacy-report.json").write_text("{}\n", encoding="utf-8")
+    # A same-named file under cwd would make cwd-bound resolution incorrectly succeed
+    # or fail depending on which side used cwd; bind only to report_dir.
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    (elsewhere / "install.json").write_text('{"evil": true}\n', encoding="utf-8")
+    monkeypatch.chdir(elsewhere)
+    report: dict[str, JsonValue] = {
+        "scope": {
+            "manual_json": ["install.json"],
+        },
+    }
+    self_scan: dict[str, JsonValue] = {
+        "scope": {
+            "privacy_report": ["privacy-report.json"],
+            "install_report_canonical": ["install.json"],
+        },
+    }
+    assert coverage_union_errors(report, self_scan, report_dir=report_dir) == []
+
+
+def test_derive_includes_arbitrary_extra_manual_json(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    run_root = tmp_path / "run"
+    report_dir.mkdir()
+    for relative in (
+        "home",
+        "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+        "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+    ):
+        (run_root / relative).mkdir(parents=True, exist_ok=True)
+    (report_dir / "install.json").write_text("{}\n", encoding="utf-8")
+    (report_dir / "extra-manual.json").write_text("{}\n", encoding="utf-8")
+    # Privacy outputs excluded at produce-time; verify excluded until verify-only.
+    (report_dir / "privacy-report.json").write_text("{}\n", encoding="utf-8")
+    (report_dir / "verify.json").write_text("{}\n", encoding="utf-8")
+    targets = derive_existing_privacy_targets(
+        report_dir=report_dir,
+        run_root=run_root,
+        version="0.1.0",
+        codex_cache=run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+        claude_cache=run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+        include_privacy_outputs=False,
+        include_verify=False,
+    )
+    names = {Path(path).name for path in targets["manual_json"]}
+    assert "install.json" in names
+    assert "extra-manual.json" in names
+    assert "privacy-report.json" not in names
+    assert "verify.json" not in names
+
+
+def test_derive_rejects_symlink_and_special_manual_json(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports"
+    run_root = tmp_path / "run"
+    report_dir.mkdir()
+    for relative in (
+        "home",
+        "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+        "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+    ):
+        (run_root / relative).mkdir(parents=True, exist_ok=True)
+    real = report_dir / "install.json"
+    real.write_text("{}\n", encoding="utf-8")
+    link = report_dir / "linked-manual.json"
+    link.symlink_to(real)
+    with pytest.raises(PrivacyPipelineError, match="manual_json_symlink_rejected"):
+        derive_existing_privacy_targets(
+            report_dir=report_dir,
+            run_root=run_root,
+            version="0.1.0",
+            codex_cache=run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+            claude_cache=run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+            include_privacy_outputs=False,
+            include_verify=False,
+        )
+    link.unlink()
+    fifo = report_dir / "fifo-manual.json"
+    os.mkfifo(fifo)
+    with pytest.raises(PrivacyPipelineError, match="manual_json_special_rejected"):
+        derive_existing_privacy_targets(
+            report_dir=report_dir,
+            run_root=run_root,
+            version="0.1.0",
+            codex_cache=run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+            claude_cache=run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0",
+            include_privacy_outputs=False,
+            include_verify=False,
+        )
+
+
+def test_scan_directory_rejects_special_node(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    cache = run_root / "cache"
+    cache.mkdir(parents=True)
+    (cache / "ok.txt").write_text("clean\n", encoding="utf-8")
+    fifo = cache / "pipe.fifo"
+    os.mkfifo(fifo)
+    _findings, errors = scan_directory_normalized(cache, run_root=run_root)
+    assert any(item.get("error") == "special_node" for item in errors)
+    assert any(str(fifo) in str(item.get("path", "")) for item in errors)
