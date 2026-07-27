@@ -230,6 +230,9 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: PLR091
         shutil.rmtree(marketplace)
     if probe_env.exists():
         shutil.rmtree(probe_env, ignore_errors=True)
+    for preserved in (clone, codex_cache, claude_cache, home, codex_home, claude_home, run_root):
+        if preserved.exists():
+            preserved.chmod(0o700)
     write_json(options.out, report)
     verified, errors = load_verified_install_report(options.out)
     if verified is None:
