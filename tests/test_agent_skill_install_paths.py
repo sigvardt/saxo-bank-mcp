@@ -5,10 +5,10 @@ from pathlib import Path
 
 from test_agent_skill_evidence_support import ROOT, build_install_fixture, run_cli
 
+import saxo_bank_mcp.agent_skill_install_cli_driver as install_cli_driver
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult
 from saxo_bank_mcp.agent_skill_install_cli_driver import (
     CommandDiscoveryError,
-    _cache_root_from_payload,
     cache_root_from_results,
 )
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
@@ -85,8 +85,37 @@ def test_cache_root_discovery_requires_cli_payload_not_guess(tmp_path: Path) -> 
 def test_cache_root_parses_camel_case_cli_keys(tmp_path: Path) -> None:
     path = tmp_path / "installed"
     path.mkdir()
-    assert _cache_root_from_payload({"installedPath": str(path)}) == path
-    assert _cache_root_from_payload([{"installPath": str(path)}]) == path
+    parse = install_cli_driver.cache_root_from_results
+
+    # Prefer public discovery path: wrap payloads as successful command results.
+    def result(name: str, payload: object) -> CommandResult:
+        return CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=("cli",),
+                cwd=str(tmp_path),
+                pid=1,
+                pgid=1,
+                exit_code=0,
+                stdout_sha256="a" * 64,
+                stderr_sha256="b" * 64,
+            ),
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    discovered, source = parse(
+        (result("codex_plugin_add", {"installedPath": str(path)}),),
+        client="codex",
+    )
+    assert discovered == path.resolve()
+    assert source == "codex_plugin_add"
+    discovered, source = parse(
+        (result("claude_plugin_list", [{"installPath": str(path)}]),),
+        client="claude",
+    )
+    assert discovered == path.resolve()
+    assert source == "claude_plugin_list"
 
 
 def test_global_fingerprint_is_scoped_and_stable(tmp_path: Path) -> None:

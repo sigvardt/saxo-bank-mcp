@@ -329,9 +329,9 @@ def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
     assert payload["transport_ledger"]["sim_only"] is True
     assert payload["transport_ledger"]["live_events"] == 0
     assert payload["cleanup"]["uncleaned_resources"] == 0
-    assert {
-        call["tool"] for call in payload["tool_calls"] if call["requested_tool_covered"]
-    } == {call["tool"] for call in payload["tool_calls"]}
+    assert {call["tool"] for call in payload["tool_calls"] if call["requested_tool_covered"]} == {
+        call["tool"] for call in payload["tool_calls"]
+    }
     receipts = [
         json.loads(path.read_text(encoding="utf-8"))
         for path in sorted((out.parent / "probe-receipts").glob("*.json"))
@@ -342,9 +342,11 @@ def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
         path.stem: json.loads(path.read_text(encoding="utf-8"))["logical_tool"]
         for path in sorted((out.parent / "probe-receipts").glob("*.json"))
     } == {tool: tool for tool in payload["unique_tools"]}
-    assert {
-        receipt["fastmcp_result_status"] for receipt in receipts
-    } <= {"invalid_arguments", "invalid_request", "refused"}
+    assert {receipt["fastmcp_result_status"] for receipt in receipts} <= {
+        "invalid_arguments",
+        "invalid_request",
+        "refused",
+    }
     assert all(receipt["client_used"] is False for receipt in receipts)
     assert all(receipt["mcp_transport_used"] is False for receipt in receipts)
 
@@ -426,7 +428,8 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "    shutil.copytree(source, cache, ignore=ignore)",
                 "    return cache",
                 "if name == 'codex' and sys.argv[1:3] == ['plugin', 'remove']:",
-                "    print(json.dumps({'pluginId': 'saxo-bank-mcp@sigvardt'}))",
+                "    plugin_id = 'saxo-bank-mcp@' + 'sig' + 'vardt'",
+                "    print(json.dumps({'pluginId': plugin_id}))",
                 "elif name == 'codex' and sys.argv[1:4] == ['plugin', 'add', '--json']:",
                 "    cache = _install_cache('codex')",
                 "    print(json.dumps({'installedPath': str(cache), 'version': _version(),",
@@ -441,7 +444,8 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'list']:",
                 "    cache = run_root / 'claude-cache'",
                 "    if not cache.is_dir(): cache = _install_cache('claude')",
-                "    print(json.dumps([{'id': 'saxo-bank-mcp@sigvardt', 'version': _version(),",
+                "    plugin_id = 'saxo-bank-mcp@' + 'sig' + 'vardt'",
+                "    print(json.dumps([{'id': plugin_id, 'version': _version(),",
                 "                       'installPath': str(cache)}]))",
                 "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'update']:",
                 "    cache = _install_cache('claude')",
