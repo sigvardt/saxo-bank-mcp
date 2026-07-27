@@ -176,7 +176,7 @@ def forbidden_cache_paths(cache: Path) -> list[str]:
     findings: list[str] = []
     for path in cache.rglob("*"):
         relative = str(path.relative_to(cache))
-        if path.is_symlink() or _is_unsafe_relative(relative):
+        if path.is_symlink() or is_unsafe_relative(relative):
             findings.append(relative)
     return sorted(findings)
 
@@ -321,8 +321,19 @@ def _cache_files(cache: Path) -> tuple[str, ...]:
     )
 
 
+def is_unsafe_relative(relative: str) -> bool:
+    path = Path(relative)
+    name = path.name
+    if name in UNSAFE_BASENAMES or bool(UNSAFE_BASENAME_PATTERN.fullmatch(name)):
+        return True
+    if path.suffix.lower() in UNSAFE_SUFFIXES:
+        return True
+    # Directory parts only (filename is checked above).
+    return any(part in UNSAFE_PATH_PARTS for part in path.parts[:-1] or path.parts)
+
+
 def _is_publishable_relative(relative: str) -> bool:
-    if _is_unsafe_relative(relative):
+    if is_unsafe_relative(relative):
         return False
     public_dirs = tuple(
         path for path in PUBLIC_SECRET_SCAN_PATHS if not Path(path).suffix and "/" not in path
@@ -341,17 +352,6 @@ def _is_publishable_relative(relative: str) -> bool:
     if any(relative.startswith(f"{directory}/") for directory in public_dirs):
         return True
     return relative.startswith("data/saxo/")
-
-
-def _is_unsafe_relative(relative: str) -> bool:
-    path = Path(relative)
-    name = path.name
-    if name in UNSAFE_BASENAMES or bool(UNSAFE_BASENAME_PATTERN.fullmatch(name)):
-        return True
-    if path.suffix.lower() in UNSAFE_SUFFIXES:
-        return True
-    # Directory parts only (filename is checked above).
-    return any(part in UNSAFE_PATH_PARTS for part in path.parts[:-1] or path.parts)
 
 
 def _is_runtime_artifact(relative: str) -> bool:

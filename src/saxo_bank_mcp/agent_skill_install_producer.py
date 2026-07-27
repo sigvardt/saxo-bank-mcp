@@ -11,7 +11,6 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     remaining_live_pgids,
     remaining_live_pids,
 )
-from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_evidence_io import resolve_commit
 from saxo_bank_mcp.agent_skill_install_cli_driver import (
     CommandDiscoveryError,
@@ -33,7 +32,7 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
     run_update_probe,
     startup_from_probes,
 )
-from saxo_bank_mcp.agent_skill_install_models import InstallManifestOptions
+from saxo_bank_mcp.agent_skill_install_models import CommandReceipt, InstallManifestOptions
 from saxo_bank_mcp.agent_skill_install_paths import (
     assert_preserved_modes,
     ensure_owner_only,

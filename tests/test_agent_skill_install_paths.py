@@ -20,11 +20,13 @@ from saxo_bank_mcp.agent_skill_install_env import build_isolated_env
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_paths import (
     OWNER_ONLY_MODE,
+    VERSION_RELATIVES,
     assert_preserved_modes,
     ensure_owner_only,
     export_publishable_tree,
     forbidden_cache_paths,
     installed_inventory_check,
+    is_unsafe_relative,
     owner_only_mode,
     publishable_tracked_files,
 )
@@ -51,23 +53,19 @@ def test_publishable_tree_excludes_omo_and_forbidden() -> None:
 
 
 def test_unsafe_relative_rejects_secret_data_not_product_modules() -> None:
-    from saxo_bank_mcp.agent_skill_install_paths import _is_unsafe_relative
-
-    assert _is_unsafe_relative("src/saxo_bank_mcp/credentials.py") is False
-    assert _is_unsafe_relative("src/saxo_bank_mcp/secret_scan_patterns.py") is False
-    assert _is_unsafe_relative("src/saxo_bank_mcp/token_cache.py") is False
-    assert _is_unsafe_relative("credentials.json") is True
-    assert _is_unsafe_relative("local/token_cache.json") is True
-    assert _is_unsafe_relative("secrets/id_rsa") is True
-    assert _is_unsafe_relative("nested/.env") is True
-    assert _is_unsafe_relative("keys/app.pem") is True
-    assert _is_unsafe_relative(".omo/evidence/report.json") is True
-    assert _is_unsafe_relative("credentials/live.json") is True
+    assert is_unsafe_relative("src/saxo_bank_mcp/credentials.py") is False
+    assert is_unsafe_relative("src/saxo_bank_mcp/secret_scan_patterns.py") is False
+    assert is_unsafe_relative("src/saxo_bank_mcp/token_cache.py") is False
+    assert is_unsafe_relative("credentials.json") is True
+    assert is_unsafe_relative("local/token_cache.json") is True
+    assert is_unsafe_relative("secrets/id_rsa") is True
+    assert is_unsafe_relative("nested/.env") is True
+    assert is_unsafe_relative("keys/app.pem") is True
+    assert is_unsafe_relative(".omo/evidence/report.json") is True
+    assert is_unsafe_relative("credentials/live.json") is True
 
 
 def test_version_bump_rewrites_lockfile_with_manifests() -> None:
-    from saxo_bank_mcp.agent_skill_install_paths import VERSION_RELATIVES
-
     assert "uv.lock" in VERSION_RELATIVES
     assert "pyproject.toml" in VERSION_RELATIVES
 
@@ -312,4 +310,6 @@ def test_inventory_rejects_unexpected_extra_file(tmp_path: Path) -> None:
     (cache / "unexpected-secret.bin").write_bytes(b"x")
     inventory = installed_inventory_check(source, cache)
     assert inventory["inventory_exact_match"] is False
-    assert "unexpected_cache_files" in inventory["mismatches"]
+    mismatches = inventory["mismatches"]
+    assert isinstance(mismatches, list)
+    assert "unexpected_cache_files" in mismatches

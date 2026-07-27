@@ -19,12 +19,12 @@
         "reason": "Agent eval validation status, not production MCP tool response truth."
       },
       {
-        "module": "src/saxo_bank_mcp/agent_skill_install_cli_driver.py",
-        "reason": "Plugin install command/probe receipt status, not production MCP tool response truth."
-      },
-      {
         "module": "src/saxo_bank_mcp/agent_skill_install_models.py",
         "reason": "Plugin install evidence model status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_probe.py",
+        "reason": "Plugin install stdio probe status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
