@@ -243,24 +243,29 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     assert payload["claude"]["installed"] is True
     assert payload["global_state_unchanged"] is True
     assert payload["project_version"] == "0.1.0"
-    assert payload["codex"]["cache_root_source"] == "codex_plugin_add"
-    assert payload["claude"]["cache_root_source"] == "claude_plugin_install"
+    assert payload["codex"]["cache_root_source"] == "codex_plugin_add_restored"
+    assert payload["claude"]["cache_root_source"] == "claude_plugin_list_restored"
     assert payload["codex"]["identity"] == "saxo-bank-mcp"
     assert payload["claude"]["version"] == "0.1.0"
     assert payload["installed_byte_checks"]["mismatches"] == []
     assert payload["installed_byte_checks"]["forbidden_files_absent"] is True
     assert payload["update_probe"]["candidate_restored"] is True
+    assert payload["update_probe"]["codex_reached_bumped"] is True
+    assert payload["update_probe"]["claude_reached_bumped"] is True
     assert payload["process_cleanup"]["observed_pids"]
     assert payload["process_cleanup"]["observed_pgids"]
+    assert payload["process_cleanup"]["complete"] is True
+    assert payload["fixture_cleanup"]["teardown_owner"] == "post-final-completion-gate"
     assert all(item["validated"] for item in payload["help_syntax"].values())
     assert any(row.startswith("plugin marketplace add --json ") for row in commands)
     plugin_ref = "saxo-bank-mcp@" + "sig" + "vardt"
     assert f"plugin add --json {plugin_ref}" in commands
     assert any(row.startswith("plugin marketplace add ") for row in commands)
     assert f"plugin install {plugin_ref} --scope user" in commands
-    assert (
-        sum(1 for row in commands if row.startswith("run --project "))
-        == EXPECTED_INSTALL_STARTUP_PROBES
+    assert f"plugin update {plugin_ref} --scope user" in commands
+    # Initial install probes + post-restore probes for both clients.
+    assert sum(1 for row in commands if row.startswith("run --project ")) >= (
+        EXPECTED_INSTALL_STARTUP_PROBES
     )
 
 
@@ -405,29 +410,44 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "        print('Commands: install update details')",
                 "    raise SystemExit(0)",
                 "run_root = pathlib.Path(os.environ.get('FAKE_RUN_ROOT', pathlib.Path.cwd()))",
-                "source = run_root / 'source-clone'",
-                "if name == 'codex' and sys.argv[1:4] == ['plugin', 'add', '--json']:",
+                "source = run_root / 'marketplace-source'",
+                "if not source.is_dir():",
+                "    source = run_root / 'source-clone'",
+                "def _version():",
+                "    text = (source / 'pyproject.toml').read_text(encoding='utf-8')",
+                "    for line in text.splitlines():",
+                "        if line.startswith('version = '):",
+                "            return line.split('=', 1)[1].strip().strip('\"')",
+                "    return '0.1.0'",
+                "def _install_cache(client):",
+                "    cache = run_root / f'{client}-cache'",
+                "    if cache.exists(): shutil.rmtree(cache)",
+                "    ignore = shutil.ignore_patterns('.git', '.omo', '.venv', '__pycache__')",
+                "    shutil.copytree(source, cache, ignore=ignore)",
+                "    return cache",
+                "if name == 'codex' and sys.argv[1:3] == ['plugin', 'remove']:",
+                "    print(json.dumps({'pluginId': 'saxo-bank-mcp@sigvardt'}))",
+                "elif name == 'codex' and sys.argv[1:4] == ['plugin', 'add', '--json']:",
+                "    cache = _install_cache('codex')",
+                "    print(json.dumps({'installedPath': str(cache), 'version': _version(),",
+                "                      'name': 'saxo-bank-mcp'}))",
+                "elif name == 'codex' and sys.argv[1:3] == ['plugin', 'list']:",
                 "    cache = run_root / 'codex-cache'",
-                "    if cache.exists(): shutil.rmtree(cache)",
-                "    ignore = shutil.ignore_patterns('.git', '.omo', '.venv')",
-                "    shutil.copytree(source, cache, ignore=ignore)",
-                "    marker = {'tool_count': 39, 'annotations_missing': []}",
-                "    (cache / '.qa-probe.json').write_text(json.dumps(marker), encoding='utf-8')",
-                "    print(json.dumps({'cache_root': str(cache)}))",
+                "    print(json.dumps({'installed': [{'name': 'saxo-bank-mcp',",
+                "      'version': _version(), 'installedPath': str(cache)}], 'available': []}))",
                 "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'install']:",
+                "    cache = _install_cache('claude')",
+                "    print(json.dumps({'installPath': str(cache)}))",
+                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'list']:",
                 "    cache = run_root / 'claude-cache'",
-                "    if cache.exists(): shutil.rmtree(cache)",
-                "    ignore = shutil.ignore_patterns('.git', '.omo', '.venv')",
-                "    shutil.copytree(source, cache, ignore=ignore)",
-                "    marker = {'tool_count': 39, 'annotations_missing': []}",
-                "    (cache / '.qa-probe.json').write_text(json.dumps(marker), encoding='utf-8')",
-                "    print(json.dumps({'cache_root': str(cache)}))",
-                "elif name == 'codex' and sys.argv[1:4] == ['plugin', 'marketplace', 'upgrade']:",
-                "    print(json.dumps({'status': 'ok',",
-                "                      'cache_root': str(run_root / 'codex-cache')}))",
+                "    if not cache.is_dir(): cache = _install_cache('claude')",
+                "    print(json.dumps([{'id': 'saxo-bank-mcp@sigvardt', 'version': _version(),",
+                "                       'installPath': str(cache)}]))",
                 "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'update']:",
-                "    print(json.dumps({'status': 'ok',",
-                "                      'cache_root': str(run_root / 'claude-cache')}))",
+                "    cache = _install_cache('claude')",
+                "    print('updated')",
+                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'details']:",
+                "    print('Skills (8)\\nMCP servers (1)')",
                 "else:",
                 "    print(json.dumps({'status': 'ok'}))",
             )

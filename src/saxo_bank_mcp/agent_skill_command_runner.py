@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -29,6 +29,12 @@ class CommandResult:
         except ValidationError:
             return {}
 
+    def json_value(self) -> JsonValue | None:
+        try:
+            return cast("JsonValue", json.loads(self.stdout))
+        except json.JSONDecodeError:
+            return None
+
 
 @dataclass(frozen=True, slots=True)
 class CommandFailureError(Exception):
@@ -41,9 +47,9 @@ def run_command(
     *,
     cwd: Path,
     env: dict[str, str] | None = None,
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 180,
 ) -> CommandResult:
-    executable = shutil.which(argv[0], path=None if env is None else env.get("PATH"))
+    executable = shutil_which(argv[0], path=None if env is None else env.get("PATH"))
     command: tuple[str, ...] = argv if executable is None else (executable, *argv[1:])
     process: subprocess.Popen[str] | None = None
     try:
@@ -74,7 +80,7 @@ def run_command(
             )
             raise CommandFailureError(receipt) from exc
         pgid = os.getpgid(process.pid)
-        os.killpg(pgid, signal.SIGTERM)
+        _terminate_group(pgid)
         stdout, stderr = process.communicate()
         receipt = _receipt(
             name,
@@ -124,6 +130,20 @@ def run_command(
     return result
 
 
+def process_still_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def remaining_live_pids(pids: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(pid for pid in sorted(set(pids)) if process_still_running(pid))
+
+
 def load_json_object(path: Path) -> dict[str, JsonValue]:
     try:
         return JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
@@ -131,11 +151,24 @@ def load_json_object(path: Path) -> dict[str, JsonValue]:
         return {}
 
 
+def shutil_which(command: str, *, path: str | None) -> str | None:
+    import shutil  # noqa: PLC0415
+
+    return shutil.which(command, path=path)
+
+
 def _merged_env(env: dict[str, str] | None) -> dict[str, str]:
     merged = os.environ.copy()
     if env is not None:
         merged.update(env)
     return merged
+
+
+def _terminate_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
 
 
 def _receipt(  # noqa: PLR0913

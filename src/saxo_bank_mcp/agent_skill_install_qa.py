@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import tomllib
 from collections.abc import Mapping
@@ -15,25 +14,39 @@ from saxo_bank_mcp.agent_skill_install_models import (
     InstallEvidenceReport,
     InstallManifestOptions,
 )
+from saxo_bank_mcp.agent_skill_install_paths import (
+    REQUIRED_CACHE_FILES,
+    global_state_fingerprint,
+    publishable_tracked_files,
+    required_cache_files,
+)
 
 EXPECTED_SKILL_COUNT = 8
 EXPECTED_MCP_SERVER_COUNT = 1
 EXPECTED_TOOL_COUNT = 39
 SHA256_HEX_LENGTH = 64
-REQUIRED_CACHE_FILES = (
-    ".mcp.json",
-    ".claude-plugin/plugin.json",
-    ".codex-plugin/plugin.json",
-    "data/saxo/openapi_inventory.json",
-    "pyproject.toml",
-    "uv.lock",
-)
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
 def write_install_fixture(fixture: str, out: Path) -> int:
-    reason = "forbidden_private_file" if fixture == "private-file" else "version_drift"
-    write_json(out, {"status": "failed", "fixture": fixture, "reason": reason})
+    if fixture == "private-file":
+        write_json(
+            out,
+            {
+                "status": "failed",
+                "fixture": "private-file",
+                "forbidden_path_class": ".omo",
+            },
+        )
+        return 1
+    write_json(
+        out,
+        {
+            "status": "failed",
+            "fixture": "version-drift",
+            "version_field": "project.version",
+        },
+    )
     return 1
 
 
@@ -46,15 +59,15 @@ def manifest_install_report(options: InstallManifestOptions) -> int:
     if commit is None:
         write_json(options.out, {"status": "failed", "reason": "commit_unresolved"})
         return 1
+    if options.codex_global_home is None or options.claude_global_home is None:
+        write_json(options.out, {"status": "failed", "reason": "isolated_home_invalid"})
+        return 1
     isolated = {
         "home": str(options.run_root / "home"),
         "codex_home": str(options.run_root / "codex-home"),
         "claude_home": str(options.run_root / "claude-home"),
     }
-    before = {
-        "codex": path_fingerprint(options.codex_global_home),
-        "claude": path_fingerprint(options.claude_global_home),
-    }
+    before = global_state_fingerprint(options.codex_global_home, options.claude_global_home)
     write_json(
         options.out,
         {
@@ -77,7 +90,7 @@ def manifest_install_report(options: InstallManifestOptions) -> int:
 def verify_install_report(path: Path, out: Path) -> int:
     report, errors = load_verified_install_report(path)
     if report is None:
-        write_json(out, {"status": "failed", "errors": errors})
+        write_json(out, {"status": "failed", "errors": list(errors)})
         return 1
     write_json(
         out,
@@ -118,13 +131,10 @@ def load_verified_install_report(
 
 def planning_error(options: InstallManifestOptions) -> str | None:
     repo_valid = (
-        options.repo.is_dir()
-        and git_output(options.repo, "rev-parse", "--git-dir") is not None
+        options.repo.is_dir() and git_output(options.repo, "rev-parse", "--git-dir") is not None
     )
     commit_valid = repo_valid and resolve_commit(options.repo, options.commit) is not None
-    codex_home_valid = (
-        options.codex_global_home is not None and options.codex_global_home.is_dir()
-    )
+    codex_home_valid = options.codex_global_home is not None and options.codex_global_home.is_dir()
     claude_home_valid = (
         options.claude_global_home is not None and options.claude_global_home.is_dir()
     )
@@ -155,6 +165,13 @@ def planning_error(options: InstallManifestOptions) -> str | None:
         (options.expected_tools == EXPECTED_TOOL_COUNT, "expected_tool_count_invalid"),
     )
     return next((reason for valid, reason in contract_checks if not valid), None)
+
+
+def path_fingerprint(path: Path | None) -> str:
+    if path is None:
+        return "missing"
+    # Compatibility helper for older tests; prefer global_state_fingerprint.
+    return global_state_fingerprint(path, path)["codex"]
 
 
 def _install_report_errors(report: InstallEvidenceReport) -> list[str]:
@@ -196,11 +213,10 @@ def _repository_errors(
     return errors
 
 
-def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:
+def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:  # noqa: C901
     errors: list[str] = []
-    if (
-        report.global_state.before != report.global_state.after
-        or not _valid_fingerprints(report.global_state.before)
+    if report.global_state.before != report.global_state.after or not _valid_fingerprints(
+        report.global_state.before,
     ):
         errors.append("global_state_fingerprint_mismatch")
     if report.errors or report.installed_byte_checks.mismatches:
@@ -216,8 +232,14 @@ def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:
         errors.append("help_syntax_unvalidated")
     if report.update_probe.get("candidate_restored") is not True:
         errors.append("update_probe_restore_missing")
+    if report.update_probe.get("codex_reached_bumped") is not True:
+        errors.append("codex_update_version_not_reached")
+    if report.update_probe.get("claude_reached_bumped") is not True:
+        errors.append("claude_update_version_not_reached")
     if not _auth_metadata_owner_only(report.auth_files):
         errors.append("auth_file_metadata_invalid")
+    if report.fixture_cleanup.teardown_owner != "post-final-completion-gate":
+        errors.append("fixture_teardown_owner_invalid")
     return errors
 
 
@@ -242,26 +264,24 @@ def _client_errors(
     if not cache.is_dir() or not cache.is_relative_to(run_root):
         errors.append(f"{name}_cache_invalid")
         return errors
+    if client.cache_root_source in {"missing", "isolated_cache_tree", "isolated_cache_inventory"}:
+        errors.append(f"{name}_cache_root_guessed")
     expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
     if (client.skill_count, client.mcp_server_count, client.tool_count) != expected:
         errors.append(f"{name}_count_mismatch")
-    if (
-        client.identity != "saxo-bank-mcp"
-        or client.version != _project_version(clone)
-        or client.cache_root_source == "missing"
-    ):
+    if client.identity != "saxo-bank-mcp" or client.version != _project_version(clone):
         errors.append(f"{name}_identity_version_invalid")
     if client.annotations_missing or client.forbidden_cache_paths:
         errors.append(f"{name}_cache_inventory_invalid")
     checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
     if any(check.tool_count != EXPECTED_TOOL_COUNT for check in checks):
         errors.append(f"{name}_startup_invalid")
-    required = _required_cache_files(clone)
+    required = required_cache_files(clone)
     if len(required) != len(REQUIRED_CACHE_FILES) + EXPECTED_SKILL_COUNT:
         errors.append(f"{name}_skill_inventory_invalid")
     elif any(not _same_bytes(clone / relative, cache / relative) for relative in required):
         errors.append(f"{name}_installed_bytes_mismatch")
-    public_files = _tracked_public_files(clone)
+    public_files = publishable_tracked_files(clone)
     if not public_files or any(
         not _same_bytes(clone / relative, cache / relative) for relative in public_files
     ):
@@ -278,9 +298,7 @@ def _origin_path(clone: Path) -> Path | None:
 
 def _same_bytes(source: Path, installed: Path) -> bool:
     return (
-        source.is_file()
-        and installed.is_file()
-        and source.read_bytes() == installed.read_bytes()
+        source.is_file() and installed.is_file() and source.read_bytes() == installed.read_bytes()
     )
 
 
@@ -309,31 +327,3 @@ def _project_version(root: Path) -> str:
         return ""
     version = project.get("version")
     return version if isinstance(version, str) else ""
-
-
-def _required_cache_files(clone: Path) -> tuple[str, ...]:
-    skills = tuple(str(path.relative_to(clone)) for path in clone.glob("skills/*/SKILL.md"))
-    return (*REQUIRED_CACHE_FILES, *skills)
-
-
-def _tracked_public_files(clone: Path) -> tuple[str, ...]:
-    raw = git_output(clone, "ls-files", "-z") or ""
-    return tuple(
-        sorted(
-            relative
-            for relative in raw.split("\0")
-            if relative and not relative.startswith(".omo/")
-        ),
-    )
-
-
-def path_fingerprint(path: Path | None) -> str:
-    if path is None or not path.exists():
-        return "missing"
-    digest = hashlib.sha256()
-    files = (path,) if path.is_file() else tuple(item for item in path.rglob("*") if item.is_file())
-    for item in sorted(files):
-        digest.update(str(item.relative_to(path) if path.is_dir() else item.name).encode())
-        digest.update(str(item.stat().st_size).encode())
-        digest.update(hashlib.sha256(item.read_bytes()).digest())
-    return digest.hexdigest()

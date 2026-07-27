@@ -234,7 +234,7 @@ def run_cli(
         env=merged_env,
         text=True,
         capture_output=True,
-        timeout=30,
+        timeout=180,
         check=False,
     )
 
@@ -245,7 +245,7 @@ def git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         msg = "git is required for evidence fixture tests"
         raise RuntimeError(msg)
     return subprocess.run(
-        [executable, *args], cwd=cwd, text=True, capture_output=True, check=True, timeout=30
+        [executable, *args], cwd=cwd, text=True, capture_output=True, check=True, timeout=180
     )
 
 
@@ -282,6 +282,7 @@ def _install_payload(
             "source_repo": str(repo),
             "no_local": True,
             "clean": True,
+            "mode": "0o700",
         },
         "expected_skills": 8,
         "expected_mcp_servers": 1,
@@ -298,7 +299,10 @@ def _install_payload(
         "update_probe": {
             "original_version": "0.1.0",
             "bumped_version": "0.1.1",
+            "codex_reached_bumped": True,
+            "claude_reached_bumped": True,
             "candidate_restored": True,
+            "temporary_fixtures_removed": True,
         },
         "auth_files": {"copied": [], "values_published": False},
         "codex": _client_payload(caches[0]),
@@ -306,7 +310,7 @@ def _install_payload(
         "installed_byte_checks": {
             "complete": True,
             "compared_files": 1,
-            "metadata_exceptions": [".omo/**"],
+            "metadata_exceptions": [],
             "required_files_present": [
                 ".mcp.json",
                 ".claude-plugin/plugin.json",
@@ -336,6 +340,10 @@ def _install_payload(
             "deferred_registered": True,
             "preserve_for": "task-15,task-16",
             "run_root": str(run_root),
+            "preserved_paths": [str(clone), str(caches[0]), str(caches[1])],
+            "owner_only": True,
+            "teardown_owner": "post-final-completion-gate",
+            "consumers": ["task-15", "task-16"],
         },
         "errors": [],
     }

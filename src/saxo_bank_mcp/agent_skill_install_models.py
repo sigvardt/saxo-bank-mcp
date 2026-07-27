@@ -66,6 +66,7 @@ class CloneEvidence(BaseModel):
     source_repo: Path
     no_local: Literal[True]
     clean: Literal[True]
+    mode: str = Field(default="0o700", min_length=1)
 
 
 class GlobalStateEvidence(BaseModel):
@@ -101,6 +102,10 @@ class FixtureCleanup(BaseModel):
     deferred_registered: Literal[True]
     preserve_for: str = Field(min_length=1)
     run_root: Path
+    preserved_paths: tuple[str, ...] = ()
+    owner_only: Literal[True] = True
+    teardown_owner: str = "post-final-completion-gate"
+    consumers: tuple[str, ...] = ()
 
 
 class InstallEvidenceReport(BaseModel):
