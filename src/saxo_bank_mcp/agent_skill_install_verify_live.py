@@ -12,7 +12,7 @@ from pydantic import TypeAdapter, ValidationError
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_env import (
     build_isolated_env,
-    cleanup_disposable_isolated_state,
+    cleanup_verify_scratch_state,
     verify_throwaway_roots,
 )
 from saxo_bank_mcp.agent_skill_install_models import (
@@ -275,8 +275,9 @@ def startup_probe_errors_for_caches(
     except Exception:  # noqa: BLE001
         errors.append("verify_env_invalid")
     finally:
-        # run_command already reaps probe children; then delete throwaway disposable trees.
-        residual = cleanup_disposable_isolated_state(run_root)
+        # run_command already reaps probe children; delete verifier scratch only
+        # (never retained home/ or codex-home/ after privacy production).
+        residual = cleanup_verify_scratch_state(run_root)
         if residual:
             errors.append("verify_scratch_residue")
     return errors
@@ -485,7 +486,7 @@ def _proof_against_disk(  # noqa: C901, PLR0912, PLR0913
         except Exception:  # noqa: BLE001
             errors.append(f"{client_name}_{label}_startup_probe_failed")
         finally:
-            residual = cleanup_disposable_isolated_state(run_root)
+            residual = cleanup_verify_scratch_state(run_root)
             if residual:
                 errors.append(f"{client_name}_{label}_verify_scratch_residue")
     return errors

@@ -23,7 +23,9 @@ from saxo_bank_mcp.agent_skill_command_runner import (
 from saxo_bank_mcp.agent_skill_install_env import (
     DisposableCleanupError,
     cleanup_disposable_isolated_state,
+    cleanup_verify_scratch_state,
     enumerated_disposable_paths,
+    enumerated_verify_scratch_paths,
     require_disposable_cleanup,
 )
 from saxo_bank_mcp.agent_skill_install_ledger import (
@@ -619,6 +621,24 @@ def test_disposable_cleanup_residue_fails_closed(
     assert err.value.residual_paths
 
 
+def _plant_retained_canaries(run_root: Path) -> dict[Path, str]:
+    """Plant retained disposable-looking canaries that verifier cleanup must leave alone."""
+    payloads: dict[Path, str] = {
+        run_root / "home/.cache/canary.txt": "retained-cache\n",
+        run_root / "home/.config/canary.txt": "retained-config\n",
+        run_root / "home/.local/canary.txt": "retained-local\n",
+        run_root
+        / "home/Library/Application Support/fastmcp/canary.txt": "retained-fastmcp\n",
+        run_root / "home/.claude/backups/canary.txt": "retained-backups\n",
+        run_root / "codex-home/.tmp/canary.txt": "retained-codex-dot-tmp\n",
+        run_root / "codex-home/tmp/canary.txt": "retained-codex-tmp\n",
+    }
+    for path, body in payloads.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+    return payloads
+
+
 def test_verify_startup_uses_throwaway_homes_and_cleans(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -627,17 +647,14 @@ def test_verify_startup_uses_throwaway_homes_and_cleans(
     codex_cache, claude_cache = _seed_retained_fixture(run_root)
     clone = run_root / "source-clone"
     retained_home = run_root / "home"
-    retained_codex = run_root / "codex-home"
-    marker = retained_home / "retained-marker"
-    marker.write_text("keep\n", encoding="utf-8")
-    fingerprint_before = {
-        "home": sorted(
-            str(path.relative_to(retained_home)) for path in retained_home.rglob("*")
-        ),
-        "codex": sorted(
-            str(path.relative_to(retained_codex)) for path in retained_codex.rglob("*")
-        ),
-    }
+    canaries = _plant_retained_canaries(run_root)
+    # Producer leftover probe-env must not be deleted by verifier scratch cleanup.
+    producer_probe = run_root / "probe-env" / "kept"
+    producer_probe.parent.mkdir(parents=True, exist_ok=True)
+    producer_probe.write_text("producer-probe\n", encoding="utf-8")
+    marketplace = run_root / "marketplace-source" / "kept"
+    marketplace.parent.mkdir(parents=True, exist_ok=True)
+    marketplace.write_text("marketplace\n", encoding="utf-8")
     captured: dict[str, Path] = {}
 
     def _fake_probe(
@@ -656,6 +673,10 @@ def test_verify_startup_uses_throwaway_homes_and_cleans(
         (home / ".cache" / "uv").mkdir(parents=True, exist_ok=True)
         (home / ".cache" / "uv" / "poison").write_text("nope\n", encoding="utf-8")
         (codex_home / "tmp").mkdir(parents=True, exist_ok=True)
+        # Shared run-root scratch from build_isolated_env for probes.
+        (run_root / "tmp" / "probe-work").mkdir(parents=True, exist_ok=True)
+        (run_root / "uv-cache" / "wheels").mkdir(parents=True, exist_ok=True)
+        (run_root / "uv-python" / "cpython").mkdir(parents=True, exist_ok=True)
         receipt = CommandReceipt(
             name=name,
             argv=("uv", "run"),
@@ -685,26 +706,116 @@ def test_verify_startup_uses_throwaway_homes_and_cleans(
         claude_cache=claude_cache,
     )
     assert "verify_scratch_residue" not in errors
-    assert captured["home"] == (run_root / "verify-home").resolve() or captured[
-        "home"
-    ] == run_root / "verify-home"
-    assert captured["codex_home"] == (run_root / "verify-codex-home").resolve() or captured[
-        "codex_home"
-    ] == run_root / "verify-codex-home"
-    assert not (run_root / "verify-home").exists()
-    assert not (run_root / "verify-codex-home").exists()
-    assert not (run_root / "verify-probe-env").exists()
-    assert marker.is_file()
-    assert not (retained_home / ".cache").exists()
-    fingerprint_after = {
-        "home": sorted(
-            str(path.relative_to(retained_home)) for path in retained_home.rglob("*")
-        ),
-        "codex": sorted(
-            str(path.relative_to(retained_codex)) for path in retained_codex.rglob("*")
-        ),
-    }
-    assert fingerprint_after == fingerprint_before
+    assert captured["home"].resolve() == (run_root / "verify-home").resolve()
+    assert captured["codex_home"].resolve() == (run_root / "verify-codex-home").resolve()
+    for scratch in enumerated_verify_scratch_paths(run_root):
+        assert not scratch.exists(), scratch
+    for path, body in canaries.items():
+        assert path.is_file()
+        assert path.read_text(encoding="utf-8") == body
+    assert producer_probe.is_file()
+    assert marketplace.is_file()
+    assert not (retained_home / ".cache" / "uv" / "poison").exists()
+
+
+def test_verify_scratch_cleanup_never_touches_retained_home_codex(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    _seed_retained_fixture(run_root)
+    canaries = _plant_retained_canaries(run_root)
+    for scratch in enumerated_verify_scratch_paths(run_root):
+        scratch.mkdir(parents=True, exist_ok=True)
+        (scratch / "gone").write_text("scratch\n", encoding="utf-8")
+    residual = cleanup_verify_scratch_state(run_root)
+    assert residual == []
+    for scratch in enumerated_verify_scratch_paths(run_root):
+        assert not scratch.exists(), scratch
+    for path, body in canaries.items():
+        assert path.read_text(encoding="utf-8") == body
+
+
+def test_retained_secret_survives_verify_cleanup_for_privacy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup verify cleanup must not erase a post-scan injected retained secret."""
+    run_root = tmp_path / "run"
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    secret_path = run_root / "home" / ".cache" / "leaked.json"
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    secret_body = json.dumps({"access_token": string.ascii_lowercase}) + "\n"
+    secret_path.write_text(secret_body, encoding="utf-8")
+
+    def _fake_probe(
+        name: str,
+        root: Path,
+        *,
+        env: dict[str, str],
+        probe_env: Path,
+    ) -> CommandResult:
+        _ = env, probe_env
+        receipt = CommandReceipt(
+            name=name,
+            argv=("uv", "run"),
+            cwd=str(root),
+            exit_code=0,
+            timed_out=False,
+            stdout_sha256="a" * 64,
+            stderr_sha256="b" * 64,
+            pid=None,
+            pgid=None,
+            cleanup_attempted=True,
+        )
+        return CommandResult(
+            receipt=receipt,
+            stdout=json.dumps({"tool_count": 39, "annotations_missing": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live.probe_root_stdio",
+        _fake_probe,
+    )
+    errors = startup_probe_errors_for_caches(
+        run_root=run_root,
+        clone=clone,
+        codex_cache=codex_cache,
+        claude_cache=claude_cache,
+    )
+    assert "verify_scratch_residue" not in errors
+    # Secret still present for later privacy verification (not erased by startup cleanup).
+    assert secret_path.is_file()
+    assert secret_path.read_text(encoding="utf-8") == secret_body
+    install = report_dir / "install.json"
+    install.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "privacy": provisional_privacy_binding(
+                    candidate_commit=COMMIT,
+                    clone_commit=COMMIT,
+                ),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PrivacyPipelineError, match="privacy_scan_failed"):
+        produce_privacy_evidence(
+            install_report_path=install,
+            report_dir=report_dir,
+            run_root=run_root,
+            version="0.1.0",
+            candidate_commit=COMMIT,
+            clone_commit=COMMIT,
+            codex_cache=codex_cache,
+            claude_cache=claude_cache,
+        )
 
 
 def test_privacy_still_rejects_secret_in_retained_state(tmp_path: Path) -> None:

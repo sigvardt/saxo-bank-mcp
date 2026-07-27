@@ -90,6 +90,16 @@ _DISPOSABLE_CODEX_HOME_RELATIVES: Final = (
 VERIFY_HOME_NAME: Final = "verify-home"
 VERIFY_CODEX_HOME_NAME: Final = "verify-codex-home"
 VERIFY_PROBE_ENV_NAME: Final = "verify-probe-env"
+# Verifier-only scratch: throwaway homes/probe plus shared run-root env dirs created by probes.
+# Never includes run_root/home/** or run_root/codex-home/**.
+_VERIFY_SCRATCH_RUN_ROOT_RELATIVES: Final = (
+    VERIFY_HOME_NAME,
+    VERIFY_CODEX_HOME_NAME,
+    VERIFY_PROBE_ENV_NAME,
+    "tmp",
+    "uv-cache",
+    "uv-python",
+)
 
 
 class EnvironmentContainmentError(ValueError):
@@ -234,7 +244,7 @@ def cleanup_disposable_isolated_state(
     *,
     extra_paths: Sequence[Path] = (),
 ) -> list[str]:
-    """Remove enumerated disposable paths. Return residual absolute paths (empty = clean).
+    """Remove producer pre-privacy disposable paths.
 
     Call only after process cleanup for commands that may hold open files under these trees.
     Does not touch source-clone, installed caches, registration files, or the six ledger roots
@@ -242,6 +252,45 @@ def cleanup_disposable_isolated_state(
     """
     targets = list(enumerated_disposable_paths(run_root))
     targets.extend(path.resolve() for path in extra_paths)
+    return _cleanup_path_list(targets)
+
+
+def enumerated_verify_scratch_paths(run_root: Path) -> tuple[Path, ...]:
+    """Verifier-created scratch only. Never includes retained home/ or codex-home/."""
+    root = run_root.resolve()
+    return tuple(root / relative for relative in _VERIFY_SCRATCH_RUN_ROOT_RELATIVES)
+
+
+def cleanup_verify_scratch_state(run_root: Path) -> list[str]:
+    """Remove verifier scratch trees only. Return residual absolute paths (empty = clean).
+
+    Safe after privacy production: must not delete or mutate run_root/home/** or
+    run_root/codex-home/** (retained fixture state for privacy re-scan).
+    """
+    return _cleanup_path_list(list(enumerated_verify_scratch_paths(run_root)))
+
+
+def require_disposable_cleanup(
+    run_root: Path,
+    *,
+    extra_paths: Sequence[Path] = (),
+) -> list[str]:
+    """Remove disposable paths and raise DisposableCleanupError if residue remains."""
+    residual = cleanup_disposable_isolated_state(run_root, extra_paths=extra_paths)
+    if residual:
+        raise DisposableCleanupError(residual)
+    return residual
+
+
+def require_verify_scratch_cleanup(run_root: Path) -> list[str]:
+    """Remove verifier scratch and raise DisposableCleanupError if residue remains."""
+    residual = cleanup_verify_scratch_state(run_root)
+    if residual:
+        raise DisposableCleanupError(residual)
+    return residual
+
+
+def _cleanup_path_list(targets: Sequence[Path]) -> list[str]:
     # Deepest paths first so nested removals do not race parents.
     ordered = sorted(set(targets), key=lambda item: len(str(item)), reverse=True)
     residual: list[str] = []
@@ -256,18 +305,6 @@ def cleanup_disposable_isolated_state(
         if os.path.lexists(path):
             residual.append(str(path.resolve() if path.exists() else path))
     return sorted(set(residual))
-
-
-def require_disposable_cleanup(
-    run_root: Path,
-    *,
-    extra_paths: Sequence[Path] = (),
-) -> list[str]:
-    """Remove disposable paths and raise DisposableCleanupError if residue remains."""
-    residual = cleanup_disposable_isolated_state(run_root, extra_paths=extra_paths)
-    if residual:
-        raise DisposableCleanupError(residual)
-    return residual
 
 
 def _remove_path_tree(path: Path) -> None:
