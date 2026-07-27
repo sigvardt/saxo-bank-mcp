@@ -198,13 +198,28 @@ def global_state_fingerprint(
     codex_global_home: Path,
     claude_global_home: Path,
 ) -> dict[str, JsonValue]:
+    # Scope uses labeled roots, never absolute private home paths in published evidence.
     return {
         "codex": _fingerprint_scope(_codex_fingerprint_targets(codex_global_home)),
         "claude": _fingerprint_scope(_claude_fingerprint_targets(claude_global_home)),
         "scope": {
-            "codex": [str(path) for path in _codex_fingerprint_targets(codex_global_home)],
-            "claude": [str(path) for path in _claude_fingerprint_targets(claude_global_home)],
+            "codex": [
+                f"${{CODEX_GLOBAL_HOME}}/{path.relative_to(codex_global_home)}"
+                if path != codex_global_home
+                else "${CODEX_GLOBAL_HOME}"
+                for path in _codex_fingerprint_targets(codex_global_home)
+            ],
+            "claude": [
+                f"${{CLAUDE_GLOBAL_HOME}}/{path.relative_to(claude_global_home)}"
+                if path != claude_global_home
+                else "${CLAUDE_GLOBAL_HOME}"
+                for path in _claude_fingerprint_targets(claude_global_home)
+            ],
             "fields": ["path", "type", "size", "mode", "sha256"],
+            "roots": {
+                "CODEX_GLOBAL_HOME": "caller_codex_global_home",
+                "CLAUDE_GLOBAL_HOME": "caller_claude_global_home",
+            },
         },
     }
 

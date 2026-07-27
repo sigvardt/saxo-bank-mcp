@@ -127,7 +127,7 @@ def _secret_patterns_in_text(file_path: Path, text: str) -> list[SecretPattern]:
         patterns.extend(_credential_patterns(scan_line))
         patterns.extend(_email_patterns(scan_line))
         patterns.extend(
-            _person_identifier_patterns(_public_metadata_scrubbed_line(file_path, scan_line)),
+            _person_identifier_patterns(_person_scan_line(file_path, scan_line)),
         )
     return patterns
 
@@ -144,7 +144,7 @@ def _python_secret_patterns(text: str) -> list[SecretPattern]:
         patterns.extend(_email_patterns(scan_line))
         patterns.extend(
             _person_identifier_patterns(
-                _public_metadata_scrubbed_line(Path("source.py"), scan_line),
+                _person_scan_line(Path("source.py"), scan_line),
             ),
         )
     return patterns
@@ -162,10 +162,21 @@ def _invalid_python_secret_patterns(text: str) -> list[SecretPattern]:
         patterns.extend(_email_patterns(scan_line))
         patterns.extend(
             _person_identifier_patterns(
-                _public_metadata_scrubbed_line(Path("source.py"), scan_line),
+                _person_scan_line(Path("source.py"), scan_line),
             ),
         )
     return patterns
+
+
+def _person_scan_line(file_path: Path, line: str) -> str:
+    # Exact public marketplace slug exemption applies everywhere; other public
+    # plugin metadata tokens remain path-gated.
+    scrubbed = scrub_bounded_fragments(
+        line,
+        SAFE_PUBLIC_METADATA_TOKENS,
+        adjacent_character_pattern=r"[A-Za-z0-9_+-]",
+    )
+    return _public_metadata_scrubbed_line(file_path, scrubbed)
 
 
 def _public_pattern(pattern: SecretPattern) -> str:

@@ -304,7 +304,12 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     )
     codex_client = _sanitize_client_report(codex_client, repo_root, repo_field=repo_field)
     claude_client = _sanitize_client_report(claude_client, repo_root, repo_field=repo_field)
-    update_probe = dict(update_probe)
+    sanitized_update = _sanitize_json_paths(
+        dict(update_probe),
+        repo_root,
+        repo_field=repo_field,
+    )
+    update_probe = dict(sanitized_update) if isinstance(sanitized_update, dict) else {}
     update_probe["temporary_fixtures_removed"] = (
         bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temps
     )
@@ -465,10 +470,33 @@ def _json_int(payload: dict[str, JsonValue], key: str) -> int:
 
 def _public_path(path: Path, repo_root: Path, *, repo_field: str) -> str:
     resolved = path.resolve()
-    if repo_field == "." and (resolved == repo_root or resolved.is_relative_to(repo_root)):
+    if resolved == repo_root or resolved.is_relative_to(repo_root):
         relative = resolved.relative_to(repo_root)
-        return "." if str(relative) == "." else str(relative)
-    return str(resolved)
+        if repo_field == ".":
+            return "." if str(relative) == "." else str(relative)
+        return str(Path(repo_field) / relative) if str(relative) != "." else repo_field
+    # Never publish absolute private roots in evidence.
+    return f"<redacted-path>/{resolved.name}"
+
+
+def _sanitize_json_paths(
+    value: JsonValue,
+    repo_root: Path,
+    *,
+    repo_field: str,
+) -> JsonValue:
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_json_paths(item, repo_root, repo_field=repo_field)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_json_paths(item, repo_root, repo_field=repo_field) for item in value
+        ]
+    if isinstance(value, str) and value.startswith(("/", str(repo_root))):
+        return _public_path(Path(value), repo_root, repo_field=repo_field)
+    return value
 
 
 def _sanitize_client_report(
