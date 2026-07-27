@@ -36,10 +36,7 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
     startup_from_probes,
 )
 from saxo_bank_mcp.agent_skill_install_env import EnvironmentContainmentError
-from saxo_bank_mcp.agent_skill_install_ledger import (
-    append_fixture_ledger_event,
-    default_ledger_path,
-)
+from saxo_bank_mcp.agent_skill_install_ledger import bind_existing_ledger_event
 from saxo_bank_mcp.agent_skill_install_models import (
     REQUIRED_FIXTURE_CONSUMERS,
     CommandReceipt,
@@ -54,7 +51,11 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     installed_inventory_check,
     owner_only_from_modes,
 )
-from saxo_bank_mcp.agent_skill_install_privacy import build_privacy_binding
+from saxo_bank_mcp.agent_skill_install_privacy import (
+    PrivacyPipelineError,
+    produce_privacy_evidence,
+    provisional_privacy_binding,
+)
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
 from saxo_bank_mcp.agent_skill_install_qa import (
     EXPECTED_MCP_SERVER_COUNT,
@@ -356,55 +357,25 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             },
         )
         return 1
-    ledger_path = options.fixture_cleanup_ledger or default_ledger_path(run_root)
-    try:
-        ledger_binding = append_fixture_ledger_event(
-            ledger_path,
-            candidate_commit=commit,
-            run_root=run_root,
-            preserved_paths=(
-                str(clone.resolve()),
-                str(codex_cache.resolve()),
-                str(claude_cache.resolve()),
-                str(home.resolve()),
-                str(codex_home.resolve()),
-                str(claude_home.resolve()),
-            ),
-            consumers=REQUIRED_FIXTURE_CONSUMERS,
-        )
-    except ValueError as exc:
-        write_json(options.out, {"status": "failed", "reason": str(exc)})
+    if options.fixture_cleanup_ledger is None:
+        write_json(options.out, {"status": "failed", "reason": "fixture_ledger_required"})
         return 1
-
-    privacy_report = options.privacy_report or (options.out.parent / "privacy-report.json")
-    privacy_self_scan = options.privacy_self_scan or (
-        options.out.parent / "privacy-self-scan.json"
+    ledger_path = options.fixture_cleanup_ledger
+    version = project_version(clone)
+    ledger_binding, ledger_errors = bind_existing_ledger_event(
+        ledger_path,
+        candidate_commit=commit,
+        run_root=run_root,
+        version=version,
     )
-    if not privacy_report.is_file() or not privacy_self_scan.is_file():
+    if ledger_binding is None:
         write_json(
             options.out,
-            {
-                "status": "failed",
-                "reason": "privacy_evidence_missing",
-                "privacy_report": str(privacy_report),
-                "privacy_self_scan": str(privacy_self_scan),
-            },
-        )
-        return 1
-    try:
-        privacy_binding = build_privacy_binding(
-            privacy_report=privacy_report,
-            privacy_self_scan=privacy_self_scan,
-            candidate_commit=commit,
-            clone_commit=commit,
-        )
-    except ValueError as exc:
-        write_json(
-            options.out,
-            {"status": "failed", "reason": "privacy_binding_invalid", "error": str(exc)},
+            {"status": "failed", "reason": "fixture_ledger_invalid", "errors": ledger_errors},
         )
         return 1
 
+    # Phase 1: provisional install — complete shape, privacy digests are zeros only.
     report: dict[str, JsonValue] = {
         "status": "passed",
         "execution_mode": "installed_verification",
@@ -423,7 +394,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         "expected_tools": options.expected_tools,
         "global_state": {"before": before, "after": after, "scope": scope},
         "global_state_unchanged": before == after,
-        "project_version": project_version(clone),
+        "project_version": version,
         "help_syntax": help_syntax_evidence(help_receipts),
         "update_probe": update_probe,
         "auth_files": _sanitize_auth_files(auth_files, path_roots),
@@ -470,7 +441,10 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "consumers": list(REQUIRED_FIXTURE_CONSUMERS),
             "ledger": ledger_binding.model_dump(mode="json"),
         },
-        "privacy": privacy_binding.model_dump(mode="json"),
+        "privacy": provisional_privacy_binding(
+            candidate_commit=commit,
+            clone_commit=commit,
+        ),
         "help_receipts": [
             _sanitize_receipt(result.receipt.model_dump(mode="json"), path_roots)
             for result in help_receipts
@@ -492,19 +466,39 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         ),
     }
     write_json(options.out, report)
+    try:
+        produce_privacy_evidence(
+            install_report_path=options.out,
+            report_dir=options.out.parent,
+            run_root=run_root,
+            version=version,
+            candidate_commit=commit,
+            clone_commit=commit,
+            codex_cache=codex_cache,
+            claude_cache=claude_cache,
+        )
+    except PrivacyPipelineError as exc:
+        write_json(
+            options.out,
+            {"status": "failed", "reason": "privacy_pipeline_failed", "error": exc.reason},
+        )
+        return 1
+    # Homes already narrowed to Path by the early isolated_home_invalid return.
     verified, errors = load_verified_install_report(
         options.out,
         codex_global_home=options.codex_global_home,
         claude_global_home=options.claude_global_home,
-        run_startup_probes=False,
         fixture_cleanup_ledger=ledger_path,
     )
     if verified is None:
-        failed = dict(report)
-        failed["status"] = "failed"
-        failed["reason"] = "producer_evidence_invalid"
-        failed["errors"] = list(errors)
-        write_json(options.out, failed)
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "producer_evidence_invalid",
+                "errors": list(errors),
+            },
+        )
         return 1
     return 0
 

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_evidence_io import git_output, resolve_commit, sha256_file
-from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.agent_skill_matrix import load_verified_matrix_report
 from saxo_bank_mcp.agent_skill_release_models import (
     AgentEvalEvidence,
@@ -175,9 +175,15 @@ def _manifest(
     inputs: ReleaseInputs,
     commit: str,
 ) -> ReleaseManifest:
-    install, _ = load_verified_install_report(inputs.install)
-    if install is None or install.candidate_commit != commit:
-        raise _ReleaseValidationError("install_evidence_invalid")
+    install, install_errors = load_install_report_for_consumers(inputs.install)
+    if (
+        install is None
+        or getattr(install, "candidate_commit", None) != commit
+        or getattr(install, "execution_mode", None) != "installed_verification"
+    ):
+        raise _ReleaseValidationError(
+            "install_evidence_invalid" if not install_errors else install_errors[0],
+        )
     matrix, _ = load_verified_matrix_report(inputs.matrix)
     if matrix is None or matrix.candidate_commit != commit:
         raise _ReleaseValidationError("sim_evidence_invalid")

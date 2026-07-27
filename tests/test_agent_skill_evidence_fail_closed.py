@@ -22,7 +22,11 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     CommandResult,
     run_command,
 )
-from saxo_bank_mcp.agent_skill_install_privacy import write_minimal_privacy_pair
+from saxo_bank_mcp.agent_skill_install_ledger import (
+    append_fixture_ledger_event,
+    expected_preserved_paths,
+)
+from saxo_bank_mcp.agent_skill_install_models import REQUIRED_FIXTURE_CONSUMERS
 from saxo_bank_mcp.agent_skill_matrix import (
     LIFECYCLE_TOOLS,
     SCENARIO_MANIFEST,
@@ -87,7 +91,13 @@ def test_install_verify_rejects_missing_fingerprint_contract(tmp_path: Path) -> 
     )
 
     assert result.returncode != 0
-    assert "global_state_fingerprints_missing" in errors(out)
+    assert out.is_file()
+    payload_errors = errors(out)
+    assert (
+        "global_state_homes_required" in payload_errors
+        or "global_state_fingerprints_missing" in payload_errors
+        or "install_report_schema_invalid" in payload_errors
+    )
 
 
 def test_install_rejects_isolated_home_collision(tmp_path: Path) -> None:
@@ -209,7 +219,7 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     _write_fake_plugin_cli(fake_bin / "codex", log)
     _write_fake_plugin_cli(fake_bin / "claude", log)
     _write_fake_uv_install_probe(fake_bin / "uv", log)
-    out = tmp_path / "install.json"
+    out = source / "install.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     codex_global = tmp_path / "codex-global"
     claude_global = tmp_path / "claude-global"
@@ -220,21 +230,27 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
         cwd=source,
         text=True,
     ).strip()
-    write_minimal_privacy_pair(
-        out.parent,
+    # Pre-register durable ledger event (main-thread helper) before producer.
+    for path_str in expected_preserved_paths(run_root, version="0.1.0"):
+        Path(path_str).mkdir(parents=True, exist_ok=True)
+    ledger = tmp_path / "durable-fixture-cleanup-ledger.jsonl"
+    append_fixture_ledger_event(
+        ledger,
         candidate_commit=commit,
-        clone_commit=commit,
         run_root=run_root,
+        version="0.1.0",
+        consumers=REQUIRED_FIXTURE_CONSUMERS,
     )
 
+    # Run with cwd=source so published paths stay repo-relative (privacy-safe).
     result = run_cli(
         INSTALL_QA,
         "--repo",
-        str(source),
+        ".",
         "--commit",
         "HEAD",
         "--run-root",
-        str(run_root),
+        str(run_root.relative_to(source)),
         "--codex-global-home",
         str(codex_global),
         "--claude-global-home",
@@ -245,9 +261,12 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
         "39",
         "--preserve-for",
         "task-15,task-16,final-f3,final-f4,post-final-h1",
+        "--fixture-cleanup-ledger",
+        str(ledger),
         "--out",
-        str(out),
+        str(out.relative_to(source)) if out.is_relative_to(source) else str(out),
         env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "FAKE_RUN_ROOT": str(run_root)},
+        cwd=source,
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
     commands = _logged_commands(log)

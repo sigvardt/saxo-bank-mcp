@@ -74,13 +74,13 @@ def run_command(  # noqa: C901, PLR0915
     def _watch() -> None:
         while not stop_watch.is_set():
             if root_pid is None:
-                time.sleep(0.01)
+                time.sleep(0.001)
                 continue
             pids, pgids = _snapshot_tree(root_pid, pgid)
             with watch_lock:
                 tracked_pids[:] = sorted(set(tracked_pids) | set(pids))
                 tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids))
-            time.sleep(0.01)
+            time.sleep(0.001)
 
     watcher: threading.Thread | None = None
     try:
@@ -95,18 +95,34 @@ def run_command(  # noqa: C901, PLR0915
         )
         root_pid = process.pid
         pgid = os.getpgid(process.pid)
+        # Immediate snapshot so fast-exit parents still leave tracked members.
+        first_pids, first_pgids = _snapshot_tree(root_pid, pgid)
+        with watch_lock:
+            tracked_pids[:] = list(first_pids)
+            tracked_pgids[:] = list(first_pgids)
         watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
         watcher.start()
         deadline = time.monotonic() + timeout_seconds
         while process.poll() is None:
+            # Continuous capture while parent is alive (escaped groups / new sessions).
+            pids_now, pgids_now = _snapshot_tree(root_pid, pgid)
+            with watch_lock:
+                tracked_pids[:] = sorted(set(tracked_pids) | set(pids_now))
+                tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids_now))
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
-            time.sleep(0.02)
+            time.sleep(0.005)
         with watch_lock:
             pids = tuple(tracked_pids)
             pgids = tuple(tracked_pgids)
         pids, pgids = _merge_snapshots(pids, pgids, *_snapshot_tree(root_pid, pgid))
+        # Always include original process group: redirected sleepers share it after parent exit.
+        # pgid is assigned from os.getpgid after Popen; keep it in the tracked set even if
+        # the parent has already exited and descendants remain only under that group.
+        tracked_pgid = pgid
+        pgids = tuple(sorted(set(pgids) | {tracked_pgid}))
+        pids = tuple(sorted(set(pids) | set(process_group_members(tracked_pgid))))
         # Kill descendants before draining pipes so background children cannot hold pipes open.
         _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
         try:

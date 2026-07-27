@@ -216,6 +216,7 @@ def run_update_probe(  # noqa: PLR0913
                 probe_env=Path(codex_env["UV_PROJECT_ENVIRONMENT"]),
                 label="codex_bumped",
                 expected_version=bump,
+                list_receipt_name="codex_plugin_list_bumped",
             ),
             "claude": _version_cache_proof(
                 marketplace,
@@ -225,6 +226,7 @@ def run_update_probe(  # noqa: PLR0913
                 probe_env=Path(claude_env["UV_PROJECT_ENVIRONMENT"]),
                 label="claude_bumped",
                 expected_version=bump,
+                list_receipt_name="claude_plugin_list_bumped",
             ),
         }
     finally:
@@ -272,6 +274,7 @@ def run_update_probe(  # noqa: PLR0913
             probe_env=Path(codex_env["UV_PROJECT_ENVIRONMENT"]),
             label="codex_restored",
             expected_version=expected_version,
+            list_receipt_name="codex_plugin_list_restored",
         ),
         "claude": _version_cache_proof(
             marketplace,
@@ -281,6 +284,7 @@ def run_update_probe(  # noqa: PLR0913
             probe_env=Path(claude_env["UV_PROJECT_ENVIRONMENT"]),
             label="claude_restored",
             expected_version=expected_version,
+            list_receipt_name="claude_plugin_list_restored",
         ),
     }
     remaining_temps = [path for path in temporary_paths if path.exists()]
@@ -435,6 +439,7 @@ def _version_cache_proof(  # noqa: PLR0913
     probe_env: Path,
     label: str,
     expected_version: str,
+    list_receipt_name: str,
 ) -> dict[str, JsonValue]:
     # Probe first (may resolve/lock under the cache), scrub runtime debris, then
     # require publishable bytes still match the bumped/restored source.
@@ -448,8 +453,9 @@ def _version_cache_proof(  # noqa: PLR0913
     )
     tool_count = payload.get("tool_count") if isinstance(payload.get("tool_count"), int) else 0
     inventory = installed_inventory_check(source, cache, publishable=publishable)
+    cache_resolved = str(cache.resolve())
     return {
-        "cache_root": str(cache),
+        "cache_root": cache_resolved,
         "version": expected_version if identity_version(cache)[1] == expected_version else "",
         "digest": tree_digest(cache, publishable),
         "source_digest": tree_digest(source, publishable),
@@ -457,6 +463,9 @@ def _version_cache_proof(  # noqa: PLR0913
         "tool_count": tool_count,
         "annotations_missing": missing_list,
         "probe_stdout_sha256": probe.receipt.stdout_sha256,
+        "list_receipt_name": list_receipt_name,
+        "registration_version": expected_version,
+        "registration_cache_root": cache_resolved,
     }
 
 

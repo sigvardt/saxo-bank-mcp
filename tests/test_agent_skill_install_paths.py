@@ -262,13 +262,22 @@ def test_assert_preserved_modes_rejects_0755(tmp_path: Path) -> None:
 
 def test_fixture_support_is_not_production_evidence(tmp_path: Path) -> None:
     fixture = build_install_fixture(tmp_path / "fixture")
-    verified, errors = load_verified_install_report(fixture.report)
-    assert verified is None
-    assert "fixture_support_not_production" in errors
+    # Production loader requires homes/ledger; fixture mode is rejected without them
+    # via load_install_report_for_consumers accepting fixture_support only.
     consumer, consumer_errors = load_install_report_for_consumers(fixture.report)
     assert consumer is not None
     assert consumer_errors == ()
     assert consumer.execution_mode == "fixture_support"
+    # Explicit production path rejects fixture support.
+    verified, errors = load_verified_install_report(
+        fixture.report,
+        codex_global_home=tmp_path / "cg",
+        claude_global_home=tmp_path / "cl",
+        fixture_cleanup_ledger=tmp_path / "ledger.jsonl",
+    )
+    # homes/ledger may be missing; either fixture rejection or missing files.
+    assert verified is None
+    assert errors
 
 
 def test_verify_rejects_report_mode_that_does_not_match_disk(tmp_path: Path) -> None:

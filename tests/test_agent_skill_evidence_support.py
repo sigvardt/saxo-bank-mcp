@@ -224,13 +224,14 @@ def run_cli(
     script: Path,
     *args: str,
     env: dict[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env is not None:
         merged_env.update(env)
     return subprocess.run(
         [sys.executable, str(script), *args],
-        cwd=ROOT,
+        cwd=ROOT if cwd is None else cwd,
         env=merged_env,
         text=True,
         capture_output=True,

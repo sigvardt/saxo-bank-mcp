@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -18,6 +22,7 @@ from saxo_bank_mcp.agent_skill_install_models import (
     InstallEvidenceReport,
     InstallManifestOptions,
     UpdateProbeEvidence,
+    VerifyReceipt,
 )
 from saxo_bank_mcp.agent_skill_install_paths import (
     ALLOWED_INSTALLER_METADATA,
@@ -33,7 +38,11 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     required_cache_files,
 )
 from saxo_bank_mcp.agent_skill_install_privacy import verify_privacy_binding
-from saxo_bank_mcp.agent_skill_install_verify_live import live_verify_errors
+from saxo_bank_mcp.agent_skill_install_verify_live import (
+    consumer_live_errors,
+    live_verify_errors,
+)
+from saxo_bank_mcp.secret_scan import scan_secret_text
 
 EXPECTED_SKILL_COUNT = 8
 EXPECTED_MCP_SERVER_COUNT = 1
@@ -107,50 +116,73 @@ def manifest_install_report(options: InstallManifestOptions) -> int:
     return 0
 
 
-def verify_install_report(  # noqa: PLR0913
+def verify_install_report(
     path: Path,
     out: Path,
     *,
     codex_global_home: Path | None = None,
     claude_global_home: Path | None = None,
-    run_startup_probes: bool = True,
     fixture_cleanup_ledger: Path | None = None,
 ) -> int:
+    if codex_global_home is None or claude_global_home is None:
+        write_json(out, {"status": "failed", "errors": ["global_state_homes_required"]})
+        return 1
+    if fixture_cleanup_ledger is None:
+        write_json(out, {"status": "failed", "errors": ["fixture_ledger_required"]})
+        return 1
     report, errors = load_verified_install_report(
         path,
         codex_global_home=codex_global_home,
         claude_global_home=claude_global_home,
-        run_startup_probes=run_startup_probes,
         fixture_cleanup_ledger=fixture_cleanup_ledger,
     )
     if report is None:
         write_json(out, {"status": "failed", "errors": list(errors)})
         return 1
-    write_json(
-        out,
-        {
-            "status": "passed",
-            "execution_mode": PRODUCTION_MODE,
-            "candidate_commit": report.candidate_commit,
-            "expected_skills": report.expected_skills,
-            "expected_mcp_servers": report.expected_mcp_servers,
-            "expected_tools": report.expected_tools,
-            "global_state_unchanged": report.global_state_unchanged,
-            "errors": [],
-        },
+    receipt = VerifyReceipt(
+        status="passed",
+        execution_mode="installed_verification",
+        candidate_commit=report.candidate_commit,
+        install_report_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        privacy_report_sha256=report.privacy.privacy_report_sha256,
+        privacy_self_scan_sha256=report.privacy.privacy_self_scan_sha256,
+        ledger_event_sha256=(
+            report.fixture_cleanup.ledger.event_sha256
+            if report.fixture_cleanup.ledger is not None
+            else "0" * 64
+        ),
+        ledger_path_sha256=(
+            report.fixture_cleanup.ledger.ledger_path_sha256
+            if report.fixture_cleanup.ledger is not None
+            else "0" * 64
+        ),
+        expected_skills=report.expected_skills,
+        expected_mcp_servers=report.expected_mcp_servers,
+        expected_tools=report.expected_tools,
+        global_state_unchanged=True,
+        global_state_recomputed=True,
+        startup_verified=True,
+        errors=(),
     )
+    payload = receipt.model_dump(mode="json")
+    # Secret-scan verify receipt in memory before atomic publish.
+    rendered = json.dumps(payload, sort_keys=True) + "\n"
+    findings, scan_errors = scan_secret_text(str(out), rendered)
+    if findings or scan_errors:
+        write_json(out, {"status": "failed", "errors": ["verify_receipt_secret_scan_failed"]})
+        return 1
+    _atomic_write_text(out, rendered)
     return 0
 
 
 def load_verified_install_report(
     path: Path,
     *,
-    codex_global_home: Path | None = None,
-    claude_global_home: Path | None = None,
-    run_startup_probes: bool = True,
-    fixture_cleanup_ledger: Path | None = None,
+    codex_global_home: Path,
+    claude_global_home: Path,
+    fixture_cleanup_ledger: Path,
 ) -> tuple[InstallEvidenceReport | None, tuple[str, ...]]:
-    """Load a production installed-verification report only."""
+    """Load a production installed-verification report with full independent checks."""
     try:
         raw_map = JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValidationError):
@@ -178,15 +210,19 @@ def load_verified_install_report(
             report,
             codex_global_home=codex_global_home,
             claude_global_home=claude_global_home,
-            run_startup_probes=run_startup_probes,
         ),
     )
     errors.extend(
         verify_privacy_binding(
             report.privacy,
             report_dir=path.parent.resolve(),
+            install_report_path=path.resolve(),
             candidate_commit=report.candidate_commit,
             clone_commit=report.clone.commit,
+            run_root=report.fixture_cleanup.run_root.resolve(),
+            version=report.project_version,
+            codex_cache=report.codex.cache_root.resolve(),
+            claude_cache=report.claude.cache_root.resolve(),
         ),
     )
     if report.fixture_cleanup.ledger is None:
@@ -197,6 +233,7 @@ def load_verified_install_report(
                 report.fixture_cleanup.ledger,
                 candidate_commit=report.candidate_commit,
                 run_root=report.fixture_cleanup.run_root.resolve(),
+                version=report.project_version,
                 ledger_path=fixture_cleanup_ledger,
             ),
         )
@@ -206,7 +243,7 @@ def load_verified_install_report(
 def load_install_report_for_consumers(
     path: Path,
 ) -> tuple[InstallEvidenceReport | FixtureSupportReport | None, tuple[str, ...]]:
-    """Downstream consumers may accept production reports or explicit fixture_support."""
+    """Fail-closed consumer contract: independent live checks + bound verify receipt."""
     try:
         raw_map = JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValidationError):
@@ -219,8 +256,60 @@ def load_install_report_for_consumers(
             return None, ("fixture_support_invalid",)
         errors = _install_report_errors(report, production=False)
         return (report, ()) if not errors else (None, tuple(errors))
-    # Consumers loading production reports skip expensive startup re-probes.
-    return load_verified_install_report(path, run_startup_probes=False)
+    try:
+        report = InstallEvidenceReport.model_validate(raw_map)
+    except ValidationError:
+        return None, ("install_report_schema_invalid",)
+    errors = _install_report_errors(report, production=True)
+    errors.extend(consumer_live_errors(report))
+    errors.extend(
+        _bound_verify_receipt_errors(
+            path.parent / "verify.json",
+            install_report=path,
+            report=report,
+        ),
+    )
+    return (report, ()) if not errors else (None, tuple(errors))
+
+
+def _bound_verify_receipt_errors(  # noqa: C901
+    verify_receipt: Path,
+    *,
+    install_report: Path,
+    report: InstallEvidenceReport,
+) -> list[str]:
+    if not verify_receipt.is_file():
+        return ["verify_receipt_missing"]
+    try:
+        receipt = VerifyReceipt.model_validate_json(verify_receipt.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
+        return ["verify_receipt_invalid"]
+    errors: list[str] = []
+    if receipt.candidate_commit != report.candidate_commit:
+        errors.append("verify_receipt_commit_mismatch")
+    actual_sha = hashlib.sha256(install_report.read_bytes()).hexdigest()
+    if receipt.install_report_sha256 != actual_sha:
+        errors.append("verify_receipt_install_digest_mismatch")
+    if receipt.privacy_report_sha256 != report.privacy.privacy_report_sha256:
+        errors.append("verify_receipt_privacy_report_digest_mismatch")
+    if receipt.privacy_self_scan_sha256 != report.privacy.privacy_self_scan_sha256:
+        errors.append("verify_receipt_privacy_self_scan_digest_mismatch")
+    ledger = report.fixture_cleanup.ledger
+    if ledger is None:
+        errors.append("verify_receipt_ledger_missing")
+    else:
+        if receipt.ledger_event_sha256 != ledger.event_sha256:
+            errors.append("verify_receipt_ledger_event_digest_mismatch")
+        if receipt.ledger_path_sha256 != ledger.ledger_path_sha256:
+            errors.append("verify_receipt_ledger_path_digest_mismatch")
+    # Re-scan receipt bytes (already on disk from verify-only).
+    findings, scan_errors = scan_secret_text(
+        str(verify_receipt),
+        verify_receipt.read_text(encoding="utf-8"),
+    )
+    if findings or scan_errors:
+        errors.append("verify_receipt_secret_scan_failed")
+    return errors
 
 
 def planning_error(options: InstallManifestOptions) -> str | None:
@@ -359,7 +448,6 @@ def _evidence_contract_errors(  # noqa: C901, PLR0912
 
 
 def _update_probe_errors(probe: UpdateProbeEvidence) -> list[str]:
-    # Typed model already enforces nested fields; keep explicit production guards.
     errors: list[str] = []
     if probe.temporary_fixtures_removed is not True:
         errors.append("temporary_fixtures_remain")
@@ -569,3 +657,16 @@ def _project_version(root: Path) -> str:
         return ""
     version = project.get("version")
     return version if isinstance(version, str) else ""
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        tmp_path.replace(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise

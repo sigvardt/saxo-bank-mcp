@@ -138,6 +138,10 @@ class VersionCacheProof(BaseModel):
     tool_count: Literal[39]
     annotations_missing: tuple[str, ...]
     probe_stdout_sha256: str = Field(pattern=SHA256_HEX)
+    # Privacy-safe fields captured from actual discovery so random digests cannot pass.
+    list_receipt_name: str = Field(min_length=1)
+    registration_version: str = Field(min_length=1)
+    registration_cache_root: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def _require_clean_annotations(self) -> VersionCacheProof:
@@ -146,6 +150,12 @@ class VersionCacheProof(BaseModel):
             raise ValueError(msg)
         if self.digest != self.source_digest:
             msg = "digest must equal source_digest"
+            raise ValueError(msg)
+        if self.registration_version != self.version:
+            msg = "registration_version must equal version"
+            raise ValueError(msg)
+        if self.registration_cache_root != self.cache_root:
+            msg = "registration_cache_root must equal cache_root"
             raise ValueError(msg)
         return self
 
@@ -198,13 +208,13 @@ class UpdateProbeEvidence(BaseModel):
 class PrivacyEvidenceBinding(BaseModel):
     """Privacy-safe binding of privacy-report.json and privacy-self-scan.json.
 
-    Order (avoids circular self-hash):
-    1. Write install report without privacy digests (or with paths only).
-    2. Write privacy-report.json over required scopes, excluding the two privacy
-       report files themselves from content-hash of this binding.
-    3. Write privacy-self-scan.json over privacy-report.json only.
-    4. Record digests of both privacy files into this binding / verify live.
-    Digests here hash the privacy files; privacy files must not embed these digests.
+    Order (non-circular):
+    1. Write provisional install.json without privacy digests.
+    2. Write privacy-report.json over retained targets (includes provisional install).
+    3. Write privacy-self-scan.json over privacy-report + canonical install form.
+    4. Finalize install.json with digests of the two privacy files only.
+    Verify rescans targets; install content scan normalizes only the two fixed-shape
+    privacy digest fields so binding digests do not create a hash cycle.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -220,16 +230,20 @@ class PrivacyEvidenceBinding(BaseModel):
     scan_errors_count: Literal[0]
     scopes_covered: tuple[str, ...] = Field(min_length=1)
     digest_order: Literal[
-        "install_then_privacy_report_then_self_scan_then_binding_digests"
-    ] = "install_then_privacy_report_then_self_scan_then_binding_digests"
+        "provisional_install_then_privacy_report_then_self_scan_then_finalize_digests"
+    ] = "provisional_install_then_privacy_report_then_self_scan_then_finalize_digests"
 
 
 class FixtureLedgerBinding(BaseModel):
-    """Privacy-safe metadata for an external JSONL cleanup ledger entry."""
+    """Privacy-safe metadata for an external JSONL cleanup ledger entry.
+
+    Does not publish the absolute external ledger path. Binds via opaque
+    sha256 of the canonical absolute ledger path plus the exact event digest.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    ledger_path: str = Field(min_length=1)
+    ledger_path_sha256: str = Field(pattern=SHA256_HEX)
     event_sha256: str = Field(pattern=SHA256_HEX)
     candidate_commit: str = Field(pattern=COMMIT_HEX)
     consumers: tuple[str, ...] = Field(min_length=1)
@@ -245,6 +259,28 @@ class FixtureLedgerBinding(BaseModel):
             msg = "consumers must match required retained fixture consumers"
             raise ValueError(msg)
         return value
+
+
+class VerifyReceipt(BaseModel):
+    """Bound successful production verify-only receipt for consumers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["passed"]
+    execution_mode: Literal["installed_verification"]
+    candidate_commit: str = Field(pattern=COMMIT_HEX)
+    install_report_sha256: str = Field(pattern=SHA256_HEX)
+    privacy_report_sha256: str = Field(pattern=SHA256_HEX)
+    privacy_self_scan_sha256: str = Field(pattern=SHA256_HEX)
+    ledger_event_sha256: str = Field(pattern=SHA256_HEX)
+    ledger_path_sha256: str = Field(pattern=SHA256_HEX)
+    expected_skills: int
+    expected_mcp_servers: int
+    expected_tools: int
+    global_state_unchanged: Literal[True]
+    global_state_recomputed: Literal[True]
+    startup_verified: Literal[True]
+    errors: tuple[str, ...] = ()
 
 
 class FixtureCleanup(BaseModel):
