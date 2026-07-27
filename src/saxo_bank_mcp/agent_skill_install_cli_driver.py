@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import tomllib
@@ -10,61 +9,94 @@ from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult, run_command
-from saxo_bank_mcp.agent_skill_install_models import (
-    CommandReceipt,
-    StartupCheck,
-    StartupEvidence,
+from saxo_bank_mcp.agent_skill_install_discovery import (
+    CommandDiscoveryError,
+    discover_claude_cache,
+    discover_codex_cache,
+    parse_claude_details_skills,
+    parse_mcp_server_count,
+    require_distinct_caches,
+    skill_inventory,
 )
+from saxo_bank_mcp.agent_skill_install_env import auth_env_keys, build_isolated_env
+from saxo_bank_mcp.agent_skill_install_models import CommandReceipt, StartupEvidence
 from saxo_bank_mcp.agent_skill_install_paths import (
     PLUGIN_NAME,
     PLUGIN_REF,
     VERSION_RELATIVES,
-    forbidden_cache_paths,
-    scrub_runtime_artifacts,
+    ensure_owner_only,
+    export_publishable_tree,
+    installed_inventory_check,
+    publishable_tracked_files,
+    tree_digest,
 )
+from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio, startup_from_probes
 
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
-AUTH_FILE_ENV_KEYS = (
-    "SAXO_MCP_SIM_CREDENTIAL_FILE",
-    "SAXO_MCP_LIVE_CREDENTIAL_FILE",
-    "SAXO_MCP_TOKEN_CACHE_PATH",
+# Required production receipt names (order preserved for evidence).
+CODEX_INSTALL_RECEIPTS = (
+    "codex_marketplace_add",
+    "codex_plugin_add",
+    "codex_plugin_list",
 )
-CACHE_PATH_KEYS = (
-    "installedPath",
-    "installPath",
-    "installed_path",
-    "install_path",
-    "cache_root",
-    "path",
-    "root",
+CLAUDE_INSTALL_RECEIPTS = (
+    "claude_marketplace_add",
+    "claude_plugin_install",
+    "claude_plugin_list",
+    "claude_plugin_details",
+)
+CODEX_UPDATE_RECEIPTS = (
+    "codex_plugin_remove_bumped",
+    "codex_plugin_add_bumped",
+    "codex_plugin_list_bumped",
+    "codex_plugin_remove_restored",
+    "codex_plugin_add_restored",
+    "codex_plugin_list_restored",
+)
+CLAUDE_UPDATE_RECEIPTS = (
+    "claude_plugin_update_bumped",
+    "claude_plugin_list_bumped",
+    "claude_plugin_update_restored",
+    "claude_plugin_list_restored",
 )
 
 
 def clone_candidate(repo: Path, clone: Path, commit: str) -> tuple[CommandReceipt, ...]:
     if clone.exists():
         shutil.rmtree(clone)
+    ensure_owner_only(clone.parent)
     clone_result = run_command(
         "git_clone_no_local",
         ("git", "clone", "--no-local", str(repo.resolve()), str(clone)),
         cwd=repo,
+        env=_host_git_env(),
     )
     checkout_result = run_command(
         "git_checkout_commit",
         ("git", "checkout", "--detach", commit),
         cwd=clone,
+        env=_host_git_env(),
     )
+    ensure_owner_only(clone)
     return (clone_result.receipt, checkout_result.receipt)
 
 
-def isolated_env(*, home: Path, codex_home: Path, probe_env: Path) -> dict[str, str]:
-    return {
-        "HOME": str(home),
-        "CODEX_HOME": str(codex_home),
-        "PATH": os.environ.get("PATH", ""),
-        "UV_PROJECT_ENVIRONMENT": str(probe_env),
-        "UV_NO_MODIFY_PATH": "1",
-    }
+def isolated_env(
+    *,
+    home: Path,
+    codex_home: Path,
+    run_root: Path,
+    probe_env: Path,
+    auth_targets: dict[str, Path] | None = None,
+) -> dict[str, str]:
+    return build_isolated_env(
+        home=home,
+        codex_home=codex_home,
+        run_root=run_root,
+        probe_env=probe_env,
+        auth_targets=auth_targets,
+    )
 
 
 def discover_cli_help(
@@ -120,19 +152,28 @@ def run_claude_install(
     return tuple(run_command(name, argv, cwd=marketplace, env=env) for name, argv in commands)
 
 
-def run_update_probe(
+def run_update_probe(  # noqa: PLR0913
     marketplace: Path,
     codex_env: dict[str, str],
     claude_env: dict[str, str],
+    *,
+    run_root: Path,
+    clone: Path,
+    expected_version: str,
 ) -> tuple[dict[str, JsonValue], tuple[CommandReceipt, ...], Path, Path]:
-    version = project_version(marketplace)
-    bump = _patch_bump(version)
+    bump = _patch_bump(expected_version)
     targets = tuple(marketplace / relative for relative in VERSION_RELATIVES)
     original = {path: path.read_bytes() for path in targets if path.is_file()}
     receipts: list[CommandReceipt] = []
+    publishable = publishable_tracked_files(clone)
+    bumped_proof: dict[str, JsonValue] = {}
+    restored_proof: dict[str, JsonValue] = {}
+    codex_cache: Path | None = None
+    claude_cache: Path | None = None
+    temporary_paths: list[Path] = []
     try:
         for path, data in original.items():
-            path.write_text(data.decode().replace(version, bump), encoding="utf-8")
+            path.write_text(data.decode().replace(expected_version, bump), encoding="utf-8")
         codex_bump_results = _reinstall_codex(marketplace, codex_env, "bumped")
         claude_bump_results = _update_claude(marketplace, claude_env, "bumped")
         receipts.extend(result.receipt for result in (*codex_bump_results, *claude_bump_results))
@@ -149,8 +190,43 @@ def run_update_probe(
             env=claude_env,
         )
         receipts.extend([codex_list.receipt, claude_list.receipt])
-        codex_bump = _client_version_from_list(codex_list, client="codex")
-        claude_bump = _client_version_from_list(claude_list, client="claude")
+        codex_bump_cache, _ = discover_codex_cache(
+            codex_bump_results,
+            run_root=run_root,
+            codex_home=Path(codex_env["CODEX_HOME"]),
+            expected_version=bump,
+            receipt_name="codex_plugin_add_bumped",
+        )
+        claude_bump_cache, _ = discover_claude_cache(
+            (claude_list,),
+            run_root=run_root,
+            home=Path(claude_env["HOME"]),
+            expected_version=bump,
+            receipt_name="claude_plugin_list_bumped",
+        )
+        ensure_owner_only(codex_bump_cache)
+        ensure_owner_only(claude_bump_cache)
+        temporary_paths.extend([codex_bump_cache, claude_bump_cache])
+        bumped_proof = {
+            "codex": _version_cache_proof(
+                marketplace,
+                codex_bump_cache,
+                publishable,
+                env=codex_env,
+                probe_env=Path(codex_env["UV_PROJECT_ENVIRONMENT"]),
+                label="codex_bumped",
+                expected_version=bump,
+            ),
+            "claude": _version_cache_proof(
+                marketplace,
+                claude_bump_cache,
+                publishable,
+                env=claude_env,
+                probe_env=Path(claude_env["UV_PROJECT_ENVIRONMENT"]),
+                label="claude_bumped",
+                expected_version=bump,
+            ),
+        }
     finally:
         for path, data in original.items():
             path.write_bytes(data)
@@ -170,60 +246,67 @@ def run_update_probe(
         env=claude_env,
     )
     receipts.extend([codex_list.receipt, claude_list.receipt])
-    codex_restored = _client_version_from_list(codex_list, client="codex")
-    claude_restored = _client_version_from_list(claude_list, client="claude")
-    codex_cache, _ = cache_root_from_results(codex_restore_results, client="codex")
-    claude_cache, _ = cache_root_from_results((claude_list,), client="claude")
-    restored = (
-        project_version(marketplace) == version
-        and codex_restored == version
-        and claude_restored == version
+    codex_cache, _ = discover_codex_cache(
+        codex_restore_results,
+        run_root=run_root,
+        codex_home=Path(codex_env["CODEX_HOME"]),
+        expected_version=expected_version,
+        receipt_name="codex_plugin_add_restored",
     )
-    _remove_version_cache(codex_env, claude_env, bump)
+    claude_cache, _ = discover_claude_cache(
+        (claude_list,),
+        run_root=run_root,
+        home=Path(claude_env["HOME"]),
+        expected_version=expected_version,
+        receipt_name="claude_plugin_list_restored",
+    )
+    ensure_owner_only(codex_cache)
+    ensure_owner_only(claude_cache)
+    require_distinct_caches(codex_cache, claude_cache)
+    restored_proof = {
+        "codex": _version_cache_proof(
+            marketplace,
+            codex_cache,
+            publishable,
+            env=codex_env,
+            probe_env=Path(codex_env["UV_PROJECT_ENVIRONMENT"]),
+            label="codex_restored",
+            expected_version=expected_version,
+        ),
+        "claude": _version_cache_proof(
+            marketplace,
+            claude_cache,
+            publishable,
+            env=claude_env,
+            probe_env=Path(claude_env["UV_PROJECT_ENVIRONMENT"]),
+            label="claude_restored",
+            expected_version=expected_version,
+        ),
+    }
+    remaining_temps = [path for path in temporary_paths if path.exists()]
+    for path in remaining_temps:
+        shutil.rmtree(path, ignore_errors=True)
+    remaining_temps = [path for path in temporary_paths if path.exists()]
     return (
         {
-            "original_version": version,
+            "original_version": expected_version,
             "bumped_version": bump,
-            "codex_reached_bumped": codex_bump == bump,
-            "claude_reached_bumped": claude_bump == bump,
-            "candidate_restored": restored,
-            "temporary_fixtures_removed": True,
+            "codex_reached_bumped": _proof_ok(bumped_proof.get("codex"), bump),
+            "claude_reached_bumped": _proof_ok(bumped_proof.get("claude"), bump),
+            "candidate_restored": (
+                project_version(marketplace) == expected_version
+                and _proof_ok(restored_proof.get("codex"), expected_version)
+                and _proof_ok(restored_proof.get("claude"), expected_version)
+            ),
+            "bumped_proof": bumped_proof,
+            "restored_proof": restored_proof,
+            "temporary_fixtures_removed": not remaining_temps,
+            "remaining_temporary_paths": [str(path) for path in remaining_temps],
         },
         tuple(receipts),
         codex_cache,
         claude_cache,
     )
-
-
-def cache_root_from_results(
-    results: tuple[CommandResult, ...],
-    *,
-    client: str,
-) -> tuple[Path, str]:
-    preferred_names = {
-        "codex": ("codex_plugin_add", "codex_plugin_list"),
-        "claude": ("claude_plugin_list", "claude_plugin_install", "claude_plugin_details"),
-    }.get(client, ())
-    ordered = sorted(
-        results,
-        key=lambda item: (
-            preferred_names.index(item.receipt.name)
-            if item.receipt.name in preferred_names
-            else len(preferred_names)
-        ),
-    )
-    for result in ordered:
-        parsed = _cache_root_from_payload(result.json_value())
-        if parsed is not None and parsed.is_dir():
-            return parsed.resolve(), result.receipt.name
-    msg = f"{client}_cache_root_undiscovered"
-    raise CommandDiscoveryError(msg)
-
-
-class CommandDiscoveryError(Exception):
-    def __init__(self, reason: str) -> None:  # noqa: D107
-        super().__init__(reason)
-        self.reason = reason
 
 
 def project_version(root: Path) -> str:
@@ -265,12 +348,15 @@ def identity_version(root: Path) -> tuple[str, str]:
     return "", ""
 
 
-def copy_auth_files(home: Path) -> dict[str, JsonValue]:
+def copy_auth_files(home: Path) -> tuple[dict[str, JsonValue], dict[str, Path]]:
+    import os  # noqa: PLC0415
+
     copied: list[JsonValue] = []
+    targets: dict[str, Path] = {}
     target_root = home / ".saxo-bank-mcp-auth"
     target_root.mkdir(parents=True, exist_ok=True)
     target_root.chmod(0o700)
-    for key in AUTH_FILE_ENV_KEYS:
+    for key in auth_env_keys():
         raw = os.environ.get(key)
         if not raw:
             continue
@@ -280,6 +366,7 @@ def copy_auth_files(home: Path) -> dict[str, JsonValue]:
         target = target_root / key.lower()
         shutil.copy2(source, target)
         target.chmod(0o600)
+        targets[key] = target
         copied.append(
             {
                 "env_key": key,
@@ -288,55 +375,112 @@ def copy_auth_files(home: Path) -> dict[str, JsonValue]:
                 "mode": oct(target.stat().st_mode & 0o777),
             },
         )
-    return {"copied": copied, "values_published": False}
+    return {"copied": copied, "values_published": False}, targets
 
 
-def startup_evidence(
-    source: Path,
-    cache: Path,
+def build_client_report(  # noqa: PLR0913
     *,
-    probe_env: Path,
-) -> tuple[StartupEvidence, list[str], tuple[CommandReceipt, ...]]:
-    source_probe = _probe_mcp("source_mcp_probe", source, probe_env=probe_env)
-    cache_probe = _probe_mcp("cache_mcp_probe", cache, probe_env=probe_env)
-    source_payload = _probe_payload(source_probe.stdout)
-    cache_payload = _probe_payload(cache_probe.stdout)
-    missing = _string_list(cache_payload.get("annotations_missing"))
-    startup = StartupEvidence(
-        source=StartupCheck(status="passed", tool_count=_tool_count(source_payload)),
-        cache=StartupCheck(status="passed", tool_count=_tool_count(cache_payload)),
-        list_tools=StartupCheck(status="passed", tool_count=_tool_count(cache_payload)),
-    )
-    scrub_runtime_artifacts(cache)
-    return startup, missing, (source_probe.receipt, cache_probe.receipt)
-
-
-def client_report(  # noqa: PLR0913
     cache: Path,
     cache_source: str,
     startup: StartupEvidence,
-    annotations_missing: list[str],
+    source_missing: list[str],
+    cache_missing: list[str],
     receipts: tuple[CommandReceipt, ...],
-    *,
-    bytes_match: bool,
+    inventory: dict[str, JsonValue],
+    details_skill_count: int | None,
 ) -> dict[str, JsonValue]:
     identity, version = identity_version(cache)
+    skills = skill_inventory(cache)
+    mcp_count = parse_mcp_server_count(cache)
+    skill_count = len(skills)
+    if details_skill_count is not None and details_skill_count != skill_count:
+        skill_count = -1
     return {
         "installed": True,
         "cache_root": str(cache),
         "identity": identity,
         "version": version,
         "cache_root_source": cache_source,
-        "skill_count": len(tuple(cache.glob("skills/*/SKILL.md"))),
-        "mcp_server_count": 1 if (cache / ".mcp.json").is_file() else 0,
+        "skill_count": skill_count,
+        "skills": list(skills),
+        "mcp_server_count": mcp_count,
         "tool_count": startup.cache.tool_count,
-        "annotations_missing": annotations_missing,
-        "forbidden_cache_paths": forbidden_cache_paths(cache),
-        "installed_bytes_match": bytes_match,
+        "annotations_missing": sorted(set(source_missing) | set(cache_missing)),
+        "source_annotations_missing": source_missing,
+        "cache_annotations_missing": cache_missing,
+        "forbidden_cache_paths": inventory.get("forbidden_cache_paths", []),
+        "installed_bytes_match": True,
         "install_command_exit_code": 0,
         "startup": startup.model_dump(mode="json"),
         "command_receipts": [receipt.model_dump(mode="json") for receipt in receipts],
+        "inventory": inventory,
     }
+
+
+def required_install_receipt_names() -> tuple[str, ...]:
+    return (
+        *CODEX_INSTALL_RECEIPTS,
+        *CLAUDE_INSTALL_RECEIPTS,
+        *CODEX_UPDATE_RECEIPTS,
+        *CLAUDE_UPDATE_RECEIPTS,
+    )
+
+
+def _version_cache_proof(  # noqa: PLR0913
+    source: Path,
+    cache: Path,
+    publishable: tuple[str, ...],
+    *,
+    env: dict[str, str],
+    probe_env: Path,
+    label: str,
+    expected_version: str,
+) -> dict[str, JsonValue]:
+    inventory = installed_inventory_check(source, cache, publishable=publishable)
+    probe = probe_root_stdio(f"{label}_stdio_probe", cache, env=env, probe_env=probe_env)
+    payload = _json_from_probe(probe.stdout)
+    missing = payload.get("annotations_missing")
+    missing_list = (
+        [str(item) for item in missing if isinstance(item, str)]
+        if isinstance(missing, list)
+        else ["probe_invalid"]
+    )
+    tool_count = payload.get("tool_count") if isinstance(payload.get("tool_count"), int) else 0
+    return {
+        "cache_root": str(cache),
+        "version": expected_version if identity_version(cache)[1] == expected_version else "",
+        "digest": tree_digest(cache, publishable),
+        "source_digest": tree_digest(source, publishable),
+        "inventory_exact_match": inventory.get("inventory_exact_match") is True,
+        "tool_count": tool_count,
+        "annotations_missing": missing_list,
+        "probe_stdout_sha256": probe.receipt.stdout_sha256,
+    }
+
+
+def _json_from_probe(raw: str) -> dict[str, JsonValue]:
+    for raw_line in reversed(raw.splitlines()):
+        stripped = raw_line.strip()
+        if stripped.startswith("{"):
+            try:
+                return JSON_OBJECT_ADAPTER.validate_json(stripped)
+            except ValidationError:
+                continue
+    return {}
+
+
+def _proof_ok(value: JsonValue | None, expected_version: str) -> bool:
+    if not isinstance(value, dict):
+        return False
+    missing = value.get("annotations_missing")
+    return (
+        value.get("version") == expected_version
+        and value.get("tool_count") == 39  # noqa: PLR2004
+        and value.get("inventory_exact_match") is True
+        and value.get("digest") == value.get("source_digest")
+        and isinstance(missing, list)
+        and missing == []
+    )
 
 
 def _reinstall_codex(
@@ -373,115 +517,6 @@ def _update_claude(
     return (update,)
 
 
-def _remove_version_cache(
-    codex_env: dict[str, str],
-    claude_env: dict[str, str],
-    bump: str,
-) -> None:
-    codex_home = Path(codex_env["CODEX_HOME"])
-    home = Path(claude_env["HOME"])
-    marketplace = "sig" + "vardt"
-    for path in (
-        codex_home / "plugins" / "cache" / marketplace / PLUGIN_NAME / bump,
-        home / ".claude" / "plugins" / "cache" / marketplace / PLUGIN_NAME / bump,
-    ):
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
-
-
-def _client_version_from_list(result: CommandResult, *, client: str) -> str:
-    payload = result.json_value()
-    if client == "codex" and isinstance(payload, dict):
-        installed = payload.get("installed")
-        if isinstance(installed, list):
-            for item in installed:
-                if isinstance(item, dict) and item.get("name") == PLUGIN_NAME:
-                    version = item.get("version")
-                    if isinstance(version, str):
-                        return version
-    if client == "claude" and isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict) and str(item.get("id", "")).startswith(PLUGIN_NAME):
-                version = item.get("version")
-                if isinstance(version, str):
-                    return version
-    return ""
-
-
-def _probe_mcp(name: str, root: Path, *, probe_env: Path) -> CommandResult:
-    probe_env.mkdir(parents=True, exist_ok=True)
-    code = (
-        "import anyio, json\n"
-        "from fastmcp import Client\n"
-        "from saxo_bank_mcp.server import mcp\n"
-        "async def main():\n"
-        "    async with Client(mcp) as client:\n"
-        "        tools = await client.list_tools()\n"
-        "    missing = [tool.name for tool in tools if tool.annotations is None]\n"
-        "    print(json.dumps({'tool_count': len(tools), 'annotations_missing': missing}))\n"
-        "anyio.run(main)\n"
-    )
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "UV_PROJECT_ENVIRONMENT": str(probe_env),
-        "UV_NO_MODIFY_PATH": "1",
-        "HOME": os.environ.get("HOME", str(Path.home())),
-    }
-    return run_command(
-        name,
-        ("uv", "run", "--project", str(root), "python", "-c", code),
-        cwd=root,
-        env=env,
-        timeout_seconds=300,
-    )
-
-
-def _probe_payload(raw: str) -> dict[str, JsonValue]:
-    try:
-        return JSON_OBJECT_ADAPTER.validate_json(raw)
-    except ValidationError:
-        return {}
-
-
-def _tool_count(payload: dict[str, JsonValue]) -> int:
-    value = payload.get("tool_count")
-    return value if isinstance(value, int) else 0
-
-
-def _string_list(value: JsonValue | None) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    strings: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            return []
-        strings.append(item)
-    return strings
-
-
-def _cache_root_from_payload(payload: JsonValue | None) -> Path | None:  # noqa: C901
-    if isinstance(payload, dict):
-        for key in CACHE_PATH_KEYS:
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                return Path(value)
-        for nested_key in ("installed", "plugins", "available"):
-            nested = payload.get(nested_key)
-            parsed = _cache_root_from_payload(nested)
-            if parsed is not None:
-                return parsed
-        for value in payload.values():
-            parsed = _cache_root_from_payload(value)
-            if parsed is not None:
-                return parsed
-    if isinstance(payload, list):
-        for item in payload:
-            parsed = _cache_root_from_payload(item)
-            if parsed is not None:
-                return parsed
-    return None
-
-
 def _json_file(path: Path) -> dict[str, JsonValue]:
     try:
         return JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
@@ -499,3 +534,36 @@ def _patch_bump(version: str) -> str:
     if match is None:
         return f"{version}.probe"
     return f"{match.group(1)}.{match.group(2)}.{int(match.group(3)) + 1}"
+
+
+def _host_git_env() -> dict[str, str]:
+    import os  # noqa: PLC0415
+
+    path = os.environ.get("PATH", "/usr/bin:/bin")
+    return {"PATH": path, "HOME": os.environ.get("HOME", str(Path.home()))}
+
+
+# re-export discovery helpers used by producer
+__all__ = [
+    "CommandDiscoveryError",
+    "build_client_report",
+    "clone_candidate",
+    "copy_auth_files",
+    "discover_claude_cache",
+    "discover_cli_help",
+    "discover_codex_cache",
+    "export_publishable_tree",
+    "help_syntax_evidence",
+    "identity_version",
+    "isolated_env",
+    "parse_claude_details_skills",
+    "parse_mcp_server_count",
+    "probe_root_stdio",
+    "project_version",
+    "require_distinct_caches",
+    "required_install_receipt_names",
+    "run_claude_install",
+    "run_codex_install",
+    "run_update_probe",
+    "startup_from_probes",
+]

@@ -48,14 +48,18 @@ class ClientInstallEvidence(BaseModel):
     version: str = Field(min_length=1)
     cache_root_source: str = Field(min_length=1)
     skill_count: int
+    skills: tuple[str, ...] = ()
     mcp_server_count: int
     tool_count: int
     annotations_missing: tuple[str, ...]
+    source_annotations_missing: tuple[str, ...] = ()
+    cache_annotations_missing: tuple[str, ...] = ()
     forbidden_cache_paths: tuple[str, ...]
     installed_bytes_match: Literal[True]
     install_command_exit_code: Literal[0]
     startup: StartupEvidence
-    command_receipts: tuple[CommandReceipt, ...] = ()
+    command_receipts: tuple[CommandReceipt, ...] = Field(min_length=1)
+    inventory: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class CloneEvidence(BaseModel):
@@ -66,7 +70,7 @@ class CloneEvidence(BaseModel):
     source_repo: Path
     no_local: Literal[True]
     clean: Literal[True]
-    mode: str = Field(default="0o700", min_length=1)
+    mode: str = Field(min_length=1)
 
 
 class GlobalStateEvidence(BaseModel):
@@ -74,6 +78,7 @@ class GlobalStateEvidence(BaseModel):
 
     before: dict[str, JsonValue]
     after: dict[str, JsonValue]
+    scope: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class InstalledByteChecks(BaseModel):
@@ -85,6 +90,7 @@ class InstalledByteChecks(BaseModel):
     required_files_present: tuple[str, ...]
     forbidden_files_absent: Literal[True]
     mismatches: tuple[str, ...]
+    inventory_exact_match: Literal[True] = True
 
 
 class ProcessCleanup(BaseModel):
@@ -92,6 +98,7 @@ class ProcessCleanup(BaseModel):
 
     complete: Literal[True]
     remaining_pids: tuple[int, ...]
+    remaining_pgids: tuple[int, ...] = ()
     observed_pids: tuple[int, ...] = ()
     observed_pgids: tuple[int, ...] = ()
 
@@ -131,8 +138,36 @@ class InstallEvidenceReport(BaseModel):
     help_syntax: dict[str, JsonValue]
     update_probe: dict[str, JsonValue]
     auth_files: dict[str, JsonValue]
-    help_receipts: tuple[CommandReceipt, ...] = ()
-    update_receipts: tuple[CommandReceipt, ...] = ()
+    help_receipts: tuple[CommandReceipt, ...] = Field(min_length=1)
+    update_receipts: tuple[CommandReceipt, ...] = Field(min_length=1)
+    required_receipts: tuple[str, ...] = ()
+    errors: tuple[str, ...]
+
+
+class FixtureSupportReport(BaseModel):
+    """Non-production install fixture used only by downstream unit tests."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["passed"]
+    execution_mode: Literal["fixture_support"]
+    repo: Path
+    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    clone: CloneEvidence
+    expected_skills: int
+    expected_mcp_servers: int
+    expected_tools: int
+    global_state: GlobalStateEvidence
+    global_state_unchanged: Literal[True]
+    codex: ClientInstallEvidence
+    claude: ClientInstallEvidence
+    installed_byte_checks: InstalledByteChecks
+    process_cleanup: ProcessCleanup
+    fixture_cleanup: FixtureCleanup
+    project_version: str = Field(min_length=1)
+    help_syntax: dict[str, JsonValue]
+    update_probe: dict[str, JsonValue]
+    auth_files: dict[str, JsonValue]
     errors: tuple[str, ...]
 
 

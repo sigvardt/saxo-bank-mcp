@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -9,16 +8,22 @@ from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_evidence_io import git_output, resolve_commit
+from saxo_bank_mcp.agent_skill_install_cli_driver import required_install_receipt_names
+from saxo_bank_mcp.agent_skill_install_discovery import parse_mcp_server_count, skill_inventory
 from saxo_bank_mcp.agent_skill_install_models import (
     ClientInstallEvidence,
+    FixtureSupportReport,
     InstallEvidenceReport,
     InstallManifestOptions,
 )
 from saxo_bank_mcp.agent_skill_install_paths import (
+    ALLOWED_INSTALLER_METADATA,
     OWNER_ONLY_MODE,
     PRESERVED_ROOT_LABELS,
     REQUIRED_CACHE_FILES,
+    forbidden_cache_paths,
     global_state_fingerprint,
+    installed_inventory_check,
     owner_only_from_modes,
     owner_only_mode,
     publishable_tracked_files,
@@ -30,6 +35,8 @@ EXPECTED_MCP_SERVER_COUNT = 1
 EXPECTED_TOOL_COUNT = 39
 SHA256_HEX_LENGTH = 64
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
+PRODUCTION_MODE = "installed_verification"
+FIXTURE_MODE = "fixture_support"
 
 
 def write_install_fixture(fixture: str, out: Path) -> int:
@@ -80,7 +87,11 @@ def manifest_install_report(options: InstallManifestOptions) -> int:
             "repo": str(options.repo.resolve()),
             "candidate_commit": commit,
             "isolated_roots": isolated,
-            "global_state_before": before,
+            "global_state_before": {
+                "codex": before["codex"],
+                "claude": before["claude"],
+            },
+            "global_state_scope": before.get("scope", {}),
             "expected_skills": options.expected_skills,
             "expected_mcp_servers": EXPECTED_MCP_SERVER_COUNT,
             "expected_tools": options.expected_tools,
@@ -100,7 +111,7 @@ def verify_install_report(path: Path, out: Path) -> int:
         out,
         {
             "status": "passed",
-            "execution_mode": "installed_verification",
+            "execution_mode": PRODUCTION_MODE,
             "candidate_commit": report.candidate_commit,
             "expected_skills": report.expected_skills,
             "expected_mcp_servers": report.expected_mcp_servers,
@@ -115,22 +126,45 @@ def verify_install_report(path: Path, out: Path) -> int:
 def load_verified_install_report(
     path: Path,
 ) -> tuple[InstallEvidenceReport | None, tuple[str, ...]]:
+    """Load a production installed-verification report only."""
     try:
-        report = InstallEvidenceReport.model_validate_json(path.read_text(encoding="utf-8"))
-    except OSError:
+        raw_map = JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
         return None, ("invalid_install_report",)
-    except (ValidationError, json.JSONDecodeError) as exc:
-        if isinstance(exc, ValidationError):
-            if any(item["type"] == "json_invalid" for item in exc.errors()):
-                return None, ("invalid_install_report",)
-            roots = {str(item["loc"][0]) for item in exc.errors() if item["loc"]}
-            errors = ["install_report_schema_invalid"]
-            if "global_state" in roots:
-                errors.append("global_state_fingerprints_missing")
-            return None, tuple(errors)
-        return None, ("invalid_install_report",)
-    errors = _install_report_errors(report)
+    mode = raw_map.get("execution_mode")
+    if mode == FIXTURE_MODE:
+        return None, ("fixture_support_not_production",)
+    try:
+        report = InstallEvidenceReport.model_validate(raw_map)
+    except ValidationError as exc:
+        if any(item["type"] == "json_invalid" for item in exc.errors()):
+            return None, ("invalid_install_report",)
+        roots = {str(item["loc"][0]) for item in exc.errors() if item["loc"]}
+        errors = ["install_report_schema_invalid"]
+        if "global_state" in roots:
+            errors.append("global_state_fingerprints_missing")
+        return None, tuple(errors)
+    errors = _install_report_errors(report, production=True)
     return (report, ()) if not errors else (None, tuple(errors))
+
+
+def load_install_report_for_consumers(
+    path: Path,
+) -> tuple[InstallEvidenceReport | FixtureSupportReport | None, tuple[str, ...]]:
+    """Downstream consumers may accept production reports or explicit fixture_support."""
+    try:
+        raw_map = JSON_OBJECT_ADAPTER.validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValidationError):
+        return None, ("invalid_install_report",)
+    mode = raw_map.get("execution_mode")
+    if mode == FIXTURE_MODE:
+        try:
+            report = FixtureSupportReport.model_validate(raw_map)
+        except ValidationError:
+            return None, ("fixture_support_invalid",)
+        errors = _install_report_errors(report, production=False)
+        return (report, ()) if not errors else (None, tuple(errors))
+    return load_verified_install_report(path)
 
 
 def planning_error(options: InstallManifestOptions) -> str | None:
@@ -174,23 +208,29 @@ def planning_error(options: InstallManifestOptions) -> str | None:
 def path_fingerprint(path: Path | None) -> str:
     if path is None:
         return "missing"
-    # Compatibility helper for older tests; prefer global_state_fingerprint.
-    return global_state_fingerprint(path, path)["codex"]
+    return str(global_state_fingerprint(path, path)["codex"])
 
 
-def _install_report_errors(report: InstallEvidenceReport) -> list[str]:
+def _install_report_errors(
+    report: InstallEvidenceReport | FixtureSupportReport,
+    *,
+    production: bool,
+) -> list[str]:
     repo = report.repo.resolve()
     clone = report.clone.path.resolve()
     run_root = report.fixture_cleanup.run_root.resolve()
     errors = _repository_errors(report, repo, clone, run_root)
-    errors.extend(_evidence_contract_errors(report))
+    errors.extend(_evidence_contract_errors(report, production=production))
     for name, client in (("codex", report.codex), ("claude", report.claude)):
-        errors.extend(_client_errors(name, client, clone, run_root))
+        errors.extend(_client_errors(name, client, clone, run_root, production=production))
+    if production:
+        errors.extend(_receipt_lifecycle_errors(report))
+        errors.extend(_live_cache_rescan_errors(report))
     return errors
 
 
 def _repository_errors(
-    report: InstallEvidenceReport,
+    report: InstallEvidenceReport | FixtureSupportReport,
     repo: Path,
     clone: Path,
     run_root: Path,
@@ -217,15 +257,26 @@ def _repository_errors(
     return errors
 
 
-def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:  # noqa: C901
+def _evidence_contract_errors(  # noqa: C901, PLR0912
+    report: InstallEvidenceReport | FixtureSupportReport,
+    *,
+    production: bool,
+) -> list[str]:
     errors: list[str] = []
     if report.global_state.before != report.global_state.after or not _valid_fingerprints(
         report.global_state.before,
+        production=production,
     ):
         errors.append("global_state_fingerprint_mismatch")
+    if production and not report.global_state.scope:
+        errors.append("global_state_scope_missing")
     if report.errors or report.installed_byte_checks.mismatches:
         errors.append("install_report_contains_errors")
-    if report.process_cleanup.remaining_pids:
+    if report.process_cleanup.remaining_pids or getattr(
+        report.process_cleanup,
+        "remaining_pgids",
+        (),
+    ):
         errors.append("process_cleanup_incomplete")
     expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
     if (report.expected_skills, report.expected_mcp_servers, report.expected_tools) != expected:
@@ -240,15 +291,138 @@ def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:  # no
         errors.append("codex_update_version_not_reached")
     if report.update_probe.get("claude_reached_bumped") is not True:
         errors.append("claude_update_version_not_reached")
+    if production and report.update_probe.get("temporary_fixtures_removed") is not True:
+        errors.append("temporary_fixtures_remain")
     if not _auth_metadata_owner_only(report.auth_files):
         errors.append("auth_file_metadata_invalid")
     if report.fixture_cleanup.teardown_owner != "post-final-completion-gate":
         errors.append("fixture_teardown_owner_invalid")
     errors.extend(_preserved_mode_errors(report))
+    if report.codex.cache_root.resolve() == report.claude.cache_root.resolve():
+        errors.append("cache_roots_not_distinct")
     return errors
 
 
-def _preserved_mode_errors(report: InstallEvidenceReport) -> list[str]:
+def _receipt_lifecycle_errors(report: InstallEvidenceReport | FixtureSupportReport) -> list[str]:
+    if not isinstance(report, InstallEvidenceReport):
+        return ["production_receipts_required"]
+    names = [receipt.name for receipt in (*report.help_receipts, *report.update_receipts)]
+    for client in (report.codex, report.claude):
+        names.extend(receipt.name for receipt in client.command_receipts)
+    required = set(required_install_receipt_names())
+    present = set(names)
+    errors: list[str] = []
+    missing = sorted(required - present)
+    if missing:
+        errors.append("required_receipts_missing")
+    # No zero-exit duplicates for install names.
+    for required_name in required:
+        count = sum(1 for name in names if name == required_name)
+        if count != 1:
+            errors.append(f"receipt_count_invalid:{required_name}")
+    for receipt in (
+        *report.help_receipts,
+        *report.update_receipts,
+        *report.codex.command_receipts,
+        *report.claude.command_receipts,
+    ):
+        if receipt.exit_code != 0 or receipt.timed_out:
+            errors.append(f"receipt_failed:{receipt.name}")  # noqa: PERF401
+    return errors
+
+
+def _live_cache_rescan_errors(report: InstallEvidenceReport | FixtureSupportReport) -> list[str]:
+    errors: list[str] = []
+    clone = report.clone.path.resolve()
+    for name, client in (("codex", report.codex), ("claude", report.claude)):
+        cache = client.cache_root.resolve()
+        inventory = installed_inventory_check(clone, cache)
+        if inventory.get("inventory_exact_match") is not True:
+            errors.append(f"{name}_live_inventory_mismatch")
+        if inventory.get("forbidden_files_absent") is not True:
+            errors.append(f"{name}_live_forbidden_present")
+        if forbidden_cache_paths(cache):
+            errors.append(f"{name}_live_forbidden_present")
+        if parse_mcp_server_count(cache) != EXPECTED_MCP_SERVER_COUNT:
+            errors.append(f"{name}_live_mcp_count_invalid")
+        if len(skill_inventory(cache)) != EXPECTED_SKILL_COUNT:
+            errors.append(f"{name}_live_skill_count_invalid")
+        meta = inventory.get("metadata_exceptions")
+        if isinstance(meta, list):
+            unexpected = [item for item in meta if item not in ALLOWED_INSTALLER_METADATA]
+            if unexpected:
+                errors.append(f"{name}_unexpected_installer_metadata")
+    return errors
+
+
+def _valid_fingerprints(values: Mapping[str, JsonValue], *, production: bool) -> bool:
+    expected_keys = {"codex", "claude"}
+    if set(values) != expected_keys:
+        return False
+    for value in values.values():
+        if not isinstance(value, str):
+            return False
+        if len(value) != SHA256_HEX_LENGTH:
+            return False
+        if not all(character in "0123456789abcdef" for character in value):
+            return False
+        if production and value in {"0" * 64, "a" * 64, "b" * 64, "c" * 64}:
+            return False
+    return True
+
+
+def _client_errors(  # noqa: C901
+
+    name: str,
+    client: ClientInstallEvidence,
+    clone: Path,
+    run_root: Path,
+    *,
+    production: bool,
+) -> list[str]:
+    cache = client.cache_root.resolve()
+    errors: list[str] = []
+    if not cache.is_dir() or not cache.is_relative_to(run_root):
+        errors.append(f"{name}_cache_invalid")
+        return errors
+    guessed_sources = {
+        "missing",
+        "isolated_cache_tree",
+        "isolated_cache_inventory",
+        "fixture",
+    }
+    if client.cache_root_source in guessed_sources and (
+        production or client.cache_root_source != "fixture"
+    ):
+        errors.append(f"{name}_cache_root_guessed")
+    expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
+    if (client.skill_count, client.mcp_server_count, client.tool_count) != expected:
+        errors.append(f"{name}_count_mismatch")
+    if client.identity != "saxo-bank-mcp" or client.version != _project_version(clone):
+        errors.append(f"{name}_identity_version_invalid")
+    if client.annotations_missing or client.forbidden_cache_paths:
+        errors.append(f"{name}_cache_inventory_invalid")
+    if client.source_annotations_missing or client.cache_annotations_missing:
+        errors.append(f"{name}_annotations_missing")
+    checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
+    if any(check.tool_count != EXPECTED_TOOL_COUNT for check in checks):
+        errors.append(f"{name}_startup_invalid")
+    if production and len(client.command_receipts) < 1:
+        errors.append(f"{name}_receipts_missing")
+    required = required_cache_files(clone)
+    if len(required) != len(REQUIRED_CACHE_FILES) + EXPECTED_SKILL_COUNT:
+        errors.append(f"{name}_skill_inventory_invalid")
+    elif any(not _same_bytes(clone / relative, cache / relative) for relative in required):
+        errors.append(f"{name}_installed_bytes_mismatch")
+    public_files = publishable_tracked_files(clone)
+    if not public_files or any(
+        not _same_bytes(clone / relative, cache / relative) for relative in public_files
+    ):
+        errors.append(f"{name}_tracked_public_tree_mismatch")
+    return errors
+
+
+def _preserved_mode_errors(report: InstallEvidenceReport | FixtureSupportReport) -> list[str]:
     cleanup = report.fixture_cleanup
     modes = cleanup.modes
     errors: list[str] = []
@@ -273,7 +447,9 @@ def _preserved_mode_errors(report: InstallEvidenceReport) -> list[str]:
     return errors
 
 
-def _resolved_preserved_roots(report: InstallEvidenceReport) -> dict[str, Path]:
+def _resolved_preserved_roots(
+    report: InstallEvidenceReport | FixtureSupportReport,
+) -> dict[str, Path]:
     run_root = report.fixture_cleanup.run_root.resolve()
     clone = report.clone.path.resolve()
     return {
@@ -287,52 +463,6 @@ def _resolved_preserved_roots(report: InstallEvidenceReport) -> dict[str, Path]:
     }
 
 
-def _valid_fingerprints(values: Mapping[str, JsonValue]) -> bool:
-    expected_keys = {"codex", "claude"}
-    return set(values) == expected_keys and all(
-        isinstance(value, str)
-        and len(value) == SHA256_HEX_LENGTH
-        and all(character in "0123456789abcdef" for character in value)
-        for value in values.values()
-    )
-
-
-def _client_errors(
-    name: str,
-    client: ClientInstallEvidence,
-    clone: Path,
-    run_root: Path,
-) -> list[str]:
-    cache = client.cache_root.resolve()
-    errors: list[str] = []
-    if not cache.is_dir() or not cache.is_relative_to(run_root):
-        errors.append(f"{name}_cache_invalid")
-        return errors
-    if client.cache_root_source in {"missing", "isolated_cache_tree", "isolated_cache_inventory"}:
-        errors.append(f"{name}_cache_root_guessed")
-    expected = (EXPECTED_SKILL_COUNT, EXPECTED_MCP_SERVER_COUNT, EXPECTED_TOOL_COUNT)
-    if (client.skill_count, client.mcp_server_count, client.tool_count) != expected:
-        errors.append(f"{name}_count_mismatch")
-    if client.identity != "saxo-bank-mcp" or client.version != _project_version(clone):
-        errors.append(f"{name}_identity_version_invalid")
-    if client.annotations_missing or client.forbidden_cache_paths:
-        errors.append(f"{name}_cache_inventory_invalid")
-    checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
-    if any(check.tool_count != EXPECTED_TOOL_COUNT for check in checks):
-        errors.append(f"{name}_startup_invalid")
-    required = required_cache_files(clone)
-    if len(required) != len(REQUIRED_CACHE_FILES) + EXPECTED_SKILL_COUNT:
-        errors.append(f"{name}_skill_inventory_invalid")
-    elif any(not _same_bytes(clone / relative, cache / relative) for relative in required):
-        errors.append(f"{name}_installed_bytes_mismatch")
-    public_files = publishable_tracked_files(clone)
-    if not public_files or any(
-        not _same_bytes(clone / relative, cache / relative) for relative in public_files
-    ):
-        errors.append(f"{name}_tracked_public_tree_mismatch")
-    return errors
-
-
 def _origin_path(clone: Path) -> Path | None:
     raw = git_output(clone, "remote", "get-url", "origin")
     if raw is None:
@@ -342,7 +472,11 @@ def _origin_path(clone: Path) -> Path | None:
 
 def _same_bytes(source: Path, installed: Path) -> bool:
     return (
-        source.is_file() and installed.is_file() and source.read_bytes() == installed.read_bytes()
+        source.is_file()
+        and installed.is_file()
+        and not source.is_symlink()
+        and not installed.is_symlink()
+        and source.read_bytes() == installed.read_bytes()
     )
 
 

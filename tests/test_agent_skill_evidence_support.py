@@ -288,7 +288,7 @@ def _install_payload(
     }
     return {
         "status": "passed",
-        "execution_mode": "installed_verification",
+        "execution_mode": "fixture_support",
         "repo": str(repo),
         "candidate_commit": commit,
         "clone": {
@@ -302,7 +302,7 @@ def _install_payload(
         "expected_skills": 8,
         "expected_mcp_servers": 1,
         "expected_tools": 39,
-        "global_state": {"before": fingerprints, "after": fingerprints},
+        "global_state": {"before": fingerprints, "after": fingerprints, "scope": {}},
         "global_state_unchanged": True,
         "project_version": "0.1.0",
         "help_syntax": {
@@ -320,8 +320,8 @@ def _install_payload(
             "temporary_fixtures_removed": True,
         },
         "auth_files": {"copied": [], "values_published": False},
-        "codex": _client_payload(caches[0]),
-        "claude": _client_payload(caches[1]),
+        "codex": _client_payload(caches[0], source="fixture_codex"),
+        "claude": _client_payload(caches[1], source="fixture_claude"),
         "installed_byte_checks": {
             "complete": True,
             "compared_files": 1,
@@ -344,10 +344,12 @@ def _install_payload(
             ],
             "forbidden_files_absent": True,
             "mismatches": [],
+            "inventory_exact_match": True,
         },
         "process_cleanup": {
             "complete": True,
             "remaining_pids": [],
+            "remaining_pgids": [],
             "observed_pids": [1000],
             "observed_pgids": [1000],
         },
@@ -372,24 +374,56 @@ def _install_payload(
     }
 
 
-def _client_payload(cache: Path) -> dict[str, JsonValue]:
+def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
     startup: dict[str, JsonValue] = {
         "source": {"status": "passed", "tool_count": 39},
         "cache": {"status": "passed", "tool_count": 39},
         "list_tools": {"status": "passed", "tool_count": 39},
     }
+    receipt = {
+        "name": source,
+        "argv": ["fixture"],
+        "cwd": str(cache),
+        "pid": 1,
+        "pgid": 1,
+        "exit_code": 0,
+        "stdout_sha256": "d" * 64,
+        "stderr_sha256": "e" * 64,
+        "timed_out": False,
+        "cleanup_attempted": False,
+    }
+    skills = [
+        "saxo-auth-session",
+        "saxo-bank",
+        "saxo-openapi",
+        "saxo-qa-operations",
+        "saxo-reads",
+        "saxo-safety-recovery",
+        "saxo-streaming",
+        "saxo-trading",
+    ]
     return {
         "installed": True,
         "cache_root": str(cache),
         "identity": "saxo-bank-mcp",
         "version": "0.1.0",
-        "cache_root_source": "fixture",
+        "cache_root_source": source,
         "skill_count": 8,
+        "skills": skills,
         "mcp_server_count": 1,
         "tool_count": 39,
         "annotations_missing": [],
+        "source_annotations_missing": [],
+        "cache_annotations_missing": [],
         "forbidden_cache_paths": [],
         "installed_bytes_match": True,
         "install_command_exit_code": 0,
         "startup": startup,
+        "command_receipts": [receipt],
+        "inventory": {
+            "inventory_exact_match": True,
+            "forbidden_files_absent": True,
+            "mismatches": [],
+            "metadata_exceptions": [],
+        },
     }

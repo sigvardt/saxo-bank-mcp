@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 from pathlib import Path
 from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_evidence_io import git_output
+from saxo_bank_mcp.agent_skill_static_gate_constants import PUBLIC_SECRET_SCAN_PATHS
 
 PLUGIN_NAME: Final = "saxo-bank-mcp"
 MARKETPLACE_NAME: Final = "sig" + "vardt"
@@ -19,7 +21,33 @@ REQUIRED_CACHE_FILES: Final = (
     "pyproject.toml",
     "uv.lock",
 )
-FORBIDDEN_PATH_PARTS: Final = frozenset(
+VERSION_RELATIVES: Final = (
+    "pyproject.toml",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/marketplace.json",
+)
+OWNER_ONLY_MODE: Final = "0o700"
+PRESERVED_ROOT_LABELS: Final = (
+    "run_root",
+    "clone",
+    "codex_cache",
+    "claude_cache",
+    "home",
+    "codex_home",
+    "claude_home",
+)
+# Installer may add only these extra relative paths beyond the publishable tree.
+ALLOWED_INSTALLER_METADATA: Final = (
+    ".claude-plugin/.install-metadata.json",
+    ".codex-plugin/.install-metadata.json",
+)
+UNSAFE_NAME_PATTERN: Final = re.compile(
+    r"(?i)(credential|credentials|token_cache|token-cache|\.env$|\.pem$|\.key$|"
+    r"secret|password|private[_-]?key|id_rsa|auth\.json|state\.json)",
+)
+UNSAFE_PATH_PARTS: Final = frozenset(
     {
         ".cache",
         ".codex",
@@ -31,37 +59,21 @@ FORBIDDEN_PATH_PARTS: Final = frozenset(
         ".ruff_cache",
         ".venv",
         "__pycache__",
+        "evidence",
+        "credentials",
+        "tokens",
     },
-)
-FORBIDDEN_FILE_NAMES: Final = frozenset(
-    {
-        ".env",
-        "credentials.json",
-        "state.json",
-        "token_cache.json",
-        "token-cache.json",
-        ".saxo-token-cache",
-    },
-)
-PRIVATE_TRACKED_PREFIXES: Final = (".omo/",)
-VERSION_RELATIVES: Final = (
-    "pyproject.toml",
-    ".codex-plugin/plugin.json",
-    ".claude-plugin/plugin.json",
-    ".agents/plugins/marketplace.json",
-    ".claude-plugin/marketplace.json",
 )
 
 
 def publishable_tracked_files(source: Path) -> tuple[str, ...]:
     raw = git_output(source, "ls-files", "-z") or ""
-    return tuple(
-        sorted(
-            relative
-            for relative in raw.split("\0")
-            if relative and _is_publishable_relative(relative)
-        ),
-    )
+    selected = [
+        relative
+        for relative in raw.split("\0")
+        if relative and _is_publishable_relative(relative)
+    ]
+    return tuple(sorted(selected))
 
 
 def export_publishable_tree(source: Path, destination: Path) -> tuple[str, ...]:
@@ -72,37 +84,57 @@ def export_publishable_tree(source: Path, destination: Path) -> tuple[str, ...]:
     relatives = publishable_tracked_files(source)
     for relative in relatives:
         src = source / relative
+        if src.is_symlink():
+            msg = f"symlink_rejected:{relative}"
+            raise ValueError(msg)
         if not src.is_file():
             continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+        shutil.copy2(src, target, follow_symlinks=False)
     return relatives
 
 
-def installed_byte_check(source: Path, cache: Path) -> dict[str, JsonValue]:
-    publishable = publishable_tracked_files(source)
+def installed_inventory_check(
+    source: Path,
+    cache: Path,
+    *,
+    publishable: tuple[str, ...] | None = None,
+) -> dict[str, JsonValue]:
+    publishable = publishable if publishable is not None else publishable_tracked_files(source)
     mismatches: list[str] = []
     compared = 0
     for relative in publishable:
         compared += 1
+        if (cache / relative).is_symlink():
+            mismatches.append(f"symlink:{relative}")
+            continue
         if not _same_bytes(source / relative, cache / relative):
             mismatches.append(relative)
     required = required_cache_files(source)
     required_present = tuple(relative for relative in required if (cache / relative).is_file())
     if len(required_present) != len(required):
         mismatches.append("required_cache_file_missing")
+    cache_files = _cache_files(cache)
+    publishable_set = set(publishable)
+    extras = tuple(sorted(path for path in cache_files if path not in publishable_set))
+    allowed_meta = tuple(path for path in extras if path in ALLOWED_INSTALLER_METADATA)
+    unexpected = tuple(path for path in extras if path not in ALLOWED_INSTALLER_METADATA)
     forbidden = forbidden_cache_paths(cache)
-    extras = _cache_extra_files(cache, publishable)
-    metadata = tuple(sorted(path for path in extras if path not in set(forbidden)))
-    forbidden_only = tuple(sorted(set(forbidden)))
+    if unexpected:
+        mismatches.append("unexpected_cache_files")
+    if forbidden:
+        mismatches.append("forbidden")
     return {
         "compared_files": compared,
-        "metadata_exceptions": list(metadata),
+        "metadata_exceptions": list(allowed_meta),
         "required_files_present": list(required_present),
-        "forbidden_files_absent": not forbidden_only,
-        "mismatches": mismatches if not forbidden_only else [*mismatches, "forbidden"],
-        "forbidden_cache_paths": list(forbidden_only),
+        "forbidden_files_absent": not forbidden,
+        "mismatches": mismatches,
+        "forbidden_cache_paths": forbidden,
+        "publishable_count": len(publishable),
+        "cache_file_count": len(cache_files),
+        "inventory_exact_match": not unexpected and not mismatches and not forbidden,
     }
 
 
@@ -116,11 +148,12 @@ def required_cache_files(source: Path) -> tuple[str, ...]:
 def forbidden_cache_paths(cache: Path) -> list[str]:
     if not cache.is_dir():
         return ["cache_root_missing"]
-    return sorted(
-        str(path.relative_to(cache))
-        for path in cache.rglob("*")
-        if _is_forbidden(str(path.relative_to(cache)))
-    )
+    findings: list[str] = []
+    for path in cache.rglob("*"):
+        relative = str(path.relative_to(cache))
+        if path.is_symlink() or _is_unsafe_relative(relative):
+            findings.append(relative)
+    return sorted(findings)
 
 
 def scrub_runtime_artifacts(root: Path) -> None:
@@ -132,52 +165,52 @@ def scrub_runtime_artifacts(root: Path) -> None:
             continue
         if path.is_dir():
             shutil.rmtree(path, ignore_errors=True)
-        elif path.is_file():
+        elif path.is_file() or path.is_symlink():
             path.unlink(missing_ok=True)
 
 
-def global_state_fingerprint(codex_global_home: Path, claude_global_home: Path) -> dict[str, str]:
+def global_state_fingerprint(
+    codex_global_home: Path,
+    claude_global_home: Path,
+) -> dict[str, JsonValue]:
     return {
-        "codex": _fingerprint_targets(_codex_fingerprint_targets(codex_global_home)),
-        "claude": _fingerprint_targets(_claude_fingerprint_targets(claude_global_home)),
+        "codex": _fingerprint_scope(_codex_fingerprint_targets(codex_global_home)),
+        "claude": _fingerprint_scope(_claude_fingerprint_targets(claude_global_home)),
+        "scope": {
+            "codex": [str(path) for path in _codex_fingerprint_targets(codex_global_home)],
+            "claude": [str(path) for path in _claude_fingerprint_targets(claude_global_home)],
+            "fields": ["path", "type", "size", "mode", "sha256"],
+        },
     }
-
-
-OWNER_ONLY_MODE: Final = "0o700"
-PRESERVED_ROOT_LABELS: Final = (
-    "run_root",
-    "clone",
-    "codex_cache",
-    "claude_cache",
-    "home",
-    "codex_home",
-    "claude_home",
-)
 
 
 def owner_only_mode(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
 
 
-def harden_preserved_roots(roots: dict[str, Path]) -> tuple[dict[str, str], tuple[str, ...]]:
-    """Chmod each required preserved root to 0700 and return actual modes plus errors."""
+def ensure_owner_only(path: Path) -> str:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    mode = owner_only_mode(path)
+    if mode != OWNER_ONLY_MODE:
+        msg = f"path_not_owner_only:{path}"
+        raise PermissionError(msg)
+    return mode
+
+
+def assert_preserved_modes(roots: dict[str, Path]) -> dict[str, str]:
     modes: dict[str, str] = {}
-    errors: list[str] = []
     for label in PRESERVED_ROOT_LABELS:
         path = roots.get(label)
         if path is None or not path.exists():
-            errors.append(f"preserved_root_missing:{label}")
-            continue
-        path.chmod(0o700)
+            msg = f"preserved_root_missing:{label}"
+            raise FileNotFoundError(msg)
         mode = owner_only_mode(path)
-        modes[label] = mode
         if mode != OWNER_ONLY_MODE:
-            errors.append(f"preserved_root_not_owner_only:{label}")
-    missing_labels = [label for label in PRESERVED_ROOT_LABELS if label not in modes]
-    for label in missing_labels:
-        if f"preserved_root_missing:{label}" not in errors:
-            errors.append(f"preserved_root_missing:{label}")
-    return modes, tuple(errors)
+            msg = f"preserved_root_not_owner_only:{label}:{mode}"
+            raise PermissionError(msg)
+        modes[label] = mode
+    return modes
 
 
 def owner_only_from_modes(modes: dict[str, str]) -> bool:
@@ -186,71 +219,118 @@ def owner_only_from_modes(modes: dict[str, str]) -> bool:
     )
 
 
+def tree_digest(root: Path, relatives: tuple[str, ...]) -> str:
+    digest = hashlib.sha256()
+    for relative in relatives:
+        path = root / relative
+        digest.update(relative.encode())
+        if path.is_file() and not path.is_symlink():
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        else:
+            digest.update(b"missing")
+    return digest.hexdigest()
+
+
 def _codex_fingerprint_targets(home: Path) -> tuple[Path, ...]:
-    return (home / "config.toml", home / "plugins")
+    return (
+        home / "config.toml",
+        home / "plugins",
+        home / "plugins" / "cache",
+        home / "plugins" / "index.json",
+    )
 
 
 def _claude_fingerprint_targets(home: Path) -> tuple[Path, ...]:
     return (
         home / "settings.json",
         home / "plugins",
+        home / "plugins" / "cache",
         home / "plugins" / "known_marketplaces.json",
         home / "plugins" / "installed_plugins.json",
         home / "plugins" / "marketplaces",
     )
 
 
-def _fingerprint_targets(targets: tuple[Path, ...]) -> str:
+def _fingerprint_scope(targets: tuple[Path, ...]) -> str:
     digest = hashlib.sha256()
     for target in targets:
-        if not target.exists():
-            digest.update(b"missing:")
-            digest.update(str(target).encode())
-            continue
-        if target.is_file():
-            _update_file_fingerprint(digest, target, target.name)
-            continue
-        for file_path in sorted(path for path in target.rglob("*") if path.is_file()):
-            relative = str(file_path.relative_to(target))
-            _update_file_fingerprint(digest, file_path, relative)
+        _fingerprint_one(digest, target)
     return digest.hexdigest()
 
 
-def _update_file_fingerprint(digest: object, path: Path, relative: str) -> None:
+def _fingerprint_one(digest: object, target: Path) -> None:
     updater = getattr(digest, "update", None)
     if updater is None:
         msg = "digest missing update"
         raise TypeError(msg)
-    stat = path.stat()
-    updater(relative.encode())
-    updater(str(stat.st_size).encode())
-    updater(hashlib.sha256(path.read_bytes()).digest())
+    if not target.exists():
+        updater(b"missing:")
+        updater(str(target).encode())
+        return
+    kind = "dir" if target.is_dir() else "file"
+    if target.is_file():
+        stat = target.stat()
+        updater(str(target).encode())
+        updater(kind.encode())
+        updater(str(stat.st_size).encode())
+        updater(oct(stat.st_mode & 0o777).encode())
+        updater(hashlib.sha256(target.read_bytes()).digest())
+        return
+    for file_path in sorted(path for path in target.rglob("*") if path.is_file()):
+        stat = file_path.stat()
+        relative = str(file_path.relative_to(target))
+        updater(relative.encode())
+        updater(b"file")
+        updater(str(stat.st_size).encode())
+        updater(oct(stat.st_mode & 0o777).encode())
+        updater(hashlib.sha256(file_path.read_bytes()).digest())
 
 
-def _cache_extra_files(cache: Path, publishable: tuple[str, ...]) -> tuple[str, ...]:
-    published = set(publishable)
-    extras: list[str] = []
-    for path in cache.rglob("*"):
-        if not path.is_file():
-            continue
-        relative = str(path.relative_to(cache))
-        if relative not in published:
-            extras.append(relative)
-    return tuple(sorted(extras))
+def _cache_files(cache: Path) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            str(path.relative_to(cache))
+            for path in cache.rglob("*")
+            if path.is_file() or path.is_symlink()
+        ),
+    )
 
 
 def _is_publishable_relative(relative: str) -> bool:
-    for prefix in PRIVATE_TRACKED_PREFIXES:
-        if relative == prefix.rstrip("/") or relative.startswith(prefix):
-            return False
-    return not _is_forbidden(relative)
-
-
-def _is_forbidden(relative: str) -> bool:
-    path = Path(relative)
-    if path.name in FORBIDDEN_FILE_NAMES:
+    if _is_unsafe_relative(relative):
+        return False
+    public_dirs = tuple(
+        path for path in PUBLIC_SECRET_SCAN_PATHS if not Path(path).suffix and "/" not in path
+    )
+    public_files = frozenset(path for path in PUBLIC_SECRET_SCAN_PATHS if Path(path).suffix)
+    if relative in public_files or relative in PUBLIC_SECRET_SCAN_PATHS:
         return True
-    return any(part in FORBIDDEN_PATH_PARTS for part in path.parts)
+    if "/" not in relative:
+        return relative in public_files or relative in {
+            "README.md",
+            "pyproject.toml",
+            "uv.lock",
+            ".gitignore",
+            ".mcp.json",
+        }
+    if any(relative.startswith(f"{directory}/") for directory in public_dirs):
+        return True
+    return relative.startswith("data/saxo/")
+
+
+def _is_unsafe_relative(relative: str) -> bool:
+    path = Path(relative)
+    if path.name in {
+        ".env",
+        "credentials.json",
+        "state.json",
+        "token_cache.json",
+        "token-cache.json",
+    }:
+        return True
+    if any(part in UNSAFE_PATH_PARTS for part in path.parts):
+        return True
+    return bool(UNSAFE_NAME_PATTERN.search(relative))
 
 
 def _is_runtime_artifact(relative: str) -> bool:
@@ -260,5 +340,9 @@ def _is_runtime_artifact(relative: str) -> bool:
 
 def _same_bytes(source: Path, installed: Path) -> bool:
     return (
-        source.is_file() and installed.is_file() and source.read_bytes() == installed.read_bytes()
+        source.is_file()
+        and installed.is_file()
+        and not source.is_symlink()
+        and not installed.is_symlink()
+        and source.read_bytes() == installed.read_bytes()
     )

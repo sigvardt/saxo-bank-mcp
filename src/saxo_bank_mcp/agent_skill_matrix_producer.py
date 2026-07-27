@@ -14,7 +14,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     run_command,
 )
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
-from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.agent_skill_matrix import (
     EXPECTED_TOOL_COUNT,
     LIFECYCLE_TOOLS,
@@ -37,7 +37,7 @@ class MatrixProducerEvidenceError(ValueError):
 
 
 def run_real_matrix_report(options: MatrixPlanOptions) -> int:
-    install, install_errors = load_verified_install_report(options.install_report)
+    install, install_errors = load_install_report_for_consumers(options.install_report)
     if install is None:
         reason = (
             "invalid_install_report"

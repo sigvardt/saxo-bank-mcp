@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
-from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 
 EXPECTED_TOOL_COUNT = 39
 SCENARIO_MANIFEST = Path(__file__).resolve().parents[2] / "data/saxo/agent_tool_scenarios.json"
@@ -140,7 +140,7 @@ class MatrixPlanOptions:
 
 
 def build_manifest_matrix_report(options: MatrixPlanOptions) -> int:
-    install, install_errors = load_verified_install_report(options.install_report)
+    install, install_errors = load_install_report_for_consumers(options.install_report)
     if install is None:
         reason = (
             "invalid_install_report"
@@ -235,7 +235,7 @@ def _executed_report_errors(report: ExecutedMatrixReport, environment: str) -> l
 
 def _install_binding_errors(report: ExecutedMatrixReport) -> list[str]:
     errors: list[str] = []
-    install, install_errors = load_verified_install_report(report.install_report)
+    install, install_errors = load_install_report_for_consumers(report.install_report)
     if install is None:
         errors.extend(("install_report_not_verified", *install_errors))
     elif install.candidate_commit != report.candidate_commit:
