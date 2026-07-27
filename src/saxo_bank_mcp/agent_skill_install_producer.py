@@ -399,14 +399,11 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     write_json(options.out, report)
     verified, errors = load_verified_install_report(options.out)
     if verified is None:
-        write_json(
-            options.out,
-            {
-                "status": "failed",
-                "reason": "producer_evidence_invalid",
-                "errors": list(errors),
-            },
-        )
+        failed = dict(report)
+        failed["status"] = "failed"
+        failed["reason"] = "producer_evidence_invalid"
+        failed["errors"] = list(errors)
+        write_json(options.out, failed)
         return 1
     return 0
 

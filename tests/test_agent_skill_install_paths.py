@@ -65,6 +65,13 @@ def test_unsafe_relative_rejects_secret_data_not_product_modules() -> None:
     assert _is_unsafe_relative("credentials/live.json") is True
 
 
+def test_version_bump_rewrites_lockfile_with_manifests() -> None:
+    from saxo_bank_mcp.agent_skill_install_paths import VERSION_RELATIVES
+
+    assert "uv.lock" in VERSION_RELATIVES
+    assert "pyproject.toml" in VERSION_RELATIVES
+
+
 def test_export_rejects_symlinks(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

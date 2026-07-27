@@ -436,7 +436,8 @@ def _version_cache_proof(  # noqa: PLR0913
     label: str,
     expected_version: str,
 ) -> dict[str, JsonValue]:
-    inventory = installed_inventory_check(source, cache, publishable=publishable)
+    # Probe first (may resolve/lock under the cache), scrub runtime debris, then
+    # require publishable bytes still match the bumped/restored source.
     probe = probe_root_stdio(f"{label}_stdio_probe", cache, env=env, probe_env=probe_env)
     payload = _json_from_probe(probe.stdout)
     missing = payload.get("annotations_missing")
@@ -446,6 +447,7 @@ def _version_cache_proof(  # noqa: PLR0913
         else ["probe_invalid"]
     )
     tool_count = payload.get("tool_count") if isinstance(payload.get("tool_count"), int) else 0
+    inventory = installed_inventory_check(source, cache, publishable=publishable)
     return {
         "cache_root": str(cache),
         "version": expected_version if identity_version(cache)[1] == expected_version else "",

@@ -23,6 +23,7 @@ REQUIRED_CACHE_FILES: Final = (
 )
 VERSION_RELATIVES: Final = (
     "pyproject.toml",
+    "uv.lock",
     ".codex-plugin/plugin.json",
     ".claude-plugin/plugin.json",
     ".agents/plugins/marketplace.json",
