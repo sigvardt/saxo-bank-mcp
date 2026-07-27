@@ -22,6 +22,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     CommandResult,
     run_command,
 )
+from saxo_bank_mcp.agent_skill_install_privacy import write_minimal_privacy_pair
 from saxo_bank_mcp.agent_skill_matrix import (
     LIFECYCLE_TOOLS,
     SCENARIO_MANIFEST,
@@ -209,10 +210,22 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     _write_fake_plugin_cli(fake_bin / "claude", log)
     _write_fake_uv_install_probe(fake_bin / "uv", log)
     out = tmp_path / "install.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
     codex_global = tmp_path / "codex-global"
     claude_global = tmp_path / "claude-global"
     codex_global.mkdir()
     claude_global.mkdir()
+    commit = __import__("subprocess").check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        text=True,
+    ).strip()
+    write_minimal_privacy_pair(
+        out.parent,
+        candidate_commit=commit,
+        clone_commit=commit,
+        run_root=run_root,
+    )
 
     result = run_cli(
         INSTALL_QA,
@@ -434,6 +447,30 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "        if line.startswith('version = '):",
                 "            return line.split('=', 1)[1].strip().strip('\"')",
                 "    return '0.1.0'",
+                "def _register_codex(cache, version):",
+                "    config = codex_home / 'config.toml'",
+                "    config.parent.mkdir(parents=True, exist_ok=True)",
+                "    body = (",
+                "        f'[marketplaces.{mkt}]\\n'",
+                "        'source_type = \"local\"\\n'",
+                "        f'[plugins.\"{plugin_id}\"]\\n'",
+                "        'enabled = true\\n'",
+                "    )",
+                "    config.write_text(body, encoding='utf-8')",
+                "def _register_claude(cache, version):",
+                "    plugins = home / '.claude' / 'plugins'",
+                "    plugins.mkdir(parents=True, exist_ok=True)",
+                "    installed = {",
+                "        'version': 2,",
+                "        'plugins': {plugin_id: [{",
+                "            'scope': 'user',",
+                "            'installPath': str(cache),",
+                "            'version': version,",
+                "        }]},",
+                "    }",
+                "    (plugins / 'installed_plugins.json').write_text(",
+                "        json.dumps(installed), encoding='utf-8')",
+                "    (plugins / 'known_marketplaces.json').write_text('{}', encoding='utf-8')",
                 "def _install_cache(client):",
                 "    version = _version()",
                 "    if client == 'codex':",
@@ -444,6 +481,10 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "    cache.parent.mkdir(parents=True, exist_ok=True)",
                 "    ignore = shutil.ignore_patterns('.git', '.omo', '.venv', '__pycache__')",
                 "    shutil.copytree(source, cache, ignore=ignore)",
+                "    if client == 'codex':",
+                "        _register_codex(cache, version)",
+                "    else:",
+                "        _register_claude(cache, version)",
                 "    return cache",
                 "if name == 'codex' and sys.argv[1:3] == ['plugin', 'remove']:",
                 "    print(json.dumps({'pluginId': plugin_id}))",

@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +45,7 @@ class CommandFailureError(Exception):
     receipt: CommandReceipt
 
 
-def run_command(
+def run_command(  # noqa: C901, PLR0915
     name: str,
     argv: tuple[str, ...],
     *,
@@ -52,13 +53,36 @@ def run_command(
     env: dict[str, str] | None = None,
     timeout_seconds: int = 180,
 ) -> CommandResult:
-    """Run a command with an isolated env map and process-group cleanup on timeout."""
+    """Run a command; always clean the process group on success, fail, interrupt, timeout."""
     if env is None:
         msg = "isolated env is required"
         raise ValueError(msg)
     executable = shutil_which(argv[0], path=env.get("PATH"))
     command: tuple[str, ...] = argv if executable is None else (executable, *argv[1:])
     process: subprocess.Popen[str] | None = None
+    pgid: int | None = None
+    root_pid: int | None = None
+    tracked_pids: list[int] = []
+    tracked_pgids: list[int] = []
+    stop_watch = threading.Event()
+    watch_lock = threading.Lock()
+    timed_out = False
+    stdout = ""
+    stderr = ""
+    exit_code = 124
+
+    def _watch() -> None:
+        while not stop_watch.is_set():
+            if root_pid is None:
+                time.sleep(0.01)
+                continue
+            pids, pgids = _snapshot_tree(root_pid, pgid)
+            with watch_lock:
+                tracked_pids[:] = sorted(set(tracked_pids) | set(pids))
+                tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids))
+            time.sleep(0.01)
+
+    watcher: threading.Thread | None = None
     try:
         process = subprocess.Popen(
             command,
@@ -69,70 +93,84 @@ def run_command(
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
+        root_pid = process.pid
         pgid = os.getpgid(process.pid)
-        stdout, stderr = process.communicate(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        if process is None:
+        watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
+        watcher.start()
+        deadline = time.monotonic() + timeout_seconds
+        while process.poll() is None:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.02)
+        with watch_lock:
+            pids = tuple(tracked_pids)
+            pgids = tuple(tracked_pgids)
+        pids, pgids = _merge_snapshots(pids, pgids, *_snapshot_tree(root_pid, pgid))
+        # Kill descendants before draining pipes so background children cannot hold pipes open.
+        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
+        try:
+            stdout, stderr = process.communicate(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout = stdout or ""
+            stderr = stderr or "communicate_timeout"
+        if timed_out:
+            exit_code = 124
             receipt = _receipt(
                 name,
                 argv,
                 cwd,
-                None,
-                None,
-                124,
-                "",
-                type(exc).__name__,
+                root_pid,
+                pgid,
+                exit_code,
+                stdout,
+                stderr,
                 timed_out=True,
                 cleanup_attempted=True,
             )
-            raise CommandFailureError(receipt) from exc
-        pgid = os.getpgid(process.pid)
-        terminate_process_group(pgid, escalate=True)
-        stdout, stderr = process.communicate(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
-        receipt = _receipt(
-            name,
-            argv,
-            cwd,
-            process.pid,
-            pgid,
-            124,
-            stdout,
-            stderr,
-            timed_out=True,
-            cleanup_attempted=True,
-        )
-        raise CommandFailureError(receipt) from exc
+            raise CommandFailureError(receipt)
+        exit_code = int(process.returncode if process.returncode is not None else 124)
     except OSError as exc:
+        with watch_lock:
+            pids = tuple(tracked_pids)
+            pgids = tuple(tracked_pgids)
+        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
         receipt = _receipt(
             name,
             argv,
             cwd,
-            None,
-            None,
+            root_pid,
+            pgid,
             124,
             "",
             type(exc).__name__,
             timed_out=False,
-            cleanup_attempted=False,
+            cleanup_attempted=True,
         )
         raise CommandFailureError(receipt) from exc
-    result = CommandResult(
-        receipt=_receipt(
-            name,
-            argv,
-            cwd,
-            process.pid,
-            pgid,
-            process.returncode,
-            stdout,
-            stderr,
-            timed_out=False,
-            cleanup_attempted=False,
-        ),
-        stdout=stdout,
-        stderr=stderr,
+    finally:
+        stop_watch.set()
+        if watcher is not None:
+            watcher.join(timeout=1.0)
+        with watch_lock:
+            pids = tuple(tracked_pids)
+            pgids = tuple(tracked_pgids)
+        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
+
+    receipt = _receipt(
+        name,
+        argv,
+        cwd,
+        root_pid,
+        pgid,
+        exit_code,
+        stdout,
+        stderr,
+        timed_out=False,
+        cleanup_attempted=True,
     )
-    if process.returncode != 0:
+    result = CommandResult(receipt=receipt, stdout=stdout, stderr=stderr)
+    if exit_code != 0:
         raise CommandFailureError(result.receipt)
     return result
 
@@ -161,25 +199,7 @@ def remaining_live_pgids(pgids: tuple[int, ...]) -> tuple[int, ...]:
 
 def process_group_members(pgid: int) -> tuple[int, ...]:
     members: list[int] = []
-    try:
-        output = subprocess.run(
-            ("ps", "-axo", "pid=,pgid="),  # noqa: S607
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return (pgid,) if process_still_running(pgid) else ()
-    for line in output.stdout.splitlines():
-        parts = line.split()
-        if len(parts) != 2:  # noqa: PLR2004
-            continue
-        try:
-            pid = int(parts[0])
-            group = int(parts[1])
-        except ValueError:
-            continue
+    for pid, _ppid, group in _process_table():
         if group == pgid:
             members.append(pid)
     if not members and process_still_running(pgid):
@@ -187,23 +207,35 @@ def process_group_members(pgid: int) -> tuple[int, ...]:
     return tuple(sorted(set(members)))
 
 
-def terminate_process_group(pgid: int, *, escalate: bool) -> None:  # noqa: C901, PLR0912
+def descendant_pids(root_pid: int) -> tuple[int, ...]:
+    """Return root and all descendants via ppid walk, including escaped process groups."""
+    table = _process_table()
+    children: dict[int, list[int]] = {}
+    for pid, ppid, _group in table:
+        children.setdefault(ppid, []).append(pid)
+    found: list[int] = []
+    stack = [root_pid]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        found.append(current)
+        stack.extend(children.get(current, ()))
+    return tuple(sorted(pid for pid in found if process_still_running(pid)))
+
+
+def terminate_process_group(pgid: int, *, escalate: bool) -> None:
     try:
         os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         return
     except PermissionError:
-        # Fall back to signaling known members when group signal is blocked.
         for pid in process_group_members(pgid):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                continue
-    deadline = time.monotonic() + TERM_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        if not remaining_live_pgids((pgid,)):
-            return
-        time.sleep(0.05)
+            _signal_pid(pid, signal.SIGTERM)
+    if _wait_pgid_exit(pgid, TERM_WAIT_SECONDS):
+        return
     if not escalate:
         return
     try:
@@ -212,13 +244,26 @@ def terminate_process_group(pgid: int, *, escalate: bool) -> None:  # noqa: C901
         return
     except PermissionError:
         for pid in process_group_members(pgid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                continue
+            _signal_pid(pid, signal.SIGKILL)
+    _wait_pgid_exit(pgid, KILL_WAIT_SECONDS)
+
+
+def terminate_pid_tree(root_pid: int, *, escalate: bool) -> None:
+    pids = descendant_pids(root_pid)
+    for pid in reversed(pids):
+        _signal_pid(pid, signal.SIGTERM)
+    deadline = time.monotonic() + TERM_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        if not remaining_live_pids(pids):
+            return
+        time.sleep(0.05)
+    if not escalate:
+        return
+    for pid in reversed(descendant_pids(root_pid)):
+        _signal_pid(pid, signal.SIGKILL)
     kill_deadline = time.monotonic() + KILL_WAIT_SECONDS
     while time.monotonic() < kill_deadline:
-        if not remaining_live_pgids((pgid,)):
+        if not remaining_live_pids(descendant_pids(root_pid)):
             return
         time.sleep(0.05)
 
@@ -241,6 +286,105 @@ def shutil_which(command: str, *, path: str | None) -> str | None:
     import shutil  # noqa: PLC0415
 
     return shutil.which(command, path=path)
+
+
+def _snapshot_tree(
+    root_pid: int | None,
+    pgid: int | None,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    pids: set[int] = set()
+    pgids: set[int] = set()
+    if root_pid is not None:
+        pids.update(descendant_pids(root_pid))
+        pids.add(root_pid)
+    if pgid is not None:
+        pgids.add(pgid)
+        members = process_group_members(pgid)
+        pids.update(members)
+    table = {pid: group for pid, _ppid, group in _process_table()}
+    for pid in list(pids):
+        group = table.get(pid)
+        if group is not None:
+            pgids.add(group)
+            pids.update(process_group_members(group))
+    return tuple(sorted(pids)), tuple(sorted(pgids))
+
+
+def _merge_snapshots(
+    pids_a: tuple[int, ...],
+    pgids_a: tuple[int, ...],
+    pids_b: tuple[int, ...],
+    pgids_b: tuple[int, ...],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    return tuple(sorted(set(pids_a) | set(pids_b))), tuple(sorted(set(pgids_a) | set(pgids_b)))
+
+
+def _cleanup_tracked(
+    tracked_pids: tuple[int, ...],
+    tracked_pgids: tuple[int, ...],
+    *,
+    root_pid: int | None,
+    pgid: int | None,
+) -> None:
+    pgids = set(tracked_pgids)
+    if pgid is not None:
+        pgids.add(pgid)
+    for group in sorted(pgids):
+        if remaining_live_pgids((group,)):
+            terminate_process_group(group, escalate=True)
+    pids = set(tracked_pids)
+    if root_pid is not None:
+        pids.update(descendant_pids(root_pid))
+        pids.add(root_pid)
+    live = remaining_live_pids(tuple(pids))
+    for pid in reversed(live):
+        _signal_pid(pid, signal.SIGTERM)
+    if remaining_live_pids(live):
+        time.sleep(TERM_WAIT_SECONDS)
+    for pid in reversed(remaining_live_pids(live)):
+        _signal_pid(pid, signal.SIGKILL)
+    for group in sorted(pgids):
+        if remaining_live_pgids((group,)):
+            terminate_process_group(group, escalate=True)
+
+
+def _process_table() -> tuple[tuple[int, int, int], ...]:
+    try:
+        output = subprocess.run(
+            ("ps", "-axo", "pid=,ppid=,pgid="),  # noqa: S607
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    rows: list[tuple[int, int, int]] = []
+    for line in output.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3:  # noqa: PLR2004
+            continue
+        try:
+            rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+        except ValueError:
+            continue
+    return tuple(rows)
+
+
+def _signal_pid(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def _wait_pgid_exit(pgid: int, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not remaining_live_pgids((pgid,)):
+            return True
+        time.sleep(0.05)
+    return not remaining_live_pgids((pgid,))
 
 
 def _receipt(  # noqa: PLR0913

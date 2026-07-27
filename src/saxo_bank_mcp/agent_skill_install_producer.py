@@ -35,7 +35,17 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
     run_update_probe,
     startup_from_probes,
 )
-from saxo_bank_mcp.agent_skill_install_models import CommandReceipt, InstallManifestOptions
+from saxo_bank_mcp.agent_skill_install_env import EnvironmentContainmentError
+from saxo_bank_mcp.agent_skill_install_ledger import (
+    append_fixture_ledger_event,
+    default_ledger_path,
+)
+from saxo_bank_mcp.agent_skill_install_models import (
+    REQUIRED_FIXTURE_CONSUMERS,
+    CommandReceipt,
+    InstallManifestOptions,
+    UpdateProbeEvidence,
+)
 from saxo_bank_mcp.agent_skill_install_paths import (
     assert_preserved_modes,
     ensure_owner_only,
@@ -44,6 +54,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     installed_inventory_check,
     owner_only_from_modes,
 )
+from saxo_bank_mcp.agent_skill_install_privacy import build_privacy_binding
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
 from saxo_bank_mcp.agent_skill_install_qa import (
     EXPECTED_MCP_SERVER_COUNT,
@@ -52,7 +63,7 @@ from saxo_bank_mcp.agent_skill_install_qa import (
 )
 
 
-def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, PLR0911, PLR0915
+def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915
     error = planning_error(options)
     if error is not None:
         write_json(options.out, {"status": "failed", "reason": error})
@@ -215,7 +226,13 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             },
         )
         return 1
-    except (CommandDiscoveryError, FileNotFoundError, PermissionError, ValueError) as exc:
+    except (
+        CommandDiscoveryError,
+        EnvironmentContainmentError,
+        FileNotFoundError,
+        PermissionError,
+        ValueError,
+    ) as exc:
         _cleanup_temps(temporary_paths)
         cleanup_recorded_groups(tuple(observed_pgids))
         reason = getattr(exc, "reason", type(exc).__name__)
@@ -313,6 +330,80 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     update_probe["temporary_fixtures_removed"] = (
         bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temps
     )
+    try:
+        typed_update = UpdateProbeEvidence.model_validate(update_probe)
+    except Exception as exc:  # noqa: BLE001 - producer fail-closed on untyped proof
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "update_probe_invalid",
+                "error": type(exc).__name__,
+            },
+        )
+        return 1
+    update_probe = typed_update.model_dump(mode="json")
+
+    consumers = [item.strip() for item in preserve_for.split(",") if item.strip()]
+    if tuple(consumers) != REQUIRED_FIXTURE_CONSUMERS:
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "fixture_consumers_invalid",
+                "expected": list(REQUIRED_FIXTURE_CONSUMERS),
+                "got": consumers,
+            },
+        )
+        return 1
+    ledger_path = options.fixture_cleanup_ledger or default_ledger_path(run_root)
+    try:
+        ledger_binding = append_fixture_ledger_event(
+            ledger_path,
+            candidate_commit=commit,
+            run_root=run_root,
+            preserved_paths=(
+                str(clone.resolve()),
+                str(codex_cache.resolve()),
+                str(claude_cache.resolve()),
+                str(home.resolve()),
+                str(codex_home.resolve()),
+                str(claude_home.resolve()),
+            ),
+            consumers=REQUIRED_FIXTURE_CONSUMERS,
+        )
+    except ValueError as exc:
+        write_json(options.out, {"status": "failed", "reason": str(exc)})
+        return 1
+
+    privacy_report = options.privacy_report or (options.out.parent / "privacy-report.json")
+    privacy_self_scan = options.privacy_self_scan or (
+        options.out.parent / "privacy-self-scan.json"
+    )
+    if not privacy_report.is_file() or not privacy_self_scan.is_file():
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "privacy_evidence_missing",
+                "privacy_report": str(privacy_report),
+                "privacy_self_scan": str(privacy_self_scan),
+            },
+        )
+        return 1
+    try:
+        privacy_binding = build_privacy_binding(
+            privacy_report=privacy_report,
+            privacy_self_scan=privacy_self_scan,
+            candidate_commit=commit,
+            clone_commit=commit,
+        )
+    except ValueError as exc:
+        write_json(
+            options.out,
+            {"status": "failed", "reason": "privacy_binding_invalid", "error": str(exc)},
+        )
+        return 1
 
     report: dict[str, JsonValue] = {
         "status": "passed",
@@ -362,7 +453,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "observed_pgids": sorted(set(observed_pgids)),
         },
         "fixture_cleanup": {
-            "deferred_registered": bool(options.preserve_for),
+            "deferred_registered": True,
             "preserve_for": preserve_for,
             "run_root": pub(run_root),
             "preserved_paths": [
@@ -376,8 +467,10 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "modes": preserved_modes,
             "owner_only": owner_only,
             "teardown_owner": "post-final-completion-gate",
-            "consumers": [item.strip() for item in preserve_for.split(",") if item.strip()],
+            "consumers": list(REQUIRED_FIXTURE_CONSUMERS),
+            "ledger": ledger_binding.model_dump(mode="json"),
         },
+        "privacy": privacy_binding.model_dump(mode="json"),
         "help_receipts": [
             _sanitize_receipt(result.receipt.model_dump(mode="json"), path_roots)
             for result in help_receipts
@@ -399,7 +492,13 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         ),
     }
     write_json(options.out, report)
-    verified, errors = load_verified_install_report(options.out)
+    verified, errors = load_verified_install_report(
+        options.out,
+        codex_global_home=options.codex_global_home,
+        claude_global_home=options.claude_global_home,
+        run_startup_probes=False,
+        fixture_cleanup_ledger=ledger_path,
+    )
     if verified is None:
         failed = dict(report)
         failed["status"] = "failed"

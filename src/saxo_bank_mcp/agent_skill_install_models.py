@@ -4,9 +4,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
+
+SHA256_HEX = r"^[a-f0-9]{64}$"
+COMMIT_HEX = r"^[a-f0-9]{40}$"
+EXPECTED_TOOLS = 39
+ALLOWED_PRODUCTION_CACHE_SOURCES: frozenset[str] = frozenset(
+    {
+        "codex_plugin_add",
+        "codex_plugin_add_bumped",
+        "codex_plugin_add_restored",
+        "claude_plugin_list",
+        "claude_plugin_list_bumped",
+        "claude_plugin_list_restored",
+    },
+)
+REQUIRED_FIXTURE_CONSUMERS: tuple[str, ...] = (
+    "task-15",
+    "task-16",
+    "final-f3",
+    "final-f4",
+    "post-final-h1",
+)
+FIXTURE_TEARDOWN_OWNER = "post-final-completion-gate"
 
 
 class CommandReceipt(BaseModel):
@@ -18,8 +40,8 @@ class CommandReceipt(BaseModel):
     pid: int | None = None
     pgid: int | None = None
     exit_code: int
-    stdout_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    stderr_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    stdout_sha256: str = Field(pattern=SHA256_HEX)
+    stderr_sha256: str = Field(pattern=SHA256_HEX)
     timed_out: bool = False
     cleanup_attempted: bool = False
 
@@ -66,7 +88,7 @@ class CloneEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: Path
-    commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    commit: str = Field(pattern=COMMIT_HEX)
     source_repo: Path
     no_local: Literal[True]
     clean: Literal[True]
@@ -103,6 +125,128 @@ class ProcessCleanup(BaseModel):
     observed_pgids: tuple[int, ...] = ()
 
 
+class VersionCacheProof(BaseModel):
+    """Typed proof for one client cache at a bumped or restored version."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cache_root: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    digest: str = Field(pattern=SHA256_HEX)
+    source_digest: str = Field(pattern=SHA256_HEX)
+    inventory_exact_match: Literal[True]
+    tool_count: Literal[39]
+    annotations_missing: tuple[str, ...]
+    probe_stdout_sha256: str = Field(pattern=SHA256_HEX)
+
+    @model_validator(mode="after")
+    def _require_clean_annotations(self) -> VersionCacheProof:
+        if self.annotations_missing:
+            msg = "annotations_missing must be empty"
+            raise ValueError(msg)
+        if self.digest != self.source_digest:
+            msg = "digest must equal source_digest"
+            raise ValueError(msg)
+        return self
+
+
+class ClientVersionProofBundle(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    codex: VersionCacheProof
+    claude: VersionCacheProof
+
+
+class UpdateProbeEvidence(BaseModel):
+    """Mandatory typed update probe; deleting any nested field fails validation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    original_version: str = Field(min_length=1)
+    bumped_version: str = Field(min_length=1)
+    codex_reached_bumped: Literal[True]
+    claude_reached_bumped: Literal[True]
+    candidate_restored: Literal[True]
+    bumped_proof: ClientVersionProofBundle
+    restored_proof: ClientVersionProofBundle
+    temporary_fixtures_removed: Literal[True]
+    remaining_temporary_paths: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _versions_and_proofs(self) -> UpdateProbeEvidence:
+        if self.bumped_version == self.original_version:
+            msg = "bumped_version must differ from original_version"
+            raise ValueError(msg)
+        if self.bumped_proof.codex.version != self.bumped_version:
+            msg = "bumped_proof.codex.version mismatch"
+            raise ValueError(msg)
+        if self.bumped_proof.claude.version != self.bumped_version:
+            msg = "bumped_proof.claude.version mismatch"
+            raise ValueError(msg)
+        if self.restored_proof.codex.version != self.original_version:
+            msg = "restored_proof.codex.version mismatch"
+            raise ValueError(msg)
+        if self.restored_proof.claude.version != self.original_version:
+            msg = "restored_proof.claude.version mismatch"
+            raise ValueError(msg)
+        if self.remaining_temporary_paths:
+            msg = "remaining_temporary_paths must be empty"
+            raise ValueError(msg)
+        return self
+
+
+class PrivacyEvidenceBinding(BaseModel):
+    """Privacy-safe binding of privacy-report.json and privacy-self-scan.json.
+
+    Order (avoids circular self-hash):
+    1. Write install report without privacy digests (or with paths only).
+    2. Write privacy-report.json over required scopes, excluding the two privacy
+       report files themselves from content-hash of this binding.
+    3. Write privacy-self-scan.json over privacy-report.json only.
+    4. Record digests of both privacy files into this binding / verify live.
+    Digests here hash the privacy files; privacy files must not embed these digests.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    privacy_report_path: str = Field(min_length=1)
+    privacy_self_scan_path: str = Field(min_length=1)
+    privacy_report_sha256: str = Field(pattern=SHA256_HEX)
+    privacy_self_scan_sha256: str = Field(pattern=SHA256_HEX)
+    candidate_commit: str = Field(pattern=COMMIT_HEX)
+    clone_commit: str = Field(pattern=COMMIT_HEX)
+    clean: Literal[True]
+    findings_count: Literal[0]
+    scan_errors_count: Literal[0]
+    scopes_covered: tuple[str, ...] = Field(min_length=1)
+    digest_order: Literal[
+        "install_then_privacy_report_then_self_scan_then_binding_digests"
+    ] = "install_then_privacy_report_then_self_scan_then_binding_digests"
+
+
+class FixtureLedgerBinding(BaseModel):
+    """Privacy-safe metadata for an external JSONL cleanup ledger entry."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ledger_path: str = Field(min_length=1)
+    event_sha256: str = Field(pattern=SHA256_HEX)
+    candidate_commit: str = Field(pattern=COMMIT_HEX)
+    consumers: tuple[str, ...] = Field(min_length=1)
+    teardown_owner: Literal["post-final-completion-gate"]
+    owner_only: Literal[True]
+    cleanup_deadline: str = Field(min_length=1)
+    run_root: str = Field(min_length=1)
+
+    @field_validator("consumers")
+    @classmethod
+    def _require_exact_consumers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if tuple(value) != REQUIRED_FIXTURE_CONSUMERS:
+            msg = "consumers must match required retained fixture consumers"
+            raise ValueError(msg)
+        return value
+
+
 class FixtureCleanup(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -112,8 +256,9 @@ class FixtureCleanup(BaseModel):
     preserved_paths: tuple[str, ...] = ()
     modes: dict[str, str] = Field(min_length=1)
     owner_only: Literal[True]
-    teardown_owner: str = "post-final-completion-gate"
+    teardown_owner: str = FIXTURE_TEARDOWN_OWNER
     consumers: tuple[str, ...] = ()
+    ledger: FixtureLedgerBinding | None = None
 
 
 class InstallEvidenceReport(BaseModel):
@@ -122,7 +267,7 @@ class InstallEvidenceReport(BaseModel):
     status: Literal["passed"]
     execution_mode: Literal["installed_verification"]
     repo: Path
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    candidate_commit: str = Field(pattern=COMMIT_HEX)
     clone: CloneEvidence
     expected_skills: int
     expected_mcp_servers: int
@@ -136,11 +281,12 @@ class InstallEvidenceReport(BaseModel):
     fixture_cleanup: FixtureCleanup
     project_version: str = Field(min_length=1)
     help_syntax: dict[str, JsonValue]
-    update_probe: dict[str, JsonValue]
+    update_probe: UpdateProbeEvidence
     auth_files: dict[str, JsonValue]
     help_receipts: tuple[CommandReceipt, ...] = Field(min_length=1)
     update_receipts: tuple[CommandReceipt, ...] = Field(min_length=1)
     required_receipts: tuple[str, ...] = ()
+    privacy: PrivacyEvidenceBinding
     errors: tuple[str, ...]
 
 
@@ -152,7 +298,7 @@ class FixtureSupportReport(BaseModel):
     status: Literal["passed"]
     execution_mode: Literal["fixture_support"]
     repo: Path
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    candidate_commit: str = Field(pattern=COMMIT_HEX)
     clone: CloneEvidence
     expected_skills: int
     expected_mcp_servers: int
@@ -183,3 +329,6 @@ class InstallManifestOptions:
     preserve_for: str
     out: Path
     dry_run: bool = False
+    fixture_cleanup_ledger: Path | None = None
+    privacy_report: Path | None = None
+    privacy_self_scan: Path | None = None

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import Final
 
@@ -39,14 +41,10 @@ PRESERVED_ROOT_LABELS: Final = (
     "codex_home",
     "claude_home",
 )
-# Installer may add only these extra relative paths beyond the publishable tree.
 ALLOWED_INSTALLER_METADATA: Final = (
     ".claude-plugin/.install-metadata.json",
     ".codex-plugin/.install-metadata.json",
 )
-# Reject secret *data* and local-state names only. Product modules such as
-# credentials.py / secret_scan.py / token_cache.py under the public src tree must
-# remain publishable or installed caches cannot start.
 UNSAFE_BASENAMES: Final = frozenset(
     {
         ".env",
@@ -59,6 +57,7 @@ UNSAFE_BASENAMES: Final = frozenset(
         "token_cache.json",
     },
 )
+UNSAFE_BASENAMES_LOWER: Final = frozenset(name.lower() for name in UNSAFE_BASENAMES)
 UNSAFE_BASENAME_PATTERN: Final = re.compile(
     r"(?i)^("
     r"\.env(\..+)?"
@@ -89,6 +88,7 @@ UNSAFE_PATH_PARTS: Final = frozenset(
         "tokens",
     },
 )
+UNSAFE_PATH_PARTS_LOWER: Final = frozenset(part.lower() for part in UNSAFE_PATH_PARTS)
 
 
 def publishable_tracked_files(source: Path) -> tuple[str, ...]:
@@ -109,14 +109,13 @@ def export_publishable_tree(source: Path, destination: Path) -> tuple[str, ...]:
     relatives = publishable_tracked_files(source)
     for relative in relatives:
         src = source / relative
-        if src.is_symlink():
-            msg = f"symlink_rejected:{relative}"
-            raise ValueError(msg)
-        if not src.is_file():
+        _reject_non_regular_source(src, relative)
+        if not src.exists():
             continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target, follow_symlinks=False)
+        _reject_non_regular_source(target, relative)
     return relatives
 
 
@@ -131,10 +130,14 @@ def installed_inventory_check(
     compared = 0
     for relative in publishable:
         compared += 1
-        if (cache / relative).is_symlink():
+        installed = cache / relative
+        if _node_kind(installed) == "symlink":
             mismatches.append(f"symlink:{relative}")
             continue
-        if not _same_bytes(source / relative, cache / relative):
+        if _node_kind(installed) not in {"file", "missing"}:
+            mismatches.append(f"non_regular:{relative}")
+            continue
+        if not _same_bytes(source / relative, installed):
             mismatches.append(relative)
     required = required_cache_files(source)
     required_present = tuple(relative for relative in required if (cache / relative).is_file())
@@ -176,8 +179,12 @@ def forbidden_cache_paths(cache: Path) -> list[str]:
     findings: list[str] = []
     for path in cache.rglob("*"):
         relative = str(path.relative_to(cache))
-        if path.is_symlink() or is_unsafe_relative(relative):
+        kind = _node_kind(path)
+        if kind == "symlink" or is_unsafe_relative(relative):
             findings.append(relative)
+            continue
+        if kind not in {"file", "dir"}:
+            findings.append(f"{kind}:{relative}")
     return sorted(findings)
 
 
@@ -188,7 +195,7 @@ def scrub_runtime_artifacts(root: Path) -> None:
         relative = str(path.relative_to(root))
         if not _is_runtime_artifact(relative):
             continue
-        if path.is_dir():
+        if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path, ignore_errors=True)
         elif path.is_file() or path.is_symlink():
             path.unlink(missing_ok=True)
@@ -198,7 +205,6 @@ def global_state_fingerprint(
     codex_global_home: Path,
     claude_global_home: Path,
 ) -> dict[str, JsonValue]:
-    # Scope uses labeled roots, never absolute private home paths in published evidence.
     return {
         "codex": _fingerprint_scope(_codex_fingerprint_targets(codex_global_home)),
         "claude": _fingerprint_scope(_claude_fingerprint_targets(claude_global_home)),
@@ -215,7 +221,7 @@ def global_state_fingerprint(
                 else "${CLAUDE_GLOBAL_HOME}"
                 for path in _claude_fingerprint_targets(claude_global_home)
             ],
-            "fields": ["path", "type", "size", "mode", "sha256"],
+            "fields": ["path", "type", "size", "mode", "target", "sha256"],
             "roots": {
                 "CODEX_GLOBAL_HOME": "caller_codex_global_home",
                 "CLAUDE_GLOBAL_HOME": "caller_claude_global_home",
@@ -303,27 +309,50 @@ def _fingerprint_one(digest: object, target: Path) -> None:
     if updater is None:
         msg = "digest missing update"
         raise TypeError(msg)
-    if not target.exists():
+    # lexists: include dangling symlinks.
+    if not os.path.lexists(target):
         updater(b"missing:")
         updater(str(target).encode())
         return
-    kind = "dir" if target.is_dir() else "file"
-    if target.is_file():
-        stat = target.stat()
-        updater(str(target).encode())
-        updater(kind.encode())
-        updater(str(stat.st_size).encode())
-        updater(oct(stat.st_mode & 0o777).encode())
+    kind = _node_kind(target)
+    updater(str(target).encode())
+    updater(kind.encode())
+    if kind == "symlink":
+        try:
+            mode = oct(target.lstat().st_mode & 0o777)
+            link_target = str(target.readlink())
+        except OSError:
+            mode = "unknown"
+            link_target = "unreadable"
+        updater(mode.encode())
+        updater(link_target.encode())
+        return
+    if kind == "file":
+        stat_result = target.stat()
+        updater(str(stat_result.st_size).encode())
+        updater(oct(stat_result.st_mode & 0o777).encode())
         updater(hashlib.sha256(target.read_bytes()).digest())
         return
-    for file_path in sorted(path for path in target.rglob("*") if path.is_file()):
-        stat = file_path.stat()
-        relative = str(file_path.relative_to(target))
-        updater(relative.encode())
-        updater(b"file")
-        updater(str(stat.st_size).encode())
-        updater(oct(stat.st_mode & 0o777).encode())
-        updater(hashlib.sha256(file_path.read_bytes()).digest())
+    if kind == "dir":
+        stat_result = target.stat()
+        updater(oct(stat_result.st_mode & 0o777).encode())
+        try:
+            entries = sorted(target.iterdir(), key=lambda item: item.name)
+        except OSError:
+            updater(b"dir_unreadable")
+            return
+        for entry in entries:
+            relative = str(entry.relative_to(target))
+            updater(relative.encode())
+            _fingerprint_one(digest, entry)
+        return
+    # fifo/socket/device/other
+    try:
+        stat_result = target.lstat()
+        updater(str(stat_result.st_mode).encode())
+        updater(str(stat_result.st_rdev).encode())
+    except OSError:
+        updater(b"special_unreadable")
 
 
 def _cache_files(cache: Path) -> tuple[str, ...]:
@@ -331,7 +360,7 @@ def _cache_files(cache: Path) -> tuple[str, ...]:
         sorted(
             str(path.relative_to(cache))
             for path in cache.rglob("*")
-            if path.is_file() or path.is_symlink()
+            if path.is_file() or path.is_symlink() or _node_kind(path) not in {"file", "dir"}
         ),
     )
 
@@ -339,12 +368,12 @@ def _cache_files(cache: Path) -> tuple[str, ...]:
 def is_unsafe_relative(relative: str) -> bool:
     path = Path(relative)
     name = path.name
-    if name in UNSAFE_BASENAMES or bool(UNSAFE_BASENAME_PATTERN.fullmatch(name)):
+    if name.lower() in UNSAFE_BASENAMES_LOWER or bool(UNSAFE_BASENAME_PATTERN.fullmatch(name)):
         return True
     if path.suffix.lower() in UNSAFE_SUFFIXES:
         return True
-    # Directory parts only (filename is checked above).
-    return any(part in UNSAFE_PATH_PARTS for part in path.parts[:-1] or path.parts)
+    parts = path.parts[:-1] or path.parts
+    return any(part.lower() in UNSAFE_PATH_PARTS_LOWER for part in parts)
 
 
 def _is_publishable_relative(relative: str) -> bool:
@@ -382,3 +411,44 @@ def _same_bytes(source: Path, installed: Path) -> bool:
         and not installed.is_symlink()
         and source.read_bytes() == installed.read_bytes()
     )
+
+
+def reject_non_regular_source(path: Path, relative: str) -> None:
+    """Reject symlinks and non-regular filesystem nodes for publishable trees."""
+    if not os.path.lexists(path):
+        return
+    kind = _node_kind(path)
+    if kind == "symlink":
+        msg = f"symlink_rejected:{relative}"
+        raise ValueError(msg)
+    if kind != "file":
+        msg = f"non_regular_rejected:{kind}:{relative}"
+        raise ValueError(msg)
+
+
+def _reject_non_regular_source(path: Path, relative: str) -> None:
+    reject_non_regular_source(path, relative)
+
+
+def _node_kind(path: Path) -> str:  # noqa: PLR0911
+    if not os.path.lexists(path):
+        return "missing"
+    if path.is_symlink():
+        return "symlink"
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        return "unknown"
+    if stat.S_ISREG(mode):
+        return "file"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    if stat.S_ISCHR(mode):
+        return "char_device"
+    if stat.S_ISBLK(mode):
+        return "block_device"
+    return "other"

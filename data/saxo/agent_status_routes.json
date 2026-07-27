@@ -27,6 +27,10 @@
         "reason": "Plugin install stdio probe status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/agent_skill_install_privacy.py",
+        "reason": "Plugin install privacy evidence status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
         "reason": "Plugin install producer report status, not production MCP tool response truth."
       },

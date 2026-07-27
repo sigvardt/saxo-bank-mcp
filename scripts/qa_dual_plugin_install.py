@@ -35,6 +35,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--install-report", type=Path, default=None)
+    parser.add_argument(
+        "--fixture-cleanup-ledger",
+        type=Path,
+        default=None,
+        help="JSONL ledger path for retained fixture registration proof",
+    )
+    parser.add_argument("--privacy-report", type=Path, default=None)
+    parser.add_argument("--privacy-self-scan", type=Path, default=None)
+    parser.add_argument(
+        "--skip-startup-probes",
+        action="store_true",
+        help="Verify-only: skip independent MCP startup re-probes",
+    )
     parser.add_argument("--self-test-fixture", choices=("private-file", "version-drift"))
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -44,7 +57,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.install_report is None:
             sys.stderr.write("missing --install-report for --verify-only\n")
             return 1
-        return verify_install_report(args.install_report, args.out)
+        return verify_install_report(
+            args.install_report,
+            args.out,
+            codex_global_home=args.codex_global_home,
+            claude_global_home=args.claude_global_home,
+            run_startup_probes=not args.skip_startup_probes,
+            fixture_cleanup_ledger=args.fixture_cleanup_ledger,
+        )
     runner = manifest_install_report if args.dry_run else real_install_report
     return runner(
         InstallManifestOptions(
@@ -58,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
             preserve_for=str(args.preserve_for),
             out=args.out,
             dry_run=bool(args.dry_run),
+            fixture_cleanup_ledger=args.fixture_cleanup_ledger,
+            privacy_report=args.privacy_report,
+            privacy_self_scan=args.privacy_self_scan,
         ),
     )
 
