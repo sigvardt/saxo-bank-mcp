@@ -136,9 +136,10 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     )
     preserve_for = options.preserve_for or "unspecified"
     repo_root = options.repo.resolve()
+    repo_field = "." if repo_root == Path.cwd().resolve() else str(repo_root)
 
     def pub(path: Path) -> str:
-        return _public_path(path, repo_root)
+        return _public_path(path, repo_root, repo_field=repo_field)
 
     codex_client = client_report(
         codex_cache,
@@ -166,17 +167,17 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         bytes_match=not _json_list(claude_bytes, "mismatches")
         and bool(claude_bytes["forbidden_files_absent"]),
     )
-    codex_client = _sanitize_client_report(codex_client, repo_root)
-    claude_client = _sanitize_client_report(claude_client, repo_root)
+    codex_client = _sanitize_client_report(codex_client, repo_root, repo_field=repo_field)
+    claude_client = _sanitize_client_report(claude_client, repo_root, repo_field=repo_field)
     report: dict[str, JsonValue] = {
         "status": "passed",
         "execution_mode": "installed_verification",
-        "repo": ".",
+        "repo": repo_field,
         "candidate_commit": commit,
         "clone": {
             "path": pub(clone),
             "commit": commit,
-            "source_repo": ".",
+            "source_repo": repo_field,
             "no_local": True,
             "clean": True,
             "mode": owner_only_mode(clone),
@@ -189,7 +190,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         "project_version": project_version(clone),
         "help_syntax": help_syntax_evidence(help_receipts),
         "update_probe": update_probe,
-        "auth_files": _sanitize_auth_files(auth_files, repo_root),
+        "auth_files": _sanitize_auth_files(auth_files, repo_root, repo_field=repo_field),
         "codex": codex_client,
         "claude": claude_client,
         "installed_byte_checks": {
@@ -227,11 +228,19 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "consumers": [item.strip() for item in preserve_for.split(",") if item.strip()],
         },
         "help_receipts": [
-            _sanitize_receipt(result.receipt.model_dump(mode="json"), repo_root)
+            _sanitize_receipt(
+                result.receipt.model_dump(mode="json"),
+                repo_root,
+                repo_field=repo_field,
+            )
             for result in help_receipts
         ],
         "update_receipts": [
-            _sanitize_receipt(receipt.model_dump(mode="json"), repo_root)
+            _sanitize_receipt(
+                receipt.model_dump(mode="json"),
+                repo_root,
+                repo_field=repo_field,
+            )
             for receipt in update_receipts
         ],
         "errors": _producer_errors(
@@ -305,43 +314,57 @@ def _json_int(payload: dict[str, JsonValue], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _public_path(path: Path, repo_root: Path) -> str:
+def _public_path(path: Path, repo_root: Path, *, repo_field: str) -> str:
     resolved = path.resolve()
-    if resolved == repo_root or resolved.is_relative_to(repo_root):
+    if repo_field == "." and (resolved == repo_root or resolved.is_relative_to(repo_root)):
         relative = resolved.relative_to(repo_root)
         return "." if str(relative) == "." else str(relative)
-    # Keep out-of-repo fixture paths intact for unit tests; happy-path evidence is repo-relative.
     return str(resolved)
 
 
 def _sanitize_client_report(
     report: dict[str, JsonValue],
     repo_root: Path,
+    *,
+    repo_field: str,
 ) -> dict[str, JsonValue]:
     sanitized = dict(report)
     cache_root = report.get("cache_root")
     if isinstance(cache_root, str):
-        sanitized["cache_root"] = _public_path(Path(cache_root), repo_root)
+        sanitized["cache_root"] = _public_path(
+            Path(cache_root),
+            repo_root,
+            repo_field=repo_field,
+        )
     receipts = report.get("command_receipts")
     if isinstance(receipts, list):
         sanitized["command_receipts"] = [
-            _sanitize_receipt(item, repo_root) if isinstance(item, dict) else item
+            _sanitize_receipt(item, repo_root, repo_field=repo_field)
+            if isinstance(item, dict)
+            else item
             for item in receipts
         ]
     return sanitized
 
 
-def _sanitize_receipt(receipt: dict[str, JsonValue], repo_root: Path) -> dict[str, JsonValue]:
+def _sanitize_receipt(
+    receipt: dict[str, JsonValue],
+    repo_root: Path,
+    *,
+    repo_field: str,
+) -> dict[str, JsonValue]:
     sanitized = dict(receipt)
     cwd = receipt.get("cwd")
     if isinstance(cwd, str):
-        sanitized["cwd"] = _public_path(Path(cwd), repo_root)
+        sanitized["cwd"] = _public_path(Path(cwd), repo_root, repo_field=repo_field)
     argv = receipt.get("argv")
     if isinstance(argv, list):
         sanitized_argv: list[JsonValue] = []
         for item in argv:
             if isinstance(item, str) and item.startswith("/"):
-                sanitized_argv.append(_public_path(Path(item), repo_root))
+                sanitized_argv.append(
+                    _public_path(Path(item), repo_root, repo_field=repo_field),
+                )
             else:
                 sanitized_argv.append(item)
         sanitized["argv"] = sanitized_argv
@@ -351,6 +374,8 @@ def _sanitize_receipt(receipt: dict[str, JsonValue], repo_root: Path) -> dict[st
 def _sanitize_auth_files(
     auth_files: dict[str, JsonValue],
     repo_root: Path,
+    *,
+    repo_field: str,
 ) -> dict[str, JsonValue]:
     copied = auth_files.get("copied")
     if not isinstance(copied, list):
@@ -362,6 +387,6 @@ def _sanitize_auth_files(
         row = dict(item)
         target = row.get("target")
         if isinstance(target, str):
-            row["target"] = _public_path(Path(target), repo_root)
+            row["target"] = _public_path(Path(target), repo_root, repo_field=repo_field)
         sanitized_copied.append(row)
     return {"copied": sanitized_copied, "values_published": False}
