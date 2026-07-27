@@ -86,7 +86,7 @@ class RouterCaseContext:
 
 def router_source_text(root: Path) -> str:
     return "\n\n".join(
-        (root / relative).read_text(encoding="utf-8") for relative in ROUTER_SOURCE_PATHS
+        (root / relative).read_bytes().decode("utf-8") for relative in ROUTER_SOURCE_PATHS
     )
 
 
@@ -427,7 +427,7 @@ def _content_error(root: Path, expected_contents: dict[str, str]) -> str | None:
         path = root / relative
         if not path.is_file():
             return f"missing:{relative}"
-        if path.read_text(encoding="utf-8") != expected_text:
+        if path.read_bytes() != expected_text.encode("utf-8"):
             return f"digest_mismatch:{relative}"
     return None
 

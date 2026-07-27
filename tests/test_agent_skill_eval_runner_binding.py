@@ -195,6 +195,54 @@ def test_expected_digest_must_match_commit_bytes() -> None:
     assert "expected_router_source_sha256" in result
 
 
+def test_crlf_installed_cache_bytes_fail_source_binding_before_model(
+    tmp_path: Path,
+) -> None:
+    # Given: installed-cache roots whose text matches the commit after newline
+    # normalization, but whose on-disk bytes use CRLF instead of LF.
+    commit = _git_head(ROOT)
+    expected = resolve_router_source_binding(
+        RouterBindingRequest(
+            repo=ROOT,
+            expected_source_commit=commit,
+            expected_router_source_sha256=None,
+            codex_plugin_root=ROOT,
+            claude_plugin_root=ROOT,
+            require_git_checkout=False,
+        ),
+    )
+    assert isinstance(expected, RouterSourceBinding)
+    cache_a = tmp_path / "crlf-a"
+    cache_b = tmp_path / "crlf-b"
+    _write_router_files_crlf(cache_a, expected.file_contents)
+    _write_router_files_crlf(cache_b, expected.file_contents)
+    out = tmp_path / "crlf-bound.json"
+    options = _options(
+        OptionsInput(
+            out=out,
+            case_id="router-auth",
+            dry_run=False,
+            nonzero_on_skip=False,
+            codex_plugin_root=cache_a,
+            claude_plugin_root=cache_b,
+            expected_source_commit=commit,
+            expected_router_source_sha256=expected.router_source_sha256,
+        ),
+    )
+
+    # When: a model-backed router run is attempted against the CRLF caches.
+    code = run_eval_suite(options)
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    # Then: binding fails before any model call because the raw bytes differ.
+    assert code != 0
+    assert payload["status"] == "failed"
+    assert payload["case_count"] == 0
+    assert payload["records"] == []
+    assert payload["cleanup"]["source_binding"]["status"] == "failed"
+    assert "digest_mismatch" in payload["cleanup"]["source_binding"]["error"]
+
+
 @dataclass(frozen=True, slots=True)
 class OptionsInput:
     out: Path
@@ -245,4 +293,11 @@ def _write_router_files(root: Path, contents: dict[str, str]) -> None:
     for relative, text in contents.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text.encode("utf-8"))
+
+
+def _write_router_files_crlf(root: Path, contents: dict[str, str]) -> None:
+    for relative, text in contents.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
