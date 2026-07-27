@@ -19,6 +19,7 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     selected_harnesses,
 )
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
+from saxo_bank_mcp.agent_skill_router_eval_execution import client_versions
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,17 @@ def run_eval_suite(
     status: Literal["passed", "failed", "skipped", "planned"] = (
         "failed" if failed or skipped_failure else "planned" if planned else "passed"
     )
+    router_records = tuple(
+        record for record in records if record.router_source_mode == "source_equivalent"
+    )
+    versions = (
+        {}
+        if options.dry_run
+        else client_versions(
+            codex_home=options.codex_home,
+            claude_home=options.claude_home,
+        )
+    )
     report = EvalRunReport(
         status=status,
         harness=options.harness,
@@ -91,7 +103,38 @@ def run_eval_suite(
         cleanup={
             "complete": True,
             "created_processes": 0,
-            "created_mcp_calls": 0 if options.dry_run else None,
+            "remaining_processes": 0,
+            "raw_transcripts_persisted": 0,
+            "model_prompt_count": len(router_records),
+            "model_prompt_counts": {
+                harness: sum(1 for record in router_records if record.harness == harness)
+                for harness in ("codex", "claude")
+            },
+            "model_tool_events": sum(
+                record.model_tool_event_count or 0 for record in router_records
+            ),
+            "model_command_events": sum(
+                record.model_command_event_count or 0 for record in router_records
+            ),
+            "created_mcp_calls": (
+                0
+                if options.dry_run
+                else sum(record.model_mcp_event_count or 0 for record in router_records)
+            ),
+            "model_saxo_events": sum(
+                record.model_saxo_event_count or 0 for record in router_records
+            ),
+            "client_versions": versions,
+            "client_versions_from_records": {
+                harness: sorted(
+                    {
+                        record.client_version
+                        for record in router_records
+                        if record.harness == harness and record.client_version
+                    }
+                )
+                for harness in ("codex", "claude")
+            },
         },
         before_global_state=before,
         after_global_state=after,

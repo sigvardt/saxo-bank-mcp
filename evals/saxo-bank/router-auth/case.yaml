@@ -1,0 +1,31 @@
+{
+  "id": "router-auth",
+  "title": "Router classifies SIM auth recovery",
+  "tags": ["router", "router-proof", "auth", "sim"],
+  "environment": "SIM",
+  "natural_prompt": "In SIM, my Saxo access session expired and refresh material may exist. Classify and route a safe recovery plan. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+  "harness_prompts": {
+    "codex": "In SIM, my Saxo access session expired and refresh material may exist. Classify and route a safe recovery plan. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+    "claude": "In SIM, my Saxo access session expired and refresh material may exist. Classify and route a safe recovery plan. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup."
+  },
+  "expected_skill": "saxo-auth-session",
+  "required_logical_tools": [],
+  "forbidden_logical_tools": ["saxo_refresh_token", "saxo_start_pkce_login"],
+  "exact_tool_grants": {"codex": [], "claude": []},
+  "transcript_assertions": {"required_all": [], "required_any": [], "forbidden": []},
+  "deterministic_graders": ["router_structure", "no_model_tool_events"],
+  "max_turns": 2,
+  "timeout_seconds": 180,
+  "cleanup_required": false,
+  "router_expectation": {
+    "environment": "SIM",
+    "intent": "auth",
+    "mutation_risk": "local-state",
+    "evidence_need": "plan-only",
+    "primary_skill": "saxo-auth-session",
+    "follow_on_skills": [],
+    "requires_environment_clarification": false,
+    "approval_bypass_refused": false,
+    "trade_choice_refused": false
+  }
+}

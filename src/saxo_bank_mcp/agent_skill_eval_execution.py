@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, Harness, SkillEvalCase
+from saxo_bank_mcp.agent_skill_router_eval_execution import (
+    RouterHomes,
+    execute_router_model_case,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,20 @@ def execute_model_case(
     *,
     roots: HarnessRoots,
 ) -> EvalRunRecord:
+    if case.router_expectation is not None:
+        plugin_root = (
+            roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
+        )
+        return execute_router_model_case(
+            case,
+            harness,
+            grants,
+            plugin_root=plugin_root,
+            homes=RouterHomes(
+                codex_home=roots.codex_home,
+                claude_home=roots.claude_home,
+            ),
+        )
     command = _model_command(case, harness, grants, roots)
     env = os.environ.copy()
     if harness == "codex" and roots.codex_home is not None:

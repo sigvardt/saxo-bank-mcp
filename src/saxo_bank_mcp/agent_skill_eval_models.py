@@ -12,6 +12,34 @@ from saxo_bank_mcp._evidence import JsonValue
 type Harness = Literal["codex", "claude"]
 type HarnessSelector = Literal["codex", "claude", "both"]
 type EvalEnvironment = Literal["LOCAL", "SIM", "LIVE"]
+type RouterEnvironment = Literal["LOCAL", "SIM", "LIVE", "AMBIGUOUS"]
+type RouterIntent = Literal["auth", "read", "stream", "trade", "recovery", "QA", "unsupported"]
+type RouterMutationRisk = Literal[
+    "none",
+    "local-state",
+    "SIM mutation",
+    "LIVE read/precheck",
+    "LIVE mutation",
+    "ambiguous",
+]
+type RouterEvidenceNeed = Literal[
+    "plan-only",
+    "normal execution receipt",
+    "readback",
+    "cleanup proof",
+    "request-ledger proof",
+    "privacy evidence",
+    "release/QA evidence",
+]
+type FocusedSkill = Literal[
+    "saxo-auth-session",
+    "saxo-openapi",
+    "saxo-reads",
+    "saxo-streaming",
+    "saxo-trading",
+    "saxo-safety-recovery",
+    "saxo-qa-operations",
+]
 
 CASE_FILE_NAME: Final = "case.yaml"
 DEFAULT_CASE_ROOT: Final = Path("evals/saxo-bank")
@@ -52,6 +80,24 @@ class TranscriptAssertions(BaseModel):
     forbidden: tuple[str, ...] = ()
 
 
+class RouterExpectation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    environment: RouterEnvironment
+    intent: RouterIntent
+    mutation_risk: RouterMutationRisk
+    evidence_need: RouterEvidenceNeed
+    primary_skill: FocusedSkill | None
+    follow_on_skills: tuple[FocusedSkill, ...]
+    requires_environment_clarification: bool
+    approval_bypass_refused: bool
+    trade_choice_refused: bool
+
+
+class RouterDecision(RouterExpectation):
+    execution_allowed: bool
+
+
 class SkillEvalCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -70,6 +116,7 @@ class SkillEvalCase(BaseModel):
     max_turns: int = Field(gt=0, le=20)
     timeout_seconds: int = Field(gt=0, le=900)
     cleanup_required: bool
+    router_expectation: RouterExpectation | None = None
 
 
 class EvalRunRecord(BaseModel):
@@ -88,6 +135,14 @@ class EvalRunRecord(BaseModel):
     no_mcp_call: bool
     no_saxo_call: bool
     error: str = ""
+    router_decision: RouterDecision | None = None
+    router_source_mode: Literal["source_equivalent"] | None = None
+    router_source_sha256: str = ""
+    model_tool_event_count: int | None = None
+    model_command_event_count: int | None = None
+    model_mcp_event_count: int | None = None
+    model_saxo_event_count: int | None = None
+    client_version: str = ""
 
 
 class EvalRunReport(BaseModel):

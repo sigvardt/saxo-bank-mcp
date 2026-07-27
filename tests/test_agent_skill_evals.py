@@ -18,6 +18,21 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 MIN_CASE_COUNT: Final = 10
 EXPECTED_TOOL_COUNT: Final = 39
 QA_DRY_RUN_RECORDS: Final = 2
+EXPECTED_ROUTER_CASES: Final = frozenset(
+    {
+        "router-ambiguous-environment",
+        "router-approval-bypass",
+        "router-auth",
+        "router-choose-best",
+        "router-incident-recovery",
+        "router-live-trade",
+        "router-qa",
+        "router-read-then-trade",
+        "router-sim-trade",
+        "router-streaming",
+        "router-unsupported-operation",
+    },
+)
 VALIDATOR: Final = ROOT / "scripts/validate_agent_skill_evals.py"
 DUAL_RUNNER: Final = ROOT / "scripts/run_dual_harness_skill_evals.py"
 MATRIX_RUNNER: Final = ROOT / "scripts/run_mcp_tool_matrix.py"
@@ -56,6 +71,33 @@ def test_eval_cases_forbid_broad_grants_and_live_mutations() -> None:
             )
             assert "saxo_place_order" not in live_grants
             assert "saxo_execute_trading_write" not in live_grants
+
+
+def test_router_eval_cases_are_structured_plan_only_and_tool_free() -> None:
+    # Given: router-proof cases loaded through the production parser.
+    cases = tuple(
+        case
+        for case in load_eval_cases(ROOT / "evals/saxo-bank")
+        if "router-proof" in case.tags
+    )
+
+    # When: their structured expectations and grants are inspected.
+    case_ids = frozenset(case.id for case in cases)
+
+    # Then: every required route has one matched, tool-free expectation.
+    assert case_ids == EXPECTED_ROUTER_CASES
+    for case in cases:
+        expectation = case.router_expectation
+        assert expectation is not None
+        assert not case.required_logical_tools
+        assert not case.exact_tool_grants["codex"]
+        assert not case.exact_tool_grants["claude"]
+        assert case.harness_prompts["codex"] == case.harness_prompts["claude"]
+        assert expectation.evidence_need
+        if expectation.primary_skill is None:
+            assert case.expected_skill == "saxo-bank"
+        else:
+            assert case.expected_skill == expectation.primary_skill
 
 
 def test_exact_tool_permission_resolution_has_no_wildcards() -> None:

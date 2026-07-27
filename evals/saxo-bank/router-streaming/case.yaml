@@ -1,0 +1,31 @@
+{
+  "id": "router-streaming",
+  "title": "Router classifies SIM streaming cleanup",
+  "tags": ["router", "router-proof", "streaming", "sim"],
+  "environment": "SIM",
+  "natural_prompt": "Plan one bounded SIM price subscription and its cleanup. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+  "harness_prompts": {
+    "codex": "Plan one bounded SIM price subscription and its cleanup. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+    "claude": "Plan one bounded SIM price subscription and its cleanup. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup."
+  },
+  "expected_skill": "saxo-streaming",
+  "required_logical_tools": [],
+  "forbidden_logical_tools": ["saxo_create_streaming_price_subscription", "saxo_cleanup_streaming_subscriptions"],
+  "exact_tool_grants": {"codex": [], "claude": []},
+  "transcript_assertions": {"required_all": [], "required_any": [], "forbidden": []},
+  "deterministic_graders": ["router_structure", "no_model_tool_events"],
+  "max_turns": 2,
+  "timeout_seconds": 180,
+  "cleanup_required": false,
+  "router_expectation": {
+    "environment": "SIM",
+    "intent": "stream",
+    "mutation_risk": "SIM mutation",
+    "evidence_need": "cleanup proof",
+    "primary_skill": "saxo-streaming",
+    "follow_on_skills": [],
+    "requires_environment_clarification": false,
+    "approval_bypass_refused": false,
+    "trade_choice_refused": false
+  }
+}

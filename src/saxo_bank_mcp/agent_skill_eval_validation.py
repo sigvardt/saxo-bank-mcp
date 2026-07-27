@@ -10,6 +10,7 @@ from typing import Final, Literal
 from saxo_bank_mcp.agent_skill_eval_models import (
     EXPECTED_SKILLS,
     LIVE_WRITE_TOOLS,
+    RouterExpectation,
     SkillEvalCase,
     TranscriptAssertions,
     load_eval_cases,
@@ -176,6 +177,7 @@ def _case_errors(
         errors.append(f"{case.id}: missing expected skill")
     errors.extend(_prompt_errors(case))
     errors.extend(_cleanup_errors(case))
+    errors.extend(_router_errors(case))
     unknown_required = frozenset(case.required_logical_tools) - known_tools
     unknown_forbidden = frozenset(case.forbidden_logical_tools) - known_tools
     unknown_grants = _grants(case) - known_tools
@@ -193,6 +195,40 @@ def _case_errors(
         for grant in sorted(_grants(case))
         if WILDCARD_PATTERN.search(grant)
     )
+    return tuple(errors)
+
+
+def _router_errors(case: SkillEvalCase) -> tuple[str, ...]:
+    is_router_proof = "router-proof" in case.tags
+    expectation = case.router_expectation
+    if not is_router_proof:
+        return (f"{case.id}: router expectation requires router-proof tag",) if expectation else ()
+    if expectation is None:
+        return (f"{case.id}: missing router expectation",)
+    return _router_expectation_errors(case, expectation)
+
+
+def _router_expectation_errors(
+    case: SkillEvalCase,
+    expectation: RouterExpectation,
+) -> tuple[str, ...]:
+    errors: list[str] = []
+    if case.required_logical_tools or _grants(case):
+        errors.append(f"{case.id}: router proof must grant no tools")
+    if case.cleanup_required:
+        errors.append(f"{case.id}: plan-only router proof cannot require cleanup")
+    if expectation.primary_skill is None:
+        if case.expected_skill != "saxo-bank":
+            errors.append(f"{case.id}: stopped router case must expect saxo-bank")
+    elif case.expected_skill != expectation.primary_skill:
+        errors.append(f"{case.id}: expected skill differs from primary route")
+    if expectation.primary_skill in expectation.follow_on_skills:
+        errors.append(f"{case.id}: primary route repeated as follow-on")
+    if len(expectation.follow_on_skills) != len(frozenset(expectation.follow_on_skills)):
+        errors.append(f"{case.id}: duplicate follow-on route")
+    prompt = case.natural_prompt.lower()
+    if not all(term in prompt for term in ("do not run commands", "tool", "mcp", "saxo endpoint")):
+        errors.append(f"{case.id}: router proof does not explicitly forbid execution")
     return tuple(errors)
 
 

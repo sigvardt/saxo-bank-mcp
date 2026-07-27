@@ -1,0 +1,31 @@
+{
+  "id": "router-qa",
+  "title": "Router classifies release QA evidence",
+  "tags": ["router", "router-proof", "router-qa", "local"],
+  "environment": "LOCAL",
+  "natural_prompt": "Plan the matched Codex and Claude proof needed before claiming the Saxo router is ready. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+  "harness_prompts": {
+    "codex": "Plan the matched Codex and Claude proof needed before claiming the Saxo router is ready. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+    "claude": "Plan the matched Codex and Claude proof needed before claiming the Saxo router is ready. Classify and route only. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup."
+  },
+  "expected_skill": "saxo-qa-operations",
+  "required_logical_tools": [],
+  "forbidden_logical_tools": ["saxo_health", "saxo_get_safe_request_ledger"],
+  "exact_tool_grants": {"codex": [], "claude": []},
+  "transcript_assertions": {"required_all": [], "required_any": [], "forbidden": []},
+  "deterministic_graders": ["router_structure", "no_model_tool_events"],
+  "max_turns": 2,
+  "timeout_seconds": 180,
+  "cleanup_required": false,
+  "router_expectation": {
+    "environment": "LOCAL",
+    "intent": "QA",
+    "mutation_risk": "none",
+    "evidence_need": "release/QA evidence",
+    "primary_skill": "saxo-qa-operations",
+    "follow_on_skills": [],
+    "requires_environment_clarification": false,
+    "approval_bypass_refused": false,
+    "trade_choice_refused": false
+  }
+}
