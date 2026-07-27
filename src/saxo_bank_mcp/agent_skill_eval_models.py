@@ -161,6 +161,9 @@ class EvalRunReport(BaseModel):
     global_state_unchanged: bool
     skipped_count: int
     nonzero_on_skip: bool
+    source_commit: str = ""
+    router_source_sha256: str = ""
+    router_source_file_digests: dict[str, str] = {}
 
     def to_json_value(self) -> dict[str, JsonValue]:
         return self.model_dump(mode="json")

@@ -31,6 +31,27 @@ ROUTER_SOURCE_PATHS: Final = (
     Path("skills/saxo-bank/SKILL.md"),
     Path("skills/saxo-bank/references/router-contract.md"),
 )
+GIT_EXECUTABLE: Final = shutil.which("git") or "git"
+
+
+@dataclass(frozen=True, slots=True)
+class RouterSourceBinding:
+    source_commit: str
+    router_source_sha256: str
+    file_digests: dict[str, str]
+    file_contents: dict[str, str]
+    codex_plugin_root: str
+    claude_plugin_root: str
+
+
+@dataclass(frozen=True, slots=True)
+class RouterBindingRequest:
+    repo: Path
+    expected_source_commit: str
+    expected_router_source_sha256: str | None
+    codex_plugin_root: Path
+    claude_plugin_root: Path
+    require_git_checkout: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,17 +77,100 @@ class _RouterCommandSpec:
     homes: RouterHomes
 
 
+@dataclass(frozen=True, slots=True)
+class RouterCaseContext:
+    plugin_root: Path
+    homes: RouterHomes
+    expected_router_source_sha256: str | None = None
+
+
+def router_source_text(root: Path) -> str:
+    return "\n\n".join(
+        (root / relative).read_text(encoding="utf-8") for relative in ROUTER_SOURCE_PATHS
+    )
+
+
+def router_source_digest(root: Path) -> str:
+    return hashlib.sha256(router_source_text(root).encode()).hexdigest()
+
+
+def router_source_file_digests(root: Path) -> dict[str, str]:
+    return {
+        relative.as_posix(): hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        for relative in ROUTER_SOURCE_PATHS
+    }
+
+
+def resolve_router_source_binding(
+    request: RouterBindingRequest,
+) -> RouterSourceBinding | str:
+    return resolve_router_source_binding_request(request)
+
+
+def resolve_router_source_binding_request(
+    request: RouterBindingRequest,
+) -> RouterSourceBinding | str:
+    try:
+        source_commit = _resolve_commit(request.repo, request.expected_source_commit)
+        commit_contents = _router_contents_from_commit(request.repo, source_commit)
+    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+        return f"source_commit_unresolved:{type(exc).__name__}"
+    commit_digest = _digest_text(_join_router_contents(commit_contents))
+    if (
+        request.expected_router_source_sha256 is not None
+        and request.expected_router_source_sha256 != commit_digest
+    ):
+        return "expected_router_source_sha256_mismatch"
+    for label, root in (
+        ("codex_plugin_root", request.codex_plugin_root),
+        ("claude_plugin_root", request.claude_plugin_root),
+    ):
+        root_error = _validate_plugin_root(
+            root,
+            source_commit=source_commit,
+            expected_contents=commit_contents,
+            require_git_checkout=request.require_git_checkout,
+        )
+        if root_error is not None:
+            return f"{label}:{root_error}"
+    codex_digest = router_source_digest(request.codex_plugin_root)
+    claude_digest = router_source_digest(request.claude_plugin_root)
+    if codex_digest != claude_digest:
+        return "plugin_roots_router_source_mismatch"
+    if codex_digest != commit_digest:
+        return "plugin_root_router_source_mismatch"
+    return RouterSourceBinding(
+        source_commit=source_commit,
+        router_source_sha256=commit_digest,
+        file_digests={
+            relative: hashlib.sha256(text.encode()).hexdigest()
+            for relative, text in commit_contents.items()
+        },
+        file_contents=commit_contents,
+        codex_plugin_root=str(request.codex_plugin_root.resolve()),
+        claude_plugin_root=str(request.claude_plugin_root.resolve()),
+    )
+
+
 def execute_router_model_case(
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
-    *,
-    plugin_root: Path,
-    homes: RouterHomes | None = None,
+    context: RouterCaseContext,
 ) -> EvalRunRecord:
-    homes = homes or RouterHomes()
     try:
-        source = _router_source(plugin_root)
+        source = router_source_text(context.plugin_root)
+        source_digest = hashlib.sha256(source.encode()).hexdigest()
+        if (
+            context.expected_router_source_sha256 is not None
+            and source_digest != context.expected_router_source_sha256
+        ):
+            return _router_record(
+                case,
+                harness,
+                grants,
+                _RouterOutcome(None, source, "router_source_digest_mismatch"),
+            )
         with tempfile.TemporaryDirectory(prefix="saxo-router-eval-") as raw_temp:
             workdir = Path(raw_temp)
             schema_path = workdir / "router-decision.schema.json"
@@ -81,9 +185,16 @@ def execute_router_model_case(
                     prompt=prompt,
                     schema_path=schema_path,
                     workdir=workdir,
-                    homes=homes,
+                    homes=context.homes,
                 ),
             )
+            if "--ignore-user-config" in command:
+                return _router_record(
+                    case,
+                    harness,
+                    grants,
+                    _RouterOutcome(None, source, "ignore_user_config_forbidden"),
+                )
             result = subprocess.run(
                 command,
                 cwd=workdir,
@@ -123,6 +234,11 @@ def execute_router_model_case(
         and parsed.command_event_count == 0
         and parsed.mcp_event_count == 0
         and parsed.saxo_event_count == 0
+        and (
+            context.expected_router_source_sha256 is None
+            or hashlib.sha256(source.encode()).hexdigest()
+            == context.expected_router_source_sha256
+        )
     )
     return _router_record(
         case,
@@ -203,14 +319,6 @@ def _client_version(harness: Harness, env: dict[str, str]) -> str:
     return text.splitlines()[0] if text else "unknown"
 
 
-def _router_source(plugin_root: Path) -> str:
-    return "\n\n".join(
-        path.read_text(encoding="utf-8")
-        for relative in ROUTER_SOURCE_PATHS
-        for path in (plugin_root / relative,)
-    )
-
-
 def _router_prompt(user_request: str, source: str) -> str:
     return (
         "Classify and route the user request using only the router source below. "
@@ -275,3 +383,95 @@ def _router_record(
         model_saxo_event_count=None if parsed is None else parsed.saxo_event_count,
         client_version=outcome.client_version,
     )
+
+
+def _resolve_commit(repo: Path, commit: str) -> str:
+    return _git_text(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
+
+
+def _router_contents_from_commit(repo: Path, commit: str) -> dict[str, str]:
+    contents: dict[str, str] = {}
+    for relative in ROUTER_SOURCE_PATHS:
+        key = relative.as_posix()
+        contents[key] = _git_bytes(repo, "show", f"{commit}:{key}").decode("utf-8")
+    return contents
+
+
+def _join_router_contents(contents: dict[str, str]) -> str:
+    return "\n\n".join(contents[relative.as_posix()] for relative in ROUTER_SOURCE_PATHS)
+
+
+def _digest_text(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _validate_plugin_root(
+    root: Path,
+    *,
+    source_commit: str,
+    expected_contents: dict[str, str],
+    require_git_checkout: bool,
+) -> str | None:
+    content_error = _content_error(root, expected_contents)
+    if content_error is not None:
+        return content_error
+    if not _is_git_worktree(root):
+        return "not_a_git_checkout" if require_git_checkout else None
+    return _git_root_error(root, source_commit)
+
+
+def _content_error(root: Path, expected_contents: dict[str, str]) -> str | None:
+    if not root.is_dir():
+        return "missing_root"
+    for relative, expected_text in expected_contents.items():
+        path = root / relative
+        if not path.is_file():
+            return f"missing:{relative}"
+        if path.read_text(encoding="utf-8") != expected_text:
+            return f"digest_mismatch:{relative}"
+    return None
+
+
+def _git_root_error(root: Path, source_commit: str) -> str | None:
+    head = _git_text(root, "rev-parse", "HEAD").strip()
+    if head != source_commit:
+        return "head_mismatch"
+    dirty = _git_text(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        "--",
+        *[relative.as_posix() for relative in ROUTER_SOURCE_PATHS],
+    )
+    if dirty.strip():
+        return "dirty_router_source"
+    return None
+
+
+def _is_git_worktree(path: Path) -> bool:
+    result = subprocess.run(
+        [GIT_EXECUTABLE, "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _git_text(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        [GIT_EXECUTABLE, "-C", str(cwd), *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+
+
+def _git_bytes(cwd: Path, *args: str) -> bytes:
+    return subprocess.run(
+        [GIT_EXECUTABLE, "-C", str(cwd), *args],
+        check=True,
+        capture_output=True,
+    ).stdout
+

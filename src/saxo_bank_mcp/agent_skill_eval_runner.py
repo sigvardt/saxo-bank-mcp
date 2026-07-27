@@ -19,7 +19,12 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     selected_harnesses,
 )
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
-from saxo_bank_mcp.agent_skill_router_eval_execution import client_versions
+from saxo_bank_mcp.agent_skill_router_eval_execution import (
+    RouterBindingRequest,
+    RouterSourceBinding,
+    client_versions,
+    resolve_router_source_binding,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +41,9 @@ class EvalRunOptions:
     out: Path
     dry_run: bool
     nonzero_on_skip: bool
+    expected_source_commit: str | None = None
+    expected_router_source_sha256: str | None = None
+    source_repo: Path | None = None
 
 
 def run_eval_suite(
@@ -58,16 +66,85 @@ def run_eval_suite(
         codex_home=options.codex_home,
         claude_home=options.claude_home,
     )
-    records = tuple(
-        _run_case(
-            case,
-            selected,
-            roots=roots,
-            dry_run=options.dry_run,
-        )
-        for case in cases
-        for selected in selected_harnesses(options.harness)
+    binding: RouterSourceBinding | None = None
+    binding_error = ""
+    needs_binding = (not options.dry_run) and any(
+        case.router_expectation is not None for case in cases
     )
+    if needs_binding:
+        if not options.expected_source_commit:
+            binding_error = "missing_expected_source_commit"
+        else:
+            resolved = resolve_router_source_binding(
+                RouterBindingRequest(
+                    repo=options.source_repo or Path(),
+                    expected_source_commit=options.expected_source_commit,
+                    expected_router_source_sha256=options.expected_router_source_sha256,
+                    codex_plugin_root=options.codex_plugin_root,
+                    claude_plugin_root=options.claude_plugin_root,
+                    require_git_checkout=False,
+                ),
+            )
+            if isinstance(resolved, RouterSourceBinding):
+                binding = resolved
+            else:
+                binding_error = resolved
+
+    records: tuple[EvalRunRecord, ...]
+    if binding_error:
+        records = ()
+    else:
+        records = tuple(
+            _run_case(
+                case,
+                selected,
+                roots=roots,
+                dry_run=options.dry_run,
+                expected_router_source_sha256=(
+                    None if binding is None else binding.router_source_sha256
+                ),
+            )
+            for case in cases
+            for selected in selected_harnesses(options.harness)
+        )
+    if (
+        binding is not None
+        and not options.dry_run
+        and any(
+            record.router_source_mode == "source_equivalent"
+            and record.router_source_sha256 != binding.router_source_sha256
+            for record in records
+        )
+    ):
+        binding_error = "record_router_source_digest_mismatch"
+        records = tuple(
+            record
+            if record.router_source_sha256 == binding.router_source_sha256
+            else EvalRunRecord(
+                case_id=record.case_id,
+                harness=record.harness,
+                status="failed",
+                execution_mode=record.execution_mode,
+                expected_skill=record.expected_skill,
+                required_logical_tools=record.required_logical_tools,
+                forbidden_logical_tools=record.forbidden_logical_tools,
+                resolved_tool_grants=record.resolved_tool_grants,
+                transcript_assertions_passed=False,
+                no_model_call=record.no_model_call,
+                no_mcp_call=record.no_mcp_call,
+                no_saxo_call=record.no_saxo_call,
+                error="router_source_digest_mismatch",
+                router_decision=record.router_decision,
+                router_source_mode=record.router_source_mode,
+                router_source_sha256=record.router_source_sha256,
+                model_tool_event_count=record.model_tool_event_count,
+                model_command_event_count=record.model_command_event_count,
+                model_mcp_event_count=record.model_mcp_event_count,
+                model_saxo_event_count=record.model_saxo_event_count,
+                client_version=record.client_version,
+            )
+            for record in records
+        )
     after = global_state_fingerprint(
         codex_home=options.codex_home,
         claude_home=options.claude_home,
@@ -75,9 +152,15 @@ def run_eval_suite(
     skipped_count = (
         len(records) if not records else sum(1 for record in records if record.status == "skipped")
     )
-    planned = bool(options.dry_run)
-    failed = validation.status != "passed" or any(record.status == "failed" for record in records)
-    skipped_failure = bool(options.nonzero_on_skip and (not records or skipped_count))
+    empty_selection = not cases or not records
+    planned = bool(options.dry_run) and not empty_selection and not binding_error
+    failed = (
+        validation.status != "passed"
+        or bool(binding_error)
+        or empty_selection
+        or any(record.status == "failed" for record in records)
+    )
+    skipped_failure = bool(options.nonzero_on_skip and skipped_count)
     status: Literal["passed", "failed", "skipped", "planned"] = (
         "failed" if failed or skipped_failure else "planned" if planned else "passed"
     )
@@ -86,7 +169,7 @@ def run_eval_suite(
     )
     versions = (
         {}
-        if options.dry_run
+        if options.dry_run or binding_error
         else client_versions(
             codex_home=options.codex_home,
             claude_home=options.claude_home,
@@ -135,12 +218,40 @@ def run_eval_suite(
                 )
                 for harness in ("codex", "claude")
             },
+            "source_binding": (
+                {
+                    "status": "failed",
+                    "error": binding_error,
+                    "expected_source_commit": options.expected_source_commit or "",
+                    "expected_router_source_sha256": (
+                        options.expected_router_source_sha256 or ""
+                    ),
+                }
+                if binding_error
+                else {
+                    "status": "passed" if binding is not None else "not_required",
+                    "source_commit": "" if binding is None else binding.source_commit,
+                    "router_source_sha256": (
+                        "" if binding is None else binding.router_source_sha256
+                    ),
+                    "file_digests": {} if binding is None else binding.file_digests,
+                    "codex_plugin_root": (
+                        "" if binding is None else binding.codex_plugin_root
+                    ),
+                    "claude_plugin_root": (
+                        "" if binding is None else binding.claude_plugin_root
+                    ),
+                }
+            ),
         },
         before_global_state=before,
         after_global_state=after,
         global_state_unchanged=before == after,
         skipped_count=skipped_count,
         nonzero_on_skip=options.nonzero_on_skip,
+        source_commit="" if binding is None else binding.source_commit,
+        router_source_sha256="" if binding is None else binding.router_source_sha256,
+        router_source_file_digests={} if binding is None else binding.file_digests,
     )
     write_json(options.out, report.to_json_value())
     return 0 if status in {"passed", "planned"} else 1
@@ -180,6 +291,7 @@ def _run_case(
     *,
     roots: HarnessRoots,
     dry_run: bool,
+    expected_router_source_sha256: str | None,
 ) -> EvalRunRecord:
     grants = resolve_tool_grants(harness, case.exact_tool_grants[harness])
     if dry_run:
@@ -202,6 +314,7 @@ def _run_case(
         harness,
         grants,
         roots=roots,
+        expected_router_source_sha256=expected_router_source_sha256,
     )
 
 

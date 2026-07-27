@@ -36,6 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--nonzero-on-skip", action="store_true", default=True)
+    parser.add_argument("--expected-source-commit", default=None)
+    parser.add_argument("--expected-router-source-sha256", default=None)
+    parser.add_argument("--source-repo", type=Path, default=Path())
     args = parser.parse_args(argv)
     if args.fixture is not None:
         return _write_failure_fixture(args.fixture, args.out)
@@ -53,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
             out=args.out,
             dry_run=bool(args.dry_run),
             nonzero_on_skip=bool(args.nonzero_on_skip),
+            expected_source_commit=args.expected_source_commit,
+            expected_router_source_sha256=args.expected_router_source_sha256,
+            source_repo=args.source_repo,
         ),
     )
 
