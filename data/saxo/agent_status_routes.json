@@ -3,6 +3,62 @@
   "status_module_classification": {
     "excluded": [
       {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_execution.py",
+        "reason": "Agent eval execution status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_models.py",
+        "reason": "Agent eval report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_runner.py",
+        "reason": "Agent eval runner status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_eval_validation.py",
+        "reason": "Agent eval validation status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_cli_driver.py",
+        "reason": "Plugin install command/probe receipt status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_models.py",
+        "reason": "Plugin install evidence model status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
+        "reason": "Plugin install producer report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_qa.py",
+        "reason": "Plugin install QA status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_matrix.py",
+        "reason": "Tool matrix evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_matrix_producer.py",
+        "reason": "Tool matrix producer report status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_release.py",
+        "reason": "Release evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_release_models.py",
+        "reason": "Release evidence model status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_router_eval_execution.py",
+        "reason": "Router plan-only eval execution status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_static_gates.py",
+        "reason": "Static gate summary status labels, not a runtime MCP tool result."
+      },
+      {
         "module": "src/saxo_bank_mcp/endpoint_registry.py",
         "reason": "OpenAPI inventory status values, not MCP tool result statuses."
       },
@@ -59,6 +115,10 @@
         "reason": "Internal token refresh state, converted to auth_required before tool response."
       },
       {
+        "module": "src/saxo_bank_mcp/qa_exact_tool_probe.py",
+        "reason": "Exact-tool QA receipt status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/qa_live_probes.py",
         "reason": "QA probe status, not production MCP tool response truth."
       },
@@ -83,10 +143,6 @@
         "reason": "QA probe status, not production MCP tool response truth."
       },
       {
-        "module": "src/saxo_bank_mcp/qa_exact_tool_probe.py",
-        "reason": "Exact-tool QA receipt status, not production MCP tool response truth."
-      },
-      {
         "module": "src/saxo_bank_mcp/qa_prod_readiness.py",
         "reason": "QA readiness report status, not production MCP tool response truth."
       },
@@ -97,58 +153,6 @@
       {
         "module": "src/saxo_bank_mcp/qa_safety_probes.py",
         "reason": "QA probe status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_eval_execution.py",
-        "reason": "Agent eval execution status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_eval_models.py",
-        "reason": "Agent eval report status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_eval_runner.py",
-        "reason": "Agent eval runner status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_eval_validation.py",
-        "reason": "Agent eval validation status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_router_eval_execution.py",
-        "reason": "Router plan-only eval execution status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_install_cli_driver.py",
-        "reason": "Plugin install command/probe receipt status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_install_qa.py",
-        "reason": "Plugin install QA status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_install_models.py",
-        "reason": "Plugin install evidence model status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
-        "reason": "Plugin install producer report status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_matrix.py",
-        "reason": "Tool matrix evidence status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_matrix_producer.py",
-        "reason": "Tool matrix producer report status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_release.py",
-        "reason": "Release evidence status, not production MCP tool response truth."
-      },
-      {
-        "module": "src/saxo_bank_mcp/agent_skill_release_models.py",
-        "reason": "Release evidence model status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/streaming_transport.py",
