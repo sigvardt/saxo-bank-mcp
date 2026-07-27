@@ -10,7 +10,11 @@ from typing import cast
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.agent_skill_install_env import build_isolated_env
+from saxo_bank_mcp.agent_skill_install_env import (
+    build_isolated_env,
+    cleanup_disposable_isolated_state,
+    verify_throwaway_roots,
+)
 from saxo_bank_mcp.agent_skill_install_models import (
     ALLOWED_PRODUCTION_CACHE_SOURCES,
     EXPECTED_TOOLS,
@@ -23,6 +27,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     PLUGIN_NAME,
     PLUGIN_REF,
     VERSION_RELATIVES,
+    ensure_owner_only,
     global_state_fingerprint,
     installed_inventory_check,
     publishable_tracked_files,
@@ -227,32 +232,53 @@ def _startup_probe_errors(
     run_root: Path,
     clone: Path,
 ) -> list[str]:
-    home = run_root / "home"
-    codex_home = run_root / "codex-home"
-    probe_env = run_root / "verify-probe-env"
+    return startup_probe_errors_for_caches(
+        run_root=run_root,
+        clone=clone,
+        codex_cache=report.codex.cache_root.resolve(),
+        claude_cache=report.claude.cache_root.resolve(),
+    )
+
+
+def startup_probe_errors_for_caches(
+    *,
+    run_root: Path,
+    clone: Path,
+    codex_cache: Path,
+    claude_cache: Path,
+) -> list[str]:
+    """Startup probes use throwaway HOME/CODEX_HOME; registration stays on retained paths."""
+    verify_home, verify_codex_home, probe_env = verify_throwaway_roots(run_root)
+    errors: list[str] = []
     try:
+        for path in (verify_home, verify_codex_home, probe_env):
+            ensure_owner_only(path)
         env = build_isolated_env(
-            home=home,
-            codex_home=codex_home,
+            home=verify_home,
+            codex_home=verify_codex_home,
             run_root=run_root,
             probe_env=probe_env,
         )
+        for label, root in (
+            ("source", clone),
+            ("codex_cache", codex_cache),
+            ("claude_cache", claude_cache),
+        ):
+            errors.extend(_one_startup(label, root, env=env, probe_env=probe_env))
+        for name, cache in (
+            ("codex", codex_cache),
+            ("claude", claude_cache),
+        ):
+            errors.extend(
+                _one_startup(f"{name}_list_tools", cache, env=env, probe_env=probe_env),
+            )
     except Exception:  # noqa: BLE001
-        return ["verify_env_invalid"]
-    errors: list[str] = []
-    for label, root in (
-        ("source", clone),
-        ("codex_cache", report.codex.cache_root.resolve()),
-        ("claude_cache", report.claude.cache_root.resolve()),
-    ):
-        errors.extend(_one_startup(label, root, env=env, probe_env=probe_env))
-    for name, cache in (
-        ("codex", report.codex.cache_root.resolve()),
-        ("claude", report.claude.cache_root.resolve()),
-    ):
-        errors.extend(
-            _one_startup(f"{name}_list_tools", cache, env=env, probe_env=probe_env),
-        )
+        errors.append("verify_env_invalid")
+    finally:
+        # run_command already reaps probe children; then delete throwaway disposable trees.
+        residual = cleanup_disposable_isolated_state(run_root)
+        if residual:
+            errors.append("verify_scratch_residue")
     return errors
 
 
@@ -398,7 +424,7 @@ def _bumped_proof_errors(  # noqa: C901
     return errors
 
 
-def _proof_against_disk(  # noqa: C901, PLR0913
+def _proof_against_disk(  # noqa: C901, PLR0912, PLR0913
     client_name: str,
     proof: VersionCacheProof,
     *,
@@ -431,11 +457,13 @@ def _proof_against_disk(  # noqa: C901, PLR0913
     ):
         errors.append(f"{client_name}_{label}_registration_fields_invalid")
     if require_live_startup:
-        probe_env = run_root / "verify-probe-env"
+        verify_home, verify_codex_home, probe_env = verify_throwaway_roots(run_root)
         try:
+            for path in (verify_home, verify_codex_home, probe_env):
+                ensure_owner_only(path)
             env = build_isolated_env(
-                home=run_root / "home",
-                codex_home=run_root / "codex-home",
+                home=verify_home,
+                codex_home=verify_codex_home,
                 run_root=run_root,
                 probe_env=probe_env,
             )
@@ -456,6 +484,10 @@ def _proof_against_disk(  # noqa: C901, PLR0913
                 errors.append(f"{client_name}_{label}_probe_digest_mismatch")
         except Exception:  # noqa: BLE001
             errors.append(f"{client_name}_{label}_startup_probe_failed")
+        finally:
+            residual = cleanup_disposable_isolated_state(run_root)
+            if residual:
+                errors.append(f"{client_name}_{label}_verify_scratch_residue")
     return errors
 
 

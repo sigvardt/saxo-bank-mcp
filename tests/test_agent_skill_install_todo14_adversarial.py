@@ -14,10 +14,17 @@ from pydantic import ValidationError
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
+    CommandResult,
     descendant_pids,
     remaining_live_pgids,
     remaining_live_pids,
     run_command,
+)
+from saxo_bank_mcp.agent_skill_install_env import (
+    DisposableCleanupError,
+    cleanup_disposable_isolated_state,
+    enumerated_disposable_paths,
+    require_disposable_cleanup,
 )
 from saxo_bank_mcp.agent_skill_install_ledger import (
     append_fixture_ledger_event,
@@ -28,6 +35,7 @@ from saxo_bank_mcp.agent_skill_install_ledger import (
 )
 from saxo_bank_mcp.agent_skill_install_models import (
     REQUIRED_FIXTURE_CONSUMERS,
+    CommandReceipt,
     FixtureLedgerBinding,
     VersionCacheProof,
 )
@@ -41,7 +49,10 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
     provisional_privacy_binding,
     scan_directory_normalized,
 )
-from saxo_bank_mcp.agent_skill_install_verify_live import codex_registration_errors
+from saxo_bank_mcp.agent_skill_install_verify_live import (
+    codex_registration_errors,
+    startup_probe_errors_for_caches,
+)
 from saxo_bank_mcp.secret_scan import scan_secret_text
 
 COMMIT = "a" * 40
@@ -491,3 +502,245 @@ def test_scan_directory_rejects_special_node(tmp_path: Path) -> None:
     _findings, errors = scan_directory_normalized(cache, run_root=run_root)
     assert any(item.get("error") == "special_node" for item in errors)
     assert any(str(fifo) in str(item.get("path", "")) for item in errors)
+
+
+def _seed_retained_fixture(run_root: Path) -> tuple[Path, Path]:
+    """Registration + both caches under retained homes; return cache paths."""
+    codex_cache = (
+        run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+    )
+    claude_cache = (
+        run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+    )
+    for relative in (
+        "source-clone",
+        "home",
+        "codex-home",
+        "claude-home",
+        str(codex_cache.relative_to(run_root)),
+        str(claude_cache.relative_to(run_root)),
+        "home/.claude/plugins",
+        "home/.saxo-bank-mcp-auth",
+    ):
+        (run_root / relative).mkdir(parents=True, exist_ok=True)
+    (run_root / "codex-home/config.toml").write_text(
+        '[plugins."saxo-bank-mcp@sigvardt"]\nenabled = true\n',
+        encoding="utf-8",
+    )
+    (run_root / "home/.claude/plugins/installed_plugins.json").write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "saxo-bank-mcp@sigvardt": [
+                        {
+                            "version": "0.1.0",
+                            "installPath": str(claude_cache.resolve()),
+                        },
+                    ],
+                },
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (codex_cache / "marker.txt").write_text("codex-cache\n", encoding="utf-8")
+    (claude_cache / "marker.txt").write_text("claude-cache\n", encoding="utf-8")
+    return codex_cache, claude_cache
+
+
+def test_disposable_cleanup_removes_ephemeral_preserves_registration(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    ephemeral = {
+        run_root / "tmp/x",
+        run_root / "uv-cache/wheels",
+        run_root / "uv-python/cpython",
+        run_root / "probe-env/lib",
+        run_root / "marketplace-source/pkg",
+        run_root / "home/.cache/uv/CACHEDIR.TAG",
+        run_root / "home/.config/uv/uv.toml",
+        run_root / "home/.local/share/x",
+        run_root / "home/Library/Application Support/fastmcp/state",
+        run_root / "home/.claude/backups/old",
+        run_root / "codex-home/.tmp/work",
+        run_root / "codex-home/tmp/work",
+        run_root / "verify-home/.cache",
+        run_root / "verify-codex-home/tmp",
+        run_root / "verify-probe-env/lib",
+    }
+    for path in ephemeral:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix or path.name in {"CACHEDIR.TAG", "uv.toml", "x", "state", "old", "work"}:
+            if path.suffix or path.name.endswith((".TAG", ".toml", "x", "state", "old", "work")):
+                path.write_text("ephemeral\n", encoding="utf-8")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    # Ensure every enumerated disposable root exists as a tree.
+    for path in enumerated_disposable_paths(run_root):
+        path.mkdir(parents=True, exist_ok=True)
+        (path / ".keep").write_text("x\n", encoding="utf-8")
+
+    residual = cleanup_disposable_isolated_state(run_root)
+    assert residual == []
+    for path in enumerated_disposable_paths(run_root):
+        assert not path.exists(), path
+    assert (run_root / "codex-home/config.toml").is_file()
+    assert (run_root / "home/.claude/plugins/installed_plugins.json").is_file()
+    assert (codex_cache / "marker.txt").is_file()
+    assert (claude_cache / "marker.txt").is_file()
+    assert (run_root / "source-clone").is_dir()
+
+
+def test_disposable_cleanup_residue_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    _seed_retained_fixture(run_root)
+    sticky = run_root / "tmp"
+    sticky.mkdir(parents=True)
+    (sticky / "held").write_text("x\n", encoding="utf-8")
+
+    def _boom(_path: Path) -> None:
+        raise OSError("permission_denied")
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_env._remove_path_tree",
+        _boom,
+    )
+    residual = cleanup_disposable_isolated_state(run_root)
+    assert residual
+    with pytest.raises(DisposableCleanupError) as err:
+        require_disposable_cleanup(run_root)
+    assert err.value.residual_paths
+
+
+def test_verify_startup_uses_throwaway_homes_and_cleans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    retained_home = run_root / "home"
+    retained_codex = run_root / "codex-home"
+    marker = retained_home / "retained-marker"
+    marker.write_text("keep\n", encoding="utf-8")
+    fingerprint_before = {
+        "home": sorted(
+            str(path.relative_to(retained_home)) for path in retained_home.rglob("*")
+        ),
+        "codex": sorted(
+            str(path.relative_to(retained_codex)) for path in retained_codex.rglob("*")
+        ),
+    }
+    captured: dict[str, Path] = {}
+
+    def _fake_probe(
+        name: str,
+        root: Path,
+        *,
+        env: dict[str, str],
+        probe_env: Path,
+    ) -> CommandResult:
+        home = Path(env["HOME"])
+        codex_home = Path(env["CODEX_HOME"])
+        captured["home"] = home
+        captured["codex_home"] = codex_home
+        captured["probe_env"] = probe_env
+        # Mutate only throwaway trees (would poison retained state if wrong homes used).
+        (home / ".cache" / "uv").mkdir(parents=True, exist_ok=True)
+        (home / ".cache" / "uv" / "poison").write_text("nope\n", encoding="utf-8")
+        (codex_home / "tmp").mkdir(parents=True, exist_ok=True)
+        receipt = CommandReceipt(
+            name=name,
+            argv=("uv", "run"),
+            cwd=str(root),
+            exit_code=0,
+            timed_out=False,
+            stdout_sha256="a" * 64,
+            stderr_sha256="b" * 64,
+            pid=None,
+            pgid=None,
+            cleanup_attempted=True,
+        )
+        return CommandResult(
+            receipt=receipt,
+            stdout=json.dumps({"tool_count": 39, "annotations_missing": []}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live.probe_root_stdio",
+        _fake_probe,
+    )
+    errors = startup_probe_errors_for_caches(
+        run_root=run_root,
+        clone=clone,
+        codex_cache=codex_cache,
+        claude_cache=claude_cache,
+    )
+    assert "verify_scratch_residue" not in errors
+    assert captured["home"] == (run_root / "verify-home").resolve() or captured[
+        "home"
+    ] == run_root / "verify-home"
+    assert captured["codex_home"] == (run_root / "verify-codex-home").resolve() or captured[
+        "codex_home"
+    ] == run_root / "verify-codex-home"
+    assert not (run_root / "verify-home").exists()
+    assert not (run_root / "verify-codex-home").exists()
+    assert not (run_root / "verify-probe-env").exists()
+    assert marker.is_file()
+    assert not (retained_home / ".cache").exists()
+    fingerprint_after = {
+        "home": sorted(
+            str(path.relative_to(retained_home)) for path in retained_home.rglob("*")
+        ),
+        "codex": sorted(
+            str(path.relative_to(retained_codex)) for path in retained_codex.rglob("*")
+        ),
+    }
+    assert fingerprint_after == fingerprint_before
+
+
+def test_privacy_still_rejects_secret_in_retained_state(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    # Genuine retained registration-adjacent state with a secret must still fail.
+    secret_path = run_root / "home" / ".claude" / "plugins" / "notes.json"
+    secret_path.write_text(
+        json.dumps({"access_token": string.ascii_lowercase}) + "\n",
+        encoding="utf-8",
+    )
+    install = report_dir / "install.json"
+    install.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "privacy": provisional_privacy_binding(
+                    candidate_commit=COMMIT,
+                    clone_commit=COMMIT,
+                ),
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PrivacyPipelineError, match="privacy_scan_failed"):
+        produce_privacy_evidence(
+            install_report_path=install,
+            report_dir=report_dir,
+            run_root=run_root,
+            version="0.1.0",
+            candidate_commit=COMMIT,
+            clone_commit=COMMIT,
+            codex_cache=codex_cache,
+            claude_cache=claude_cache,
+        )

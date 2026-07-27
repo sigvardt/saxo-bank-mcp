@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,7 +34,12 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
     run_update_probe,
     startup_from_probes,
 )
-from saxo_bank_mcp.agent_skill_install_env import EnvironmentContainmentError
+from saxo_bank_mcp.agent_skill_install_env import (
+    DisposableCleanupError,
+    EnvironmentContainmentError,
+    cleanup_disposable_isolated_state,
+    require_disposable_cleanup,
+)
 from saxo_bank_mcp.agent_skill_install_ledger import bind_existing_ledger_event
 from saxo_bank_mcp.agent_skill_install_models import (
     REQUIRED_FIXTURE_CONSUMERS,
@@ -96,6 +100,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     observed_pids: list[int] = []
     observed_pgids: list[int] = []
     temporary_paths = [marketplace, probe_env]
+    disposable_residual: list[str] = []
     git_receipts: tuple[CommandReceipt, ...] = ()
     help_receipts: tuple[CommandResult, ...] = ()
     codex_receipts: tuple[CommandResult, ...] = ()
@@ -216,8 +221,8 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         observed_pids = [receipt.pid for receipt in command_receipts if receipt.pid is not None]
         observed_pgids = [receipt.pgid for receipt in command_receipts if receipt.pgid is not None]
     except CommandFailureError as exc:
-        _cleanup_temps(temporary_paths)
         cleanup_recorded_groups(tuple(observed_pgids))
+        cleanup_disposable_isolated_state(run_root, extra_paths=temporary_paths)
         write_json(
             options.out,
             {
@@ -234,8 +239,8 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         PermissionError,
         ValueError,
     ) as exc:
-        _cleanup_temps(temporary_paths)
         cleanup_recorded_groups(tuple(observed_pgids))
+        cleanup_disposable_isolated_state(run_root, extra_paths=temporary_paths)
         reason = getattr(exc, "reason", type(exc).__name__)
         write_json(options.out, {"status": "failed", "reason": str(reason)})
         return 1
@@ -245,13 +250,27 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         options.claude_global_home,
     )
     after = {"codex": after_scope["codex"], "claude": after_scope["claude"]}
-    _cleanup_temps(temporary_paths)
-    remaining_temps = [path for path in temporary_paths if path.exists()]
+    # Process cleanup must precede disposable tree deletion (open files / children).
     remaining_pids = remaining_live_pids(tuple(observed_pids))
     remaining_pgids = remaining_live_pgids(tuple(observed_pgids))
     if remaining_pgids:
         remaining_pgids = cleanup_recorded_groups(tuple(remaining_pgids))
         remaining_pids = remaining_live_pids(tuple(observed_pids))
+    try:
+        require_disposable_cleanup(run_root, extra_paths=temporary_paths)
+        disposable_residual = []
+    except DisposableCleanupError as exc:
+        disposable_residual = list(exc.residual_paths)
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "disposable_cleanup_failed",
+                "remaining_temporary_paths": disposable_residual,
+            },
+        )
+        return 1
+    remaining_temps = [Path(path) for path in disposable_residual]
 
     try:
         preserved_modes = assert_preserved_modes(
@@ -328,9 +347,17 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     claude_client = _sanitize_client_report(claude_client, path_roots)
     sanitized_update = _sanitize_json_paths(dict(update_probe), path_roots)
     update_probe = dict(sanitized_update) if isinstance(sanitized_update, dict) else {}
+    remaining_temp_paths = [str(path) for path in remaining_temps] + list(disposable_residual)
     update_probe["temporary_fixtures_removed"] = (
-        bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temps
+        bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temp_paths
     )
+    prior_remaining = update_probe.get("remaining_temporary_paths")
+    if isinstance(prior_remaining, list):
+        remaining_temp_paths = sorted(
+            {str(item) for item in prior_remaining if isinstance(item, str)}
+            | set(remaining_temp_paths),
+        )
+    update_probe["remaining_temporary_paths"] = remaining_temp_paths
     try:
         typed_update = UpdateProbeEvidence.model_validate(update_probe)
     except Exception as exc:  # noqa: BLE001 - producer fail-closed on untyped proof
@@ -501,12 +528,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         )
         return 1
     return 0
-
-
-def _cleanup_temps(paths: list[Path]) -> None:
-    for path in paths:
-        if path.exists():
-            shutil.rmtree(path, ignore_errors=True)
 
 
 def _producer_errors(  # noqa: PLR0913

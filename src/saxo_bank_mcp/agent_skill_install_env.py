@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
@@ -64,12 +65,46 @@ _BLOCKED_PREFIXES: Final = (
     "GH_",
     "GITHUB_",
 )
+# Task-created ephemeral trees only. Never includes clone, caches, or registration roots.
+_DISPOSABLE_RUN_ROOT_RELATIVES: Final = (
+    "marketplace-source",
+    "probe-env",
+    "verify-probe-env",
+    "verify-home",
+    "verify-codex-home",
+    "tmp",
+    "uv-cache",
+    "uv-python",
+)
+_DISPOSABLE_HOME_RELATIVES: Final = (
+    ".cache",
+    ".config",
+    ".local",
+    "Library/Application Support/fastmcp",
+    ".claude/backups",
+)
+_DISPOSABLE_CODEX_HOME_RELATIVES: Final = (
+    ".tmp",
+    "tmp",
+)
+VERIFY_HOME_NAME: Final = "verify-home"
+VERIFY_CODEX_HOME_NAME: Final = "verify-codex-home"
+VERIFY_PROBE_ENV_NAME: Final = "verify-probe-env"
 
 
 class EnvironmentContainmentError(ValueError):
     def __init__(self, reason: str) -> None:  # noqa: D107
         super().__init__(reason)
         self.reason = reason
+
+
+class DisposableCleanupError(ValueError):
+    """Fail-closed residue after removing enumerated disposable paths."""
+
+    def __init__(self, residual_paths: Sequence[str]) -> None:  # noqa: D107
+        super().__init__("disposable_cleanup_residue")
+        self.reason = "disposable_cleanup_residue"
+        self.residual_paths = tuple(residual_paths)
 
 
 def build_isolated_env(  # noqa: C901
@@ -171,6 +206,79 @@ def auth_env_keys() -> tuple[str, ...]:
 
 def write_bearing_env_keys() -> tuple[str, ...]:
     return _WRITE_BEARING_KEYS
+
+
+def verify_throwaway_roots(run_root: Path) -> tuple[Path, Path, Path]:
+    """Owner-only throwaway HOME / CODEX_HOME / probe env under run_root for verify probes."""
+    root = run_root.resolve()
+    return (
+        root / VERIFY_HOME_NAME,
+        root / VERIFY_CODEX_HOME_NAME,
+        root / VERIFY_PROBE_ENV_NAME,
+    )
+
+
+def enumerated_disposable_paths(run_root: Path) -> tuple[Path, ...]:
+    """Exact task-created ephemeral paths eligible for pre-privacy cleanup."""
+    root = run_root.resolve()
+    home = root / "home"
+    codex_home = root / "codex-home"
+    paths = [root / relative for relative in _DISPOSABLE_RUN_ROOT_RELATIVES]
+    paths.extend(home / relative for relative in _DISPOSABLE_HOME_RELATIVES)
+    paths.extend(codex_home / relative for relative in _DISPOSABLE_CODEX_HOME_RELATIVES)
+    return tuple(paths)
+
+
+def cleanup_disposable_isolated_state(
+    run_root: Path,
+    *,
+    extra_paths: Sequence[Path] = (),
+) -> list[str]:
+    """Remove enumerated disposable paths. Return residual absolute paths (empty = clean).
+
+    Call only after process cleanup for commands that may hold open files under these trees.
+    Does not touch source-clone, installed caches, registration files, or the six ledger roots
+    themselves (only listed subtrees under home/codex-home).
+    """
+    targets = list(enumerated_disposable_paths(run_root))
+    targets.extend(path.resolve() for path in extra_paths)
+    # Deepest paths first so nested removals do not race parents.
+    ordered = sorted(set(targets), key=lambda item: len(str(item)), reverse=True)
+    residual: list[str] = []
+    for path in ordered:
+        if not os.path.lexists(path):
+            continue
+        try:
+            _remove_path_tree(path)
+        except OSError:
+            residual.append(str(path.resolve() if path.exists() else path))
+            continue
+        if os.path.lexists(path):
+            residual.append(str(path.resolve() if path.exists() else path))
+    return sorted(set(residual))
+
+
+def require_disposable_cleanup(
+    run_root: Path,
+    *,
+    extra_paths: Sequence[Path] = (),
+) -> list[str]:
+    """Remove disposable paths and raise DisposableCleanupError if residue remains."""
+    residual = cleanup_disposable_isolated_state(run_root, extra_paths=extra_paths)
+    if residual:
+        raise DisposableCleanupError(residual)
+    return residual
+
+
+def _remove_path_tree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+    # Special node (fifo/socket/device): unlink without following.
+    path.unlink()
 
 
 def _assert_write_bearing_contained(env: dict[str, str], run_root: Path) -> None:
