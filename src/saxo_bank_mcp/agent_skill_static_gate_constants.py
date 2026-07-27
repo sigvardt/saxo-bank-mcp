@@ -21,15 +21,11 @@ EXPECTED_SKILLS: Final = (
     "saxo-trading",
 )
 PORTABLE_FRONTMATTER_KEYS: Final = frozenset({"name", "description"})
-_GITHUB_OWNER: Final = "sig" + "vardt"
-OFFICIAL_LINK_PREFIXES: Final = (
-    "https://www.developer.saxo/",
-    f"https://github.com/{_GITHUB_OWNER}/",
-    "https://code.claude.com/",
-)
+OFFICIAL_LINK_INVENTORY_PATH: Final = Path("data/saxo/official_skill_links.json")
 GRANT_WILDCARD_PATTERN: Final = re.compile(r"[*?]|mcp__plugin_[^\s`\"']*\*")
 HTTP_LINK_PATTERN: Final = re.compile(r"https?://[^\s)\]\"'>]+")
 FRONTMATTER_PATTERN: Final = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
+FIXTURE_CANARY: Final = "CANARY_DO_NOT_ECHO"
 CACHE_DANGEROUS_NAMES: Final = frozenset(
     {
         ".env",

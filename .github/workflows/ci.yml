@@ -17,23 +17,61 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
 
       - name: Install dependencies
         run: uv sync --locked --all-extras --dev
 
+      - name: Install Claude Code CLI (pinned)
+        run: npm install -g @anthropic-ai/claude-code@2.1.220
+
       - name: Import package
         run: uv run python -c "import saxo_bank_mcp"
 
       - name: Test
-        run: uv run pytest
+        run: uv run pytest --junitxml=/tmp/saxo-ci-pytest-junit.xml
 
       - name: Lint
         run: uv run ruff check .
 
       - name: Typecheck
         run: uv run basedpyright
+
+      - name: Codex plugin validate
+        run: uv run --locked python scripts/validators/validate_plugin.py .
+
+      - name: Claude plugin validate
+        run: claude plugin validate --strict .
+
+      - name: Skill quick validate saxo-auth-session
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-auth-session
+
+      - name: Skill quick validate saxo-bank
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-bank
+
+      - name: Skill quick validate saxo-openapi
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-openapi
+
+      - name: Skill quick validate saxo-qa-operations
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-qa-operations
+
+      - name: Skill quick validate saxo-reads
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-reads
+
+      - name: Skill quick validate saxo-safety-recovery
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-safety-recovery
+
+      - name: Skill quick validate saxo-streaming
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-streaming
+
+      - name: Skill quick validate saxo-trading
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-trading
 
       - name: Dual-harness static gates
         run: uv run python scripts/run_agent_skill_static_gates.py --check

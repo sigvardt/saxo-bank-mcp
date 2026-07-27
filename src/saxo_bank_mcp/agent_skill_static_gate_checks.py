@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import cast
@@ -12,8 +14,9 @@ from saxo_bank_mcp.agent_skill_static_gate_constants import (
     FRONTMATTER_PATTERN,
     HTTP_LINK_PATTERN,
     JSON_OBJECT_ADAPTER,
-    OFFICIAL_LINK_PREFIXES,
+    OFFICIAL_LINK_INVENTORY_PATH,
     PORTABLE_FRONTMATTER_KEYS,
+    PUBLIC_SECRET_SCAN_PATHS,
     SCAN_SUFFIXES,
     VERSION_PATHS,
     JsonObject,
@@ -25,11 +28,24 @@ from saxo_bank_mcp.agent_skill_static_gate_wildcards import (
 )
 
 
+class TrackedPublicPathError(Exception):
+    """Raised when tracked public-path enumeration fails closed."""
+
+
 def version_parity_errors(root: Path) -> tuple[str, ...]:
-    project_version = project_version_of(root)
+    try:
+        project_version = project_version_of(root)
+    except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError):
+        return ("manifest_version_drift",)
     errors: list[str] = []
     for relative in VERSION_PATHS[1:]:
-        versions = versions_from_payload(json_object(root / relative))
+        path = root / relative
+        try:
+            payload = json_object(path)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            errors.append("manifest_version_drift")
+            continue
+        versions = versions_from_payload(payload)
         if not versions or any(version != project_version for version in versions):
             errors.append("manifest_version_drift")
     return tuple(dict.fromkeys(errors))
@@ -85,12 +101,16 @@ def wildcard_findings(root: Path) -> tuple[str, ...]:
 
 
 def link_findings(root: Path) -> tuple[str, ...]:
+    try:
+        allowed = _official_link_inventory(root)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return ("unofficial_link",)
     findings = [
         "unofficial_link"
         for path in scan_files(root, ("skills",))
         if path.suffix == ".md"
         for link in HTTP_LINK_PATTERN.findall(path.read_text(encoding="utf-8"))
-        if not link.startswith(OFFICIAL_LINK_PREFIXES)
+        if link not in allowed
     ]
     return tuple(dict.fromkeys(findings))
 
@@ -106,18 +126,14 @@ def nested_reference_findings(root: Path) -> tuple[str, ...]:
 
 
 def cache_dangerous_findings(root: Path) -> tuple[str, ...]:
+    try:
+        tracked = _tracked_public_paths(root)
+    except TrackedPublicPathError:
+        return ("cache_public_path_scan_error",)
     findings = [
         "cache_dangerous_public_file"
-        for relative in (
-            "skills",
-            "evals",
-            ".agents",
-            ".codex-plugin",
-            ".claude-plugin",
-            "scripts",
-        )
-        for path in _existing_rglob(root / relative)
-        if path.is_file() and path.name in CACHE_DANGEROUS_NAMES
+        for relative in tracked
+        if Path(relative).name in CACHE_DANGEROUS_NAMES
     ]
     return tuple(dict.fromkeys(findings))
 
@@ -154,6 +170,54 @@ def scan_files(root: Path, relatives: tuple[str, ...]) -> tuple[Path, ...]:
     return tuple(files)
 
 
+def _official_link_inventory(root: Path) -> frozenset[str]:
+    raw = json.loads((root / OFFICIAL_LINK_INVENTORY_PATH).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise TypeError("official link inventory must be an object")
+    payload = cast("dict[str, object]", raw)
+    urls = payload.get("urls")
+    if not isinstance(urls, list):
+        raise TypeError("official link inventory urls must be a string list")
+    items = cast("list[object]", urls)
+    if not all(isinstance(item, str) for item in items):
+        raise TypeError("official link inventory urls must be a string list")
+    return frozenset(cast("list[str]", items))
+
+
+def _tracked_public_paths(root: Path) -> tuple[str, ...]:
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/env", "git", "-C", str(root), "ls-files", "-z"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise TrackedPublicPathError from error
+    if completed.returncode != 0:
+        raise TrackedPublicPathError
+    tracked = [item for item in completed.stdout.split("\0") if item]
+    public_dirs = tuple(
+        path for path in PUBLIC_SECRET_SCAN_PATHS if not Path(path).suffix and "/" not in path
+    )
+    public_files = frozenset(path for path in PUBLIC_SECRET_SCAN_PATHS if Path(path).suffix)
+    selected: list[str] = []
+    for relative in tracked:
+        if relative in public_files or relative in PUBLIC_SECRET_SCAN_PATHS:
+            selected.append(relative)
+            continue
+        if "/" not in relative:
+            selected.append(relative)
+            continue
+        if any(relative.startswith(f"{directory}/") for directory in public_dirs):
+            selected.append(relative)
+            continue
+        if relative.startswith("data/saxo/"):
+            selected.append(relative)
+    return tuple(selected)
+
+
 def _portable_frontmatter(loaded: object) -> bool:
     if not isinstance(loaded, dict):
         return False
@@ -183,9 +247,3 @@ def _is_nested_reference(root: Path, skill: str, path: Path) -> bool:
     if path.is_dir():
         return path != references and references in path.parents
     return path.parent != references
-
-
-def _existing_rglob(base: Path) -> tuple[Path, ...]:
-    if not base.exists():
-        return ()
-    return tuple(base.rglob("*"))

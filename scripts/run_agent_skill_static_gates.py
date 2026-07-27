@@ -36,7 +36,6 @@ def main(argv: list[str] | None = None) -> int:
         "--self-test-fixture",
         choices=sorted(FAILURE_FIXTURES),
     )
-    parser.add_argument("ignored", nargs="*")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
     if args.self_test_fixture is not None:

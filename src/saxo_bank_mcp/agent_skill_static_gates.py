@@ -4,14 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from saxo_bank_mcp.agent_catalog_fixtures import self_test_fixture as catalog_self_test
-from saxo_bank_mcp.agent_catalog_runtime import CatalogValidationError
-from saxo_bank_mcp.agent_skill_eval_validation import (
-    self_test_fixture_errors as eval_fixture_errors,
-)
 from saxo_bank_mcp.agent_skill_static_gate_checks import (
     cache_dangerous_findings,
-    frontmatter_errors_for_text,
     frontmatter_findings,
     link_findings,
     nested_reference_findings,
@@ -23,10 +17,8 @@ from saxo_bank_mcp.agent_skill_static_gate_constants import (
     FAILURE_FIXTURES,
     PUBLIC_SECRET_SCAN_PATHS,
 )
-from saxo_bank_mcp.secret_scan import scan_secret_text
-from saxo_bank_mcp.tool_annotations import (
-    ToolAnnotationDriftError,
-    assert_tool_annotations_cover,
+from saxo_bank_mcp.agent_skill_static_gate_fixtures import (
+    self_test_fixture_errors as run_self_test_fixture_errors,
 )
 
 __all__ = [
@@ -107,51 +99,4 @@ def run_static_gates(root: Path) -> StaticGateResult:
 
 
 def self_test_fixture_errors(fixture: str, root: Path | None = None) -> tuple[str, ...]:
-    base = root if root is not None else Path.cwd()
-    handlers = {
-        "missing-annotation": _missing_annotation_errors,
-        "stale-generated-row": lambda: _stale_generated_row_errors(base),
-        "bad-skill-frontmatter": _bad_skill_frontmatter_errors,
-        "manifest-version-drift": lambda: ("manifest_version_drift",),
-        "wildcard-grant": _wildcard_grant_errors,
-        "fake-secret": _fake_secret_errors,
-    }
-    handler = handlers.get(fixture)
-    if handler is None:
-        return (f"unknown_fixture:{fixture}",)
-    return handler()
-
-
-def _missing_annotation_errors() -> tuple[str, ...]:
-    try:
-        assert_tool_annotations_cover(("saxo_health", "saxo_fixture_missing_annotation"))
-    except ToolAnnotationDriftError:
-        return ("missing_annotation",)
-    return ()
-
-
-def _stale_generated_row_errors(root: Path) -> tuple[str, ...]:
-    try:
-        catalog_self_test(root, "stale-operation")
-    except CatalogValidationError:
-        return ("stale_generated_row",)
-    return ()
-
-
-def _bad_skill_frontmatter_errors() -> tuple[str, ...]:
-    text = "---\nname: saxo-bank\ndescription: x\nallowed-tools: '*'\n---\n"
-    return frontmatter_errors_for_text(text) or ("bad_skill_frontmatter",)
-
-
-def _wildcard_grant_errors() -> tuple[str, ...]:
-    return ("wildcard_grant",) if eval_fixture_errors("wildcard-grant") else ()
-
-
-def _fake_secret_errors() -> tuple[str, ...]:
-    field_name = "access" + "_token"
-    field_value = "literal-" + "portal-token-value"
-    findings, scan_errors = scan_secret_text(
-        "fixture",
-        f'{field_name} = "{field_value}"',
-    )
-    return ("fake_secret",) if findings or scan_errors else ()
+    return run_self_test_fixture_errors(fixture, root=root)

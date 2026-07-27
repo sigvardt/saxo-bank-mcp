@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
 import yaml
 
@@ -12,21 +12,41 @@ from saxo_bank_mcp.agent_skill_static_gate_constants import (
     GRANT_WILDCARD_PATTERN,
 )
 
+MANIFEST_RELATIVES: Final[tuple[str, ...]] = (
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+    ".agents/plugins/marketplace.json",
+    ".mcp.json",
+)
+GRANT_KEY_NAMES: Final = frozenset(
+    {
+        "allowedTools",
+        "allowed-tools",
+        "permissions",
+        "exact_tool_grants",
+    },
+)
+
 
 def eval_wildcard_findings(root: Path) -> tuple[str, ...]:
     findings: list[str] = []
-    for path in sorted((root / "evals").rglob("case.yaml")):
-        payload = _load_mapping(path)
+    eval_root = root / "evals"
+    if not eval_root.is_dir():
+        return ()
+    for path in sorted(eval_root.rglob("case.yaml")):
+        payload, error = _load_mapping(path)
+        if error is not None:
+            findings.append(error)
+            continue
         if payload is None:
             continue
         grants = payload.get("exact_tool_grants")
-        if not isinstance(grants, dict):
+        if grants is None:
             continue
-        grant_map = cast("dict[str, object]", grants)
-        findings.extend(
-            "wildcard_grant" for values in grant_map.values() if _values_have_wildcard(values)
-        )
-    return tuple(findings)
+        if _values_have_wildcard(grants) or _mapping_has_wildcard_grant(grants):
+            findings.append("wildcard_grant")
+    return tuple(dict.fromkeys(findings))
 
 
 def skill_frontmatter_wildcard_findings(root: Path) -> tuple[str, ...]:
@@ -35,32 +55,57 @@ def skill_frontmatter_wildcard_findings(root: Path) -> tuple[str, ...]:
         path = root / "skills" / skill / "SKILL.md"
         if not path.is_file():
             continue
-        match = FRONTMATTER_PATTERN.match(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+        match = FRONTMATTER_PATTERN.match(text)
         if match is None:
             continue
-        loaded = yaml.safe_load(match.group(1))
+        try:
+            loaded = yaml.safe_load(match.group(1))
+        except yaml.YAMLError:
+            findings.append("bad_skill_frontmatter")
+            continue
         if not isinstance(loaded, dict):
+            findings.append("bad_skill_frontmatter")
             continue
         typed = cast("dict[str, object]", loaded)
-        allowed = typed.get("allowed-tools") or typed.get("allowedTools")
-        if _values_have_wildcard(allowed):
-            findings.append("wildcard_grant")
-    return tuple(findings)
+        findings.extend(
+            "wildcard_grant"
+            for key in GRANT_KEY_NAMES
+            if key in typed and _values_have_wildcard(typed[key])
+        )
+    return tuple(dict.fromkeys(findings))
 
 
 def manifest_wildcard_findings(root: Path) -> tuple[str, ...]:
     findings: list[str] = []
-    for relative in (".claude-plugin/plugin.json", ".codex-plugin/plugin.json"):
+    for relative in MANIFEST_RELATIVES:
         path = root / relative
         if not path.is_file():
             continue
-        text = path.read_text(encoding="utf-8")
-        has_grant_field = (
-            '"allowedTools"' in text or '"allowed-tools"' in text or '"permissions"' in text
-        )
-        if has_grant_field and _mapping_has_wildcard_grant(json.loads(text)):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            findings.append("malformed_manifest_json")
+            continue
+        if _decoded_tree_has_wildcard_grant(payload):
             findings.append("wildcard_grant")
-    return tuple(findings)
+    return tuple(dict.fromkeys(findings))
+
+
+def _decoded_tree_has_wildcard_grant(value: object) -> bool:
+    if isinstance(value, dict):
+        typed = cast("dict[str, object]", value)
+        for key, item in typed.items():
+            if key in GRANT_KEY_NAMES and (
+                _values_have_wildcard(item) or _mapping_has_wildcard_grant(item)
+            ):
+                return True
+            if _decoded_tree_has_wildcard_grant(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_decoded_tree_has_wildcard_grant(item) for item in cast("list[object]", value))
+    return False
 
 
 def _values_have_wildcard(allowed: object) -> bool:
@@ -84,10 +129,11 @@ def _mapping_has_wildcard_grant(value: object) -> bool:
     return False
 
 
-def _load_mapping(path: Path) -> dict[str, object] | None:
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+def _load_mapping(path: Path) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None, "malformed_eval_yaml"
     if not isinstance(loaded, dict):
-        return None
-    return cast("dict[str, object]", loaded)
-
-
+        return None, None
+    return cast("dict[str, object]", loaded), None
