@@ -201,7 +201,9 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     source = build_install_fixture(tmp_path / "fixture-source").repo
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    run_root = tmp_path / "runtime"
+    # Keep run_root under the source repo so published evidence paths stay resolvable
+    # without embedding private absolute roots outside the candidate tree.
+    run_root = source / "runtime"
     log = tmp_path / "commands.jsonl"
     _write_fake_plugin_cli(fake_bin / "codex", log)
     _write_fake_plugin_cli(fake_bin / "claude", log)

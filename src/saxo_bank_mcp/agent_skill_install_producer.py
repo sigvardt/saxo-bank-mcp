@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
+import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
@@ -266,9 +269,10 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     preserve_for = options.preserve_for or "unspecified"
     repo_root = options.repo.resolve()
     repo_field = "." if repo_root == Path.cwd().resolve() else str(repo_root)
+    path_roots = _path_publish_roots(repo_root=repo_root, repo_field=repo_field, run_root=run_root)
 
     def pub(path: Path) -> str:
-        return _public_path(path, repo_root, repo_field=repo_field)
+        return _public_path(path, path_roots)
 
     codex_client = build_client_report(
         cache=codex_cache,
@@ -302,13 +306,9 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         inventory=claude_inventory,
         details_skill_count=details_count,
     )
-    codex_client = _sanitize_client_report(codex_client, repo_root, repo_field=repo_field)
-    claude_client = _sanitize_client_report(claude_client, repo_root, repo_field=repo_field)
-    sanitized_update = _sanitize_json_paths(
-        dict(update_probe),
-        repo_root,
-        repo_field=repo_field,
-    )
+    codex_client = _sanitize_client_report(codex_client, path_roots)
+    claude_client = _sanitize_client_report(claude_client, path_roots)
+    sanitized_update = _sanitize_json_paths(dict(update_probe), path_roots)
     update_probe = dict(sanitized_update) if isinstance(sanitized_update, dict) else {}
     update_probe["temporary_fixtures_removed"] = (
         bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temps
@@ -335,7 +335,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         "project_version": project_version(clone),
         "help_syntax": help_syntax_evidence(help_receipts),
         "update_probe": update_probe,
-        "auth_files": _sanitize_auth_files(auth_files, repo_root, repo_field=repo_field),
+        "auth_files": _sanitize_auth_files(auth_files, path_roots),
         "codex": codex_client,
         "claude": claude_client,
         "installed_byte_checks": {
@@ -379,13 +379,11 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "consumers": [item.strip() for item in preserve_for.split(",") if item.strip()],
         },
         "help_receipts": [
-            _sanitize_receipt(
-                result.receipt.model_dump(mode="json"), repo_root, repo_field=repo_field
-            )
+            _sanitize_receipt(result.receipt.model_dump(mode="json"), path_roots)
             for result in help_receipts
         ],
         "update_receipts": [
-            _sanitize_receipt(receipt.model_dump(mode="json"), repo_root, repo_field=repo_field)
+            _sanitize_receipt(receipt.model_dump(mode="json"), path_roots)
             for receipt in update_receipts
         ],
         "required_receipts": list(required_install_receipt_names()),
@@ -468,87 +466,139 @@ def _json_int(payload: dict[str, JsonValue], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
-def _public_path(path: Path, repo_root: Path, *, repo_field: str) -> str:
-    resolved = path.resolve()
-    if resolved == repo_root or resolved.is_relative_to(repo_root):
-        relative = resolved.relative_to(repo_root)
-        if repo_field == ".":
+@dataclass(frozen=True, slots=True)
+class _PathPublishRoots:
+    repo_root: Path
+    repo_field: str
+    run_root: Path
+    run_root_field: str | None
+
+
+_PRIVATE_ROOT_RE = re.compile(r"(?:/Users/|/private/|/Volumes/)")
+
+
+def _path_publish_roots(
+    *,
+    repo_root: Path,
+    repo_field: str,
+    run_root: Path,
+) -> _PathPublishRoots:
+    resolved_run = run_root.resolve()
+    if resolved_run == repo_root or resolved_run.is_relative_to(repo_root):
+        return _PathPublishRoots(
+            repo_root=repo_root,
+            repo_field=repo_field,
+            run_root=resolved_run,
+            run_root_field=None,
+        )
+    return _PathPublishRoots(
+        repo_root=repo_root,
+        repo_field=repo_field,
+        run_root=resolved_run,
+        run_root_field=str(resolved_run),
+    )
+
+
+def _public_path(path: Path, roots: _PathPublishRoots) -> str:
+    resolved = path.expanduser().resolve()
+    if resolved == roots.repo_root or resolved.is_relative_to(roots.repo_root):
+        relative = resolved.relative_to(roots.repo_root)
+        if roots.repo_field == ".":
             return "." if str(relative) == "." else str(relative)
-        return str(Path(repo_field) / relative) if str(relative) != "." else repo_field
-    # Never publish absolute private roots in evidence.
+        return str(Path(roots.repo_field) / relative) if str(relative) != "." else roots.repo_field
+    if roots.run_root_field is not None and (
+        resolved == roots.run_root or resolved.is_relative_to(roots.run_root)
+    ):
+        relative = resolved.relative_to(roots.run_root)
+        if str(relative) == ".":
+            return roots.run_root_field
+        return str(Path(roots.run_root_field) / relative)
     return f"<redacted-path>/{resolved.name}"
 
 
-def _sanitize_json_paths(
-    value: JsonValue,
-    repo_root: Path,
-    *,
-    repo_field: str,
-) -> JsonValue:
+def _sanitize_text(value: str, roots: _PathPublishRoots) -> str:
+    replacements: list[tuple[str, str]] = []
+    for root, label in (
+        (roots.repo_root, roots.repo_field if roots.repo_field != "." else "."),
+        (
+            roots.run_root,
+            roots.run_root_field
+            if roots.run_root_field is not None
+            else (
+                str(roots.run_root.relative_to(roots.repo_root))
+                if roots.run_root.is_relative_to(roots.repo_root)
+                else None
+            ),
+        ),
+    ):
+        if label is None:
+            continue
+        replacements.append((str(root), label))
+        with contextlib.suppress(OSError):
+            replacements.append((str(root.resolve()), label))
+    # Longer absolute roots first so nested paths rewrite cleanly.
+    scrubbed = value
+    for absolute, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        scrubbed = scrubbed.replace(absolute, label)
+    if _PRIVATE_ROOT_RE.search(scrubbed):
+        scrubbed = _PRIVATE_ROOT_RE.sub("<redacted-root>/", scrubbed)
+    return scrubbed
+
+
+def _sanitize_json_paths(value: JsonValue, roots: _PathPublishRoots) -> JsonValue:
     if isinstance(value, dict):
-        return {
-            key: _sanitize_json_paths(item, repo_root, repo_field=repo_field)
-            for key, item in value.items()
-        }
+        return {key: _sanitize_json_paths(item, roots) for key, item in value.items()}
     if isinstance(value, list):
-        return [
-            _sanitize_json_paths(item, repo_root, repo_field=repo_field) for item in value
-        ]
-    if isinstance(value, str) and value.startswith(("/", str(repo_root))):
-        return _public_path(Path(value), repo_root, repo_field=repo_field)
+        return [_sanitize_json_paths(item, roots) for item in value]
+    if isinstance(value, str):
+        candidate = Path(value)
+        if value.startswith(("/", str(roots.repo_root), str(roots.run_root))) and (
+            candidate.exists() or value.startswith(("/", str(roots.repo_root), str(roots.run_root)))
+        ):
+            try:
+                if value.startswith(("/", str(roots.repo_root), str(roots.run_root))):
+                    return _sanitize_text(value, roots)
+            except OSError:
+                return _sanitize_text(value, roots)
+        return _sanitize_text(value, roots)
     return value
 
 
 def _sanitize_client_report(
     report: dict[str, JsonValue],
-    repo_root: Path,
-    *,
-    repo_field: str,
+    roots: _PathPublishRoots,
 ) -> dict[str, JsonValue]:
     sanitized = dict(report)
     cache_root = report.get("cache_root")
     if isinstance(cache_root, str):
-        sanitized["cache_root"] = _public_path(Path(cache_root), repo_root, repo_field=repo_field)
+        sanitized["cache_root"] = _public_path(Path(cache_root), roots)
     receipts = report.get("command_receipts")
     if isinstance(receipts, list):
         sanitized["command_receipts"] = [
-            _sanitize_receipt(item, repo_root, repo_field=repo_field)
-            if isinstance(item, dict)
-            else item
-            for item in receipts
+            _sanitize_receipt(item, roots) if isinstance(item, dict) else item for item in receipts
         ]
     return sanitized
 
 
 def _sanitize_receipt(
     receipt: dict[str, JsonValue],
-    repo_root: Path,
-    *,
-    repo_field: str,
+    roots: _PathPublishRoots,
 ) -> dict[str, JsonValue]:
     sanitized = dict(receipt)
     cwd = receipt.get("cwd")
     if isinstance(cwd, str):
-        sanitized["cwd"] = _public_path(Path(cwd), repo_root, repo_field=repo_field)
+        sanitized["cwd"] = _public_path(Path(cwd), roots)
     argv = receipt.get("argv")
     if isinstance(argv, list):
-        sanitized_argv: list[JsonValue] = []
-        for item in argv:
-            if isinstance(item, str) and item.startswith("/"):
-                sanitized_argv.append(
-                    _public_path(Path(item), repo_root, repo_field=repo_field),
-                )
-            else:
-                sanitized_argv.append(item)
-        sanitized["argv"] = sanitized_argv
+        sanitized["argv"] = [
+            _sanitize_text(item, roots) if isinstance(item, str) else item for item in argv
+        ]
     return sanitized
 
 
 def _sanitize_auth_files(
     auth_files: dict[str, JsonValue],
-    repo_root: Path,
-    *,
-    repo_field: str,
+    roots: _PathPublishRoots,
 ) -> dict[str, JsonValue]:
     copied = auth_files.get("copied")
     if not isinstance(copied, list):
@@ -560,6 +610,6 @@ def _sanitize_auth_files(
         row = dict(item)
         target = row.get("target")
         if isinstance(target, str):
-            row["target"] = _public_path(Path(target), repo_root, repo_field=repo_field)
+            row["target"] = _public_path(Path(target), roots)
         sanitized_copied.append(row)
     return {"copied": sanitized_copied, "values_published": False}
