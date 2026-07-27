@@ -143,8 +143,47 @@ def global_state_fingerprint(codex_global_home: Path, claude_global_home: Path) 
     }
 
 
+OWNER_ONLY_MODE: Final = "0o700"
+PRESERVED_ROOT_LABELS: Final = (
+    "run_root",
+    "clone",
+    "codex_cache",
+    "claude_cache",
+    "home",
+    "codex_home",
+    "claude_home",
+)
+
+
 def owner_only_mode(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
+
+
+def harden_preserved_roots(roots: dict[str, Path]) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Chmod each required preserved root to 0700 and return actual modes plus errors."""
+    modes: dict[str, str] = {}
+    errors: list[str] = []
+    for label in PRESERVED_ROOT_LABELS:
+        path = roots.get(label)
+        if path is None or not path.exists():
+            errors.append(f"preserved_root_missing:{label}")
+            continue
+        path.chmod(0o700)
+        mode = owner_only_mode(path)
+        modes[label] = mode
+        if mode != OWNER_ONLY_MODE:
+            errors.append(f"preserved_root_not_owner_only:{label}")
+    missing_labels = [label for label in PRESERVED_ROOT_LABELS if label not in modes]
+    for label in missing_labels:
+        if f"preserved_root_missing:{label}" not in errors:
+            errors.append(f"preserved_root_missing:{label}")
+    return modes, tuple(errors)
+
+
+def owner_only_from_modes(modes: dict[str, str]) -> bool:
+    return set(modes) == set(PRESERVED_ROOT_LABELS) and all(
+        mode == OWNER_ONLY_MODE for mode in modes.values()
+    )
 
 
 def _codex_fingerprint_targets(home: Path) -> tuple[Path, ...]:

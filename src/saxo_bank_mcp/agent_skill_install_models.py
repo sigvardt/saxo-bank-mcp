@@ -103,7 +103,8 @@ class FixtureCleanup(BaseModel):
     preserve_for: str = Field(min_length=1)
     run_root: Path
     preserved_paths: tuple[str, ...] = ()
-    owner_only: Literal[True] = True
+    modes: dict[str, str] = Field(min_length=1)
+    owner_only: Literal[True]
     teardown_owner: str = "post-final-completion-gate"
     consumers: tuple[str, ...] = ()
 

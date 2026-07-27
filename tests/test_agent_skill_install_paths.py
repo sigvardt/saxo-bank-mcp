@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from test_agent_skill_evidence_support import ROOT, run_cli
+from test_agent_skill_evidence_support import ROOT, build_install_fixture, run_cli
 
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult
 from saxo_bank_mcp.agent_skill_install_cli_driver import (
@@ -13,12 +13,19 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
 )
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_paths import (
+    OWNER_ONLY_MODE,
     export_publishable_tree,
     forbidden_cache_paths,
     global_state_fingerprint,
+    harden_preserved_roots,
+    owner_only_from_modes,
+    owner_only_mode,
     publishable_tracked_files,
 )
-from saxo_bank_mcp.agent_skill_install_qa import write_install_fixture
+from saxo_bank_mcp.agent_skill_install_qa import (
+    load_verified_install_report,
+    write_install_fixture,
+)
 
 INSTALL_QA = ROOT / "scripts/qa_dual_plugin_install.py"
 
@@ -127,3 +134,69 @@ def test_write_install_fixture_helpers_match_cli(tmp_path: Path) -> None:
     out = tmp_path / "x.json"
     assert write_install_fixture("private-file", out) == 1
     assert json.loads(out.read_text(encoding="utf-8"))["forbidden_path_class"] == ".omo"
+
+
+def test_harden_preserved_roots_records_final_owner_only_modes(tmp_path: Path) -> None:
+    # Given: preserved roots that start world-readable.
+    roots = {
+        "run_root": tmp_path / "run",
+        "clone": tmp_path / "run" / "source-clone",
+        "codex_cache": tmp_path / "run" / "codex-cache",
+        "claude_cache": tmp_path / "run" / "claude-cache",
+        "home": tmp_path / "run" / "home",
+        "codex_home": tmp_path / "run" / "codex-home",
+        "claude_home": tmp_path / "run" / "claude-home",
+    }
+    for path in roots.values():
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o755)
+
+    # When: permissions are hardened before report construction.
+    modes, errors = harden_preserved_roots(roots)
+
+    # Then: reported modes equal final on-disk owner-only modes.
+    assert errors == ()
+    assert owner_only_from_modes(modes) is True
+    for label, path in roots.items():
+        assert modes[label] == OWNER_ONLY_MODE
+        assert owner_only_mode(path) == modes[label] == OWNER_ONLY_MODE
+
+
+def test_verify_rejects_0755_preserved_root(tmp_path: Path) -> None:
+    # Given: a complete install report whose clone root is left at 0755.
+    fixture = build_install_fixture(tmp_path / "fixture")
+    report = json.loads(fixture.report.read_text(encoding="utf-8"))
+    clone = Path(report["clone"]["path"])
+    clone.chmod(0o755)
+    report["fixture_cleanup"]["modes"]["clone"] = "0o755"
+    report["clone"]["mode"] = "0o755"
+    report["fixture_cleanup"]["owner_only"] = True
+    fixture.report.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+
+    # When: verification re-checks reported modes against disk.
+    verified, errors = load_verified_install_report(fixture.report)
+
+    # Then: a non-owner-only preserved root fails closed.
+    assert verified is None
+    assert any(
+        error in {"preserved_roots_not_owner_only", "preserved_root_not_owner_only:clone"}
+        or error.startswith(("preserved_mode_mismatch:", "preserved_root_not_owner_only:"))
+        for error in errors
+    )
+
+
+def test_verify_rejects_report_mode_that_does_not_match_disk(tmp_path: Path) -> None:
+    # Given: disk is owner-only but the report still claims 0755 for clone.
+    fixture = build_install_fixture(tmp_path / "fixture")
+    report = json.loads(fixture.report.read_text(encoding="utf-8"))
+    clone = Path(report["clone"]["path"])
+    clone.chmod(0o700)
+    report["fixture_cleanup"]["modes"]["clone"] = "0o755"
+    report["clone"]["mode"] = "0o755"
+    fixture.report.write_text(json.dumps(report, sort_keys=True) + "\n", encoding="utf-8")
+
+    verified, errors = load_verified_install_report(fixture.report)
+
+    assert verified is None
+    assert "preserved_mode_mismatch:clone" in errors or "clone_mode_mismatch" in errors
+    assert "preserved_roots_not_owner_only" in errors

@@ -15,8 +15,12 @@ from saxo_bank_mcp.agent_skill_install_models import (
     InstallManifestOptions,
 )
 from saxo_bank_mcp.agent_skill_install_paths import (
+    OWNER_ONLY_MODE,
+    PRESERVED_ROOT_LABELS,
     REQUIRED_CACHE_FILES,
     global_state_fingerprint,
+    owner_only_from_modes,
+    owner_only_mode,
     publishable_tracked_files,
     required_cache_files,
 )
@@ -240,7 +244,47 @@ def _evidence_contract_errors(report: InstallEvidenceReport) -> list[str]:  # no
         errors.append("auth_file_metadata_invalid")
     if report.fixture_cleanup.teardown_owner != "post-final-completion-gate":
         errors.append("fixture_teardown_owner_invalid")
+    errors.extend(_preserved_mode_errors(report))
     return errors
+
+
+def _preserved_mode_errors(report: InstallEvidenceReport) -> list[str]:
+    cleanup = report.fixture_cleanup
+    modes = cleanup.modes
+    errors: list[str] = []
+    if set(modes) != set(PRESERVED_ROOT_LABELS):
+        errors.append("preserved_modes_incomplete")
+    if not cleanup.owner_only or not owner_only_from_modes(dict(modes)):
+        errors.append("preserved_roots_not_owner_only")
+    if report.clone.mode != modes.get("clone"):
+        errors.append("clone_mode_mismatch")
+    resolved_roots = _resolved_preserved_roots(report)
+    for label in PRESERVED_ROOT_LABELS:
+        path = resolved_roots.get(label)
+        reported = modes.get(label)
+        if path is None or not path.exists():
+            errors.append(f"preserved_root_missing:{label}")
+            continue
+        on_disk = owner_only_mode(path)
+        if reported != on_disk:
+            errors.append(f"preserved_mode_mismatch:{label}")
+        if on_disk != OWNER_ONLY_MODE:
+            errors.append(f"preserved_root_not_owner_only:{label}")
+    return errors
+
+
+def _resolved_preserved_roots(report: InstallEvidenceReport) -> dict[str, Path]:
+    run_root = report.fixture_cleanup.run_root.resolve()
+    clone = report.clone.path.resolve()
+    return {
+        "run_root": run_root,
+        "clone": clone,
+        "codex_cache": report.codex.cache_root.resolve(),
+        "claude_cache": report.claude.cache_root.resolve(),
+        "home": run_root / "home",
+        "codex_home": run_root / "codex-home",
+        "claude_home": run_root / "claude-home",
+    }
 
 
 def _valid_fingerprints(values: Mapping[str, JsonValue]) -> bool:

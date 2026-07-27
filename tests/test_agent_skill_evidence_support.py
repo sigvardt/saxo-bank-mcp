@@ -271,6 +271,21 @@ def _install_payload(
     run_root: Path,
 ) -> dict[str, JsonValue]:
     fingerprints: dict[str, JsonValue] = {"codex": "a" * 64, "claude": "b" * 64}
+    home = run_root / "home"
+    codex_home = run_root / "codex-home"
+    claude_home = run_root / "claude-home"
+    for path in (run_root, clone, caches[0], caches[1], home, codex_home, claude_home):
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    modes = {
+        "run_root": "0o700",
+        "clone": "0o700",
+        "codex_cache": "0o700",
+        "claude_cache": "0o700",
+        "home": "0o700",
+        "codex_home": "0o700",
+        "claude_home": "0o700",
+    }
     return {
         "status": "passed",
         "execution_mode": "installed_verification",
@@ -340,7 +355,15 @@ def _install_payload(
             "deferred_registered": True,
             "preserve_for": "task-15,task-16",
             "run_root": str(run_root),
-            "preserved_paths": [str(clone), str(caches[0]), str(caches[1])],
+            "preserved_paths": [
+                str(clone),
+                str(caches[0]),
+                str(caches[1]),
+                str(home),
+                str(codex_home),
+                str(claude_home),
+            ],
+            "modes": modes,
             "owner_only": True,
             "teardown_owner": "post-final-completion-gate",
             "consumers": ["task-15", "task-16"],

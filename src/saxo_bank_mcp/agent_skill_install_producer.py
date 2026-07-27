@@ -29,8 +29,9 @@ from saxo_bank_mcp.agent_skill_install_models import InstallManifestOptions
 from saxo_bank_mcp.agent_skill_install_paths import (
     export_publishable_tree,
     global_state_fingerprint,
+    harden_preserved_roots,
     installed_byte_check,
-    owner_only_mode,
+    owner_only_from_modes,
 )
 from saxo_bank_mcp.agent_skill_install_qa import (
     EXPECTED_MCP_SERVER_COUNT,
@@ -105,6 +106,33 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         write_json(options.out, {"status": "failed", "reason": exc.reason})
         return 1
     after = global_state_fingerprint(options.codex_global_home, options.claude_global_home)
+    if marketplace.exists():
+        shutil.rmtree(marketplace)
+    if probe_env.exists():
+        shutil.rmtree(probe_env, ignore_errors=True)
+    # Harden permissions before constructing evidence so reported modes match disk.
+    preserved_roots = {
+        "run_root": run_root,
+        "clone": clone,
+        "codex_cache": codex_cache,
+        "claude_cache": claude_cache,
+        "home": home,
+        "codex_home": codex_home,
+        "claude_home": claude_home,
+    }
+    preserved_modes, mode_errors = harden_preserved_roots(preserved_roots)
+    owner_only = owner_only_from_modes(preserved_modes)
+    if mode_errors or not owner_only:
+        write_json(
+            options.out,
+            {
+                "status": "failed",
+                "reason": "preserved_roots_not_owner_only",
+                "errors": list(mode_errors),
+                "modes": preserved_modes,
+            },
+        )
+        return 1
     codex_bytes = installed_byte_check(clone, codex_cache)
     claude_bytes = installed_byte_check(clone, claude_cache)
     byte_mismatches = [f"codex:{item}" for item in _json_list(codex_bytes, "mismatches")] + [
@@ -180,7 +208,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             "source_repo": repo_field,
             "no_local": True,
             "clean": True,
-            "mode": owner_only_mode(clone),
+            "mode": preserved_modes["clone"],
         },
         "expected_skills": options.expected_skills,
         "expected_mcp_servers": EXPECTED_MCP_SERVER_COUNT,
@@ -223,7 +251,8 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
                 pub(codex_home),
                 pub(claude_home),
             ],
-            "owner_only": True,
+            "modes": preserved_modes,
+            "owner_only": owner_only,
             "teardown_owner": "post-final-completion-gate",
             "consumers": [item.strip() for item in preserve_for.split(",") if item.strip()],
         },
@@ -251,13 +280,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             update_probe=update_probe,
         ),
     }
-    if marketplace.exists():
-        shutil.rmtree(marketplace)
-    if probe_env.exists():
-        shutil.rmtree(probe_env, ignore_errors=True)
-    for preserved in (clone, codex_cache, claude_cache, home, codex_home, claude_home, run_root):
-        if preserved.exists():
-            preserved.chmod(0o700)
     write_json(options.out, report)
     verified, errors = load_verified_install_report(options.out)
     if verified is None:
