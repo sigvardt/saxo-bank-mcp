@@ -2,7 +2,9 @@
 
 Agents never receive raw AccountKey/OrderId in redacted tool output. They receive
 HMAC-bound selectors that resolve only inside this process against the current token
-generation. Selectors are not portable across processes or token generations.
+generation, Saxo environment, and matching account context. Order selectors also carry
+a short explicit expiry and are one-time for a successful write-preview creation.
+Selectors are not portable across processes, token generations, environments, or accounts.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import secrets
 import threading
 from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Final, cast
 
 from saxo_bank_mcp._evidence import JsonValue
@@ -24,8 +27,8 @@ _SAFE_ACCOUNT_FIELD: Final = "SafeAccountSelector"
 _SAFE_ORDER_FIELD: Final = "SafeOrderSelector"
 _PROCESS_SECRET: Final = secrets.token_bytes(32)
 _LOCK = threading.Lock()
-_ORDER_BINDINGS: dict[str, str] = {}
-_ORDER_BY_ID: dict[str, str] = {}
+# Short explicit TTL: long enough for place → readback → cancel preview, not forever.
+ORDER_SELECTOR_TTL_SECONDS: Final = 15 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,19 @@ class AccountRow:
     active: bool = True
     currency: str = ""
     account_type: str = ""
+
+
+@dataclass(slots=True)
+class OrderSelectorBinding:
+    token_generation: str
+    environment: str
+    account_key: str
+    order_id: str
+    expires_at: datetime
+    consumed: bool = False
+
+
+_ORDER_BINDINGS: dict[str, OrderSelectorBinding] = {}
 
 
 def is_account_selector(value: str) -> bool:
@@ -89,52 +105,133 @@ def resolve_account_key_input(
     return stripped, ""
 
 
-def bind_order_selector(order_id: str) -> str:
-    cleaned = order_id.strip()
+def bind_order_selector(  # noqa: PLR0913
+    token: SaxoTokenSet,
+    *,
+    environment: str,
+    account_key: str,
+    order_id: str,
+    now: datetime | None = None,
+    ttl_seconds: int = ORDER_SELECTOR_TTL_SECONDS,
+) -> str:
+    """Bind an order ID to a process-scoped selector for the current auth context."""
+    cleaned_order = order_id.strip()
+    cleaned_account = account_key.strip()
+    cleaned_env = environment.strip().upper()
+    if not cleaned_order or not cleaned_account or not cleaned_env:
+        message = "order selector bind requires order_id, account_key, and environment"
+        raise ValueError(message)
+    generation = token_generation(token)
+    current = now if now is not None else datetime.now(tz=UTC)
+    expires_at = current + timedelta(seconds=ttl_seconds)
+    material = b"\0".join(
+        (
+            generation.encode(),
+            cleaned_env.encode(),
+            cleaned_account.encode(),
+            cleaned_order.encode(),
+        )
+    )
+    digest = hmac.digest(_PROCESS_SECRET, material, "sha256")[:18]
+    encoded = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+    selector = f"{ORDER_SELECTOR_PREFIX}{encoded}"
+    binding = OrderSelectorBinding(
+        token_generation=generation,
+        environment=cleaned_env,
+        account_key=cleaned_account,
+        order_id=cleaned_order,
+        expires_at=expires_at,
+        consumed=False,
+    )
     with _LOCK:
-        existing = _ORDER_BY_ID.get(cleaned)
-        if existing is not None:
-            return existing
-        digest = hmac.digest(_PROCESS_SECRET, cleaned.encode(), "sha256")[:18]
-        encoded = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-        selector = f"{ORDER_SELECTOR_PREFIX}{encoded}"
-        # Avoid rare collisions by rehashing with a counter suffix material.
-        counter = 0
-        while selector in _ORDER_BINDINGS and _ORDER_BINDINGS[selector] != cleaned:
-            counter += 1
-            material = f"{cleaned}:{counter}".encode()
-            digest = hmac.digest(_PROCESS_SECRET, material, "sha256")[:18]
-            encoded = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-            selector = f"{ORDER_SELECTOR_PREFIX}{encoded}"
-        _ORDER_BINDINGS[selector] = cleaned
-        _ORDER_BY_ID[cleaned] = selector
+        existing = _ORDER_BINDINGS.get(selector)
+        if (
+            existing is not None
+            and not existing.consumed
+            and existing.token_generation == generation
+            and existing.environment == cleaned_env
+            and existing.account_key == cleaned_account
+            and existing.order_id == cleaned_order
+        ):
+            # Refresh expiry for an unused binding of the same exact target.
+            existing.expires_at = expires_at
+            return selector
+        _ORDER_BINDINGS[selector] = binding
         return selector
 
 
-def resolve_order_selector(selector: str) -> str | None:
-    if not is_order_selector(selector):
-        return None
-    with _LOCK:
-        return _ORDER_BINDINGS.get(selector)
+def resolve_order_id_input(  # noqa: PLR0911
+    value: str,
+    *,
+    token: SaxoTokenSet,
+    environment: str,
+    account_key: str,
+    now: datetime | None = None,
+) -> tuple[str | None, str]:
+    """Validate an order id or selector without consuming it.
 
-
-def resolve_order_id_input(value: str) -> tuple[str | None, str]:
+    Returns (resolved_order_id, denial_reason). Empty denial means success.
+    Denial reasons never include the submitted selector or raw order id.
+    """
     stripped = value.strip()
     if not stripped:
         return None, "order_id_missing"
-    if is_order_selector(stripped):
-        resolved = resolve_order_selector(stripped)
-        if resolved is None:
-            return None, "order_selector_invalid"
-        return resolved, ""
-    return stripped, ""
+    if not is_order_selector(stripped):
+        # Raw order ids remain valid for controlled probes and allowlisted automation.
+        return stripped, ""
+    current = now if now is not None else datetime.now(tz=UTC)
+    generation = token_generation(token)
+    cleaned_env = environment.strip().upper()
+    cleaned_account = account_key.strip()
+    with _LOCK:
+        binding = _ORDER_BINDINGS.get(stripped)
+        if binding is None:
+            return None, "order_selector_unknown"
+        if binding.consumed:
+            return None, "order_selector_consumed"
+        if binding.expires_at <= current:
+            return None, "order_selector_expired"
+        if not hmac.compare_digest(binding.token_generation, generation):
+            return None, "order_selector_token_mismatch"
+        if binding.environment != cleaned_env:
+            return None, "order_selector_environment_mismatch"
+        if binding.account_key != cleaned_account:
+            return None, "order_selector_account_mismatch"
+        return binding.order_id, ""
+
+
+def consume_order_selector(selector: str) -> str:
+    """Mark a resolved selector consumed after successful preview creation.
+
+    Returns empty string on success, or a safe denial reason. Never echoes values.
+    """
+    stripped = selector.strip()
+    if not is_order_selector(stripped):
+        return "order_selector_unknown"
+    with _LOCK:
+        binding = _ORDER_BINDINGS.get(stripped)
+        if binding is None:
+            return "order_selector_unknown"
+        if binding.consumed:
+            return "order_selector_consumed"
+        binding.consumed = True
+        return ""
+
+
+def consume_order_selectors(selectors: Sequence[str]) -> str:
+    """Consume all selectors after one successful write preview. Fail closed on any error."""
+    for selector in selectors:
+        reason = consume_order_selector(selector)
+        if reason:
+            return reason
+    return ""
 
 
 def inject_account_selectors(
     payload: JsonValue,
     token: SaxoTokenSet,
 ) -> JsonValue:
-    """Copy payload, adding SafeAccountSelector beside each AccountKey before redaction."""
+    """Copy payload, adding SafeAccountSelector only on account-row objects."""
     return _inject_accounts(payload, token)
 
 
@@ -160,72 +257,154 @@ def resolve_order_body_accounts(
     return body, ""
 
 
-def resolve_request_body_selectors(
+def resolve_request_body_selectors(  # noqa: PLR0913
     request_body: Mapping[str, JsonValue],
     token: SaxoTokenSet,
     accounts: Sequence[AccountRow],
-) -> tuple[dict[str, JsonValue] | None, str]:
-    """Resolve account and order selectors inside a write-preview request body."""
+    *,
+    environment: str,
+    account_key_context: str,
+    now: datetime | None = None,
+) -> tuple[dict[str, JsonValue] | None, str, tuple[str, ...]]:
+    """Resolve account and order selectors inside a write-preview request body.
+
+    Order selectors are validated but not consumed. Returns
+    (body, denial_reason, order_selectors_pending_consume).
+    """
     body = dict(request_body)
+    pending: list[str] = []
     account_value = body.get("AccountKey")
+    resolved_account = account_key_context.strip()
     if isinstance(account_value, str) and account_value.strip():
-        resolved_account, reason = resolve_account_key_input(token, accounts, account_value)
-        if resolved_account is None:
-            return None, reason or "account_selector_invalid"
-        body["AccountKey"] = resolved_account
+        resolved_account_key, reason = resolve_account_key_input(
+            token,
+            accounts,
+            account_value,
+        )
+        if resolved_account_key is None:
+            return None, reason or "account_selector_invalid", ()
+        body["AccountKey"] = resolved_account_key
+        resolved_account = resolved_account_key
+    if not resolved_account:
+        return None, "account_key_missing", ()
     for key in ("OrderId", "OrderIds", "MultiLegOrderId"):
         if key not in body:
             continue
-        resolved_value, reason = _resolve_order_field(body[key])
+        resolved_value, reason, used = _resolve_order_field(
+            body[key],
+            token=token,
+            environment=environment,
+            account_key=resolved_account,
+            now=now,
+        )
         if reason:
-            return None, reason
+            return None, reason, ()
         body[key] = resolved_value
-    return body, ""
+        pending.extend(used)
+    return body, "", tuple(pending)
 
 
-def public_order_selectors(order_ids: Sequence[str]) -> list[str]:
-    return [bind_order_selector(order_id) for order_id in order_ids if order_id.strip()]
+def public_order_selectors(
+    order_ids: Sequence[str],
+    *,
+    token: SaxoTokenSet,
+    environment: str,
+    account_key: str,
+    now: datetime | None = None,
+) -> list[str]:
+    return [
+        bind_order_selector(
+            token,
+            environment=environment,
+            account_key=account_key,
+            order_id=order_id,
+            now=now,
+        )
+        for order_id in order_ids
+        if order_id.strip()
+    ]
 
 
 def clear_process_scoped_selector_state_for_tests() -> None:
     """Test-only reset of in-process order bindings."""
     with _LOCK:
         _ORDER_BINDINGS.clear()
-        _ORDER_BY_ID.clear()
+
+
+def _looks_like_account_row(mapping: Mapping[str, JsonValue]) -> bool:
+    """Return True for port account rows, not order rows that only carry AccountKey."""
+    account_key = mapping.get("AccountKey")
+    if not isinstance(account_key, str) or not account_key.strip():
+        return False
+    account_id = mapping.get("AccountId")
+    if isinstance(account_id, str) and account_id.strip():
+        return True
+    currency = mapping.get("Currency")
+    account_type = mapping.get("AccountType")
+    return (
+        isinstance(currency, str)
+        and bool(currency.strip())
+        and isinstance(account_type, str)
+        and bool(account_type.strip())
+    )
 
 
 def _inject_accounts(value: JsonValue, token: SaxoTokenSet) -> JsonValue:
     if isinstance(value, Mapping):
         mapping = cast("Mapping[str, JsonValue]", value)
         out: dict[str, JsonValue] = {}
-        account_key = mapping.get("AccountKey")
         for key, child in mapping.items():
             out[key] = _inject_accounts(child, token)
-        if isinstance(account_key, str) and account_key.strip():
-            out[_SAFE_ACCOUNT_FIELD] = account_selector_for(token, account_key.strip())
+        if _looks_like_account_row(mapping):
+            account_key = mapping.get("AccountKey")
+            if isinstance(account_key, str) and account_key.strip():
+                out[_SAFE_ACCOUNT_FIELD] = account_selector_for(token, account_key.strip())
         return out
     if isinstance(value, Sequence) and not isinstance(value, str):
         return [_inject_accounts(child, token) for child in value]
     return value
 
 
-def _resolve_order_field(value: JsonValue) -> tuple[JsonValue, str]:
+def _resolve_order_field(
+    value: JsonValue,
+    *,
+    token: SaxoTokenSet,
+    environment: str,
+    account_key: str,
+    now: datetime | None,
+) -> tuple[JsonValue, str, tuple[str, ...]]:
     if isinstance(value, str):
-        resolved, reason = resolve_order_id_input(value)
+        pending: tuple[str, ...] = (value,) if is_order_selector(value) else ()
+        resolved, reason = resolve_order_id_input(
+            value,
+            token=token,
+            environment=environment,
+            account_key=account_key,
+            now=now,
+        )
         if resolved is None:
-            return None, reason
-        return resolved, ""
+            return None, reason, ()
+        return resolved, "", pending
     if isinstance(value, Sequence) and not isinstance(value, str):
         resolved_items: list[JsonValue] = []
+        pending_list: list[str] = []
         for item in value:
             if not isinstance(item, str):
-                return None, "order_selector_invalid"
-            resolved, reason = resolve_order_id_input(item)
+                return None, "order_selector_invalid", ()
+            if is_order_selector(item):
+                pending_list.append(item)
+            resolved, reason = resolve_order_id_input(
+                item,
+                token=token,
+                environment=environment,
+                account_key=account_key,
+                now=now,
+            )
             if resolved is None:
-                return None, reason
+                return None, reason, ()
             resolved_items.append(resolved)
-        return resolved_items, ""
-    return None, "order_selector_invalid"
+        return resolved_items, "", tuple(pending_list)
+    return None, "order_selector_invalid", ()
 
 
 def accounts_from_port_payload(payload: Mapping[str, JsonValue]) -> tuple[AccountRow, ...]:

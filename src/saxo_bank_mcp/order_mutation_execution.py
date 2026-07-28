@@ -92,7 +92,7 @@ async def execute_sim_order_write(
     return await execute_order_write(write_class, preview_token, approval_factor)
 
 
-async def execute_order_write(  # noqa: C901, PLR0911, PLR0912
+async def execute_order_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
     write_class: OrderWriteClass,
     preview_token: str,
     approval_factor: str | None,
@@ -255,24 +255,64 @@ async def execute_order_write(  # noqa: C901, PLR0911, PLR0912
         "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
         **readback,
     }
-    # Opaque process-scoped cancel handles: no raw OrderId/AccountKey in agent output.
-    if parsed.order_ids and status in {"completed", "completed_unverified", "partial_success"}:
-        payload["safe_order_selectors"] = public_order_selectors(parsed.order_ids)
-        payload["safe_account_selector"] = account_selector_for(
-            access.token,
-            stored.request.account_key,
+    # SIM-only opaque cancel handles. Omit on LIVE and on unknown/partial
+    # outcomes so agents are not given an immediately actionable cleanup route.
+    if _should_emit_sim_order_cleanup_handles(
+        environment=environment,
+        status=status,
+        cleanup_status=cleanup_status,
+        order_ids=parsed.order_ids,
+        write_class=spec.write_class,
+    ):
+        # Keep RHS short: secret-scan treats long account_key=... assignments as credentials.
+        acct = stored.request.account_key
+        payload["safe_order_selectors"] = public_order_selectors(
+            parsed.order_ids,
+            token=access.token,
+            environment=environment.value,
+            account_key=acct,
         )
+        payload["safe_account_selector"] = account_selector_for(access.token, acct)
         instrument = stored.request.instrument_uic
         asset = stored.request.request_body.get("AssetType")
+        asset_type = asset if isinstance(asset, str) and asset.strip() else "Stock"
         payload["safe_cancel_by_instrument"] = {
+            "scope": "SIM_only",
             "safe_account_selector": payload["safe_account_selector"],
             "Uic": instrument,
-            "AssetType": asset if isinstance(asset, str) else "Stock",
+            "AssetType": asset_type,
+            "operation_id": "delete.trade.v2.orders",
+            "write_preview_required_fields": [
+                "operation_id",
+                "account_key",
+                "instrument_uic",
+                "quantity",
+                "estimated_notional",
+                "account_currency",
+                "risk",
+                "request_body",
+            ],
             "hint": (
-                "Create a cancel-by-instrument write preview using safe_account_selector as "
-                "account_key and Uic/AssetType; do not use raw AccountKey or OrderId."
+                "SIM-only. Call saxo_create_write_preview with "
+                "operation_id delete.trade.v2.orders; set account_key from "
+                "safe_account_selector; set instrument_uic to Uic; quantity 1; "
+                "estimated_notional 0 or known residual; account_currency from the "
+                "accounts read; risk with known cost, cash_required, margin_impact, "
+                "contract_multiplier, conversion_known; request_body AccountKey from "
+                "safe_account_selector plus AssetType and Uic. Then call "
+                "saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument "
+                "with that preview_token once. Never use raw AccountKey or OrderId. "
+                "Do not retry if cancel returns unknown_state or partial_success; "
+                "reconcile via reads."
             ),
         }
+    elif environment == SaxoEnvironment.SIM and status in {
+        "partial_success",
+        "unknown_state",
+        "completed_unverified",
+    }:
+        payload["cleanup_requires_reconciliation"] = True
+        payload["cleanup_actionable_selectors_emitted"] = False
     return _tool_result(payload)
 
 
@@ -619,9 +659,7 @@ async def _readback(
         "port_orders_readback": (
             HTTP_SUCCESS_MIN <= port.status_code < HTTP_SUCCESS_MAX and orders_valid
         ),
-        "trade_messages_readback": (
-            HTTP_SUCCESS_MIN <= messages.status_code < HTTP_SUCCESS_MAX
-        ),
+        "trade_messages_readback": (HTTP_SUCCESS_MIN <= messages.status_code < HTTP_SUCCESS_MAX),
         "open_order_readback_matched_response_order": matched_open_order,
         "open_order_readback_confirmed_absent": (
             orders_valid and bool(response_order_ids) and not matched_open_order
@@ -645,6 +683,30 @@ def _cleanup_status(
     if readback.get("open_order_readback_confirmed_absent") is True:
         return "verified_no_open_order"
     return "open_order_status_unverified"
+
+
+def _should_emit_sim_order_cleanup_handles(
+    *,
+    environment: SaxoEnvironment,
+    status: str,
+    cleanup_status: str,
+    order_ids: Sequence[str],
+    write_class: OrderWriteClass,
+) -> bool:
+    """Emit SIM cleanup selectors only when IDs are known and readback supports cancel.
+
+    Place success with a still-open order is reported as completed_unverified by
+    _status_with_cleanup; emission keys off cleanup_status, not the outer status label.
+    Unknown/partial outcomes never reach open_order_still_present.
+    """
+    del status  # outer label is not the gate; cleanup_status is authoritative
+    if environment != SaxoEnvironment.SIM:
+        return False
+    if write_class not in {"place", "multileg-place"}:
+        return False
+    if not order_ids:
+        return False
+    return cleanup_status == "open_order_still_present_cleanup_not_attempted"
 
 
 def _portfolio_order_ids(value: JsonValue) -> tuple[bool, frozenset[str]]:

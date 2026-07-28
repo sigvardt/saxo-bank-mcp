@@ -106,7 +106,22 @@ Read back after every completed or uncertain mutation path:
 
 For SIM place or multileg place flows, cancel created open orders when the task requires cleanup. Verify the original open-order state by comparing sanitized counts, matching order fingerprints, and trade-message evidence.
 
-Place success returns process-scoped `safe_order_selectors` and `safe_cancel_by_instrument` (account selector + UIC + AssetType). Prefer cancel-by-instrument for cleanup when OrderId is redacted: create a write preview with `account_key` set to `safe_account_selector`, `instrument_uic` set to the fixture UIC, and a request body that uses the same selector fields (never raw OrderId). Exact single-order cancel may use `safe_order_selectors` as `OrderIds` in the cancel write preview.
+SIM place success with known order IDs and a verified open-order readback returns process-scoped `safe_order_selectors` and `safe_cancel_by_instrument` (SIM-only). Prefer cancel-by-instrument for cleanup when OrderId is redacted. These fields are omitted on LIVE and when place status is `unknown_state`, `partial_success`, or `completed_unverified`; then reconcile with reads and do not invent a cleanup path.
+
+Cancel-by-instrument exact write-preview arguments (all required; do not guess risk fields from memory if the place/precheck result already carried them):
+
+1. `saxo_create_write_preview` with:
+   - `operation_id`: `delete.trade.v2.orders`
+   - `account_key`: `safe_account_selector` from the place result (or accounts-read `SafeAccountSelector`)
+   - `instrument_uic`: the fixture UIC (for example `211`)
+   - `quantity`: `1` (must be > 0 for the local safety kernel)
+   - `estimated_notional`: `0` or residual notional when known
+   - `account_currency`: currency from the accounts read
+   - `risk`: object with `cost`, `cash_required`, `margin_impact`, `contract_multiplier`, `conversion_known` (use known zeros/`true` when cancel has no residual risk)
+   - `request_body`: `{ "AccountKey": <same safe_account_selector>, "AssetType": "Stock", "Uic": 211 }` (no raw OrderId)
+2. Execute once with `saxo_cancel_orders_by_instrument` or `saxo_cancel_sim_orders_by_instrument` using that `preview_token`. The cancel tool commits the preview itself; do not double-commit via `saxo_commit_write_preview` for the same token.
+
+Exact single-order cancel may put `safe_order_selectors` into `request_body.OrderIds` for `operation_id=delete.trade.v2.orders.orderids` with the same required top-level preview fields and `request_body.AccountKey` set to the account selector. Each order selector is one-time: it is consumed only after a successful write preview is created.
 
 For cancel-by-instrument, readback must cover all matching orders because Saxo can return empty success when no order matched.
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import httpx2
 import pytest
@@ -148,6 +149,9 @@ async def test_specialized_write_disables_retries_and_fails_closed_on_bad_readba
     assert payload["status"] == "completed_unverified"
     assert payload["port_orders_readback"] is False
     assert payload["open_order_readback_confirmed_absent"] is False
+    assert "safe_order_selectors" not in payload
+    assert "safe_cancel_by_instrument" not in payload
+    assert payload.get("cleanup_requires_reconciliation") is True
 
 
 @pytest.mark.anyio
@@ -260,6 +264,10 @@ async def test_production_order_tool_requires_one_exact_live_chat_approval(
     assert payload["environment"] == "LIVE"
     assert payload["live_write"] is True
     assert payload["approval_factor_mode"] == "one_exact_action_chat_approval"
+    # LIVE must not emit SIM-only cleanup selectors (misleading for agents).
+    assert "safe_order_selectors" not in payload
+    assert "safe_cancel_by_instrument" not in payload
+    assert "safe_account_selector" not in payload
     assert seen == [
         ("POST", "/openapi/trade/v2/orders"),
         ("GET", "/openapi/port/v1/orders/me"),
@@ -748,10 +756,112 @@ async def test_unknown_order_response_is_retry_unsafe_and_tri_state(
     assert payload["retry_unsafe"] is True
     assert payload["port_orders_readback"] is True
     assert payload["trade_messages_readback"] is True
+    assert "safe_order_selectors" not in payload
+    assert "safe_cancel_by_instrument" not in payload
+    assert payload.get("cleanup_requires_reconciliation") is True
     assert payload["reason"] == (
         "saxo_order_write_not_completed "
         "status=unknown_state http_status=200 error_codes=TradeNotCompleted"
     )
+
+
+@pytest.mark.anyio
+async def test_sim_place_emits_bound_cleanup_selectors_only_when_open_order_readback_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_safety_state()
+    _configure_safety(monkeypatch, tmp_path)
+    from saxo_bank_mcp.process_scoped_selectors import (  # noqa: PLC0415
+        clear_process_scoped_selector_state_for_tests,
+        is_order_selector,
+        resolve_order_id_input,
+    )
+
+    clear_process_scoped_selector_state_for_tests()
+    order_id = "67762872"
+    token = SaxoTokenSet(
+        access_token="access-token-value",  # noqa: S106
+        refresh_token="refresh-token-value",  # noqa: S106
+        code_verifier="code-verifier-value",
+        environment="SIM",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    def ready_token(_spec: OrderWriteSpec) -> SaxoTokenSet:
+        return token
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST":
+            return httpx2.Response(200, json={"OrderId": order_id}, request=request)
+        if request.url.path.endswith("/port/v1/orders/me"):
+            return httpx2.Response(
+                200,
+                json={
+                    "Data": [
+                        {
+                            "OrderId": order_id,
+                            "AccountKey": "SIM-ACCOUNT-1",
+                            "Uic": 21,
+                            "AssetType": "Stock",
+                        }
+                    ]
+                },
+                request=request,
+            )
+        return httpx2.Response(200, json={"Data": []}, request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(order_execution, "_cached_token", ready_token)
+    monkeypatch.setattr(order_execution, "create_async_client", client_factory)
+
+    async with Client(mcp) as client:
+        preview = await _create_preview(client, "post.trade.v2.orders")
+        result = await client.call_tool(
+            "saxo_place_sim_order",
+            {
+                "preview_token": str(preview["preview_token"]),
+                "approval_factor": TEST_APPROVAL_FACTOR,
+            },
+            raise_on_error=False,
+        )
+
+    payload = result.structured_content
+    assert payload is not None
+    # Place success + still-open order is labeled completed_unverified until cleanup.
+    assert payload["status"] == "completed_unverified"
+    assert payload["cleanup_status"] == "open_order_still_present_cleanup_not_attempted"
+    selectors = cast("list[str]", payload["safe_order_selectors"])
+    assert len(selectors) == 1
+    assert is_order_selector(selectors[0])
+    assert order_id not in str(payload)
+    assert "SIM-ACCOUNT-1" not in str(payload)
+    cancel = payload["safe_cancel_by_instrument"]
+    assert isinstance(cancel, dict)
+    assert cancel["scope"] == "SIM_only"
+    fixture_uic = _preview_request("post.trade.v2.orders")["instrument_uic"]
+    assert cancel["Uic"] == fixture_uic
+    assert cancel["AssetType"] == "Stock"
+    assert cancel["operation_id"] == "delete.trade.v2.orders"
+    resolved, reason = resolve_order_id_input(
+        selectors[0],
+        token=token,
+        environment="SIM",
+        account_key="SIM-ACCOUNT-1",
+    )
+    assert resolved == order_id
+    assert reason == ""
 
 
 @pytest.mark.anyio

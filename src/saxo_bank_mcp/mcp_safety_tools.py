@@ -96,6 +96,7 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
         cached_token_for_tool,
     )
     from saxo_bank_mcp.process_scoped_selectors import (  # noqa: PLC0415
+        consume_order_selectors,
         fetch_account_rows_for_token,
         is_account_selector,
         is_order_selector,
@@ -142,6 +143,7 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
         )
     resolved_account = account_key
     resolved_body = dict(request_body)
+    pending_order_selectors: tuple[str, ...] = ()
     needs_resolve = is_account_selector(account_key) or any(
         (isinstance(value, str) and is_order_selector(value))
         or (
@@ -153,7 +155,7 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
     if needs_resolve:
         environment = SaxoRuntimeConfig.from_env().requested_environment
         if environment == SaxoEnvironment.LIVE:
-            # Local write preview must not open LIVE transport for selector resolution.
+            # LIVE selector resolution is not supported on local write preview (SIM scope).
             return ToolResult(
                 structured_content={
                     "status": "denied",
@@ -201,10 +203,12 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
                         is_error=True,
                     )
                 resolved_account = resolved_key
-                body, body_reason = resolve_request_body_selectors(
+                body, body_reason, pending_order_selectors = resolve_request_body_selectors(
                     request_body,
                     token,
                     accounts,
+                    environment=environment.value,
+                    account_key_context=resolved_account,
                 )
                 if body is None:
                     return ToolResult(
@@ -241,7 +245,12 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
         risk=risk,
         request_body=resolved_body,
     )
-    return SafetyKernel().create_preview(request)
+    preview = SafetyKernel().create_preview(request)
+    # Consume order selectors only after a successful preview is stored. Validation
+    # or audit failures must not burn the one-time selector.
+    if pending_order_selectors and preview.get("status") == "preview_created":
+        consume_order_selectors(pending_order_selectors)
+    return preview
 
 
 def _missing_trade_preview_payload(  # noqa: PLR0913
