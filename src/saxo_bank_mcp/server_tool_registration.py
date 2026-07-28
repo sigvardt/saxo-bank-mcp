@@ -1,3 +1,4 @@
+# allow: SIZE_OK - static ToolRegistration catalog for all MCP function tools.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -93,6 +94,13 @@ from saxo_bank_mcp.registry_list_tools import (
     READ_LIST_TOOL_DESCRIPTION,
     saxo_list_registered_endpoints,
 )
+from saxo_bank_mcp.server_core_tools import (
+    AUTH_STATUS_TOOL_DESCRIPTION,
+    HEALTH_TOOL_DESCRIPTION,
+    saxo_auth_status,
+    saxo_health,
+)
+from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 from saxo_bank_mcp.tool_annotations import annotation_for_tool
 
 
@@ -247,10 +255,39 @@ FUNCTION_TOOL_REGISTRATIONS: Final[tuple[ToolRegistration, ...]] = (
 )
 
 
-def register_saxo_tools(mcp: SafeFastMCP) -> None:
+def register_saxo_tools(
+    mcp: SafeFastMCP,
+    *,
+    allowed_tools: frozenset[str] | None = None,
+) -> None:
+    """Register health/auth/function/live-precheck tools, optionally filtered.
+
+    When allowed_tools is None every catalog tool is registered (production: 39).
+    When set, only the exact logical subset is registered via public FastMCP APIs.
+    """
+    allowed = ALL_LOGICAL_TOOL_IDS if allowed_tools is None else allowed_tools
+    _register_core_tools(mcp, allowed)
     for registration in FUNCTION_TOOL_REGISTRATIONS:
+        if registration.tool_id not in allowed:
+            continue
         mcp.tool(
             description=registration.description,
             annotations=annotation_for_tool(registration.tool_id),
         )(registration.function)
-    mcp.add_tool(create_live_precheck_tool(annotation_for_tool("saxo_precheck_live_order")))
+    if "saxo_precheck_live_order" in allowed:
+        mcp.add_tool(create_live_precheck_tool(annotation_for_tool("saxo_precheck_live_order")))
+
+
+def _register_core_tools(mcp: SafeFastMCP, allowed: frozenset[str]) -> None:
+    if "saxo_health" in allowed:
+        mcp.tool(
+            description=HEALTH_TOOL_DESCRIPTION,
+            annotations=annotation_for_tool("saxo_health"),
+        )(saxo_health)
+    if "saxo_auth_status" in allowed:
+        mcp.tool(
+            description=AUTH_STATUS_TOOL_DESCRIPTION,
+            annotations=annotation_for_tool("saxo_auth_status"),
+        )(saxo_auth_status)
+
+

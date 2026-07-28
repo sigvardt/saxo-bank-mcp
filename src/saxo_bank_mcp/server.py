@@ -1,97 +1,81 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from typing import Final, Literal, TypedDict
+from collections.abc import Mapping
+from typing import Final
 
-from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, SaxoAuthStatus
-from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.fastmcp_logging_safety import (
     FASTMCP_VALIDATION_SAFETY_TRANSFORM,
     SafeFastMCP,
     install_fastmcp_argument_log_filter,
 )
 from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
+from saxo_bank_mcp.server_core_tools import (
+    AUTH_STATUS_TOOL_DESCRIPTION,
+    HEALTH_DOES_NOT_VERIFY,
+    HEALTH_SCOPE,
+    HEALTH_TOOL_DESCRIPTION,
+    HEALTH_VERIFIES,
+    SERVICE_NAME,
+    SaxoHealth,
+    saxo_auth_status,
+    saxo_health,
+)
+from saxo_bank_mcp.server_eval_tool_filter import (
+    EvalToolFilterError,
+    resolve_eval_tool_filter,
+)
 from saxo_bank_mcp.server_tool_registration import register_saxo_tools
-from saxo_bank_mcp.tool_annotations import annotation_for_tool
 
-SERVICE_NAME: Final = "saxo-bank-mcp"
 DEFAULT_HOST: Final = "127.0.0.1"
 DEFAULT_PORT: Final = 8000
-HEALTH_SCOPE: Final = "local_mcp_server_liveness_only"
-type HealthVerification = Literal[
-    "local MCP process is running",
-    "FastMCP tool call path is ready",
-]
-type HealthNonVerification = Literal[
-    "Saxo connectivity",
-    "credentials/session",
-    "account access",
-    "trading readiness/order placement",
-    "live write readiness",
-]
-HEALTH_VERIFIES: Final[tuple[HealthVerification, ...]] = (
-    "local MCP process is running",
-    "FastMCP tool call path is ready",
-)
-HEALTH_DOES_NOT_VERIFY: Final[tuple[HealthNonVerification, ...]] = (
-    "Saxo connectivity",
-    "credentials/session",
-    "account access",
-    "trading readiness/order placement",
-    "live write readiness",
-)
-HEALTH_TOOL_DESCRIPTION: Final = (
-    "Reports local MCP server liveness/readiness only. Does not verify Saxo connectivity, "
-    "credentials/session, account access, trading readiness/order placement, "
-    "or live write readiness."
-)
-AUTH_STATUS_TOOL_DESCRIPTION: Final = (
-    "Reports local Saxo auth configuration/cache state without secrets or network calls. "
-    "Does not prove Saxo login, account access, session validity, session capabilities, "
-    "trading readiness, or live-write permission."
+
+# Re-exports for existing importers/tests.
+__all__ = (
+    "AUTH_STATUS_TOOL_DESCRIPTION",
+    "DEFAULT_HOST",
+    "DEFAULT_PORT",
+    "HEALTH_DOES_NOT_VERIFY",
+    "HEALTH_SCOPE",
+    "HEALTH_TOOL_DESCRIPTION",
+    "HEALTH_VERIFIES",
+    "SERVICE_NAME",
+    "SaxoHealth",
+    "create_mcp_server",
+    "main",
+    "mcp",
+    "run_http",
+    "run_stdio",
+    "saxo_auth_status",
+    "saxo_health",
 )
 
 
-class SaxoHealth(TypedDict):
-    status: Literal["passed"]
-    service: Literal["saxo-bank-mcp"]
-    mode: EffectiveReadEnvironment
-    live_writes: Literal[False]
-    scope: Literal["local_mcp_server_liveness_only"]
-    verifies: list[HealthVerification]
-    does_not_verify: list[HealthNonVerification]
+def create_mcp_server(
+    *,
+    allowed_tools: frozenset[str] | None = None,
+) -> SafeFastMCP:
+    """Build a SafeFastMCP instance with optional SIM-only eval tool filter."""
+    install_fastmcp_argument_log_filter()
+    server = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
+    server.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
+    server.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
+    register_saxo_tools(server, allowed_tools=allowed_tools)
+    return server
 
 
-install_fastmcp_argument_log_filter()
-mcp: Final = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
-mcp.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
-mcp.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
+def create_mcp_server_from_env(env: Mapping[str, str] | None = None) -> SafeFastMCP:
+    """Build server from env; eval filter activates only with the explicit flag."""
+    try:
+        allowed = resolve_eval_tool_filter(os.environ if env is None else env)
+    except EvalToolFilterError as exc:
+        raise SystemExit(f"eval tool filter rejected: {exc.reason}") from exc
+    return create_mcp_server(allowed_tools=allowed)
 
 
-@mcp.tool(description=HEALTH_TOOL_DESCRIPTION, annotations=annotation_for_tool("saxo_health"))
-def saxo_health() -> SaxoHealth:
-    runtime = SaxoRuntimeConfig.from_env()
-    return {
-        "status": "passed",
-        "service": SERVICE_NAME,
-        "mode": runtime.effective_read_environment(),
-        "live_writes": False,
-        "scope": HEALTH_SCOPE,
-        "verifies": list(HEALTH_VERIFIES),
-        "does_not_verify": list(HEALTH_DOES_NOT_VERIFY),
-    }
-
-
-@mcp.tool(
-    description=AUTH_STATUS_TOOL_DESCRIPTION,
-    annotations=annotation_for_tool("saxo_auth_status"),
-)
-def saxo_auth_status() -> SaxoAuthStatus:
-    return SaxoRuntimeConfig.from_env().redacted_status()
-
-
-register_saxo_tools(mcp)
+mcp: Final = create_mcp_server_from_env()
 
 
 def run_stdio() -> None:

@@ -1,3 +1,4 @@
+# allow: SIZE_OK - dual-harness eval orchestration owns binding, runtime, cleanup, and reports.
 from __future__ import annotations
 
 import hashlib
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Final, Literal
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp.agent_skill_eval_commands import child_env_for_case
 from saxo_bank_mcp.agent_skill_eval_execution import HarnessRoots, execute_model_case
 from saxo_bank_mcp.agent_skill_eval_models import (
     EvalRunRecord,
@@ -35,6 +37,7 @@ from saxo_bank_mcp.agent_skill_router_eval_execution import (
     client_versions,
     resolve_router_source_binding,
 )
+from saxo_bank_mcp.server_eval_tool_filter import EvalToolFilterError
 
 CREDENTIAL_MODE_NONE: Final = "none"
 CREDENTIAL_MODE_EPHEMERAL: Final = "ephemeral-owner-only-copy"
@@ -168,6 +171,9 @@ def run_eval_suite(options: EvalRunOptions) -> int:
     router_records = tuple(
         record for record in records if record.router_source_mode == "source_equivalent"
     )
+    model_records = tuple(
+        record for record in records if record.execution_mode == "model_execution"
+    )
     installation_fixture_preserved = _installation_fixture_preserved(options.install_report)
     source_commit = "" if binding is None else binding.source_commit
     if not source_commit and options.expected_source_commit:
@@ -188,31 +194,34 @@ def run_eval_suite(options: EvalRunOptions) -> int:
             "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
             "process_timed_out": bool(outcome.cleanup.get("process_timed_out", False)),
             "raw_transcripts_persisted": 0,
-            "model_prompt_count": len(router_records),
+            "model_prompt_count": len(model_records),
             "model_prompt_counts": {
-                harness: sum(1 for record in router_records if record.harness == harness)
+                harness: sum(1 for record in model_records if record.harness == harness)
                 for harness in ("codex", "claude")
             },
             "model_tool_events": sum(
-                record.model_tool_event_count or 0 for record in router_records
+                record.model_tool_event_count or 0 for record in model_records
             ),
             "model_command_events": sum(
-                record.model_command_event_count or 0 for record in router_records
+                record.model_command_event_count or 0 for record in model_records
             ),
             "created_mcp_calls": (
                 0
                 if options.dry_run
-                else sum(record.model_mcp_event_count or 0 for record in router_records)
+                else sum(record.model_mcp_event_count or 0 for record in model_records)
             ),
             "model_saxo_events": sum(
-                record.model_saxo_event_count or 0 for record in router_records
+                record.model_saxo_event_count or 0 for record in model_records
+            ),
+            "invoked_logical_tool_count": sum(
+                record.invoked_logical_tool_count for record in model_records
             ),
             "client_versions": outcome.versions,
             "client_versions_from_records": {
                 harness: sorted(
                     {
                         record.client_version
-                        for record in router_records
+                        for record in model_records
                         if record.harness == harness and record.client_version
                     }
                 )
@@ -242,6 +251,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
             "runtime_cleanup": outcome.cleanup.get("runtime_cleanup", "not_required"),
             "token_promote": outcome.cleanup.get("token_promote", "not_required"),
             "installation_fixture_preserved": installation_fixture_preserved,
+            "router_case_count": len(router_records),
         },
         before_global_state=before,
         after_global_state=after,
@@ -444,21 +454,59 @@ def _execute_selected_cases(  # noqa: PLR0913
         codex_home=runtime.codex_home,
         claude_home=runtime.home,
     )
-    return tuple(
-        execute_model_case(
-            case,
-            harness,
-            resolve_tool_grants(harness, case.exact_tool_grants[harness]),
-            roots=child_roots,
-            env=runtime.env,
-            expected_router_source_sha256=(
-                None if binding is None else binding.router_source_sha256
-            ),
-            process_manager=process_manager,
-        )
-        for case in cases
-        for harness in selected_harnesses(options.harness)
-    )
+    records: list[EvalRunRecord] = []
+    for case in cases:
+        for harness in selected_harnesses(options.harness):
+            grants = resolve_tool_grants(harness, case.exact_tool_grants[harness])
+            try:
+                env = _case_child_env(runtime.env, case=case, harness=harness)
+            except EvalToolFilterError as exc:
+                records.append(
+                    EvalRunRecord(
+                        case_id=case.id,
+                        harness=harness,
+                        status="failed",
+                        execution_mode="model_execution",
+                        expected_skill=case.expected_skill,
+                        required_logical_tools=case.required_logical_tools,
+                        forbidden_logical_tools=case.forbidden_logical_tools,
+                        resolved_tool_grants=grants,
+                        transcript_assertions_passed=False,
+                        no_model_call=False,
+                        no_mcp_call=True,
+                        no_saxo_call=True,
+                        error=exc.reason,
+                        grant_status="failed",
+                        assertion_status="failed",
+                    ),
+                )
+                continue
+            records.append(
+                execute_model_case(
+                    case,
+                    harness,
+                    grants,
+                    roots=child_roots,
+                    env=env,
+                    expected_router_source_sha256=(
+                        None if binding is None else binding.router_source_sha256
+                    ),
+                    process_manager=process_manager,
+                ),
+            )
+    return tuple(records)
+
+
+def _case_child_env(
+    base_env: dict[str, str],
+    *,
+    case: SkillEvalCase,
+    harness: Harness,
+) -> dict[str, str]:
+    # Router cases stay plan-only with the shared isolated env (no tool filter).
+    if case.router_expectation is not None:
+        return dict(base_env)
+    return child_env_for_case(base_env, case.exact_tool_grants[harness])
 
 
 def _first_record_error(records: tuple[EvalRunRecord, ...]) -> str:
@@ -581,6 +629,8 @@ def _planned_record(case: SkillEvalCase, harness: Harness) -> EvalRunRecord:
         no_model_call=True,
         no_mcp_call=True,
         no_saxo_call=True,
+        grant_status="not_required",
+        assertion_status="not_required",
     )
 
 
@@ -613,6 +663,10 @@ def _rewrite_digest_mismatches(
             model_mcp_event_count=record.model_mcp_event_count,
             model_saxo_event_count=record.model_saxo_event_count,
             client_version=record.client_version,
+            invoked_logical_tools=record.invoked_logical_tools,
+            invoked_logical_tool_count=record.invoked_logical_tool_count,
+            grant_status=record.grant_status,
+            assertion_status="failed",
         )
         for record in records
     )

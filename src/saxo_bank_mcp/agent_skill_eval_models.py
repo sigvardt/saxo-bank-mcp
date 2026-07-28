@@ -143,6 +143,10 @@ class EvalRunRecord(BaseModel):
     model_mcp_event_count: int | None = None
     model_saxo_event_count: int | None = None
     client_version: str = ""
+    invoked_logical_tools: tuple[str, ...] = ()
+    invoked_logical_tool_count: int = 0
+    grant_status: Literal["passed", "failed", "not_required"] = "not_required"
+    assertion_status: Literal["passed", "failed", "not_required"] = "not_required"
 
 
 class EvalRunReport(BaseModel):

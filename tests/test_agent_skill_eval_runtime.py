@@ -719,6 +719,37 @@ def test_non_router_execute_model_case_uses_provided_env_only(
     (tmp_path / "tmp").mkdir()
     captured: dict[str, Any] = {}
     manager = EvalProcessManager()
+    required = case.required_logical_tools
+    stream_lines = [
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": f"call-{index}",
+                    "type": "mcp_tool_call",
+                    "server": "saxo_bank_mcp",
+                    "tool": tool,
+                },
+            },
+        )
+        for index, tool in enumerate(required)
+    ]
+    stream_lines.append(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "answer",
+                    "type": "agent_message",
+                    "text": (
+                        "matched natural prompts 39 logical tools cleanup "
+                        "LIVE no-purchase proof no wildcard exact tool grants"
+                    ),
+                },
+            },
+        ),
+    )
+    grants = tuple(f"mcp__saxo_bank_mcp__{tool}" for tool in required)
 
     def fake_run(
         self: EvalProcessManager,
@@ -731,10 +762,7 @@ def test_non_router_execute_model_case_uses_provided_env_only(
         _ = (self, command, cwd, timeout_seconds)
         captured["env"] = env
         return ManagedProcessResult(
-            stdout=(
-                "matched natural prompts 39 logical tools cleanup "
-                "LIVE no-purchase proof no wildcard exact tool grants"
-            ),
+            stdout="\n".join(stream_lines),
             stderr="",
             returncode=0,
             timed_out=False,
@@ -748,7 +776,7 @@ def test_non_router_execute_model_case_uses_provided_env_only(
     record = execute_model_case(
         case,
         "codex",
-        (),
+        grants,
         roots=HarnessRoots(
             codex_plugin_root=ROOT,
             claude_plugin_root=ROOT,
@@ -758,7 +786,7 @@ def test_non_router_execute_model_case_uses_provided_env_only(
         env=isolated,
         process_manager=manager,
     )
-    assert record.status == "passed"
+    assert record.status == "passed", record.error
     assert captured["env"] is isolated
     assert captured["env"]["MARKER"] == "isolated-env-marker"
     assert "OPENAI_API_KEY" not in captured["env"]
@@ -902,14 +930,40 @@ def test_non_router_success_path_with_real_zero_returncode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-router path can pass when the real managed process exits 0 with transcript hits."""
+    """Non-router path can pass when the real managed process exits 0 with structured events."""
     case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "qa-evidence-readiness")
-    transcript = (
-        "matched natural prompts 39 logical tools cleanup "
-        "LIVE no-purchase proof no wildcard exact tool grants\n"
+    required = case.required_logical_tools
+    lines = [
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": f"call-{index}",
+                    "type": "mcp_tool_call",
+                    "server": "saxo_bank_mcp",
+                    "tool": tool,
+                },
+            },
+        )
+        for index, tool in enumerate(required)
+    ]
+    lines.append(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "answer",
+                    "type": "agent_message",
+                    "text": (
+                        "matched natural prompts 39 logical tools cleanup "
+                        "LIVE no-purchase proof no wildcard exact tool grants"
+                    ),
+                },
+            },
+        ),
     )
-    out_file = tmp_path / "non-router-success.txt"
-    out_file.write_text(transcript, encoding="utf-8")
+    out_file = tmp_path / "non-router-success.jsonl"
+    out_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path / "home"),
@@ -922,6 +976,7 @@ def test_non_router_success_path_with_real_zero_returncode(
     (tmp_path / "home").mkdir()
     (tmp_path / "codex").mkdir()
     (tmp_path / "tmp").mkdir()
+    grants = tuple(f"mcp__saxo_bank_mcp__{tool}" for tool in required)
 
     def fake_model_command(
         _case: SkillEvalCase,
@@ -935,7 +990,7 @@ def test_non_router_success_path_with_real_zero_returncode(
     record = execute_model_case(
         case,
         "codex",
-        (),
+        grants,
         roots=HarnessRoots(
             codex_plugin_root=ROOT,
             claude_plugin_root=ROOT,
@@ -945,8 +1000,9 @@ def test_non_router_success_path_with_real_zero_returncode(
         env=env,
         process_manager=EvalProcessManager(),
     )
-    assert record.status == "passed"
+    assert record.status == "passed", record.error
     assert record.error == ""
+    assert record.invoked_logical_tools == required
     assert record.transcript_assertions_passed is True
 
 

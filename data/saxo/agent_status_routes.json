@@ -273,7 +273,7 @@
         "reason": "Safety result TypedDict literals define registered safety statuses."
       },
       {
-        "module": "src/saxo_bank_mcp/server.py",
+        "module": "src/saxo_bank_mcp/server_core_tools.py",
         "reason": "Registered health tool returns passed status."
       },
       {
