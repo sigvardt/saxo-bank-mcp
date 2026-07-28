@@ -36,6 +36,14 @@ def get_preview(token: str) -> StoredPreview | None:
     return _PREVIEWS.get(token)
 
 
+def discard_preview(token: str) -> bool:
+    """Remove a stored preview without committing it. True when a preview was removed."""
+    stripped = token.strip()
+    if not stripped:
+        return False
+    return _PREVIEWS.pop(stripped, None) is not None
+
+
 def is_committed(fingerprint: str) -> bool:
     _prune_committed_fingerprints()
     return fingerprint in _COMMITTED_FINGERPRINTS

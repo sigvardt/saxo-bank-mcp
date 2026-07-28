@@ -766,7 +766,7 @@ async def test_unknown_order_response_is_retry_unsafe_and_tri_state(
 
 
 @pytest.mark.anyio
-async def test_sim_place_emits_bound_cleanup_selectors_only_when_open_order_readback_matches(
+async def test_sim_place_emits_bound_cleanup_selectors_only_when_open_order_readback_matches(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -847,13 +847,35 @@ async def test_sim_place_emits_bound_cleanup_selectors_only_when_open_order_read
     assert is_order_selector(selectors[0])
     assert order_id not in str(payload)
     assert "SIM-ACCOUNT-1" not in str(payload)
-    cancel = payload["safe_cancel_by_instrument"]
-    assert isinstance(cancel, dict)
+    cancel = cast("dict[str, JsonValue]", payload["safe_cancel_by_instrument"])
     assert cancel["scope"] == "SIM_only"
     fixture_uic = _preview_request("post.trade.v2.orders")["instrument_uic"]
     assert cancel["Uic"] == fixture_uic
     assert cancel["AssetType"] == "Stock"
     assert cancel["operation_id"] == "delete.trade.v2.orders"
+    assert cancel["cleanup_status"] == "open_order_still_present_cleanup_not_attempted"
+    assert cancel["outer_status"] == "completed_unverified"
+    write_args = cast("dict[str, JsonValue]", cancel["write_preview_arguments"])
+    assert write_args["operation_id"] == "delete.trade.v2.orders"
+    assert write_args["account_key"] == payload["safe_account_selector"]
+    assert write_args["instrument_uic"] == fixture_uic
+    assert write_args["quantity"] == 1
+    assert write_args["estimated_notional"] == 0
+    assert write_args["account_currency"] == "USD"
+    risk = cast("dict[str, JsonValue]", write_args["risk"])
+    assert risk == {
+        "cost": 0,
+        "cash_required": 0,
+        "margin_impact": 0,
+        "contract_multiplier": 1,
+        "conversion_known": True,
+    }
+    body = cast("dict[str, JsonValue]", write_args["request_body"])
+    assert body["AccountKey"] == payload["safe_account_selector"]
+    assert body["AssetType"] == "Stock"
+    assert body["Uic"] == fixture_uic
+    assert order_id not in str(write_args)
+    assert "SIM-ACCOUNT-1" not in str(write_args)
     resolved, reason = resolve_order_id_input(
         selectors[0],
         token=token,

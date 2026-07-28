@@ -145,17 +145,36 @@ def bind_order_selector(  # noqa: PLR0913
     )
     with _LOCK:
         existing = _ORDER_BINDINGS.get(selector)
-        if (
-            existing is not None
-            and not existing.consumed
-            and existing.token_generation == generation
-            and existing.environment == cleaned_env
-            and existing.account_key == cleaned_account
-            and existing.order_id == cleaned_order
-        ):
-            # Refresh expiry for an unused binding of the same exact target.
-            existing.expires_at = expires_at
-            return selector
+        if existing is not None:
+            same_target = (
+                existing.token_generation == generation
+                and existing.environment == cleaned_env
+                and existing.account_key == cleaned_account
+                and existing.order_id == cleaned_order
+            )
+            if same_target:
+                if existing.consumed:
+                    # One-time selector stays consumed; never rearm via rebind.
+                    return selector
+                # Refresh expiry for an unused binding of the same exact target.
+                existing.expires_at = expires_at
+                return selector
+            # Rare hash collision on a different target: rehash with a counter.
+            counter = 0
+            while selector in _ORDER_BINDINGS:
+                counter += 1
+                material = b"\0".join(
+                    (
+                        generation.encode(),
+                        cleaned_env.encode(),
+                        cleaned_account.encode(),
+                        cleaned_order.encode(),
+                        str(counter).encode(),
+                    )
+                )
+                digest = hmac.digest(_PROCESS_SECRET, material, "sha256")[:18]
+                encoded = base64.urlsafe_b64encode(digest).decode().rstrip("=")
+                selector = f"{ORDER_SELECTOR_PREFIX}{encoded}"
         _ORDER_BINDINGS[selector] = binding
         return selector
 
@@ -201,30 +220,40 @@ def resolve_order_id_input(  # noqa: PLR0911
 
 
 def consume_order_selector(selector: str) -> str:
-    """Mark a resolved selector consumed after successful preview creation.
-
-    Returns empty string on success, or a safe denial reason. Never echoes values.
-    """
-    stripped = selector.strip()
-    if not is_order_selector(stripped):
-        return "order_selector_unknown"
-    with _LOCK:
-        binding = _ORDER_BINDINGS.get(stripped)
-        if binding is None:
-            return "order_selector_unknown"
-        if binding.consumed:
-            return "order_selector_consumed"
-        binding.consumed = True
-        return ""
+    """Mark one selector consumed. Prefer consume_order_selectors for multi-select atomicity."""
+    return consume_order_selectors((selector,))
 
 
 def consume_order_selectors(selectors: Sequence[str]) -> str:
-    """Consume all selectors after one successful write preview. Fail closed on any error."""
+    """Atomically consume all selectors after one successful write preview.
+
+    All-or-nothing under the process lock: if any selector is missing, expired, or
+    already consumed, none of the selectors in this batch are modified.
+    Returns empty string on success, or a safe denial reason. Never echoes values.
+    """
+    unique: list[str] = []
+    seen: set[str] = set()
     for selector in selectors:
-        reason = consume_order_selector(selector)
-        if reason:
-            return reason
-    return ""
+        stripped = selector.strip()
+        if not stripped or stripped in seen:
+            continue
+        seen.add(stripped)
+        unique.append(stripped)
+    if not unique:
+        return "order_id_missing"
+    with _LOCK:
+        for stripped in unique:
+            if not is_order_selector(stripped):
+                return "order_selector_unknown"
+            binding = _ORDER_BINDINGS.get(stripped)
+            if binding is None:
+                return "order_selector_unknown"
+            if binding.consumed:
+                return "order_selector_consumed"
+        for stripped in unique:
+            binding = _ORDER_BINDINGS[stripped]
+            binding.consumed = True
+        return ""
 
 
 def inject_account_selectors(

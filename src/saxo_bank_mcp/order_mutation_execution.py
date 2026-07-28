@@ -272,38 +272,48 @@ async def execute_order_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
             environment=environment.value,
             account_key=acct,
         )
-        payload["safe_account_selector"] = account_selector_for(access.token, acct)
+        sel = account_selector_for(access.token, acct)
+        payload["safe_account_selector"] = sel
         instrument = stored.request.instrument_uic
         asset = stored.request.request_body.get("AssetType")
         asset_type = asset if isinstance(asset, str) and asset.strip() else "Stock"
+        currency = stored.request.account_currency
+        write_preview_arguments: dict[str, JsonValue] = {
+            "operation_id": "delete.trade.v2.orders",
+            "account_key": sel,
+            "instrument_uic": instrument,
+            "quantity": 1,
+            "estimated_notional": 0,
+            "account_currency": currency,
+            "risk": {
+                "cost": 0,
+                "cash_required": 0,
+                "margin_impact": 0,
+                "contract_multiplier": 1,
+                "conversion_known": True,
+            },
+            "request_body": {
+                "AccountKey": sel,
+                "AssetType": asset_type,
+                "Uic": instrument,
+            },
+        }
         payload["safe_cancel_by_instrument"] = {
             "scope": "SIM_only",
-            "safe_account_selector": payload["safe_account_selector"],
+            "safe_account_selector": sel,
             "Uic": instrument,
             "AssetType": asset_type,
             "operation_id": "delete.trade.v2.orders",
-            "write_preview_required_fields": [
-                "operation_id",
-                "account_key",
-                "instrument_uic",
-                "quantity",
-                "estimated_notional",
-                "account_currency",
-                "risk",
-                "request_body",
-            ],
+            "cleanup_status": cleanup_status,
+            "outer_status": status,
+            "write_preview_arguments": write_preview_arguments,
             "hint": (
-                "SIM-only. Call saxo_create_write_preview with "
-                "operation_id delete.trade.v2.orders; set account_key from "
-                "safe_account_selector; set instrument_uic to Uic; quantity 1; "
-                "estimated_notional 0 or known residual; account_currency from the "
-                "accounts read; risk with known cost, cash_required, margin_impact, "
-                "contract_multiplier, conversion_known; request_body AccountKey from "
-                "safe_account_selector plus AssetType and Uic. Then call "
-                "saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument "
-                "with that preview_token once. Never use raw AccountKey or OrderId. "
-                "Do not retry if cancel returns unknown_state or partial_success; "
-                "reconcile via reads."
+                "SIM-only. Place outer status may be completed_unverified because cleanup "
+                "is still required; cleanup_status open_order_still_present_cleanup_not_attempted "
+                "means cancel is the intended next step. Pass write_preview_arguments unchanged "
+                "to saxo_create_write_preview, then call saxo_cancel_orders_by_instrument or "
+                "saxo_cancel_sim_orders_by_instrument once with that preview_token. Never use "
+                "raw AccountKey or OrderId."
             ),
         }
     elif environment == SaxoEnvironment.SIM and status in {
@@ -311,6 +321,7 @@ async def execute_order_write(  # noqa: C901, PLR0911, PLR0912, PLR0915
         "unknown_state",
         "completed_unverified",
     }:
+        # No handles: true unknown/partial/unverified-without-open-order-match.
         payload["cleanup_requires_reconciliation"] = True
         payload["cleanup_actionable_selectors_emitted"] = False
     return _tool_result(payload)

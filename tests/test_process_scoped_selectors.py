@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -23,6 +25,7 @@ from saxo_bank_mcp.process_scoped_selectors import (
     accounts_from_port_payload,
     bind_order_selector,
     clear_process_scoped_selector_state_for_tests,
+    consume_order_selectors,
     inject_account_selectors,
     is_account_selector,
     public_order_selectors,
@@ -32,7 +35,7 @@ from saxo_bank_mcp.process_scoped_selectors import (
     resolve_order_id_input,
     resolve_request_body_selectors,
 )
-from saxo_bank_mcp.safety import reset_safety_state
+from saxo_bank_mcp.safety import get_preview, pending_preview_count, reset_safety_state
 from saxo_bank_mcp.server import mcp
 
 EXPIRES: Final = datetime.now(tz=UTC) + timedelta(hours=1)
@@ -324,6 +327,111 @@ def test_token_generation_mismatch_refuses_account_selector() -> None:
     assert resolve_account_selector(use_token, accounts, selector) is None
 
 
+def test_rebind_does_not_rearm_consumed_order_selector() -> None:
+    token = _token()
+    selector = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+    )
+    assert consume_order_selectors([selector]) == ""
+    rebound = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+    )
+    assert rebound == selector
+    resolved, reason = resolve_order_id_input(
+        rebound,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert resolved is None
+    assert reason == "order_selector_consumed"
+
+
+def test_multi_selector_consume_is_atomic() -> None:
+    token = _token()
+    first = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+    )
+    second = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id="OID" + "456",
+    )
+    unknown = f"{ORDER_SELECTOR_PREFIX}notbound"
+    reason = consume_order_selectors([first, unknown, second])
+    assert reason == "order_selector_unknown"
+    still_first, first_reason = resolve_order_id_input(
+        first,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    still_second, second_reason = resolve_order_id_input(
+        second,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert still_first == ORDER
+    assert first_reason == ""
+    assert still_second == "OID" + "456"
+    assert second_reason == ""
+    assert consume_order_selectors([first, second]) == ""
+    burned_first, burned_first_reason = resolve_order_id_input(
+        first,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert burned_first is None
+    assert burned_first_reason == "order_selector_consumed"
+
+
+def test_concurrent_consume_exactly_one_winner() -> None:
+    token = _token()
+    selector = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+    )
+    barrier = threading.Barrier(2)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait(timeout=5)
+        reason = consume_order_selectors([selector])
+        with lock:
+            results.append(reason)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert results.count("") == 1
+    assert results.count("order_selector_consumed") == 1
+    resolved, reason = resolve_order_id_input(
+        selector,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert resolved is None
+    assert reason == "order_selector_consumed"
+
+
 @pytest.mark.anyio
 async def test_write_preview_consumes_order_selector_only_after_success(
     tmp_path: Path,
@@ -437,6 +545,198 @@ async def test_write_preview_consumes_order_selector_only_after_success(
         assert ORDER not in str(replay_payload)
         assert order_sel not in str(replay_payload)
         assert ACCOUNT not in str(replay_payload)
+
+
+def test_concurrent_write_preview_selector_race_discards_loser(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent callers both pass resolve and create; only one consume wins."""
+    reset_safety_state()
+    clear_process_scoped_selector_state_for_tests()
+    monkeypatch.setenv("SAXO_MCP_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("SAXO_MCP_ACCOUNT_ALLOWLIST", ACCOUNT)
+    monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", str(FIXTURE_UIC))
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    token = _token()
+    order_sel = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+    )
+    accounts = (AccountRow(account_key=ACCOUNT, account_id="A1", currency="USD"),)
+    settings = SimAuthSettings(
+        app_key="sim-app-key",
+        authorization_url="https://sim.logonvalidation.net/authorize",
+        token_url="https://sim.logonvalidation.net/token",  # noqa: S106
+        rest_base_url="https://gateway.saxobank.com/sim/openapi/",
+        redirect_uri="http://127.0.0.1:8765/callback",
+        cache_path=tmp_path / "cache.json",
+    )
+
+    def _ready_token(_tool: str, _path: Path) -> CachedTokenReady:
+        return CachedTokenReady(token=token)
+
+    def _sim_settings(**_kwargs: object) -> SimAuthSettings:
+        return settings
+
+    monkeypatch.setattr("saxo_bank_mcp.mcp_token_state.cached_token_for_tool", _ready_token)
+    monkeypatch.setattr("saxo_bank_mcp.config.resolve_sim_auth_settings", _sim_settings)
+    monkeypatch.setattr(
+        "saxo_bank_mcp.process_scoped_selectors.fetch_account_rows_for_token",
+        AsyncMock(return_value=accounts),
+    )
+
+    import saxo_bank_mcp.safety as safety_module  # noqa: PLC0415
+    import saxo_bank_mcp.safety_state as safety_state_module  # noqa: PLC0415
+
+    barrier = threading.Barrier(2)
+    original_store = safety_state_module.store_preview
+
+    def gated_store(preview_token: str, preview: object) -> None:
+        from saxo_bank_mcp.safety_models import StoredPreview  # noqa: PLC0415
+
+        assert isinstance(preview, StoredPreview)
+        original_store(preview_token, preview)
+        # Hold both callers between store and consume so both previews exist first.
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(safety_state_module, "store_preview", gated_store)
+    monkeypatch.setattr(safety_module, "store_preview", gated_store)
+
+    args = {
+        "operation_id": "delete.trade.v2.orders.orderids",
+        "account_key": ACCOUNT,
+        "instrument_uic": FIXTURE_UIC,
+        "quantity": 1,
+        "estimated_notional": 0,
+        "account_currency": "USD",
+        "risk": {
+            "cost": 0,
+            "cash_required": 0,
+            "margin_impact": 0,
+            "contract_multiplier": 1,
+            "conversion_known": True,
+        },
+        "request_body": {
+            "AccountKey": ACCOUNT,
+            "OrderIds": order_sel,
+            "AssetType": "Stock",
+        },
+    }
+    payloads: list[dict[str, JsonValue] | None] = []
+    lock = threading.Lock()
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        async def run() -> object:
+            async with Client(mcp) as client:
+                return await client.call_tool(
+                    "saxo_create_write_preview",
+                    args,
+                    raise_on_error=False,
+                )
+
+        try:
+            result = asyncio.run(run())
+            structured = getattr(result, "structured_content", None)
+            typed: dict[str, JsonValue] | None = None
+            if isinstance(structured, dict):
+                typed = cast("dict[str, JsonValue]", structured)
+            with lock:
+                payloads.append(typed)
+        except BaseException as error:  # noqa: BLE001 - collect concurrent failures
+            with lock:
+                errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not errors, errors
+    worker_count = 2
+    assert len(payloads) == worker_count
+    created = [
+        payload
+        for payload in payloads
+        if payload is not None and payload.get("status") == "preview_created"
+    ]
+    denied = [
+        payload
+        for payload in payloads
+        if payload is not None and payload.get("status") == "denied"
+    ]
+    assert len(created) == 1
+    assert len(denied) == 1
+    assert denied[0]["denial_reason"] == "order_selector_consumed"
+    assert denied[0].get("preview_created") is False
+    assert denied[0].get("preview_discarded_after_selector_race") is True
+    assert "preview_token" not in denied[0]
+    winner_token = created[0].get("preview_token")
+    assert isinstance(winner_token, str)
+    assert winner_token
+    assert get_preview(winner_token) is not None
+    assert pending_preview_count() == 1
+    burned, burned_reason = resolve_order_id_input(
+        order_sel,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert burned is None
+    assert burned_reason == "order_selector_consumed"
+    assert ORDER not in str(denied[0])
+    assert order_sel not in str(denied[0])
+
+
+@pytest.mark.anyio
+async def test_write_preview_refuses_account_key_body_mismatch_before_create(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_safety_state()
+    monkeypatch.setenv("SAXO_MCP_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("SAXO_MCP_ACCOUNT_ALLOWLIST", f"{ACCOUNT},AKOTHER")
+    monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", str(FIXTURE_UIC))
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_write_preview",
+            {
+                "operation_id": "delete.trade.v2.orders",
+                "account_key": ACCOUNT,
+                "instrument_uic": FIXTURE_UIC,
+                "quantity": 1,
+                "estimated_notional": 0,
+                "account_currency": "USD",
+                "risk": {
+                    "cost": 0,
+                    "cash_required": 0,
+                    "margin_impact": 0,
+                    "contract_multiplier": 1,
+                    "conversion_known": True,
+                },
+                "request_body": {
+                    "AccountKey": "AK" + "OTHER",
+                    "AssetType": "Stock",
+                    "Uic": FIXTURE_UIC,
+                },
+            },
+            raise_on_error=False,
+        )
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "denied"
+    assert (
+        payload.get("denial_reason") == "request_body_account_key_mismatch"
+        or "request_body_account_key_mismatch" in (payload.get("denial_reasons") or [])
+    )
+    assert payload.get("preview_created") is False or "preview_token" not in payload
+    assert pending_preview_count() == 0
 
 
 @pytest.mark.anyio

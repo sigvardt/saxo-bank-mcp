@@ -41,7 +41,7 @@ def saxo_safety_status() -> ToolResult:
     return ToolResult(structured_content=status)
 
 
-async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
+async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0912, PLR0913
     operation_id: Annotated[
         str,
         Field(description="Registered write operation identifier, for example trade.order.place"),
@@ -103,6 +103,7 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
         resolve_account_key_input,
         resolve_request_body_selectors,
     )
+    from saxo_bank_mcp.safety_state import discard_preview  # noqa: PLC0415
 
     operation = nontrade_write_operation_for_id(operation_id)
     if operation is not None:
@@ -235,6 +236,23 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
                     },
                     is_error=True,
                 )
+    body_account = resolved_body.get("AccountKey")
+    if (
+        isinstance(body_account, str)
+        and body_account.strip()
+        and body_account != resolved_account
+    ):
+        # Fail before create_preview so agents never receive a token that execute will deny.
+        return ToolResult(
+            structured_content={
+                "status": "denied",
+                "tool_name": "saxo_create_write_preview",
+                "denial_reason": "request_body_account_key_mismatch",
+                "preview_created": False,
+                "network_call_made": False,
+            },
+            is_error=True,
+        )
     request = WritePreviewRequest(
         operation_id=operation_id,
         account_key=resolved_account,
@@ -246,10 +264,26 @@ async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0913
         request_body=resolved_body,
     )
     preview = SafetyKernel().create_preview(request)
-    # Consume order selectors only after a successful preview is stored. Validation
-    # or audit failures must not burn the one-time selector.
+    # Consume only after a successful preview is stored. Validation/audit failures
+    # before create must not burn the one-time selector. If consume loses a race,
+    # discard the just-created preview so no usable orphan token remains.
     if pending_order_selectors and preview.get("status") == "preview_created":
-        consume_order_selectors(pending_order_selectors)
+        consume_reason = consume_order_selectors(pending_order_selectors)
+        if consume_reason:
+            token = preview.get("preview_token")
+            if isinstance(token, str) and token.strip():
+                discard_preview(token)
+            return ToolResult(
+                structured_content={
+                    "status": "denied",
+                    "tool_name": "saxo_create_write_preview",
+                    "denial_reason": consume_reason,
+                    "preview_created": False,
+                    "network_call_made": True,
+                    "preview_discarded_after_selector_race": True,
+                },
+                is_error=True,
+            )
     return preview
 
 

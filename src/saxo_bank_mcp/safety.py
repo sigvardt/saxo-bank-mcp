@@ -28,6 +28,7 @@ from saxo_bank_mcp.safety_models import (
 )
 from saxo_bank_mcp.safety_state import (
     committed_fingerprint_count,
+    discard_preview,
     get_preview,
     is_committed,
     is_preview_token_committed,
@@ -45,6 +46,9 @@ __all__ = (
     "SafetyConfig",
     "SafetyKernel",
     "WritePreviewRequest",
+    "discard_preview",
+    "get_preview",
+    "pending_preview_count",
     "request_fingerprint",
     "reset_safety_state",
     "token_fingerprint",
