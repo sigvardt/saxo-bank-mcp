@@ -29,8 +29,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--claude-plugin-root", type=Path, default=Path())
     parser.add_argument("--codex-home", type=Path, default=None)
     parser.add_argument("--claude-home", type=Path, default=None)
+    parser.add_argument(
+        "--source-codex-home",
+        type=Path,
+        default=None,
+        help="Read-only Codex home used to seed disposable auth/config (not evidence).",
+    )
+    parser.add_argument(
+        "--source-claude-home",
+        type=Path,
+        default=None,
+        help="Read-only Claude home used to seed disposable auth/config (not evidence).",
+    )
     parser.add_argument("--install-report", type=Path, default=None)
-    parser.add_argument("--credential-mode", default="none")
+    parser.add_argument(
+        "--credential-mode",
+        choices=("none", "ephemeral-owner-only-copy"),
+        default="none",
+    )
     parser.add_argument(
         "--fixture",
         choices=("after-send-timeout", "incomplete-evicted-ledger", "state-fingerprint-mismatch"),
@@ -68,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             source_repo=args.source_repo,
             install_report=args.install_report,
             credential_mode=str(args.credential_mode),
+            source_codex_home=args.source_codex_home,
+            source_claude_home=args.source_claude_home,
         ),
     )
 

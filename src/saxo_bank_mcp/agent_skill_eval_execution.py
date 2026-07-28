@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,18 +20,17 @@ class HarnessRoots:
     claude_home: Path | None
 
 
-def execute_model_case(
+def execute_model_case(  # noqa: PLR0913
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
     *,
     roots: HarnessRoots,
+    env: dict[str, str],
     expected_router_source_sha256: str | None = None,
 ) -> EvalRunRecord:
     if case.router_expectation is not None:
-        plugin_root = (
-            roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
-        )
+        plugin_root = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
         return execute_router_model_case(
             case,
             harness,
@@ -45,13 +43,9 @@ def execute_model_case(
                 ),
                 expected_router_source_sha256=expected_router_source_sha256,
             ),
+            env=env,
         )
     command = _model_command(case, harness, grants, roots)
-    env = os.environ.copy()
-    if harness == "codex" and roots.codex_home is not None:
-        env["CODEX_HOME"] = str(roots.codex_home)
-    if harness == "claude" and roots.claude_home is not None:
-        env["HOME"] = str(roots.claude_home)
     try:
         result = subprocess.run(
             command,

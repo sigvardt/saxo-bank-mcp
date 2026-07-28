@@ -27,16 +27,29 @@ from saxo_bank_mcp.token_cache import (
 )
 
 MATRIX_RUNTIME_NAME: Final = "matrix-runtime"
+EVAL_RUNTIME_NAME: Final = "eval-runtime"
 DEFAULT_SIM_REDIRECT_URI: Final = "http://localhost:8080/callback"
 _AUTH_DIR_NAME: Final = "auth"
 _SIM_CREDENTIAL_NAME: Final = "sim-credentials"
 _TOKEN_CACHE_BASENAME: Final = "token-cache.json"  # noqa: S105 - filename, not a secret
 OWNER_FILE_MODE: Final = 0o600
 OWNER_DIR_MODE: Final = 0o700
+# CLI auth/config inputs only — never session history or raw model transcripts.
+_CODEX_SEED_FILES: Final = ("auth.json", "config.toml")
+_CLAUDE_SEED_RELATIVES: Final = (
+    Path(".claude") / "settings.json",
+    Path(".claude") / ".credentials.json",
+    Path(".claude.json"),
+)
+_CLAUDE_PLUGIN_SEED_RELATIVES: Final = (
+    Path(".claude") / "plugins" / "installed_plugins.json",
+    Path(".claude") / "plugins" / "known_marketplaces.json",
+)
+_CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
 
 
 class MatrixEnvError(ValueError):
-    """Sanitized failure for Todo 15 matrix isolated environment setup/cleanup."""
+    """Sanitized failure for Todo 15 matrix/eval isolated environment setup/cleanup."""
 
     def __init__(self, reason: str) -> None:  # noqa: D107
         super().__init__(reason)
@@ -59,8 +72,26 @@ class MatrixIsolatedRuntime:
 
 
 def matrix_runtime_root(evidence_root: Path) -> Path:
-    """Disposable Todo 15 runtime under the evidence root that owns options.out."""
-    return evidence_root.resolve() / MATRIX_RUNTIME_NAME
+    """Disposable Todo 15 matrix runtime under the evidence root that owns options.out."""
+    return isolated_runtime_root(evidence_root, MATRIX_RUNTIME_NAME)
+
+
+def eval_runtime_root(evidence_root: Path) -> Path:
+    """Disposable dual-harness eval runtime under the evidence root that owns options.out."""
+    return isolated_runtime_root(evidence_root, EVAL_RUNTIME_NAME)
+
+
+def isolated_runtime_root(evidence_root: Path, runtime_name: str) -> Path:
+    """Disposable isolated runtime directory under the evidence root."""
+    invalid = (
+        not runtime_name
+        or "/" in runtime_name
+        or "\\" in runtime_name
+        or runtime_name in {".", ".."}
+    )
+    if invalid:
+        raise MatrixEnvError("runtime_name_invalid")
+    return evidence_root.resolve() / runtime_name
 
 
 def resolve_matrix_child_evidence_path(
@@ -136,9 +167,13 @@ def prepare_matrix_child_receipt_path(path: Path) -> Path:
     return path
 
 
-def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntime:
+def prepare_matrix_isolated_runtime(
+    evidence_root: Path,
+    *,
+    runtime_name: str = MATRIX_RUNTIME_NAME,
+) -> MatrixIsolatedRuntime:
     """Create owner-only disposable roots and SIM-only auth copies under evidence_root."""
-    run_root = matrix_runtime_root(evidence_root)
+    run_root = isolated_runtime_root(evidence_root, runtime_name)
     if run_root.exists():
         residual = cleanup_matrix_isolated_runtime(run_root)
         if residual:
@@ -183,6 +218,7 @@ def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntim
         env["SAXO_MCP_SIM_REDIRECT_URI"] = _resolve_sim_redirect_uri()
         _assert_no_live_auth(env)
         _assert_write_bearing_under_run_root(env, run_root)
+        _assert_parent_secrets_stripped(env)
         return MatrixIsolatedRuntime(
             run_root=run_root,
             env=env,
@@ -204,6 +240,69 @@ def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntim
     except OSError as exc:
         cleanup_matrix_isolated_runtime(run_root)
         raise MatrixEnvError("matrix_runtime_setup_failed") from exc
+
+
+def prepare_eval_isolated_runtime(
+    evidence_root: Path,
+    *,
+    source_codex_home: Path | None,
+    source_claude_home: Path | None,
+) -> MatrixIsolatedRuntime:
+    """SIM-only eval runtime under evidence_root with task-created CLI homes.
+
+    Source homes are read-only inputs for owner-only auth/config/plugin copies.
+    They are never written and never published as evidence fields.
+    """
+    runtime = prepare_matrix_isolated_runtime(
+        evidence_root,
+        runtime_name=EVAL_RUNTIME_NAME,
+    )
+    try:
+        seed_isolated_cli_homes(
+            runtime,
+            source_codex_home=source_codex_home,
+            source_claude_home=source_claude_home,
+        )
+    except MatrixEnvError:
+        cleanup_matrix_isolated_runtime(runtime.run_root)
+        raise
+    except OSError as exc:
+        cleanup_matrix_isolated_runtime(runtime.run_root)
+        raise MatrixEnvError("eval_cli_home_seed_failed") from exc
+    return runtime
+
+
+def seed_isolated_cli_homes(
+    runtime: MatrixIsolatedRuntime,
+    *,
+    source_codex_home: Path | None,
+    source_claude_home: Path | None,
+) -> None:
+    """Copy required CLI auth/config/plugin inputs into task-created homes."""
+    codex_source = _resolve_codex_source_home(source_codex_home)
+    claude_source = _resolve_claude_source_home(source_claude_home)
+    for name in _CODEX_SEED_FILES:
+        _copy_optional_owner_only_file(
+            codex_source / name,
+            runtime.codex_home / name,
+            copy_reason="codex_auth_copy_failed",
+        )
+    for relative in _CODEX_PLUGIN_SEED_RELATIVES:
+        _copy_optional_owner_only_file(
+            codex_source / relative,
+            runtime.codex_home / relative,
+            copy_reason="codex_plugin_state_copy_failed",
+        )
+    for relative in (*_CLAUDE_SEED_RELATIVES, *_CLAUDE_PLUGIN_SEED_RELATIVES):
+        _copy_optional_owner_only_file(
+            claude_source / relative,
+            runtime.home / relative,
+            copy_reason="claude_auth_copy_failed",
+        )
+    # Ensure config dirs stay owner-only after selective copies.
+    for path in (runtime.home, runtime.codex_home, runtime.home / ".claude"):
+        if path.exists():
+            path.chmod(OWNER_DIR_MODE)
 
 
 def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
@@ -338,19 +437,73 @@ def _copy_owner_only_file(
     missing_reason: str,
     copy_reason: str,
 ) -> Path:
-    if not source.is_file():
+    if source.is_symlink():
+        raise MatrixEnvError("auth_source_symlink")
+    try:
+        mode = source.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError(missing_reason) from exc
+    if not stat.S_ISREG(mode):
         raise MatrixEnvError(missing_reason)
     try:
-        shutil.copy2(source, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.chmod(OWNER_DIR_MODE)
+        shutil.copy2(source, target, follow_symlinks=False)
         target.chmod(OWNER_FILE_MODE)
     except OSError as exc:
         raise MatrixEnvError(copy_reason) from exc
-    mode = target.stat().st_mode & 0o777
-    if mode != OWNER_FILE_MODE:
+    try:
+        target_mode = target.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError("auth_permissions_invalid") from exc
+    if not stat.S_ISREG(target_mode) or (target_mode & 0o777) != OWNER_FILE_MODE:
         raise MatrixEnvError("auth_permissions_invalid")
-    if not stat.S_ISREG(target.stat().st_mode):
+    if target.is_symlink():
         raise MatrixEnvError("auth_permissions_invalid")
     return target.resolve()
+
+
+def _copy_optional_owner_only_file(
+    source: Path,
+    target: Path,
+    *,
+    copy_reason: str,
+) -> Path | None:
+    """Copy a regular source file when present. Symlinks/non-regular nodes fail closed."""
+    if not os.path.lexists(source):
+        return None
+    if source.is_symlink():
+        raise MatrixEnvError("cli_auth_source_symlink")
+    try:
+        mode = source.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError(copy_reason) from exc
+    if not stat.S_ISREG(mode):
+        raise MatrixEnvError("cli_auth_source_not_regular")
+    return _copy_owner_only_file(
+        source,
+        target,
+        missing_reason=copy_reason,
+        copy_reason=copy_reason,
+    )
+
+
+def _resolve_codex_source_home(preferred: Path | None) -> Path:
+    if preferred is not None:
+        return preferred.expanduser()
+    raw = os.environ.get("CODEX_HOME", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".codex"
+
+
+def _resolve_claude_source_home(preferred: Path | None) -> Path:
+    if preferred is not None:
+        return preferred.expanduser()
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser().parent
+    return Path.home()
 
 
 def _regular_file_digest(path: Path) -> str | None:
@@ -394,6 +547,24 @@ def _assert_no_live_auth(env: dict[str, str]) -> None:
     for key in live_keys:
         if env.get(key):
             raise MatrixEnvError("live_auth_inherited")
+
+
+def _assert_parent_secrets_stripped(env: dict[str, str]) -> None:
+    """Child env must never carry parent LIVE/SAXO/OPENAI/ANTHROPIC secrets."""
+    blocked_prefixes = ("SAXO_", "OPENAI_", "ANTHROPIC_", "LIVE_")
+    allowlisted = {
+        "SAXO_MCP_ENVIRONMENT",
+        "SAXO_MCP_ENABLE_LIVE_READS",
+        "SAXO_MCP_ENABLE_LIVE_WRITES",
+        "SAXO_MCP_SIM_CREDENTIAL_FILE",
+        "SAXO_MCP_TOKEN_CACHE_PATH",
+        "SAXO_MCP_SIM_REDIRECT_URI",
+    }
+    for key, value in env.items():
+        if key in allowlisted or not value:
+            continue
+        if any(key == prefix or key.startswith(prefix) for prefix in blocked_prefixes):
+            raise MatrixEnvError("parent_secret_inherited")
 
 
 def _assert_write_bearing_under_run_root(env: dict[str, str], run_root: Path) -> None:

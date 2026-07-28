@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -157,6 +155,8 @@ def execute_router_model_case(
     harness: Harness,
     grants: tuple[str, ...],
     context: RouterCaseContext,
+    *,
+    env: dict[str, str],
 ) -> EvalRunRecord:
     try:
         source = router_source_text(context.plugin_root)
@@ -171,41 +171,41 @@ def execute_router_model_case(
                 grants,
                 _RouterOutcome(None, source, "router_source_digest_mismatch"),
             )
-        with tempfile.TemporaryDirectory(prefix="saxo-router-eval-") as raw_temp:
-            workdir = Path(raw_temp)
-            schema_path = workdir / "router-decision.schema.json"
-            schema_path.write_text(
-                json.dumps(RouterDecision.model_json_schema(), sort_keys=True),
-                encoding="utf-8",
+        work_root = Path(env["TMPDIR"]) / f"router-eval-{harness}-{case.id}"
+        work_root.mkdir(parents=True, exist_ok=True)
+        schema_path = work_root / "router-decision.schema.json"
+        schema_path.write_text(
+            json.dumps(RouterDecision.model_json_schema(), sort_keys=True),
+            encoding="utf-8",
+        )
+        prompt = _router_prompt(case.harness_prompts[harness], source)
+        command = _router_command(
+            _RouterCommandSpec(
+                harness=harness,
+                prompt=prompt,
+                schema_path=schema_path,
+                workdir=work_root,
+                homes=context.homes,
+            ),
+        )
+        if "--ignore-user-config" in command:
+            return _router_record(
+                case,
+                harness,
+                grants,
+                _RouterOutcome(None, source, "ignore_user_config_forbidden"),
             )
-            prompt = _router_prompt(case.harness_prompts[harness], source)
-            env, command = _router_command_env(
-                _RouterCommandSpec(
-                    harness=harness,
-                    prompt=prompt,
-                    schema_path=schema_path,
-                    workdir=workdir,
-                    homes=context.homes,
-                ),
-            )
-            if "--ignore-user-config" in command:
-                return _router_record(
-                    case,
-                    harness,
-                    grants,
-                    _RouterOutcome(None, source, "ignore_user_config_forbidden"),
-                )
-            result = subprocess.run(
-                command,
-                cwd=workdir,
-                env=env,
-                text=True,
-                capture_output=True,
-                timeout=case.timeout_seconds,
-                check=False,
-            )
-            client_version = _client_version(harness, env)
-    except (OSError, subprocess.TimeoutExpired, ValidationError):
+        result = subprocess.run(
+            command,
+            cwd=work_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=case.timeout_seconds,
+            check=False,
+        )
+        client_version = _client_version(harness, env)
+    except (OSError, subprocess.TimeoutExpired, ValidationError, KeyError):
         return _router_record(
             case,
             harness,
@@ -236,8 +236,7 @@ def execute_router_model_case(
         and parsed.saxo_event_count == 0
         and (
             context.expected_router_source_sha256 is None
-            or hashlib.sha256(source.encode()).hexdigest()
-            == context.expected_router_source_sha256
+            or hashlib.sha256(source.encode()).hexdigest() == context.expected_router_source_sha256
         )
     )
     return _router_record(
@@ -253,53 +252,22 @@ def execute_router_model_case(
     )
 
 
-def client_versions(
-    *,
-    codex_home: Path | None = None,
-    claude_home: Path | None = None,
-) -> dict[str, str]:
-    env = os.environ.copy()
-    if codex_home is not None:
-        env["CODEX_HOME"] = str(codex_home)
-    if claude_home is not None:
-        env["HOME"] = str(claude_home)
+def client_versions(*, env: dict[str, str]) -> dict[str, str]:
     return {
         "codex": _client_version("codex", env),
         "claude": _client_version("claude", env),
     }
 
 
-def _router_command_env(
-    spec: _RouterCommandSpec,
-) -> tuple[dict[str, str], tuple[str, ...]]:
-    env = os.environ.copy()
-    env["TMPDIR"] = str(spec.workdir)
+def _router_command(spec: _RouterCommandSpec) -> tuple[str, ...]:
     if spec.harness == "codex":
-        isolated_home = spec.workdir / "codex-home"
-        _prepare_codex_home(isolated_home, preferred=spec.homes.codex_home)
-        env["CODEX_HOME"] = str(isolated_home)
-        command = codex_router_command(
+        return codex_router_command(
             spec.prompt,
             spec.schema_path,
             spec.workdir,
             mcp_server_names=(),
         )
-        return env, command
-    if spec.homes.claude_home is not None:
-        env["HOME"] = str(spec.homes.claude_home)
-    return env, claude_router_command(spec.prompt, spec.schema_path)
-
-
-def _prepare_codex_home(target: Path, *, preferred: Path | None) -> None:
-    target.mkdir(parents=True, exist_ok=True)
-    source = preferred or Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-    auth_source = source / "auth.json"
-    if auth_source.is_file():
-        shutil.copy2(auth_source, target / "auth.json")
-    (target / "config.toml").write_text(
-        "# Isolated router-eval home: no MCP servers, no local rules.\n",
-        encoding="utf-8",
-    )
+    return claude_router_command(spec.prompt, spec.schema_path)
 
 
 def _client_version(harness: Harness, env: dict[str, str]) -> str:
@@ -474,4 +442,3 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
         check=True,
         capture_output=True,
     ).stdout
-
