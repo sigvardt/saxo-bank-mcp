@@ -27,13 +27,17 @@ from saxo_bank_mcp.agent_skill_install_ledger import (
     append_fixture_ledger_event,
     expected_preserved_paths,
 )
-from saxo_bank_mcp.agent_skill_install_models import REQUIRED_FIXTURE_CONSUMERS
+from saxo_bank_mcp.agent_skill_install_models import (
+    REQUIRED_FIXTURE_CONSUMERS,
+    CommandReceipt,
+)
 from saxo_bank_mcp.agent_skill_matrix import (
     LIFECYCLE_TOOLS,
     SCENARIO_MANIFEST,
     MatrixPlanOptions,
     SimFixtureOptions,
 )
+from saxo_bank_mcp.agent_skill_matrix_env import prepare_matrix_child_receipt_path
 from saxo_bank_mcp.agent_skill_matrix_producer import (
     run_real_matrix_report,
     validated_exact_tool_receipt,
@@ -226,11 +230,15 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     claude_global = tmp_path / "claude-global"
     codex_global.mkdir()
     claude_global.mkdir()
-    commit = __import__("subprocess").check_output(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source,
-        text=True,
-    ).strip()
+    commit = (
+        __import__("subprocess")
+        .check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source,
+            text=True,
+        )
+        .strip()
+    )
     # Pre-register durable ledger event (main-thread helper) before producer.
     for path_str in expected_preserved_paths(run_root, version="0.1.0"):
         Path(path_str).mkdir(parents=True, exist_ok=True)
@@ -502,6 +510,222 @@ def test_matrix_rejects_missing_tool_receipt_without_fill(
     assert payload["status"] == "failed"
     assert "missing_tool_receipt" in payload["reason"]
     assert "tool_calls" not in payload
+
+
+def _blocked_matrix_payload() -> dict[str, JsonValue]:
+    return {
+        "status": "blocked",
+        "environment": "SIM",
+        "reason": "disclaimer_context_unavailable",
+        "tool_receipts": [],
+        "lifecycle_calls": [],
+        "registered_trading_write_ops": [],
+        "disclaimer_response_completed": False,
+        "fixture_reference_validated": True,
+        "account_allowlist_resolved": True,
+        "auth_status_completed": True,
+        "session_capabilities_completed": True,
+        "before_state_fingerprint": {},
+        "after_state_fingerprint": {},
+        "uncleaned_resources": 0,
+        "hosts": ["gateway.saxobank.com"],
+        "live_events": 0,
+        "errors": ["disclaimer_context_unavailable"],
+    }
+
+
+def _command_failure_receipt() -> CommandFailureError:
+    return CommandFailureError(
+        CommandReceipt(
+            name="probe_sim_tool_matrix",
+            argv=("uv", "run", "python", "-m", "saxo_bank_mcp.qa", "sim-tool-matrix"),
+            cwd="/var/empty/installed-cache",
+            pid=9,
+            pgid=9,
+            exit_code=1,
+            stdout_sha256="d" * 64,
+            stderr_sha256="e" * 64,
+            timed_out=False,
+            cleanup_attempted=True,
+        )
+    )
+
+
+def _matrix_options(
+    out: Path,
+    installed_report: InstallFixture,
+) -> MatrixPlanOptions:
+    return MatrixPlanOptions(
+        manifest=SCENARIO_MANIFEST,
+        environment="SIM",
+        require_tools=EXPECTED_TOOL_CALLS,
+        install_report=installed_report.report,
+        fixtures=SimFixtureOptions(
+            stock_uic="211",
+            amount="1",
+            limit_price="50",
+            modified_limit_price="51",
+            option_uics="30004846,30004926",
+            stream_uic="21",
+        ),
+        out=out,
+        expected_source_commit=installed_report.commit,
+    )
+
+
+def test_matrix_consumes_valid_blocked_receipt_on_command_failure(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+    blocked = _blocked_matrix_payload()
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = options
+        write_json(receipt_dir / "sim-tool-matrix.json", blocked)
+        raise _command_failure_receipt()
+
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(_matrix_options(out, installed_report))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert result != 0
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "disclaimer_context_unavailable"
+    assert payload["matrix_status"] == "blocked"
+    assert payload["errors"] == ["disclaimer_context_unavailable"]
+    assert payload["command"]["name"] == "probe_sim_tool_matrix"
+    assert payload["command"]["exit_code"] == 1
+    assert "stdout" not in payload
+    assert "stderr" not in payload
+    assert "tool_calls" not in payload
+
+
+def test_matrix_command_failure_without_receipt_stays_generic(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = receipt_dir
+        _ = options
+        raise _command_failure_receipt()
+
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(_matrix_options(out, installed_report))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert result != 0
+    assert payload["reason"] == "producer_command_failed"
+    assert "matrix_status" not in payload
+    assert "errors" not in payload
+    assert payload["command"]["exit_code"] == 1
+
+
+def test_matrix_command_failure_malformed_receipt_stays_generic(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = options
+        (receipt_dir / "sim-tool-matrix.json").write_text(
+            '{"status": "blocked", "not": "a-valid-receipt"}',
+            encoding="utf-8",
+        )
+        raise _command_failure_receipt()
+
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(_matrix_options(out, installed_report))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert result != 0
+    assert payload["reason"] == "producer_command_failed"
+    assert "matrix_status" not in payload
+
+
+def test_matrix_command_failure_with_passed_receipt_cannot_pass(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+    tool_names = _scenario_tool_names()
+    passed = _passed_matrix_payload(tool_names)
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = options
+        write_json(receipt_dir / "sim-tool-matrix.json", passed)
+        raise _command_failure_receipt()
+
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(_matrix_options(out, installed_report))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert result != 0
+    assert payload["status"] == "failed"
+    assert payload["reason"] == "producer_command_failed"
+    assert payload["matrix_status"] == "passed"
+    assert "tool_calls" not in payload
+    assert "execution_mode" not in payload
+
+
+def test_matrix_stale_receipt_is_removed_and_not_consumed(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+    receipt_dir = out.parent / "probe-receipts"
+    receipt_dir.mkdir(parents=True)
+    stale_path = receipt_dir / "sim-tool-matrix.json"
+    write_json(stale_path, _blocked_matrix_payload())
+    assert stale_path.is_file()
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = options
+        # Mirror real probe: clear prior receipt, then fail before publish.
+        prepare_matrix_child_receipt_path(receipt_dir / "sim-tool-matrix.json")
+        raise _command_failure_receipt()
+
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(_matrix_options(out, installed_report))
+    payload = json.loads(out.read_text(encoding="utf-8"))
+
+    assert result != 0
+    assert payload["reason"] == "producer_command_failed"
+    assert payload.get("matrix_status") != "blocked"
+    assert not stale_path.exists()
 
 
 def test_matrix_rejects_wrong_tool_no_call_and_legacy_fabricated_receipts(

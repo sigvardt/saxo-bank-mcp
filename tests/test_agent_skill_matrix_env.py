@@ -17,6 +17,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
     cleanup_matrix_isolated_runtime,
     matrix_runtime_root,
+    prepare_matrix_child_receipt_path,
     prepare_matrix_isolated_runtime,
     require_matrix_runtime_cleanup,
     resolve_matrix_child_evidence_path,
@@ -251,6 +252,152 @@ def testrun_sim_matrix_probe_cleans_up_after_command_failure(
     )
     with pytest.raises(CommandFailureError):
         matrix_producer.run_sim_matrix_probe(cache, receipt_dir, options)
+    assert not matrix_runtime_root(evidence).exists()
+
+
+def test_prepare_matrix_child_receipt_path_removes_regular_and_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "task-15-sim" / "manual"
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir(parents=True)
+    regular = receipt_dir / "sim-tool-matrix.json"
+    regular.write_text('{"status":"blocked","reason":"stale"}', encoding="utf-8")
+    prepare_matrix_child_receipt_path(regular)
+    assert not regular.exists()
+
+    target = receipt_dir / "elsewhere.json"
+    target.write_text("{}", encoding="utf-8")
+    link = receipt_dir / "linked-receipt.json"
+    link.symlink_to(target)
+    with pytest.raises(MatrixEnvError, match="child_out_symlink"):
+        prepare_matrix_child_receipt_path(link)
+    assert link.is_symlink()
+    assert target.is_file()
+
+    directory = receipt_dir / "not-a-file"
+    directory.mkdir()
+    with pytest.raises(MatrixEnvError, match="child_out_not_regular"):
+        prepare_matrix_child_receipt_path(directory)
+
+
+def testrun_sim_matrix_probe_removes_stale_receipt_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    stale = receipt_dir / "sim-tool-matrix.json"
+    stale.write_text(
+        '{"status":"blocked","reason":"disclaimer_context_unavailable"}',
+        encoding="utf-8",
+    )
+    _write_auth_sources(tmp_path, monkeypatch)
+    seen: dict[str, bool] = {}
+
+    def failing_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        _ = env
+        out_path = Path(argv[argv.index("--out") + 1])
+        seen["stale_gone_at_spawn"] = not out_path.exists()
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=tuple(argv),
+                cwd=str(cwd),
+                pid=4,
+                pgid=4,
+                exit_code=1,
+                stdout_sha256="e" * 64,
+                stderr_sha256="e" * 64,
+                timed_out=False,
+                cleanup_attempted=True,
+            )
+        )
+
+    monkeypatch.setattr(matrix_producer, "run_command", failing_run_command)
+    options = MatrixPlanOptions(
+        manifest=Path("data/saxo/agent_tool_scenarios.json"),
+        environment="SIM",
+        require_tools=39,
+        install_report=tmp_path / "install.json",
+        fixtures=SimFixtureOptions(
+            stock_uic="211",
+            amount="1",
+            limit_price="50",
+            modified_limit_price="51",
+            option_uics="30004846,30004926",
+            stream_uic="21",
+        ),
+        out=evidence / "tool-matrix.json",
+    )
+    with pytest.raises(CommandFailureError):
+        matrix_producer.run_sim_matrix_probe(cache, receipt_dir, options)
+    assert seen["stale_gone_at_spawn"] is True
+    assert not stale.exists()
+    assert not matrix_runtime_root(evidence).exists()
+
+
+def testrun_sim_matrix_probe_rejects_symlink_receipt_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    target = evidence / "secret-elsewhere.json"
+    target.write_text('{"status":"blocked"}', encoding="utf-8")
+    link = receipt_dir / "sim-tool-matrix.json"
+    link.symlink_to(target)
+    _write_auth_sources(tmp_path, monkeypatch)
+    called = {"run_command": False}
+
+    def must_not_run(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        _ = name, argv, cwd, env
+        called["run_command"] = True
+        raise AssertionError("spawn must not run for symlink child out")
+
+    monkeypatch.setattr(matrix_producer, "run_command", must_not_run)
+    options = MatrixPlanOptions(
+        manifest=Path("data/saxo/agent_tool_scenarios.json"),
+        environment="SIM",
+        require_tools=39,
+        install_report=tmp_path / "install.json",
+        fixtures=SimFixtureOptions(
+            stock_uic="211",
+            amount="1",
+            limit_price="50",
+            modified_limit_price="51",
+            option_uics="30004846,30004926",
+            stream_uic="21",
+        ),
+        out=evidence / "tool-matrix.json",
+    )
+    with pytest.raises(MatrixEnvError, match="child_out_symlink"):
+        matrix_producer.run_sim_matrix_probe(cache, receipt_dir, options)
+    assert called["run_command"] is False
+    assert link.is_symlink()
+    assert target.is_file()
     assert not matrix_runtime_root(evidence).exists()
 
 

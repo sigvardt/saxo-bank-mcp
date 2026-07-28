@@ -68,7 +68,14 @@ def resolve_matrix_child_evidence_path(
         root = evidence_root.resolve()
         cache = installed_cache.resolve()
         runtime = runtime_root.resolve()
-        resolved = candidate.expanduser().resolve()
+        expanded = candidate.expanduser()
+    except OSError as exc:
+        raise MatrixEnvError("child_out_invalid") from exc
+    # Reject the leaf symlink before resolve() follows it to a different node.
+    if expanded.is_symlink():
+        raise MatrixEnvError("child_out_symlink")
+    try:
+        resolved = expanded.resolve()
     except OSError as exc:
         raise MatrixEnvError("child_out_invalid") from exc
 
@@ -80,6 +87,8 @@ def resolve_matrix_child_evidence_path(
         raise MatrixEnvError("child_out_aliases_matrix_runtime")
     if not resolved.is_absolute():
         raise MatrixEnvError("child_out_invalid")
+    if resolved.is_symlink():
+        raise MatrixEnvError("child_out_symlink")
 
     parent = resolved.parent
     try:
@@ -87,6 +96,31 @@ def resolve_matrix_child_evidence_path(
     except (OSError, PermissionError) as exc:
         raise MatrixEnvError("child_out_create_failed") from exc
     return resolved
+
+
+def prepare_matrix_child_receipt_path(path: Path) -> Path:
+    """Reject unsafe child out nodes and remove any prior regular receipt.
+
+    Only a post-spawn newly created regular file at this absolute path may be
+    consumed. Symlinks and non-regular nodes fail closed with stable reasons.
+    """
+    if path.is_symlink():
+        raise MatrixEnvError("child_out_symlink")
+    if not path.exists():
+        return path
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError("child_out_stale_remove_failed") from exc
+    if not stat.S_ISREG(mode):
+        raise MatrixEnvError("child_out_not_regular")
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise MatrixEnvError("child_out_stale_remove_failed") from exc
+    if path.exists() or path.is_symlink():
+        raise MatrixEnvError("child_out_stale_remove_failed")
+    return path
 
 
 def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntime:

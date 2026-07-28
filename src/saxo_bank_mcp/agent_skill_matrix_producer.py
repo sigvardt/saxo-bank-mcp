@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from saxo_bank_mcp.agent_skill_matrix import (
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
     matrix_runtime_root,
+    prepare_matrix_child_receipt_path,
     prepare_matrix_isolated_runtime,
     require_matrix_runtime_cleanup,
     resolve_matrix_child_evidence_path,
@@ -121,17 +123,14 @@ def _probe_or_fail(
     install: InstallEvidenceReport | FixtureSupportReport,
     receipt_dir: Path,
 ) -> tuple[CommandResult, SimToolMatrixReceipt] | int:
+    receipt_path = receipt_dir / "sim-tool-matrix.json"
     try:
         result = run_sim_matrix_probe(install.codex.cache_root, receipt_dir, options)
     except MatrixEnvError as exc:
         return _write_failure(options.out, exc.reason)
     except CommandFailureError as exc:
-        return _write_failure(
-            options.out,
-            "producer_command_failed",
-            {"command": exc.receipt.model_dump(mode="json")},
-        )
-    matrix = _load_matrix_receipt(receipt_dir / "sim-tool-matrix.json", options.out)
+        return _failure_from_command_error(options.out, receipt_path, exc)
+    matrix = _load_matrix_receipt(receipt_path, options.out)
     if isinstance(matrix, int):
         return matrix
     if matrix.status != "passed":
@@ -141,6 +140,58 @@ def _probe_or_fail(
             {"matrix_status": matrix.status, "errors": list(matrix.errors)},
         )
     return result, matrix
+
+
+def _failure_from_command_error(
+    out: Path,
+    receipt_path: Path,
+    exc: CommandFailureError,
+) -> int:
+    """On child nonzero, consume a fresh schema-valid receipt when present.
+
+    Blocked/failed reasons are preserved. A receipt claiming passed still fails.
+    Missing or malformed receipts keep generic producer_command_failed.
+    """
+    command_meta: dict[str, JsonValue] = {
+        "command": exc.receipt.model_dump(mode="json"),
+    }
+    matrix = _try_read_fresh_matrix_receipt(receipt_path)
+    if matrix is None:
+        return _write_failure(out, "producer_command_failed", command_meta)
+    if matrix.status == "passed":
+        return _write_failure(
+            out,
+            "producer_command_failed",
+            {
+                **command_meta,
+                "matrix_status": matrix.status,
+                "errors": list(matrix.errors),
+            },
+        )
+    return _write_failure(
+        out,
+        matrix.reason or matrix.status,
+        {
+            **command_meta,
+            "matrix_status": matrix.status,
+            "errors": list(matrix.errors),
+        },
+    )
+
+
+def _try_read_fresh_matrix_receipt(path: Path) -> SimToolMatrixReceipt | None:
+    """Load a post-spawn regular schema-valid receipt; never follow symlinks."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        payload = load_json_object(path)
+        if not payload:
+            return None
+        return SimToolMatrixReceipt.model_validate(payload)
+    except (ValidationError, OSError, TypeError, json.JSONDecodeError):
+        return None
 
 
 def _prepare_matrix_inputs(
@@ -220,6 +271,7 @@ def run_sim_matrix_probe(
             installed_cache=cache,
             runtime_root=runtime.run_root,
         )
+        prepare_matrix_child_receipt_path(out)
         command = (
             "uv",
             "run",
