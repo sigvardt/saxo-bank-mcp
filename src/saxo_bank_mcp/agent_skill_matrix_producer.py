@@ -33,6 +33,11 @@ from saxo_bank_mcp.agent_skill_matrix import (
     manifest_tools,
     sha256_file,
 )
+from saxo_bank_mcp.agent_skill_matrix_env import (
+    MatrixEnvError,
+    prepare_matrix_isolated_runtime,
+    require_matrix_runtime_cleanup,
+)
 from saxo_bank_mcp.qa_exact_tool_probe import ExactToolProbeReceipt
 from saxo_bank_mcp.qa_sim_tool_matrix import SimToolMatrixReceipt
 
@@ -70,23 +75,10 @@ def _execute_prepared_matrix(
 ) -> int:
     receipt_dir = options.out.parent / "probe-receipts"
     receipt_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        result = _run_sim_matrix_probe(install.codex.cache_root, receipt_dir, options)
-    except CommandFailureError as exc:
-        return _write_failure(
-            options.out,
-            "producer_command_failed",
-            {"command": exc.receipt.model_dump(mode="json")},
-        )
-    matrix = _load_matrix_receipt(receipt_dir / "sim-tool-matrix.json", options.out)
-    if isinstance(matrix, int):
-        return matrix
-    if matrix.status != "passed":
-        return _write_failure(
-            options.out,
-            matrix.reason or matrix.status,
-            {"matrix_status": matrix.status, "errors": list(matrix.errors)},
-        )
+    probed = _probe_or_fail(options, install, receipt_dir)
+    if isinstance(probed, int):
+        return probed
+    result, matrix = probed
     try:
         report = _build_executed_report(
             options,
@@ -111,6 +103,33 @@ def _execute_prepared_matrix(
             tool_receipt.model_dump(mode="json"),
         )
     return 0
+
+
+def _probe_or_fail(
+    options: MatrixPlanOptions,
+    install: InstallEvidenceReport | FixtureSupportReport,
+    receipt_dir: Path,
+) -> tuple[CommandResult, SimToolMatrixReceipt] | int:
+    try:
+        result = run_sim_matrix_probe(install.codex.cache_root, receipt_dir, options)
+    except MatrixEnvError as exc:
+        return _write_failure(options.out, exc.reason)
+    except CommandFailureError as exc:
+        return _write_failure(
+            options.out,
+            "producer_command_failed",
+            {"command": exc.receipt.model_dump(mode="json")},
+        )
+    matrix = _load_matrix_receipt(receipt_dir / "sim-tool-matrix.json", options.out)
+    if isinstance(matrix, int):
+        return matrix
+    if matrix.status != "passed":
+        return _write_failure(
+            options.out,
+            matrix.reason or matrix.status,
+            {"matrix_status": matrix.status, "errors": list(matrix.errors)},
+        )
+    return result, matrix
 
 
 def _prepare_matrix_inputs(
@@ -174,35 +193,61 @@ def _write_failure(
     return 1
 
 
-def _run_sim_matrix_probe(
+def run_sim_matrix_probe(
     cache: Path,
     receipt_dir: Path,
     options: MatrixPlanOptions,
 ) -> CommandResult:
-    out = receipt_dir / "sim-tool-matrix.json"
-    command = (
-        "uv",
-        "run",
-        "python",
-        "-m",
-        "saxo_bank_mcp.qa",
-        "sim-tool-matrix",
-        "--out",
-        str(out),
-        "--fixture-stock-uic",
-        str(options.fixtures.stock_uic),
-        "--fixture-amount",
-        str(options.fixtures.amount),
-        "--fixture-limit-price",
-        str(options.fixtures.limit_price),
-        "--fixture-modified-limit-price",
-        str(options.fixtures.modified_limit_price),
-        "--fixture-option-uics",
-        str(options.fixtures.option_uics),
-        "--fixture-stream-uic",
-        str(options.fixtures.stream_uic),
-    )
-    return run_command("probe_sim_tool_matrix", command, cwd=cache, timeout_seconds=3600)
+    evidence_root = options.out.parent.resolve()
+    runtime = prepare_matrix_isolated_runtime(evidence_root)
+    command_error: CommandFailureError | None = None
+    result: CommandResult | None = None
+    try:
+        out = receipt_dir / "sim-tool-matrix.json"
+        command = (
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "saxo_bank_mcp.qa",
+            "sim-tool-matrix",
+            "--out",
+            str(out),
+            "--fixture-stock-uic",
+            str(options.fixtures.stock_uic),
+            "--fixture-amount",
+            str(options.fixtures.amount),
+            "--fixture-limit-price",
+            str(options.fixtures.limit_price),
+            "--fixture-modified-limit-price",
+            str(options.fixtures.modified_limit_price),
+            "--fixture-option-uics",
+            str(options.fixtures.option_uics),
+            "--fixture-stream-uic",
+            str(options.fixtures.stream_uic),
+        )
+        result = run_command(
+            "probe_sim_tool_matrix",
+            command,
+            cwd=cache,
+            env=runtime.env,
+            timeout_seconds=3600,
+        )
+    except CommandFailureError as exc:
+        command_error = exc
+    finally:
+        cleanup_error: MatrixEnvError | None = None
+        try:
+            require_matrix_runtime_cleanup(runtime.run_root)
+        except MatrixEnvError as exc:
+            cleanup_error = exc
+    if command_error is not None:
+        raise command_error
+    if cleanup_error is not None:
+        raise cleanup_error
+    if result is None:
+        raise MatrixEnvError("matrix_probe_result_missing")
+    return result
 
 
 def _build_executed_report(
