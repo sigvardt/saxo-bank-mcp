@@ -219,12 +219,16 @@ def resolve_order_id_input(  # noqa: PLR0911
         return binding.order_id, ""
 
 
-def consume_order_selector(selector: str) -> str:
+def consume_order_selector(selector: str, *, now: datetime | None = None) -> str:
     """Mark one selector consumed. Prefer consume_order_selectors for multi-select atomicity."""
-    return consume_order_selectors((selector,))
+    return consume_order_selectors((selector,), now=now)
 
 
-def consume_order_selectors(selectors: Sequence[str]) -> str:
+def consume_order_selectors(
+    selectors: Sequence[str],
+    *,
+    now: datetime | None = None,
+) -> str:
     """Atomically consume all selectors after one successful write preview.
 
     All-or-nothing under the process lock: if any selector is missing, expired, or
@@ -241,6 +245,7 @@ def consume_order_selectors(selectors: Sequence[str]) -> str:
         unique.append(stripped)
     if not unique:
         return "order_id_missing"
+    current = now if now is not None else datetime.now(tz=UTC)
     with _LOCK:
         for stripped in unique:
             if not is_order_selector(stripped):
@@ -250,6 +255,9 @@ def consume_order_selectors(selectors: Sequence[str]) -> str:
                 return "order_selector_unknown"
             if binding.consumed:
                 return "order_selector_consumed"
+            # Reject under the same lock, before any mutation, so expiry races fail closed.
+            if binding.expires_at <= current:
+                return "order_selector_expired"
         for stripped in unique:
             binding = _ORDER_BINDINGS[stripped]
             binding.consumed = True
@@ -358,6 +366,21 @@ def clear_process_scoped_selector_state_for_tests() -> None:
     """Test-only reset of in-process order bindings."""
     with _LOCK:
         _ORDER_BINDINGS.clear()
+
+
+def force_expire_order_selector_for_tests(
+    selector: str,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Test-only: set a bound selector's expiry in the past under the process lock."""
+    current = now if now is not None else datetime.now(tz=UTC)
+    stripped = selector.strip()
+    with _LOCK:
+        binding = _ORDER_BINDINGS.get(stripped)
+        if binding is None:
+            return
+        binding.expires_at = current - timedelta(seconds=1)
 
 
 def _looks_like_account_row(mapping: Mapping[str, JsonValue]) -> bool:

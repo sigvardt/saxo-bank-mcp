@@ -26,6 +26,7 @@ from saxo_bank_mcp.process_scoped_selectors import (
     bind_order_selector,
     clear_process_scoped_selector_state_for_tests,
     consume_order_selectors,
+    force_expire_order_selector_for_tests,
     inject_account_selectors,
     is_account_selector,
     public_order_selectors,
@@ -397,6 +398,80 @@ def test_multi_selector_consume_is_atomic() -> None:
     assert burned_first_reason == "order_selector_consumed"
 
 
+def test_expired_selector_cannot_be_atomically_consumed() -> None:
+    token = _token()
+    now = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+    selector = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+        now=now,
+        ttl_seconds=30,
+    )
+    # Still valid at bind time, expired at consume time.
+    reason = consume_order_selectors([selector], now=now + timedelta(seconds=31))
+    assert reason == "order_selector_expired"
+    assert ORDER not in reason
+    assert selector not in reason
+    still, still_reason = resolve_order_id_input(
+        selector,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        now=now + timedelta(seconds=31),
+    )
+    assert still is None
+    assert still_reason == "order_selector_expired"
+    # Not marked consumed: only expiry applies.
+    unexpired, unexpired_reason = resolve_order_id_input(
+        selector,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        now=now + timedelta(seconds=10),
+    )
+    assert unexpired == ORDER
+    assert unexpired_reason == ""
+
+
+def test_multi_selector_batch_with_one_expired_consumes_none() -> None:
+    token = _token()
+    now = datetime(2026, 3, 2, 9, 0, tzinfo=UTC)
+    fresh = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+        now=now,
+        ttl_seconds=120,
+    )
+    short = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id="OID" + "789",
+        now=now,
+        ttl_seconds=10,
+    )
+    reason = consume_order_selectors(
+        [fresh, short],
+        now=now + timedelta(seconds=11),
+    )
+    assert reason == "order_selector_expired"
+    for selector, expected_id in ((fresh, ORDER), (short, "OID" + "789")):
+        resolved, resolve_reason = resolve_order_id_input(
+            selector,
+            token=token,
+            environment="SIM",
+            account_key=ACCOUNT,
+            now=now + timedelta(seconds=5),
+        )
+        assert resolved == expected_id
+        assert resolve_reason == ""
+        assert consume_order_selectors([selector], now=now + timedelta(seconds=5)) == ""
+
+
 def test_concurrent_consume_exactly_one_winner() -> None:
     token = _token()
     selector = bind_order_selector(
@@ -545,6 +620,115 @@ async def test_write_preview_consumes_order_selector_only_after_success(
         assert ORDER not in str(replay_payload)
         assert order_sel not in str(replay_payload)
         assert ACCOUNT not in str(replay_payload)
+
+
+@pytest.mark.anyio
+async def test_write_preview_discards_when_selector_expires_after_resolve(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If expiry hits after resolve but before atomic consume, discard the preview."""
+    reset_safety_state()
+    clear_process_scoped_selector_state_for_tests()
+    monkeypatch.setenv("SAXO_MCP_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("SAXO_MCP_ACCOUNT_ALLOWLIST", ACCOUNT)
+    monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", str(FIXTURE_UIC))
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    token = _token()
+    # Bind against real wall clock so resolve succeeds; expire only after store.
+    order_sel = bind_order_selector(
+        token,
+        environment="SIM",
+        account_key=ACCOUNT,
+        order_id=ORDER,
+        ttl_seconds=3600,
+    )
+    accounts = (AccountRow(account_key=ACCOUNT, account_id="A1", currency="USD"),)
+    settings = SimAuthSettings(
+        app_key="sim-app-key",
+        authorization_url="https://sim.logonvalidation.net/authorize",
+        token_url="https://sim.logonvalidation.net/token",  # noqa: S106
+        rest_base_url="https://gateway.saxobank.com/sim/openapi/",
+        redirect_uri="http://127.0.0.1:8765/callback",
+        cache_path=tmp_path / "cache.json",
+    )
+
+    def _ready_token(_tool: str, _path: Path) -> CachedTokenReady:
+        return CachedTokenReady(token=token)
+
+    def _sim_settings(**_kwargs: object) -> SimAuthSettings:
+        return settings
+
+    monkeypatch.setattr("saxo_bank_mcp.mcp_token_state.cached_token_for_tool", _ready_token)
+    monkeypatch.setattr("saxo_bank_mcp.config.resolve_sim_auth_settings", _sim_settings)
+    monkeypatch.setattr(
+        "saxo_bank_mcp.process_scoped_selectors.fetch_account_rows_for_token",
+        AsyncMock(return_value=accounts),
+    )
+
+    import saxo_bank_mcp.safety as safety_module  # noqa: PLC0415
+    import saxo_bank_mcp.safety_state as safety_state_module  # noqa: PLC0415
+
+    original_store = safety_state_module.store_preview
+
+    def expire_then_store(preview_token: str, preview: object) -> None:
+        from saxo_bank_mcp.safety_models import StoredPreview  # noqa: PLC0415
+
+        assert isinstance(preview, StoredPreview)
+        # Simulate wall-clock passing between successful resolve and atomic consume.
+        force_expire_order_selector_for_tests(order_sel)
+        original_store(preview_token, preview)
+
+    monkeypatch.setattr(safety_state_module, "store_preview", expire_then_store)
+    monkeypatch.setattr(safety_module, "store_preview", expire_then_store)
+
+    args = {
+        "operation_id": "delete.trade.v2.orders.orderids",
+        "account_key": ACCOUNT,
+        "instrument_uic": FIXTURE_UIC,
+        "quantity": 1,
+        "estimated_notional": 0,
+        "account_currency": "USD",
+        "risk": {
+            "cost": 0,
+            "cash_required": 0,
+            "margin_impact": 0,
+            "contract_multiplier": 1,
+            "conversion_known": True,
+        },
+        "request_body": {
+            "AccountKey": ACCOUNT,
+            "OrderIds": order_sel,
+            "AssetType": "Stock",
+        },
+    }
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_write_preview",
+            args,
+            raise_on_error=False,
+        )
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["status"] == "denied"
+    assert payload["denial_reason"] == "order_selector_expired"
+    assert payload.get("preview_created") is False
+    assert payload.get("preview_discarded_after_selector_race") is True
+    assert "preview_token" not in payload
+    assert pending_preview_count() == 0
+    assert ORDER not in str(payload)
+    assert order_sel not in str(payload)
+    # Failed consume must not mark the binding consumed (resolve still says expired, not consumed).
+    still, still_reason = resolve_order_id_input(
+        order_sel,
+        token=token,
+        environment="SIM",
+        account_key=ACCOUNT,
+    )
+    assert still is None
+    assert still_reason == "order_selector_expired"
 
 
 def test_concurrent_write_preview_selector_race_discards_loser(  # noqa: PLR0915
