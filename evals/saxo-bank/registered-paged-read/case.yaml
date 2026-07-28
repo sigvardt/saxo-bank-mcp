@@ -1,7 +1,11 @@
 {
   "id": "registered-paged-read",
   "title": "Registered paged read",
-  "tags": ["reads", "sim", "positive"],
+  "tags": [
+    "reads",
+    "sim",
+    "positive"
+  ],
   "environment": "SIM",
   "natural_prompt": "Read a registered SIM portfolio endpoint that may be paged. List the registry first and follow only Saxo-returned paging links.",
   "harness_prompts": {
@@ -9,19 +13,49 @@
     "claude": "Read a registered SIM portfolio endpoint that may be paged. List the registry first and follow only Saxo-returned paging links."
   },
   "expected_skill": "saxo-reads",
-  "required_logical_tools": ["saxo_get_session_capabilities", "saxo_list_registered_endpoints", "saxo_call_registered_endpoint"],
-  "forbidden_logical_tools": ["saxo_place_order", "saxo_create_write_preview", "saxo_execute_trading_write"],
+  "required_logical_tools": [
+    "saxo_list_registered_endpoints",
+    "saxo_call_registered_endpoint"
+  ],
+  "forbidden_logical_tools": [
+    "saxo_place_order",
+    "saxo_create_write_preview",
+    "saxo_execute_trading_write"
+  ],
   "exact_tool_grants": {
-    "codex": ["saxo_get_session_capabilities", "saxo_list_registered_endpoints", "saxo_call_registered_endpoint"],
-    "claude": ["saxo_get_session_capabilities", "saxo_list_registered_endpoints", "saxo_call_registered_endpoint"]
+    "codex": [
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
+    ],
+    "claude": [
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
+    ]
   },
   "transcript_assertions": {
-    "required_all": ["saxo_list_registered_endpoints", "saxo_call_registered_endpoint", "paging"],
-    "required_any": ["returned next", "skiptoken", "__next"],
-    "forbidden": ["fabricated page token", "raw account"]
+    "required_all": [
+      "paging"
+    ],
+    "required_any": [
+      "returned next",
+      "skiptoken",
+      "__next",
+      "next"
+    ],
+    "forbidden": [
+      "fabricated page token",
+      "raw account"
+    ]
   },
-  "deterministic_graders": ["required_text", "forbidden_text", "tool_order"],
+  "deterministic_graders": [
+    "required_text",
+    "forbidden_text",
+    "tool_order"
+  ],
   "max_turns": 8,
   "timeout_seconds": 300,
-  "cleanup_required": false
+  "cleanup_required": false,
+  "required_tool_groups": []
 }

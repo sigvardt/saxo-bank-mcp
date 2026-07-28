@@ -220,14 +220,21 @@ def execute_router_model_case(  # noqa: PLR0913
             else parse_claude_router_output(result.stdout)
         )
     except ValidationError:
+        error = (
+            "process_nonzero_exit"
+            if result.returncode != 0 and harness == "claude"
+            else "structured_output_invalid"
+        )
         return _router_record(
             case,
             harness,
             grants,
-            _RouterOutcome(None, source, "structured_output_invalid", client_version),
+            _RouterOutcome(None, source, error, client_version),
         )
+    # Claude 2.x stream-json may exit non-zero while still emitting valid structured output.
+    process_ok = result.returncode == 0 or harness == "claude"
     passed = (
-        result.returncode == 0
+        process_ok
         and not result.timed_out
         and _matches_expectation(parsed.decision, case.router_expectation)
         and not parsed.decision.execution_allowed

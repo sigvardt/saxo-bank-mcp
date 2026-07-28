@@ -105,14 +105,24 @@ def _record_from_process(
 ) -> EvalRunRecord:
     if result.timed_out:
         return _failed_record(case, harness, grants, "TimeoutExpired")
-    if result.returncode != 0:
-        return _failed_record(case, harness, grants, "process_nonzero_exit")
     if result.remaining_processes > 0 or result.process_cleanup == "residue":
         return _failed_record(case, harness, grants, "process_cleanup_residue")
+    return _record_from_stdout(case, harness, grants, result)
+
+
+def _record_from_stdout(
+    case: SkillEvalCase,
+    harness: Harness,
+    grants: tuple[str, ...],
+    result: ManagedProcessResult,
+) -> EvalRunRecord:
     try:
         trace = _parse_trace(harness, result.stdout)
     except (ValueError, TypeError):
-        return _failed_record(case, harness, grants, "malformed_output")
+        error = "process_nonzero_exit" if result.returncode != 0 else "malformed_output"
+        return _failed_record(case, harness, grants, error)
+    if result.returncode != 0 and not _claude_nonzero_output_usable(harness, trace):
+        return _failed_record(case, harness, grants, "process_nonzero_exit", trace=trace)
     if trace.parse_error:
         return _failed_record(
             case,
@@ -123,6 +133,13 @@ def _record_from_process(
             assertions_passed=False,
         )
     return _evaluate_trace(case, harness, grants, trace)
+
+
+def _claude_nonzero_output_usable(harness: Harness, trace: ModelToolTrace) -> bool:
+    """Claude 2.x may exit non-zero after emitting usable stream-json; still grade it."""
+    if harness != "claude":
+        return False
+    return bool(trace.saxo_event_count or trace.assistant_text.strip())
 
 
 def _parse_trace(harness: Harness, stdout: str) -> ModelToolTrace:
@@ -144,8 +161,8 @@ def _evaluate_trace(
         grant_logical = frozenset(case.exact_tool_grants[harness])
     invoked = trace.invoked_logical_tools
     invoked_set = frozenset(invoked)
-    assertions_passed = _transcript_passed(case, trace.assistant_text)
-    error = _non_router_error(
+    assertions_passed = transcript_passed(case, trace.assistant_text, invoked)
+    error = non_router_error(
         case=case,
         trace=trace,
         invoked_set=invoked_set,
@@ -193,7 +210,7 @@ def _side_channel_error(trace: ModelToolTrace) -> str:
     return ""
 
 
-def _non_router_error(
+def non_router_error(
     *,
     case: SkillEvalCase,
     trace: ModelToolTrace,
@@ -209,14 +226,28 @@ def _non_router_error(
         return "forbidden_tool_called"
     if invoked_set - grant_logical:
         return "out_of_grant_tool"
-    required = tuple(case.required_logical_tools)
-    if required and (
-        not all(tool in invoked_set for tool in required) or trace.saxo_event_count == 0
-    ):
+    if not _required_tools_satisfied(case, invoked_set, saxo_event_count=trace.saxo_event_count):
         return "required_tool_missing"
     if not assertions_passed:
         return "transcript_assertion_failed"
     return ""
+
+
+def _required_tools_satisfied(
+    case: SkillEvalCase,
+    invoked_set: frozenset[str],
+    *,
+    saxo_event_count: int,
+) -> bool:
+    """All required tools plus one member of each required group; needs real Saxo events."""
+    required = tuple(case.required_logical_tools)
+    if required and not all(tool in invoked_set for tool in required):
+        return False
+    for group in case.required_tool_groups:
+        if group and not any(tool in invoked_set for tool in group):
+            return False
+    needs_tools = bool(required) or any(bool(group) for group in case.required_tool_groups)
+    return not needs_tools or saxo_event_count > 0
 
 
 def _failed_record(  # noqa: PLR0913
@@ -253,15 +284,37 @@ def _failed_record(  # noqa: PLR0913
     )
 
 
-def _transcript_passed(case: SkillEvalCase, transcript: str) -> bool:
+def transcript_passed(
+    case: SkillEvalCase,
+    transcript: str,
+    invoked_logical_tools: tuple[str, ...] | frozenset[str] = (),
+) -> bool:
+    """Require safety prose; tool-name requirements may be satisfied by real invocations."""
     lowered = transcript.lower()
+    invoked = frozenset(invoked_logical_tools)
     required_all = all(
-        value.lower() in lowered for value in case.transcript_assertions.required_all
+        _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
+        for value in case.transcript_assertions.required_all
     )
     required_any = (
         True
         if not case.transcript_assertions.required_any
-        else any(value.lower() in lowered for value in case.transcript_assertions.required_any)
+        else any(
+            _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
+            for value in case.transcript_assertions.required_any
+        )
     )
     forbidden = any(value.lower() in lowered for value in case.transcript_assertions.forbidden)
     return required_all and required_any and not forbidden
+
+
+def _transcript_value_satisfied(
+    value: str,
+    *,
+    lowered: str,
+    invoked: frozenset[str],
+) -> bool:
+    if value.lower() in lowered:
+        return True
+    # Logical tool IDs named in assertions are agent-realistic when actually invoked.
+    return value.startswith("saxo_") and value in invoked

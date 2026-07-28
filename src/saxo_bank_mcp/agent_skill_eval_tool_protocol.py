@@ -27,6 +27,27 @@ CLAUDE_COMMAND_TOOLS: Final = frozenset(
 CLAUDE_PROTOCOL_TOOLS: Final = frozenset({"structuredoutput"})
 CODEX_HARNESS_PREFIX: Final = "mcp__saxo_bank_mcp__"
 CLAUDE_HARNESS_PREFIX: Final = "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__"
+# Known installed-plugin / stdio server ids for Saxo MCP (not foreign MCPs).
+SAXO_MCP_SERVER_MARKERS: Final = frozenset(
+    {
+        "saxo-bank-mcp",
+        "saxo_bank_mcp",
+        "plugin_saxo_bank_mcp_saxo_bank_mcp",
+        "plugin-saxo-bank-mcp-saxo-bank-mcp",
+    },
+)
+# Saxo-server protocol wrappers that are not tradable logical tools.
+SAXO_SERVER_PROTOCOL_TOOLS: Final = frozenset(
+    {
+        "",
+        "list_resources",
+        "list_tools",
+        "list_prompts",
+        "read_resource",
+        "complete",
+        "ping",
+    },
+)
 type HarnessName = Literal["codex", "claude"]
 
 
@@ -152,25 +173,28 @@ def parse_claude_model_output(stream: str) -> ModelToolTrace:
 
 def normalize_logical_tool_name(raw: str, *, harness: HarnessName) -> str | None:
     """Map harness-qualified MCP names to logical Saxo IDs; reject unknown names."""
+    del harness  # retained for call-site clarity across harnesses
     name = raw.strip()
     if not name:
         return None
-    match harness:
-        case "codex":
-            if name.startswith(CODEX_HARNESS_PREFIX):
-                logical = name.removeprefix(CODEX_HARNESS_PREFIX)
-            elif name.startswith("mcp__"):
-                return None
-            else:
-                logical = name
-        case "claude":
-            if name.startswith(CLAUDE_HARNESS_PREFIX):
-                logical = name.removeprefix(CLAUDE_HARNESS_PREFIX)
-            elif name.startswith("mcp__"):
-                return None
-            else:
-                logical = name
-    return logical if logical in ALL_LOGICAL_TOOL_IDS else None
+    if name in ALL_LOGICAL_TOOL_IDS:
+        return name
+    stripped = _strip_known_mcp_prefix(name)
+    if stripped is not None:
+        return stripped if stripped in ALL_LOGICAL_TOOL_IDS else None
+    if not name.startswith("mcp__") or "__" not in name:
+        return None
+    logical = name.rsplit("__", 1)[-1]
+    if logical in ALL_LOGICAL_TOOL_IDS and "saxo" in name.lower():
+        return logical
+    return None
+
+
+def _strip_known_mcp_prefix(name: str) -> str | None:
+    for prefix in (CODEX_HARNESS_PREFIX, CLAUDE_HARNESS_PREFIX):
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return None
 
 
 def logical_tools_from_grants(grants: tuple[str, ...]) -> tuple[str, ...]:
@@ -217,13 +241,19 @@ def _classify_codex_item(item: _CodexItem, counts: _EventCounts, order: list[str
     if item.type != "mcp_tool_call":
         return
     counts.mcp += 1
-    logical = _codex_mcp_logical(item)
-    if logical is None:
-        counts.non_saxo_mcp += 1
-        counts.parse_error = counts.parse_error or "non_saxo_mcp_event"
+    classification = _codex_mcp_classification(item)
+    if classification == "saxo":
+        logical = _codex_mcp_logical(item)
+        if logical is None:
+            # Saxo server protocol wrapper/noise: not a foreign MCP.
+            return
+        counts.saxo += 1
+        order.append(logical)
         return
-    counts.saxo += 1
-    order.append(logical)
+    if classification == "saxo_protocol":
+        return
+    counts.non_saxo_mcp += 1
+    counts.parse_error = counts.parse_error or "non_saxo_mcp_event"
 
 
 def _codex_mcp_logical(item: _CodexItem) -> str | None:
@@ -236,10 +266,40 @@ def _codex_mcp_logical(item: _CodexItem) -> str | None:
             return logical
         if candidate in ALL_LOGICAL_TOOL_IDS:
             return candidate
-    # Bare tool field is the normal Codex MCP shape.
     if item.tool in ALL_LOGICAL_TOOL_IDS:
         return item.tool
     return None
+
+
+def _is_saxo_mcp_server(server: str) -> bool:
+    name = server.strip()
+    if not name:
+        return False
+    if name in SAXO_MCP_SERVER_MARKERS:
+        return True
+    lowered = name.lower().replace("-", "_")
+    return "saxo" in lowered and "mcp" in lowered
+
+
+def _codex_mcp_classification(item: _CodexItem) -> str:
+    """Return saxo | saxo_protocol | non_saxo for an MCP tool event."""
+    logical = _codex_mcp_logical(item)
+    if logical is not None:
+        return "saxo"
+    server = item.server.strip()
+    tool = (item.tool or "").strip()
+    name = (item.name or "").strip()
+    if _is_saxo_mcp_server(server):
+        if tool.lower() in SAXO_SERVER_PROTOCOL_TOOLS or name.lower() in SAXO_SERVER_PROTOCOL_TOOLS:
+            return "saxo_protocol"
+        # Unknown tool on a Saxo server is still not a foreign MCP server.
+        # Leave it as protocol noise so out-of-grant is enforced via grants, not side-channel.
+        if not tool and not name:
+            return "saxo_protocol"
+        if "saxo" in f"{tool} {name}".lower():
+            return "saxo_protocol"
+        return "saxo_protocol"
+    return "non_saxo"
 
 
 def _classify_claude_tool(name: str, counts: _EventCounts, order: list[str]) -> None:

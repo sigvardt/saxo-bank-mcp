@@ -117,10 +117,15 @@ def parse_claude_router_output(stream: str) -> RouterOutput:
     for event in events:
         if event.structured_output is not None:
             decision = event.structured_output
-        if event.type == "result" and decision is None and event.result:
-            decision = RouterDecision.model_validate_json(event.result)
+        if decision is not None:
+            continue
+        if event.type == "result" and event.result:
+            text = event.result.strip()
+            if text.startswith("{"):
+                decision = RouterDecision.model_validate_json(text)
     if decision is None:
-        decision = RouterDecision.model_validate_json("")
+        # Fail with a ValidationError for callers that map it to structured_output_invalid.
+        decision = RouterDecision.model_validate_json("{}")
     tool_ids, command_ids, mcp_ids, saxo_ids = _claude_tool_events(events)
     return RouterOutput(
         decision=decision,

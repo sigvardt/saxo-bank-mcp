@@ -109,6 +109,7 @@ class SkillEvalCase(BaseModel):
     harness_prompts: dict[Harness, str]
     expected_skill: str = Field(min_length=1)
     required_logical_tools: tuple[str, ...]
+    required_tool_groups: tuple[tuple[str, ...], ...] = ()
     forbidden_logical_tools: tuple[str, ...]
     exact_tool_grants: dict[Harness, tuple[str, ...]]
     transcript_assertions: TranscriptAssertions

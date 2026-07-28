@@ -178,17 +178,23 @@ def _case_errors(
     errors.extend(_prompt_errors(case))
     errors.extend(_cleanup_errors(case))
     errors.extend(_router_errors(case))
+    group_tools = frozenset(
+        tool for group in case.required_tool_groups for tool in group
+    )
     unknown_required = frozenset(case.required_logical_tools) - known_tools
+    unknown_groups = group_tools - known_tools
     unknown_forbidden = frozenset(case.forbidden_logical_tools) - known_tools
     unknown_grants = _grants(case) - known_tools
     errors.extend(
         f"{case.id}: stale expected tool {tool}"
-        for tool in sorted(unknown_required | unknown_forbidden | unknown_grants)
+        for tool in sorted(
+            unknown_required | unknown_groups | unknown_forbidden | unknown_grants
+        )
     )
     errors.extend(_live_errors(case))
     if _grants(case).intersection(case.forbidden_logical_tools):
         errors.append(f"{case.id}: forbidden tool granted")
-    missing_grants = frozenset(case.required_logical_tools) - _grants(case)
+    missing_grants = (frozenset(case.required_logical_tools) | group_tools) - _grants(case)
     errors.extend(f"{case.id}: required tool not granted {tool}" for tool in sorted(missing_grants))
     errors.extend(
         f"{case.id}: wildcard grant"
@@ -270,7 +276,13 @@ def _coverage_errors(
     used_tools = frozenset(
         tool
         for case in cases
-        for tool in (*case.required_logical_tools, *case.forbidden_logical_tools)
+        for tool in (
+            *case.required_logical_tools,
+            *case.forbidden_logical_tools,
+            *(member for group in case.required_tool_groups for member in group),
+            *case.exact_tool_grants.get("codex", ()),
+            *case.exact_tool_grants.get("claude", ()),
+        )
     )
     expected_skills = EXPECTED_SKILLS & known_skills
     positive_skills = frozenset(case.expected_skill for case in cases)

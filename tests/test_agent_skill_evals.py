@@ -48,7 +48,13 @@ def test_eval_suite_covers_all_tools_and_skills() -> None:
     used_tools = {
         tool
         for case in cases
-        for tool in (*case.required_logical_tools, *case.forbidden_logical_tools)
+        for tool in (
+            *case.required_logical_tools,
+            *case.forbidden_logical_tools,
+            *(member for group in case.required_tool_groups for member in group),
+            *case.exact_tool_grants.get("codex", ()),
+            *case.exact_tool_grants.get("claude", ()),
+        )
     }
     positive_skills = {case.expected_skill for case in cases}
 
