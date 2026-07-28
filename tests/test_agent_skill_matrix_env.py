@@ -330,6 +330,191 @@ def testrun_sim_matrix_probe_cleans_up_after_command_failure(
     assert not matrix_runtime_root(evidence).exists()
 
 
+def _raise_cleanup_residue(_run_root: Path) -> None:
+    raise MatrixEnvError("matrix_runtime_cleanup_residue")
+
+
+def test_command_failure_aggregates_cleanup_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+
+    def failing_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,  # noqa: ARG001
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        raise CommandFailureError(_ok_receipt(name, argv, cwd, exit_code=1).receipt)
+
+    monkeypatch.setattr(matrix_producer, "run_command", failing_run_command)
+    monkeypatch.setattr(
+        matrix_producer,
+        "require_matrix_runtime_cleanup",
+        _raise_cleanup_residue,
+    )
+    with pytest.raises(MatrixEnvError) as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == "command_failed+matrix_runtime_cleanup_residue"
+    assert str(cache) not in str(err.value)
+    assert str(evidence) not in str(err.value)
+    assert "refresh-token" not in str(err.value)
+
+
+def test_probe_failure_aggregates_cleanup_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+
+    def probe_path_error(
+        candidate: Path,
+        *,
+        evidence_root: Path,
+        installed_cache: Path,
+        runtime_root: Path,
+    ) -> Path:
+        _ = (candidate, evidence_root, installed_cache, runtime_root)
+        raise MatrixEnvError("child_out_symlink")
+
+    monkeypatch.setattr(
+        matrix_producer,
+        "resolve_matrix_child_evidence_path",
+        probe_path_error,
+    )
+    monkeypatch.setattr(
+        matrix_producer,
+        "require_matrix_runtime_cleanup",
+        _raise_cleanup_residue,
+    )
+    with pytest.raises(MatrixEnvError) as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == "child_out_symlink+matrix_runtime_cleanup_residue"
+    assert str(cache) not in str(err.value)
+    assert str(evidence) not in str(err.value)
+
+
+def test_promote_failure_aggregates_cleanup_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+
+    def mutate_source_digest(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        save_token_cache(
+            Path(env["SAXO_MCP_TOKEN_CACHE_PATH"]),
+            _sim_token(
+                access="rotated-access",
+                refresh="rotated-refresh-secret",
+                verifier="rotated-verifier-secret",
+            ),
+        )
+        save_token_cache(
+            source_token,
+            _sim_token(
+                access="concurrent-access",
+                refresh="concurrent-refresh-secret",
+                verifier="concurrent-verifier-secret",
+            ),
+        )
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", mutate_source_digest)
+    monkeypatch.setattr(
+        matrix_producer,
+        "require_matrix_runtime_cleanup",
+        _raise_cleanup_residue,
+    )
+    with pytest.raises(MatrixEnvError) as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == "token_promote_source_changed+matrix_runtime_cleanup_residue"
+    rendered = str(err.value)
+    assert str(source_token) not in rendered
+    assert "rotated-refresh-secret" not in rendered
+    assert "concurrent-refresh-secret" not in rendered
+
+
+def test_cleanup_residue_only_keeps_cleanup_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+
+    def ok_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,  # noqa: ARG001
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", ok_run_command)
+    monkeypatch.setattr(
+        matrix_producer,
+        "require_matrix_runtime_cleanup",
+        _raise_cleanup_residue,
+    )
+    with pytest.raises(MatrixEnvError) as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == "matrix_runtime_cleanup_residue"
+    assert str(cache) not in str(err.value)
+    assert str(evidence) not in str(err.value)
+
+
 def test_prepare_matrix_child_receipt_path_removes_regular_and_rejects_symlink(
     tmp_path: Path,
 ) -> None:

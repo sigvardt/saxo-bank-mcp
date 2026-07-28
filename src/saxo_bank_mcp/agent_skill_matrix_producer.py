@@ -319,17 +319,48 @@ def run_sim_matrix_probe(
             require_matrix_runtime_cleanup(runtime.run_root)
         except MatrixEnvError as exc:
             cleanup_error = exc
-    if promote_error is not None:
-        raise promote_error
-    if command_error is not None:
-        raise command_error
-    if probe_error is not None:
-        raise probe_error
-    if cleanup_error is not None:
-        raise cleanup_error
+    _raise_matrix_probe_terminal_error(
+        promote_error=promote_error,
+        command_error=command_error,
+        probe_error=probe_error,
+        cleanup_error=cleanup_error,
+    )
     if result is None:
         raise MatrixEnvError("matrix_probe_result_missing")
     return result
+
+
+def _raise_matrix_probe_terminal_error(
+    *,
+    promote_error: MatrixEnvError | None,
+    command_error: CommandFailureError | None,
+    probe_error: MatrixEnvError | None,
+    cleanup_error: MatrixEnvError | None,
+) -> None:
+    """Raise the first primary failure; never discard cleanup residue.
+
+    Primary precedence matches historical order: promote, command, probe.
+    When cleanup also fails, raise a combined MatrixEnvError so SIM credential
+    residue is not silently hidden behind the primary failure.
+    """
+    primary_reason: str | None = None
+    primary_exc: Exception | None = None
+    if promote_error is not None:
+        primary_reason = promote_error.reason
+        primary_exc = promote_error
+    elif command_error is not None:
+        primary_reason = "command_failed"
+        primary_exc = command_error
+    elif probe_error is not None:
+        primary_reason = probe_error.reason
+        primary_exc = probe_error
+
+    if cleanup_error is not None:
+        if primary_reason is not None:
+            raise MatrixEnvError(f"{primary_reason}+{cleanup_error.reason}")
+        raise cleanup_error
+    if primary_exc is not None:
+        raise primary_exc
 
 
 def _build_executed_report(
