@@ -1080,7 +1080,7 @@ def test_router_success_path_with_real_zero_returncode(
     (tmp_path / "codex").mkdir()
     (tmp_path / "tmp").mkdir()
 
-    def fake_router_command(_spec: object) -> tuple[str, ...]:
+    def fake_router_command(_spec: object, **_kwargs: object) -> tuple[str, ...]:
         return ("/bin/cat", str(stream_path))
 
     monkeypatch.setattr(router_execution, "_router_command", fake_router_command)

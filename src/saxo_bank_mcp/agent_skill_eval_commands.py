@@ -237,11 +237,12 @@ def write_claude_sim_mcp_config(
 
 
 def resolve_cli_executable(name: str, env: Mapping[str, str]) -> str:
-    """Resolve a CLI binary to an absolute executable path when possible.
+    """Resolve a CLI binary to an absolute path when possible (deterministic Popen).
 
     Search order: EVAL_CLI_<NAME>_BIN override, env PATH, process PATH.
-    Prefer a path that still exists and is executable after symlink resolution so
-    Popen does not fail with FileNotFoundError on a bare name or a broken resolve.
+    Keeps the which()/override path absolute without following symlinks: Homebrew
+    Claude Code is ``/opt/homebrew/bin/claude`` -> ``.../claude.exe``, and launching
+    via the realpath breaks MCP + structured plan mode while bare/symlink still works.
     Falls back to the bare name only when nothing executable is found.
     """
     override_key = f"EVAL_CLI_{name.upper().replace('-', '_')}_BIN"
@@ -265,25 +266,24 @@ def resolve_cli_executable(name: str, env: Mapping[str, str]) -> str:
 
 
 def path_with_cli_dirs(path_value: str, *binaries: str) -> str:
-    """Prepend parent dirs of resolvable CLIs (and node for shebang scripts) onto PATH."""
+    """Append parent dirs of resolvable CLIs (and node) onto PATH without reordering."""
     parts = [part for part in path_value.split(os.pathsep) if part]
-    for binary in binaries:
+    extras: list[str] = []
+    seen = set(parts)
+    for binary in (*binaries, "node", "uv", "git"):
         located = shutil.which(binary, path=path_value) or shutil.which(binary)
         if not located:
             continue
-        directory = str(Path(located).resolve().parent)
-        if directory not in parts:
-            parts.insert(0, directory)
-    # node is required when claude/codex are Node shebang wrappers; seed even if
-    # the CLI itself was resolved via absolute path outside PATH.
-    for helper in ("node", "uv", "git"):
-        located = shutil.which(helper, path=path_value) or shutil.which(helper)
-        if not located:
+        # Parent of the which path (symlink location). Do not realpath: callers must
+        # keep brew wrapper dirs on PATH ahead of package-internal claude.exe dirs.
+        directory = str(_absolute_path(Path(located)).parent)
+        if directory in seen:
             continue
-        directory = str(Path(located).resolve().parent)
-        if directory not in parts:
-            parts.append(directory)
-    return os.pathsep.join(parts) if parts else path_value
+        seen.add(directory)
+        extras.append(directory)
+    if not extras:
+        return path_value
+    return os.pathsep.join([*parts, *extras])
 
 
 def enrich_eval_cli_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -294,26 +294,42 @@ def enrich_eval_cli_env(env: Mapping[str, str]) -> dict[str, str]:
     out["PATH"] = path
     for name in ("uv", "codex", "claude"):
         key = f"EVAL_CLI_{name.upper()}_BIN"
+        # Prefer live which() path over a stored pin so brew symlink launchers win
+        # over package-internal realpaths (claude.exe) left from older candidates.
+        via_path = shutil.which(name, path=out["PATH"]) or shutil.which(name)
+        if via_path:
+            absolute = _absolute_executable(via_path)
+            if absolute is not None:
+                out[key] = absolute
+                continue
         existing = out.get(key)
         if existing:
-            continue
+            absolute = _absolute_executable(existing)
+            if absolute is not None:
+                out[key] = absolute
+                continue
+            out.pop(key, None)
         resolved = resolve_cli_executable(name, out)
-        if resolved != name and Path(resolved).is_file():
+        if resolved != name:
             out[key] = resolved
     return out
 
 
+def _absolute_path(path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else expanded.absolute()
+
+
 def _absolute_executable(candidate: str) -> str | None:
+    """Return an absolute executable path without following symlinks to realpath."""
     try:
-        path = Path(candidate).expanduser()
+        path = _absolute_path(Path(candidate))
     except (OSError, RuntimeError, ValueError):
         return None
     try:
+        # is_file()/access follow the symlink target; keep the public path string.
         if path.is_file() and os.access(path, os.X_OK):
-            resolved = path.resolve()
-            if resolved.is_file() and os.access(resolved, os.X_OK):
-                return str(resolved)
-            return str(path if path.is_absolute() else path.absolute())
+            return str(path)
     except OSError:
         return None
     return None

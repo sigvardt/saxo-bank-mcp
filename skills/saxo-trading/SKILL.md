@@ -101,7 +101,9 @@ Required tool order (every name below is mandatory unless a listed alternate is 
 4. Cancel once for cleanup (always, even when outer place status is `completed` or `completed_unverified`): prefer place response `safe_cancel_by_instrument.write_preview_arguments` passed unchanged into `saxo_create_write_preview`, then one of `saxo_cancel_orders_by_instrument` or `saxo_cancel_sim_orders_by_instrument`. If that cleanup blob is missing, still create a cancel-by-instrument write preview from the known UIC/account selectors and cancel once. Do not invent OrderId or risk fields.
 5. `saxo_get_safe_request_ledger` last (after preview, place, and cancel have each been called).
 
-Do not finish after ledger alone if place or cancel was never called. Do not skip `saxo_create_order_preview`. Do not answer disclaimers in LIVE; treat SIM disclaimer blockers as blockers without inventing disclaimer context. Say exactly `SIM needs no human approval.` when stating SIM approval.
+Do not finish after ledger alone if place or cancel was never called. Do not skip `saxo_create_order_preview`. Do not answer disclaimers in LIVE; treat SIM disclaimer blockers as blockers without inventing disclaimer context.
+
+Lifecycle close-out (mandatory): after the five tool steps above, your final user-facing answer must include the exact sentence `SIM needs no human approval.` and must mention cleanup or cancel (tool invocation of a cancel tool also satisfies the cleanup mention).
 
 ## Result handling
 

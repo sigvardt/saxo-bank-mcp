@@ -814,12 +814,42 @@ def test_resolve_cli_executable_prefers_existing_override_and_path(
         "claude",
         {"PATH": "/usr/bin:/bin", "EVAL_CLI_CLAUDE_BIN": str(fake)},
     )
-    assert resolved == str(fake.resolve())
-    # PATH search finds the binary.
+    assert resolved == str(fake.absolute())
+    # PATH search finds the binary without following a different realpath.
     via_path = resolve_cli_executable("claude", {"PATH": str(bin_dir)})
-    assert via_path == str(fake.resolve())
+    assert via_path == str(fake.absolute())
     # Missing name stays bare so Popen can raise FileNotFoundError.
     assert resolve_cli_executable("no-such-cli-xyz", {"PATH": "/usr/bin"}) == "no-such-cli-xyz"
+
+
+def test_resolve_cli_executable_keeps_symlink_path_not_realpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Homebrew Claude Code is a symlink to claude.exe; realpath breaks MCP/plan mode."""
+    real_dir = tmp_path / "pkg" / "bin"
+    real_dir.mkdir(parents=True)
+    real = real_dir / "claude.exe"
+    real.write_text("#!/bin/sh\necho real\n", encoding="utf-8")
+    real.chmod(0o755)
+    link_dir = tmp_path / "brew" / "bin"
+    link_dir.mkdir(parents=True)
+    link = link_dir / "claude"
+    link.symlink_to(real)
+    monkeypatch.setenv("PATH", str(link_dir))
+    resolved = resolve_cli_executable("claude", {"PATH": str(link_dir)})
+    assert resolved == str(link.absolute())
+    assert not resolved.endswith("claude.exe")
+    # Stale realpath pins are rewritten to the public symlink via which().
+    env = enrich_eval_cli_env(
+        {
+            "PATH": str(link_dir),
+            "HOME": str(tmp_path),
+            "EVAL_CLI_CLAUDE_BIN": str(real.absolute()),
+        },
+    )
+    assert env["EVAL_CLI_CLAUDE_BIN"] == str(link.absolute())
+    assert not env["EVAL_CLI_CLAUDE_BIN"].endswith("claude.exe")
 
 
 def test_path_with_cli_dirs_seeds_node_and_cli_parents(
@@ -834,7 +864,9 @@ def test_path_with_cli_dirs_seeds_node_and_cli_parents(
         path.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_dir))
     enriched = path_with_cli_dirs("/usr/bin", "claude")
-    assert str(bin_dir.resolve()) in enriched.split(":")
+    # Appends which() parent; does not reorder leading PATH entries.
+    assert enriched.startswith("/usr/bin")
+    assert str(bin_dir.absolute()) in enriched.split(":")
     env = enrich_eval_cli_env({"PATH": "/usr/bin", "HOME": str(tmp_path)})
     assert "PATH" in env
     assert env.get("EVAL_CLI_CLAUDE_BIN", "").endswith("claude") or "claude" in env["PATH"]
@@ -912,11 +944,14 @@ def test_lifecycle_prompt_and_skill_require_preview_place_cancel_ledger() -> Non
         assert "saxo_get_safe_request_ledger" in prompt
         assert "always cancel" in prompt.lower() or "cancel once" in prompt.lower()
         assert "saxo_place_order" in prompt or "saxo_place_sim_order" in prompt
+        assert "SIM needs no human approval" in prompt
+        assert "final answer must include exactly" in prompt.lower()
     skill = Path("skills/saxo-trading/SKILL.md").read_text(encoding="utf-8")
     assert "saxo_create_order_preview" in skill
     assert "always" in skill.lower()
     assert "saxo_cancel_orders_by_instrument" in skill
     assert "saxo_get_safe_request_ledger" in skill
+    assert "Lifecycle close-out" in skill
     # Codex dual-eval skip of preview alone must still fail closed.
     missing_preview = _trace(
         invoked=("saxo_call_registered_endpoint", "saxo_auth_status"),
@@ -931,6 +966,49 @@ def test_lifecycle_prompt_and_skill_require_preview_place_cancel_ledger() -> Non
             assertions_passed=True,
         )
         == "required_tool_missing"
+    )
+    # Full tool path without the mandatory approval sentence still fails transcript.
+    tools_only = _trace(
+        invoked=(
+            "saxo_create_order_preview",
+            "saxo_place_sim_order",
+            "saxo_create_write_preview",
+            "saxo_cancel_sim_orders_by_instrument",
+            "saxo_get_safe_request_ledger",
+        ),
+        assistant_text="Lifecycle finished with cleanup.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=tools_only,
+            invoked_set=frozenset(tools_only.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["codex"]),
+            assertions_passed=transcript_passed(
+                case,
+                tools_only.assistant_text,
+                tools_only.invoked_logical_tools,
+            ),
+        )
+        == "transcript_assertion_failed"
+    )
+    complete = _trace(
+        invoked=tools_only.invoked_logical_tools,
+        assistant_text="SIM needs no human approval. cleanup done after cancel.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=complete,
+            invoked_set=frozenset(complete.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["codex"]),
+            assertions_passed=transcript_passed(
+                case,
+                complete.assistant_text,
+                complete.invoked_logical_tools,
+            ),
+        )
+        == ""
     )
 
 

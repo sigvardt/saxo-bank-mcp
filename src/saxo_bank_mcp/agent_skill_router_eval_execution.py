@@ -182,6 +182,11 @@ def execute_router_model_case(  # noqa: PLR0913
             encoding="utf-8",
         )
         prompt = _router_prompt(case.harness_prompts[harness], source)
+        from saxo_bank_mcp.agent_skill_eval_commands import (  # noqa: PLC0415
+            enrich_eval_cli_env,
+        )
+
+        launch_env = enrich_eval_cli_env(env)
         command = _router_command(
             _RouterCommandSpec(
                 harness=harness,
@@ -190,6 +195,7 @@ def execute_router_model_case(  # noqa: PLR0913
                 workdir=work_root,
                 homes=context.homes,
             ),
+            env=launch_env,
         )
         if "--ignore-user-config" in command:
             return _router_record(
@@ -201,10 +207,10 @@ def execute_router_model_case(  # noqa: PLR0913
         result = manager.run(
             command,
             cwd=work_root,
-            env=env,
+            env=launch_env,
             timeout_seconds=case.timeout_seconds,
         )
-        client_version = _client_version(harness, env, process_manager=manager)
+        client_version = _client_version(harness, launch_env, process_manager=manager)
     except (OSError, ValidationError, KeyError):
         return _router_record(
             case,
@@ -272,7 +278,11 @@ def client_versions(
     }
 
 
-def _router_command(spec: _RouterCommandSpec) -> tuple[str, ...]:
+def _router_command(
+    spec: _RouterCommandSpec,
+    *,
+    env: dict[str, str] | None = None,
+) -> tuple[str, ...]:
     if spec.harness == "codex":
         return codex_router_command(
             spec.prompt,
@@ -280,7 +290,7 @@ def _router_command(spec: _RouterCommandSpec) -> tuple[str, ...]:
             spec.workdir,
             mcp_server_names=(),
         )
-    return claude_router_command(spec.prompt, spec.schema_path)
+    return claude_router_command(spec.prompt, spec.schema_path, env=env)
 
 
 def _client_version(

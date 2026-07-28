@@ -191,25 +191,34 @@ def build_isolated_env(  # noqa: C901, PLR0912
     path_parts = env["PATH"].split(os.pathsep)
     # node is required for Claude Code / some Codex Node shebang wrappers when
     # the CLI is launched by absolute path and the shebang is `#!/usr/bin/env node`.
+    # Keep which() parent dirs (symlink locations), not realpath package bins:
+    # Claude Code's brew entry is a symlink to claude.exe and must stay the launcher.
     for binary in ("uv", "codex", "claude", "git", "node"):
         located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
         if located:
-            directory = str(Path(located).resolve().parent)
+            located_path = Path(located).expanduser()
+            directory = str(
+                located_path.parent
+                if located_path.is_absolute()
+                else located_path.absolute().parent
+            )
             if directory not in path_parts:
                 path_parts.append(directory)
     env["PATH"] = os.pathsep.join(path_parts)
     # Pin absolute CLI paths under a non-SAXO_ prefix so model children keep a
     # stable argv0 without tripping parent-secret strip (SAXO_* is blocked).
+    # Do not follow symlinks to realpath (Claude Code brew wrapper).
     for binary in ("uv", "codex", "claude"):
         located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
         if not located:
             continue
+        located_path = Path(located).expanduser()
+        absolute = located_path if located_path.is_absolute() else located_path.absolute()
         try:
-            absolute = str(Path(located).resolve())
+            if absolute.is_file() and os.access(absolute, os.X_OK):
+                env[f"EVAL_CLI_{binary.upper()}_BIN"] = str(absolute)
         except OSError:
             continue
-        if Path(absolute).is_file():
-            env[f"EVAL_CLI_{binary.upper()}_BIN"] = absolute
     if auth_targets:
         for key, target in auth_targets.items():
             resolved = target.resolve()

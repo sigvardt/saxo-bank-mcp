@@ -202,12 +202,17 @@ def _signal_pid(pid: int, sig: signal.Signals) -> None:
 
 
 def _resolve_run_executable(command0: str, path: str | None) -> str:
-    """Prefer an absolute executable that still exists; then PATH; then host PATH."""
+    """Prefer an absolute executable that still exists; then PATH; then host PATH.
+
+    Never realpath() the binary: Claude Code's brew launcher is a symlink to
+    claude.exe and must be exec'd via the public path.
+    """
     candidate = Path(command0).expanduser()
-    if candidate.is_absolute():
+    if candidate.is_absolute() or "/" in command0:
+        absolute = candidate if candidate.is_absolute() else candidate.absolute()
         try:
-            if candidate.is_file() and os.access(candidate, os.X_OK):
-                return str(candidate)
+            if absolute.is_file() and os.access(absolute, os.X_OK):
+                return str(absolute)
         except OSError:
             pass
     found = shutil_which(command0, path=path)
@@ -220,4 +225,7 @@ def _resolve_run_executable(command0: str, path: str | None) -> str:
     if found is None:
         # Keep original so Popen raises FileNotFoundError with a stable name.
         return command0
-    return found
+    found_path = Path(found).expanduser()
+    if not found_path.is_absolute():
+        found_path = found_path.absolute()
+    return str(found_path)

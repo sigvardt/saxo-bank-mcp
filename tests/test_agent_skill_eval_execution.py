@@ -152,7 +152,8 @@ def test_native_router_commands_disable_tools_and_mcp(tmp_path: Path) -> None:
     assert "mcp_servers.playwright.enabled=false" in codex
 
     # Then: Claude exposes no built-in tools or MCP servers.
-    assert claude[0] == "claude"
+    # argv0 may be absolute (symlink-preserving resolve) or bare when missing.
+    assert claude[0] == "claude" or Path(claude[0]).name.startswith("claude")
     assert _adjacent_pair(claude, "") == ("--tools", "")
     assert "--safe-mode" in claude
     assert "--strict-mcp-config" in claude

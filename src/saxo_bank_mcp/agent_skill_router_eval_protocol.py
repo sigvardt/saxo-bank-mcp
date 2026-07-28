@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -72,9 +73,7 @@ class RouterOutput:
 
 def parse_codex_router_output(stream: str) -> RouterOutput:
     events = tuple(
-        _CodexEvent.model_validate_json(line)
-        for line in stream.splitlines()
-        if line.strip()
+        _CodexEvent.model_validate_json(line) for line in stream.splitlines() if line.strip()
     )
     tool_ids: set[str] = set()
     command_ids: set[str] = set()
@@ -109,9 +108,7 @@ def parse_codex_router_output(stream: str) -> RouterOutput:
 
 def parse_claude_router_output(stream: str) -> RouterOutput:
     events = tuple(
-        _ClaudeEvent.model_validate_json(line)
-        for line in stream.splitlines()
-        if line.strip()
+        _ClaudeEvent.model_validate_json(line) for line in stream.splitlines() if line.strip()
     )
     decision: RouterDecision | None = None
     for event in events:
@@ -171,9 +168,7 @@ def codex_router_command(
     mcp_server_names: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     mcp_overrides = tuple(
-        value
-        for name in mcp_server_names
-        for value in ("-c", f"mcp_servers.{name}.enabled=false")
+        value for name in mcp_server_names for value in ("-c", f"mcp_servers.{name}.enabled=false")
     )
     return (
         "codex",
@@ -225,9 +220,18 @@ def configured_codex_mcp_server_names(config_path: Path) -> tuple[str, ...]:
 def claude_router_command(
     prompt: str,
     schema_path: Path,
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
+    from saxo_bank_mcp.agent_skill_eval_commands import (  # noqa: PLC0415
+        enrich_eval_cli_env,
+        resolve_cli_executable,
+    )
+
+    path_env = enrich_eval_cli_env(env or {})
+    claude_bin = resolve_cli_executable("claude", path_env)
     return (
-        "claude",
+        claude_bin,
         "--safe-mode",
         "--no-session-persistence",
         "--no-chrome",
