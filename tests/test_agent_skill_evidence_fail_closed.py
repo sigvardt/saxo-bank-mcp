@@ -380,7 +380,7 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
             },
         )
 
-    monkeypatch.setattr(matrix_producer, "_run_sim_matrix_probe", run_sim_probe)
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
     result = run_real_matrix_report(
         MatrixPlanOptions(
             manifest=SCENARIO_MANIFEST,
@@ -478,7 +478,7 @@ def test_matrix_rejects_missing_tool_receipt_without_fill(
             },
         )
 
-    monkeypatch.setattr(matrix_producer, "_run_sim_matrix_probe", run_sim_probe)
+    monkeypatch.setattr(matrix_producer, "run_sim_matrix_probe", run_sim_probe)
     result = run_real_matrix_report(
         MatrixPlanOptions(
             manifest=SCENARIO_MANIFEST,
