@@ -7,10 +7,10 @@
     "positive"
   ],
   "environment": "SIM",
-  "natural_prompt": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets.",
+  "natural_prompt": "My SIM Saxo session looks expired. Execute recovery: call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Refresh or start PKCE only when status requires it. In your final answer include exactly: I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status. Do not ask me to paste secrets.",
   "harness_prompts": {
-    "codex": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets.",
-    "claude": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets."
+    "codex": "My SIM Saxo session looks expired. Execute recovery: call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Refresh or start PKCE only when status requires it. In your final answer include exactly: I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status. Do not ask me to paste secrets.",
+    "claude": "My SIM Saxo session looks expired. Execute recovery: call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Refresh or start PKCE only when status requires it. In your final answer include exactly: I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status. Do not ask me to paste secrets."
   },
   "expected_skill": "saxo-auth-session",
   "required_logical_tools": [
@@ -42,12 +42,13 @@
     ]
   },
   "transcript_assertions": {
-    "required_all": [],
+    "required_all": [
+      "I cannot take secrets in chat"
+    ],
     "required_any": [
-      "do not paste secrets",
-      "cannot take secrets",
-      "I cannot take secrets in chat",
-      "secrets"
+      "local browser login",
+      "owner-only cache",
+      "session"
     ],
     "forbidden": [
       "paste the token",

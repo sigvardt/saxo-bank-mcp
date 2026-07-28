@@ -85,3 +85,11 @@ Say: `Local auth status is not Saxo connectivity proof. I need a session-capabil
 Say: `The entitlement summary does not prove this specific instrument has live prices or that any order is safe.`
 
 Do not say that a token is valid because a cache exists. Do not say that SIM success proves LIVE. Do not say that a LIVE precheck or entitlement read proves write permission.
+
+## Recovery execution close-out (mandatory)
+
+When the user asked you to recover or prove a SIM session and you called auth/session tools (for example `saxo_auth_status` then `saxo_get_session_capabilities`), your final user-facing answer must include this exact sentence at least once:
+
+`I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.`
+
+Include it even when recovery succeeded without refresh or PKCE and even when the user did not try to paste a secret. Do not ask the user to paste tokens, codes, verifiers, passwords, or cache content.

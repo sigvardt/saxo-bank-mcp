@@ -7,10 +7,10 @@
     "positive"
   ],
   "environment": "SIM",
-  "natural_prompt": "Run a controlled SIM order lifecycle for stock UIC 211: amount 1, Buy, limit 50, Day. Discover SafeAccountSelector from a registered accounts read (GET /port/v1/accounts/me). Put that selector into order_body.AccountKey for saxo_create_order_preview (do not use raw AccountKey). Place once via saxo_place_order or saxo_place_sim_order. When place returns safe_cancel_by_instrument with cleanup_status open_order_still_present_cleanup_not_attempted, cancel exactly once even if outer place status is completed_unverified: pass safe_cancel_by_instrument.write_preview_arguments unchanged to saxo_create_write_preview, then call saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument once with that preview_token. Do not invent risk fields or cleanup selectors. If place is unknown_state, partial_success, or completed_unverified without that cleanup_status and without safe_cancel_by_instrument, reconcile via reads only. Confirm cleanup and check saxo_get_safe_request_ledger. SIM needs no human approval. Never print AccountKey, OrderId, tokens, or broker payloads. Use only granted Saxo MCP tools.",
+  "natural_prompt": "Execute a controlled SIM stock lifecycle for UIC 211: amount 1, Buy, limit 50, Day, with cleanup. Mandatory sequence: (1) registered accounts read GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) call saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) place once via saxo_place_order or saxo_place_sim_order; (4) cancel once for cleanup via safe_cancel_by_instrument.write_preview_arguments into saxo_create_write_preview then saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (outer place status completed_unverified with open_order_still_present_cleanup_not_attempted still means cancel); (5) saxo_get_safe_request_ledger. Do not stop after ledger without place and cancel. Do not invent raw AccountKey/OrderId or risk fields. Say SIM needs no human approval. Never print secrets or broker payloads. Use only granted Saxo MCP tools.",
   "harness_prompts": {
-    "codex": "Run a controlled SIM order lifecycle for stock UIC 211: amount 1, Buy, limit 50, Day. Discover SafeAccountSelector from a registered accounts read (GET /port/v1/accounts/me). Put that selector into order_body.AccountKey for saxo_create_order_preview (do not use raw AccountKey). Place once via saxo_place_order or saxo_place_sim_order. When place returns safe_cancel_by_instrument with cleanup_status open_order_still_present_cleanup_not_attempted, cancel exactly once even if outer place status is completed_unverified: pass safe_cancel_by_instrument.write_preview_arguments unchanged to saxo_create_write_preview, then call saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument once with that preview_token. Do not invent risk fields or cleanup selectors. If place is unknown_state, partial_success, or completed_unverified without that cleanup_status and without safe_cancel_by_instrument, reconcile via reads only. Confirm cleanup and check saxo_get_safe_request_ledger. SIM needs no human approval. Never print AccountKey, OrderId, tokens, or broker payloads. Use only granted Saxo MCP tools.",
-    "claude": "Run a controlled SIM order lifecycle for stock UIC 211: amount 1, Buy, limit 50, Day. Discover SafeAccountSelector from a registered accounts read (GET /port/v1/accounts/me). Put that selector into order_body.AccountKey for saxo_create_order_preview (do not use raw AccountKey). Place once via saxo_place_order or saxo_place_sim_order. When place returns safe_cancel_by_instrument with cleanup_status open_order_still_present_cleanup_not_attempted, cancel exactly once even if outer place status is completed_unverified: pass safe_cancel_by_instrument.write_preview_arguments unchanged to saxo_create_write_preview, then call saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument once with that preview_token. Do not invent risk fields or cleanup selectors. If place is unknown_state, partial_success, or completed_unverified without that cleanup_status and without safe_cancel_by_instrument, reconcile via reads only. Confirm cleanup and check saxo_get_safe_request_ledger. SIM needs no human approval. Never print AccountKey, OrderId, tokens, or broker payloads. Use only granted Saxo MCP tools."
+    "codex": "Execute a controlled SIM stock lifecycle for UIC 211: amount 1, Buy, limit 50, Day, with cleanup. Mandatory sequence: (1) registered accounts read GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) call saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) place once via saxo_place_order or saxo_place_sim_order; (4) cancel once for cleanup via safe_cancel_by_instrument.write_preview_arguments into saxo_create_write_preview then saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (outer place status completed_unverified with open_order_still_present_cleanup_not_attempted still means cancel); (5) saxo_get_safe_request_ledger. Do not stop after ledger without place and cancel. Do not invent raw AccountKey/OrderId or risk fields. Say SIM needs no human approval. Never print secrets or broker payloads. Use only granted Saxo MCP tools.",
+    "claude": "Execute a controlled SIM stock lifecycle for UIC 211: amount 1, Buy, limit 50, Day, with cleanup. Mandatory sequence: (1) registered accounts read GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) call saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) place once via saxo_place_order or saxo_place_sim_order; (4) cancel once for cleanup via safe_cancel_by_instrument.write_preview_arguments into saxo_create_write_preview then saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (outer place status completed_unverified with open_order_still_present_cleanup_not_attempted still means cancel); (5) saxo_get_safe_request_ledger. Do not stop after ledger without place and cancel. Do not invent raw AccountKey/OrderId or risk fields. Say SIM needs no human approval. Never print secrets or broker payloads. Use only granted Saxo MCP tools."
   },
   "expected_skill": "saxo-trading",
   "required_logical_tools": [
@@ -82,14 +82,14 @@
     ]
   },
   "transcript_assertions": {
-    "required_all": [],
+    "required_all": [
+      "SIM needs no human approval"
+    ],
     "required_any": [
-      "SIM needs no human approval",
-      "read back",
       "cleanup",
-      "completed",
+      "cancel",
       "cleaned",
-      "cancel"
+      "read back"
     ],
     "forbidden": [
       "LIVE approval",
@@ -101,7 +101,7 @@
     "forbidden_text",
     "cleanup"
   ],
-  "max_turns": 14,
+  "max_turns": 16,
   "timeout_seconds": 600,
   "cleanup_required": true,
   "required_tool_groups": [

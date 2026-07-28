@@ -245,6 +245,119 @@ def test_healthy_auth_path_does_not_require_recovery_tools() -> None:
     assert error == ""
 
 
+def test_auth_recovery_case_requires_secret_sentence_even_when_tools_ran() -> None:
+    """Fresh dual-eval failure: Claude called both auth tools but omitted secret close-out."""
+    from saxo_bank_mcp.agent_skill_eval_models import load_eval_cases  # noqa: PLC0415
+
+    case = next(c for c in load_eval_cases() if c.id == "auth-recovery")
+    tools_only = _trace(
+        invoked=("saxo_auth_status", "saxo_get_session_capabilities"),
+        assistant_text="Session capabilities look ready.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=tools_only,
+            invoked_set=frozenset(tools_only.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=transcript_passed(
+                case,
+                tools_only.assistant_text,
+                tools_only.invoked_logical_tools,
+            ),
+        )
+        == "transcript_assertion_failed"
+    )
+    with_closeout = _trace(
+        invoked=("saxo_auth_status", "saxo_get_session_capabilities"),
+        assistant_text=(
+            "Session is ready. I cannot take secrets in chat. Use the local browser "
+            "login or configured owner-only cache flow, then I can check redacted status."
+        ),
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=with_closeout,
+            invoked_set=frozenset(with_closeout.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=transcript_passed(
+                case,
+                with_closeout.assistant_text,
+                with_closeout.invoked_logical_tools,
+            ),
+        )
+        == ""
+    )
+
+
+def test_lifecycle_case_requires_cancel_group_not_just_preview_and_ledger() -> None:
+    """Claude dual-eval called preview, place, and ledger but skipped cancel cleanup."""
+    from saxo_bank_mcp.agent_skill_eval_models import load_eval_cases  # noqa: PLC0415
+
+    case = next(c for c in load_eval_cases() if c.id == "sim-order-lifecycle")
+    missing_cancel = _trace(
+        invoked=(
+            "saxo_create_order_preview",
+            "saxo_place_sim_order",
+            "saxo_get_safe_request_ledger",
+        ),
+        assistant_text="SIM needs no human approval. cleanup incomplete.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=missing_cancel,
+            invoked_set=frozenset(missing_cancel.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=True,
+        )
+        == "required_tool_missing"
+    )
+    complete = _trace(
+        invoked=(
+            "saxo_create_order_preview",
+            "saxo_place_sim_order",
+            "saxo_create_write_preview",
+            "saxo_cancel_sim_orders_by_instrument",
+            "saxo_get_safe_request_ledger",
+        ),
+        assistant_text="SIM needs no human approval. cleanup done after cancel.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=complete,
+            invoked_set=frozenset(complete.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=transcript_passed(
+                case,
+                complete.assistant_text,
+                complete.invoked_logical_tools,
+            ),
+        )
+        == ""
+    )
+    missing_preview = _trace(
+        invoked=(
+            "saxo_call_registered_endpoint",
+            "saxo_get_safe_request_ledger",
+            "saxo_auth_status",
+        ),
+        assistant_text="SIM needs no human approval. ledger only.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=missing_preview,
+            invoked_set=frozenset(missing_preview.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["codex"]),
+            assertions_passed=True,
+        )
+        == "required_tool_missing"
+    )
+
+
 def test_transcript_tool_names_satisfied_by_invoked_tools() -> None:
     case = _minimal_case(
         transcript_assertions={

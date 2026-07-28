@@ -89,6 +89,18 @@ Use these logical tools under the reference rules:
 11. Read back portfolio orders, positions, trade messages, and fingerprint-only balances as needed.
 12. Clean up created SIM orders or subscriptions and verify the original open-order state when the task requires restoration.
 
+## Controlled SIM stock lifecycle (must not skip)
+
+When the user asks for a controlled SIM order lifecycle with cleanup (fixture stock UIC, amount, Buy limit, Day), execute this exact logical sequence without substituting ledger-only or status-only stops:
+
+1. Registered accounts read (`GET /port/v1/accounts/me` via registered endpoints) and take `SafeAccountSelector` for `order_body.AccountKey`.
+2. `saxo_create_order_preview` with single-stock limit body keys: AccountKey (selector), Uic, AssetType, Amount, BuySell, OrderType, OrderPrice, OrderDuration.DurationType DayOrder. The tool adds precheck-only ManualOrder=false and FieldGroups; do not invent raw AccountKey/OrderId.
+3. Place once with `saxo_place_order` or `saxo_place_sim_order` using that preview token.
+4. Cancel once for cleanup: if place returns `safe_cancel_by_instrument` with cleanup_status `open_order_still_present_cleanup_not_attempted`, pass `write_preview_arguments` unchanged into `saxo_create_write_preview`, then call `saxo_cancel_orders_by_instrument` or `saxo_cancel_sim_orders_by_instrument` once. Outer place status may be `completed_unverified` until cleanup; that is not a stop.
+5. Confirm with portfolio order readback as needed, then `saxo_get_safe_request_ledger`.
+
+Do not finish after ledger alone if place or cancel was never called. Do not answer disclaimers in LIVE; treat SIM disclaimer blockers as blockers without inventing disclaimer context. Say exactly `SIM needs no human approval.` when stating SIM approval.
+
 ## Result handling
 
 Treat `completed` as the only unqualified execution success.
