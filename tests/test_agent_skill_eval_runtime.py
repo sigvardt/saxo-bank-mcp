@@ -10,11 +10,22 @@ from typing import Any, Final
 
 import pytest
 
+import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
 import saxo_bank_mcp.agent_skill_router_eval_execution as router_execution
-from saxo_bank_mcp.agent_skill_command_runner import remaining_live_pgids
+from saxo_bank_mcp.agent_skill_command_runner import (
+    process_group_members,
+    process_still_running,
+    remaining_live_pgids,
+    remaining_live_pids,
+)
 from saxo_bank_mcp.agent_skill_eval_execution import HarnessRoots, execute_model_case
-from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, SkillEvalCase, load_eval_cases
+from saxo_bank_mcp.agent_skill_eval_models import (
+    EvalRunRecord,
+    RouterDecision,
+    SkillEvalCase,
+    load_eval_cases,
+)
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
 from saxo_bank_mcp.agent_skill_matrix_env import (
@@ -27,11 +38,21 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     resolve_actual_claude_auth_home,
     resolve_actual_codex_auth_home,
 )
-from saxo_bank_mcp.agent_skill_router_eval_execution import RouterSourceBinding
+from saxo_bank_mcp.agent_skill_router_eval_execution import (
+    RouterCaseContext,
+    RouterHomes,
+    RouterSourceBinding,
+    execute_router_model_case,
+)
 from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.token_cache import save_token_cache
 
 TIMEOUT_EXIT_CODE: Final = 124
+CLAUDE_SETTINGS_CANARY: Final = "GLOBAL-SETTINGS-HOOKS-CANARY"
+CLAUDE_MCP_CANARY: Final = "GLOBAL-MCP-CANARY"
+CLAUDE_PROJECT_HISTORY_CANARY: Final = "PROJECT-HISTORY-CANARY"
+CLAUDE_HOOKS_CANARY: Final = "HOOKS-DIR-CANARY"
+CLAUDE_SESSION_HISTORY_CANARY: Final = "SESSION-HISTORY-CANARY"
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
@@ -99,16 +120,44 @@ def _seed_cli_auth_sources(tmp_path: Path) -> tuple[Path, Path]:
     (codex / "auth.json").chmod(0o600)
     claude_cfg = claude / ".claude"
     claude_cfg.mkdir()
-    (claude_cfg / "settings.json").write_text("{}\n", encoding="utf-8")
+    # Canaries: global settings/hooks/MCP/project/history must never seed into runtime.
+    (claude_cfg / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {"PreToolUse": [{"command": CLAUDE_SETTINGS_CANARY}]},
+                "mcpServers": {"canary": {"command": CLAUDE_MCP_CANARY}},
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (claude_cfg / "settings.json").chmod(0o600)
+    (claude / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "/canary-project": {
+                        "history": [CLAUDE_PROJECT_HISTORY_CANARY],
+                    },
+                },
+            },
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (claude / ".claude.json").chmod(0o600)
+    hooks_dir = claude_cfg / "hooks"
+    hooks_dir.mkdir()
+    (hooks_dir / "canary.sh").write_text(f"{CLAUDE_HOOKS_CANARY}\n", encoding="utf-8")
     (claude_cfg / ".credentials.json").write_text(
         '{"claude":"auth-fixture"}\n',
         encoding="utf-8",
     )
     (claude_cfg / ".credentials.json").chmod(0o600)
-    # Transcripts must never be copied into disposable homes.
-    (codex / "history.jsonl").write_text("raw-transcript\n", encoding="utf-8")
-    (claude_cfg / "history.jsonl").write_text("raw-transcript\n", encoding="utf-8")
+    # Transcripts/history must never be copied into disposable homes.
+    history_line = f"{CLAUDE_SESSION_HISTORY_CANARY}\n"
+    (codex / "history.jsonl").write_text(history_line, encoding="utf-8")
+    (claude_cfg / "history.jsonl").write_text(history_line, encoding="utf-8")
     return codex, claude
 
 
@@ -145,6 +194,32 @@ def _seed_retained_plugin_homes(tmp_path: Path) -> tuple[Path, Path, Path]:
 def _seed_cli_sources(tmp_path: Path) -> tuple[Path, Path]:
     """Compat helper: auth sources only (plugin state is seeded separately)."""
     return _seed_cli_auth_sources(tmp_path)
+
+
+def _claude_global_canaries() -> tuple[str, ...]:
+    return (
+        CLAUDE_SETTINGS_CANARY,
+        CLAUDE_MCP_CANARY,
+        CLAUDE_PROJECT_HISTORY_CANARY,
+        CLAUDE_HOOKS_CANARY,
+        CLAUDE_SESSION_HISTORY_CANARY,
+    )
+
+
+def _assert_runtime_excludes_claude_global_canaries(run_root: Path) -> None:
+    """Prove settings/hooks/MCP/project/history canaries never enter runtime files."""
+    canaries = _claude_global_canaries()
+    assert not (run_root / "home" / ".claude" / "settings.json").exists()
+    assert not (run_root / "home" / ".claude.json").exists()
+    assert not (run_root / "home" / ".claude" / "hooks").exists()
+    assert not (run_root / "home" / ".claude" / "history.jsonl").exists()
+    for path in run_root.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for canary in canaries:
+            assert canary not in text, f"{canary} leaked into {path.relative_to(run_root)}"
+            assert canary not in path.name
 
 
 def _binding() -> RouterSourceBinding:
@@ -293,8 +368,8 @@ def test_prepare_eval_runtime_strips_parent_secrets_and_is_owner_only(
             plugin_root / "skills" / "saxo-bank" / "SKILL.md"
         ).read_bytes()
         assert not (seeded_plugin / "history.jsonl").exists()
-        assert not (runtime.codex_home / "history.jsonl").exists()
-        assert not (runtime.home / ".claude" / "history.jsonl").exists()
+        # File-auth only: never seed global settings, hooks, MCP, project, or history.
+        _assert_runtime_excludes_claude_global_canaries(runtime.run_root)
         assert str(codex_src) not in json.dumps({"env": runtime.env})
         assert str(claude_src) not in json.dumps({"env": runtime.env})
     finally:
@@ -731,6 +806,8 @@ def test_install_report_omitted_source_flags_use_actual_auth_roots(
         assert (runtime.home / ".claude" / ".credentials.json").read_text(encoding="utf-8") == (
             actual_claude / ".claude" / ".credentials.json"
         ).read_text(encoding="utf-8")
+        assert not (runtime.home / ".claude" / "settings.json").exists()
+        assert not (runtime.home / ".claude.json").exists()
         assert (runtime.codex_home / "config.toml").read_text(encoding="utf-8") == (
             retained_codex / "config.toml"
         ).read_text(encoding="utf-8")
@@ -744,8 +821,210 @@ def test_install_report_omitted_source_flags_use_actual_auth_roots(
         # Retained source remains untouched.
         assert (plugin_root / "skills" / "saxo-bank" / "SKILL.md").is_file()
         assert not (seeded / "history.jsonl").exists()
+        _assert_runtime_excludes_claude_global_canaries(runtime.run_root)
     finally:
         require_matrix_runtime_cleanup(runtime.run_root)
+
+
+def test_eval_auth_seed_excludes_global_settings_hooks_mcp_project_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Canaries in global Claude settings/hooks/MCP/project/history never enter runtime."""
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, claude_src = _seed_cli_auth_sources(tmp_path)
+    # Source roots deliberately contain non-auth global state.
+    assert (claude_src / ".claude" / "settings.json").is_file()
+    assert (claude_src / ".claude.json").is_file()
+    assert (claude_src / ".claude" / "hooks" / "canary.sh").is_file()
+    assert CLAUDE_SETTINGS_CANARY in (claude_src / ".claude" / "settings.json").read_text(
+        encoding="utf-8",
+    )
+    assert CLAUDE_MCP_CANARY in (claude_src / ".claude" / "settings.json").read_text(
+        encoding="utf-8",
+    )
+    assert CLAUDE_PROJECT_HISTORY_CANARY in (claude_src / ".claude.json").read_text(
+        encoding="utf-8",
+    )
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=codex_src,
+        source_claude_home=claude_src,
+    )
+    try:
+        # Only the file-auth artifact is copied.
+        assert (runtime.home / ".claude" / ".credentials.json").read_text(encoding="utf-8") == (
+            claude_src / ".claude" / ".credentials.json"
+        ).read_text(encoding="utf-8")
+        _assert_runtime_excludes_claude_global_canaries(runtime.run_root)
+        # Canaries also stay out of any evidence-shaped serialization of the runtime env.
+        rendered = json.dumps(
+            {
+                "env": runtime.env,
+                "paths": [str(runtime.home), str(runtime.run_root)],
+            },
+        )
+        for canary in _claude_global_canaries():
+            assert canary not in rendered
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+        assert not runtime.run_root.exists()
+
+
+def test_process_manager_preserves_successful_zero_returncode(tmp_path: Path) -> None:
+    """Regression: successful subprocess returncode=0 must not become 124."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+    }
+    manager = EvalProcessManager()
+    result = manager.run(
+        ("/bin/sh", "-c", "printf 'ok\\n'; exit 0"),
+        cwd=tmp_path,
+        env=env,
+        timeout_seconds=5,
+    )
+    snapshot = manager.finalize()
+    assert result.timed_out is False
+    assert result.returncode == 0
+    assert result.stdout == "ok\n"
+    assert result.remaining_processes == 0
+    assert result.process_cleanup == "passed"
+    assert snapshot["remaining_processes"] == 0
+    assert snapshot["timed_out"] is False
+
+
+def test_non_router_success_path_with_real_zero_returncode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-router path can pass when the real managed process exits 0 with transcript hits."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "qa-evidence-readiness")
+    transcript = (
+        "matched natural prompts 39 logical tools cleanup "
+        "LIVE no-purchase proof no wildcard exact tool grants\n"
+    )
+    out_file = tmp_path / "non-router-success.txt"
+    out_file.write_text(transcript, encoding="utf-8")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "codex"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_READS": "0",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "codex").mkdir()
+    (tmp_path / "tmp").mkdir()
+
+    def fake_model_command(
+        _case: SkillEvalCase,
+        _harness: str,
+        _grants: tuple[str, ...],
+        _roots: HarnessRoots,
+    ) -> tuple[str, ...]:
+        return ("/bin/cat", str(out_file))
+
+    monkeypatch.setattr(eval_execution, "_model_command", fake_model_command)
+    record = execute_model_case(
+        case,
+        "codex",
+        (),
+        roots=HarnessRoots(
+            codex_plugin_root=ROOT,
+            claude_plugin_root=ROOT,
+            codex_home=tmp_path / "codex",
+            claude_home=tmp_path / "home",
+        ),
+        env=env,
+        process_manager=EvalProcessManager(),
+    )
+    assert record.status == "passed"
+    assert record.error == ""
+    assert record.transcript_assertions_passed is True
+
+
+def test_router_success_path_with_real_zero_returncode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Router path can pass when the real managed process exits 0 with structured output."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-qa")
+    assert case.router_expectation is not None
+    decision = RouterDecision(
+        environment=case.router_expectation.environment,
+        intent=case.router_expectation.intent,
+        mutation_risk=case.router_expectation.mutation_risk,
+        evidence_need=case.router_expectation.evidence_need,
+        primary_skill=case.router_expectation.primary_skill,
+        follow_on_skills=case.router_expectation.follow_on_skills,
+        requires_environment_clarification=(
+            case.router_expectation.requires_environment_clarification
+        ),
+        approval_bypass_refused=case.router_expectation.approval_bypass_refused,
+        trade_choice_refused=case.router_expectation.trade_choice_refused,
+        execution_allowed=False,
+    )
+    stream = "\n".join(
+        (
+            json.dumps({"type": "thread.started", "thread_id": "fixture"}),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "answer",
+                        "type": "agent_message",
+                        "text": decision.model_dump_json(),
+                    },
+                },
+            ),
+        ),
+    )
+    stream_path = tmp_path / "router-success.jsonl"
+    stream_path.write_text(stream + "\n", encoding="utf-8")
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path / "home"),
+        "CODEX_HOME": str(tmp_path / "codex"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_READS": "0",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "codex").mkdir()
+    (tmp_path / "tmp").mkdir()
+
+    def fake_router_command(_spec: object) -> tuple[str, ...]:
+        return ("/bin/cat", str(stream_path))
+
+    monkeypatch.setattr(router_execution, "_router_command", fake_router_command)
+    record = execute_router_model_case(
+        case,
+        "codex",
+        (),
+        RouterCaseContext(
+            plugin_root=ROOT,
+            homes=RouterHomes(
+                codex_home=tmp_path / "codex",
+                claude_home=tmp_path / "home",
+            ),
+            expected_router_source_sha256=None,
+        ),
+        env=env,
+        process_manager=EvalProcessManager(),
+    )
+    assert record.status == "passed"
+    assert record.error == ""
+    assert record.model_tool_event_count == 0
+    assert record.model_mcp_event_count == 0
+    assert record.model_saxo_event_count == 0
 
 
 def test_process_manager_kills_fake_parent_and_descendant_group(tmp_path: Path) -> None:
@@ -754,15 +1033,26 @@ def test_process_manager_kills_fake_parent_and_descendant_group(tmp_path: Path) 
         "HOME": str(tmp_path),
         "TMPDIR": str(tmp_path),
     }
-    # Real fake parent that spawns a descendant in the same process group.
+    ids_path = tmp_path / "spawned-ids.txt"
+    # Record the real parent shell PID/PGID, then spawn a long-lived group sibling.
+    script = (
+        f'printf "%s %s\\n" "$$" "$(ps -o pgid= -p $$ | tr -d \'[:space:]\')" > "{ids_path}"; '
+        "sleep 60 & wait"
+    )
     manager = EvalProcessManager()
     result = manager.run(
-        ("/bin/sh", "-c", "sleep 30 & wait"),
+        ("/bin/sh", "-c", script),
         cwd=tmp_path,
         env=env,
         timeout_seconds=1,
     )
     snapshot = manager.finalize()
+    assert ids_path.is_file()
+    pid_text, pgid_text = ids_path.read_text(encoding="utf-8").strip().split()
+    spawned_pid = int(pid_text)
+    spawned_pgid = int(pgid_text)
+    assert spawned_pid > 0
+    assert spawned_pgid > 0
     assert result.timed_out is True
     assert result.created_processes >= 1
     assert result.remaining_processes == 0
@@ -772,8 +1062,11 @@ def test_process_manager_kills_fake_parent_and_descendant_group(tmp_path: Path) 
     assert manager.terminated_processes >= 1
     assert result.returncode == TIMEOUT_EXIT_CODE
     assert snapshot["remaining_processes"] == 0
-    # Entire group is gone after finalize.
-    assert remaining_live_pgids(()) == ()
+    # Specific captured process/group must be gone — empty-tuple checks prove nothing.
+    assert remaining_live_pgids((spawned_pgid,)) == ()
+    assert remaining_live_pids((spawned_pid,)) == ()
+    assert process_group_members(spawned_pgid) == ()
+    assert process_still_running(spawned_pid) is False
 
 
 def test_eval_failure_preserves_records_when_cleanup_and_promote_fail(

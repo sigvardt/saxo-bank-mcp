@@ -34,13 +34,9 @@ _SIM_CREDENTIAL_NAME: Final = "sim-credentials"
 _TOKEN_CACHE_BASENAME: Final = "token-cache.json"  # noqa: S105 - filename, not a secret
 OWNER_FILE_MODE: Final = 0o600
 OWNER_DIR_MODE: Final = 0o700
-# Actual CLI auth sources only — never session history, transcripts, hooks, or MCP state.
+# Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
-_CLAUDE_AUTH_SEED_RELATIVES: Final = (
-    Path(".claude") / "settings.json",
-    Path(".claude") / ".credentials.json",
-    Path(".claude.json"),
-)
+_CLAUDE_AUTH_SEED_RELATIVES: Final = (Path(".claude") / ".credentials.json",)
 # Retained install plugin registration/artifacts only (options.codex_home / options.claude_home).
 _CODEX_PLUGIN_SEED_FILES: Final = ("config.toml",)
 _CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)

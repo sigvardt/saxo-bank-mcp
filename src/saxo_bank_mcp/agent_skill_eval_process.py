@@ -93,7 +93,8 @@ class EvalProcessManager:
         self.remaining_processes = remaining
         cleanup = "passed" if remaining == 0 else "residue"
         self.process_cleanup = cleanup
-        returncode = 124 if timed_out else int(process.returncode or 124)
+        # Preserve exact zero. `or 124` would turn successful exit 0 into 124.
+        returncode = 124 if timed_out or process.returncode is None else int(process.returncode)
         return ManagedProcessResult(
             stdout=stdout or "",
             stderr=stderr or "",
