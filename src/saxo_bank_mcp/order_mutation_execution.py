@@ -92,7 +92,7 @@ async def execute_sim_order_write(
     return await execute_order_write(write_class, preview_token, approval_factor)
 
 
-async def execute_order_write(  # noqa: C901, PLR0911
+async def execute_order_write(  # noqa: C901, PLR0911, PLR0912
     write_class: OrderWriteClass,
     preview_token: str,
     approval_factor: str | None,
@@ -180,6 +180,11 @@ async def execute_order_write(  # noqa: C901, PLR0911
             )
         return _tool_result(response)
 
+    from saxo_bank_mcp.process_scoped_selectors import (  # noqa: PLC0415
+        account_selector_for,
+        public_order_selectors,
+    )
+
     raw_response_body = _raw_response_body(response)
     public_response_body = _public_response_body(raw_response_body)
     audit_path = _audit_raw_response(spec, response.status_code, public_response_body)
@@ -198,60 +203,77 @@ async def execute_order_write(  # noqa: C901, PLR0911
     }
     retry_unsafe = parsed.needs_readback
     raw_audit_path_inside_repo = False if audit_path is None else is_inside_repo(audit_path)
-    return _tool_result(
-        {
-            "status": status,
-            "tool_name": spec.tool_name,
-            "write_class": spec.write_class,
-            "operation_id": spec.operation_id,
-            "endpoint_path": spec.endpoint_path,
-            "environment": environment.value,
-            "fastmcp_called": True,
-            "network_call_made": True,
-            "live_write": environment == SaxoEnvironment.LIVE,
-            "live_write_called": environment == SaxoEnvironment.LIVE,
-            "preview_token_redacted": True,
-            "approval_factor_mode": (
-                "one_exact_action_chat_approval"
-                if environment == SaxoEnvironment.LIVE
-                else "autonomous_sim"
+    payload: dict[str, JsonValue] = {
+        "status": status,
+        "tool_name": spec.tool_name,
+        "write_class": spec.write_class,
+        "operation_id": spec.operation_id,
+        "endpoint_path": spec.endpoint_path,
+        "environment": environment.value,
+        "fastmcp_called": True,
+        "network_call_made": True,
+        "live_write": environment == SaxoEnvironment.LIVE,
+        "live_write_called": environment == SaxoEnvironment.LIVE,
+        "preview_token_redacted": True,
+        "approval_factor_mode": (
+            "one_exact_action_chat_approval"
+            if environment == SaxoEnvironment.LIVE
+            else "autonomous_sim"
+        ),
+        "x_request_id_present": bool(request_id),
+        "x_request_id_generated": bool(request_id),
+        "x_request_id_response_echo_verified": False,
+        "order_result_parsed": True,
+        "http_status": response.status_code,
+        "parsed_response": _public_parsed_response(parsed),
+        "parsed_order_id_count": len(parsed.order_ids),
+        "parsed_order_ids_redacted": bool(parsed.order_ids),
+        "reason": reason,
+        "port_orders_readback": readback["port_orders_readback"],
+        "trade_messages_readback": readback["trade_messages_readback"],
+        "readback_required": parsed.needs_readback,
+        "mutation_may_have_occurred": mutation_may_have_occurred,
+        "retry_unsafe": retry_unsafe,
+        "raw_audit_path": str(audit_path) if audit_path is not None else "",
+        "raw_audit_path_inside_repo": raw_audit_path_inside_repo,
+        "audit_mode": None if audit_path is None else audit_mode(audit_path),
+        "cleanup_attempted": cleanup_status != "not_required_by_executor",
+        "cleanup_status": cleanup_status,
+        "order_placed": _content_backed_mutation_flag(
+            spec,
+            parsed,
+            ("place", "multileg-place"),
+        ),
+        "order_modified": _content_backed_mutation_flag(
+            spec,
+            parsed,
+            ("modify", "multileg-modify"),
+        ),
+        "order_cancelled": _order_cancelled_flag(spec, parsed),
+        "mutation_content_verified": _mutation_content_verified(spec, parsed),
+        "order_or_subscription_created": mutation_may_have_occurred,
+        "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
+        **readback,
+    }
+    # Opaque process-scoped cancel handles: no raw OrderId/AccountKey in agent output.
+    if parsed.order_ids and status in {"completed", "completed_unverified", "partial_success"}:
+        payload["safe_order_selectors"] = public_order_selectors(parsed.order_ids)
+        payload["safe_account_selector"] = account_selector_for(
+            access.token,
+            stored.request.account_key,
+        )
+        instrument = stored.request.instrument_uic
+        asset = stored.request.request_body.get("AssetType")
+        payload["safe_cancel_by_instrument"] = {
+            "safe_account_selector": payload["safe_account_selector"],
+            "Uic": instrument,
+            "AssetType": asset if isinstance(asset, str) else "Stock",
+            "hint": (
+                "Create a cancel-by-instrument write preview using safe_account_selector as "
+                "account_key and Uic/AssetType; do not use raw AccountKey or OrderId."
             ),
-            "x_request_id_present": bool(request_id),
-            "x_request_id_generated": bool(request_id),
-            "x_request_id_response_echo_verified": False,
-            "order_result_parsed": True,
-            "http_status": response.status_code,
-            "parsed_response": _public_parsed_response(parsed),
-            "parsed_order_id_count": len(parsed.order_ids),
-            "parsed_order_ids_redacted": bool(parsed.order_ids),
-            "reason": reason,
-            "port_orders_readback": readback["port_orders_readback"],
-            "trade_messages_readback": readback["trade_messages_readback"],
-            "readback_required": parsed.needs_readback,
-            "mutation_may_have_occurred": mutation_may_have_occurred,
-            "retry_unsafe": retry_unsafe,
-            "raw_audit_path": str(audit_path) if audit_path is not None else "",
-            "raw_audit_path_inside_repo": raw_audit_path_inside_repo,
-            "audit_mode": None if audit_path is None else audit_mode(audit_path),
-            "cleanup_attempted": cleanup_status != "not_required_by_executor",
-            "cleanup_status": cleanup_status,
-            "order_placed": _content_backed_mutation_flag(
-                spec,
-                parsed,
-                ("place", "multileg-place"),
-            ),
-            "order_modified": _content_backed_mutation_flag(
-                spec,
-                parsed,
-                ("modify", "multileg-modify"),
-            ),
-            "order_cancelled": _order_cancelled_flag(spec, parsed),
-            "mutation_content_verified": _mutation_content_verified(spec, parsed),
-            "order_or_subscription_created": mutation_may_have_occurred,
-            "does_not_verify": list(ORDER_WRITE_DOES_NOT_VERIFY),
-            **readback,
-        },
-    )
+        }
+    return _tool_result(payload)
 
 
 def _tool_result(payload: Mapping[str, JsonValue]) -> ToolResult:

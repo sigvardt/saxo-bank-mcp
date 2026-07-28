@@ -102,7 +102,11 @@ async def saxo_call_registered_endpoint(
             )
         fingerprint = None
         fingerprint_scope = None
-    body = None if response_mode == "fingerprint_only" else response_body(response)
+    body = (
+        None
+        if response_mode == "fingerprint_only"
+        else response_body(response, token=context.token)
+    )
     status = "passed" if ok else "http_error"
     environment = context.environment
     live_access = environment == "LIVE"

@@ -349,7 +349,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     update_probe = dict(sanitized_update) if isinstance(sanitized_update, dict) else {}
     # Path sanitization rewrites absolute roots; keep registration_cache_root locked
     # to the sanitized cache_root so typed equality still holds after rewrite.
-    _align_update_probe_registration_roots(update_probe)
+    align_update_probe_registration_roots(update_probe)
     # Bumped-cache fixtures already removed by run_update_probe when
     # temporary_fixtures_removed is True. Do not reintroduce disposable residuals
     # (those fail earlier as disposable_cleanup_failed).
@@ -368,7 +368,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
                 "status": "failed",
                 "reason": "update_probe_invalid",
                 "error": type(exc).__name__,
-                "validation_locations": _sanitized_validation_locations(exc),
+                "validation_locations": sanitized_validation_locations(exc),
             },
         )
         return 1
@@ -731,7 +731,7 @@ def _sanitize_auth_files(
     return {"copied": sanitized_copied, "values_published": False}
 
 
-def _align_update_probe_registration_roots(update_probe: dict[str, JsonValue]) -> None:
+def align_update_probe_registration_roots(update_probe: dict[str, JsonValue]) -> None:
     """Keep registration_cache_root identical to sanitized cache_root for each proof."""
     for side in ("bumped_proof", "restored_proof"):
         bundle = update_probe.get(side)
@@ -746,7 +746,7 @@ def _align_update_probe_registration_roots(update_probe: dict[str, JsonValue]) -
                 proof["registration_cache_root"] = cache_root
 
 
-def _sanitized_validation_locations(exc: BaseException) -> list[dict[str, JsonValue]]:
+def sanitized_validation_locations(exc: BaseException) -> list[dict[str, JsonValue]]:
     """Return pydantic error locs/types only (no values, paths, or messages with data)."""
     from typing import cast  # noqa: PLC0415
 

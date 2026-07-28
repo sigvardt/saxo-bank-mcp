@@ -305,7 +305,10 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     assert f"plugin add --json {plugin_ref}" in commands
     assert any(row.startswith("plugin marketplace add ") for row in commands)
     assert f"plugin install {plugin_ref} --scope user" in commands
-    assert f"plugin update {plugin_ref} --scope user" in commands
+    assert f"plugin uninstall {plugin_ref} --scope user" in commands
+    assert any(
+        row.startswith(f"plugin install {plugin_ref} --scope user") for row in commands
+    )
     # Initial install probes + post-restore probes for both clients.
     assert sum(1 for row in commands if row.startswith("run --project ")) >= (
         EXPECTED_INSTALL_STARTUP_PROBES

@@ -102,10 +102,15 @@ class TradePrecheckAccess:
     token: SaxoTokenSet
 
 
-async def saxo_create_order_preview(
+async def saxo_create_order_preview(  # noqa: C901, PLR0911
     order_body: Annotated[
         dict[str, JsonValue],
-        Field(description="Exact Saxo order body; account identifiers are never echoed raw"),
+        Field(
+            description=(
+                "Exact Saxo order body. Prefer process-scoped SafeAccountSelector values from "
+                "registered account reads as AccountKey; raw AccountKey is never echoed."
+            ),
+        ),
     ],
     order_kind: Annotated[OrderKind, Field(description="single or multileg order pre-check")] = (
         "single"
@@ -123,10 +128,18 @@ async def saxo_create_order_preview(
         Field(description="Current response state for required disclaimers"),
     ] = "unknown",
 ) -> ToolResult:
+    from saxo_bank_mcp.process_scoped_selectors import (  # noqa: PLC0415
+        account_selector_for,
+        fetch_account_rows_for_token,
+        is_account_selector,
+        resolve_order_body_accounts,
+    )
+
     endpoint = precheck_endpoint_for_order_kind(order_kind)
     network_call_made = False
     source_precheck = precheck_response
     environment = SaxoRuntimeConfig.from_env().requested_environment
+    resolved_body = dict(order_body)
     if environment == SaxoEnvironment.LIVE and source_precheck is not None:
         return _tool_result(
             _denied(
@@ -145,13 +158,62 @@ async def saxo_create_order_preview(
                 precheck_endpoint=endpoint,
             ),
         )
-    if source_precheck is None:
+    access_or_result: TradePrecheckAccess | ToolResult | None = None
+    account_value = order_body.get("AccountKey")
+    needs_selector_resolve = (
+        isinstance(account_value, str) and is_account_selector(account_value)
+    ) or (
+        isinstance(order_body.get("SafeAccountSelector"), str)
+        and str(order_body.get("SafeAccountSelector", "")).strip() != ""
+    )
+    if needs_selector_resolve or source_precheck is None:
         access_or_result = _precheck_access("saxo_create_order_preview", environment)
         if isinstance(access_or_result, ToolResult):
             return access_or_result
+    if needs_selector_resolve:
+        if not isinstance(access_or_result, TradePrecheckAccess):
+            return _tool_result(
+                _denied(
+                    "saxo_create_order_preview",
+                    ["account_selector_auth_unavailable"],
+                    order_kind=order_kind,
+                    precheck_endpoint=endpoint,
+                ),
+            )
+        accounts = await fetch_account_rows_for_token(
+            access_or_result.token,
+            rest_base_url=access_or_result.rest_base_url,
+        )
+        network_call_made = True
+        resolved, reason = resolve_order_body_accounts(
+            order_body,
+            access_or_result.token,
+            accounts,
+        )
+        if resolved is None:
+            return _tool_result(
+                _denied(
+                    "saxo_create_order_preview",
+                    [reason or "account_selector_invalid"],
+                    order_kind=order_kind,
+                    precheck_endpoint=endpoint,
+                    network_call_made=network_call_made,
+                ),
+            )
+        resolved_body = resolved
+    if source_precheck is None:
+        if not isinstance(access_or_result, TradePrecheckAccess):
+            return _tool_result(
+                _denied(
+                    "saxo_create_order_preview",
+                    ["precheck_access_unavailable"],
+                    order_kind=order_kind,
+                    precheck_endpoint=endpoint,
+                ),
+            )
         fetched = await _post_saxo_json(
             endpoint,
-            _precheck_body(order_body, environment),
+            _precheck_body(resolved_body, environment),
             access_or_result.token,
             tool_name="saxo_create_order_preview",
             base_url=access_or_result.rest_base_url,
@@ -160,14 +222,29 @@ async def saxo_create_order_preview(
             return fetched
         source_precheck = fetched
         network_call_made = True
-    return _preview_result(
-        order_body=order_body,
+    result = _preview_result(
+        order_body=resolved_body,
         order_kind=order_kind,
         precheck_response=source_precheck,
         disclaimer_details=disclaimer_details,
         disclaimer_response_state=disclaimer_response_state,
         network_call_made=network_call_made,
     )
+    content = result.structured_content
+    if (
+        isinstance(access_or_result, TradePrecheckAccess)
+        and isinstance(content, dict)
+        and content.get("status") == "preview_created"
+    ):
+        account_key = order_account_key(resolved_body)
+        if account_key is not None:
+            payload = dict(content)
+            payload["safe_account_selector"] = account_selector_for(
+                access_or_result.token,
+                account_key,
+            )
+            return _tool_result(cast("dict[str, JsonValue]", payload))
+    return result
 
 
 async def saxo_get_multileg_order_defaults(

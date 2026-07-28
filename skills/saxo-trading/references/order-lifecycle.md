@@ -28,7 +28,7 @@ Use `saxo_list_registered_endpoints` before any registered read. Use `saxo_call_
 Before an order preview, discover or confirm:
 
 - Environment: SIM or LIVE.
-- Account alias and internal account selector from session capabilities (prefer selected SIM account alias in user text).
+- Account: call a registered accounts read (`GET /port/v1/accounts/me` or the matching registered template). The redacted body includes `SafeAccountSelector` process-scoped values. Put that selector into `order_body.AccountKey` (or `account_key` on write previews). Never paste raw AccountKey, ClientKey, or AccountId into chat or evidence.
 - Instrument UIC and asset type.
 - Tradability and account permission for that instrument.
 - Tick size, supported order types, supported duration types, and trading conditions.
@@ -36,7 +36,7 @@ Before an order preview, discover or confirm:
 - Multileg defaults through `saxo_get_multileg_order_defaults` for supported option strategies.
 - Quantity, price, duration, side, and order type all match account-aware settings.
 
-Do not invent investment advice or choose a product when the user has not named one. When the user names a controlled SIM lifecycle fixture (for example stock UIC `211`, amount `1`, Buy limit `50`, Day), use that fixture to construct the order body after capability and settings reads. Do not guess account keys from memory; read them from SIM session/capabilities tools and keep them out of user-facing text.
+Do not invent investment advice or choose a product when the user has not named one. When the user names a controlled SIM lifecycle fixture (for example stock UIC `211`, amount `1`, Buy limit `50`, Day), use that fixture to construct the order body after capability and settings reads. `saxo_get_session_capabilities` proves auth levels only; it does not return account keys. Always discover `SafeAccountSelector` from the accounts read.
 
 ## Precheck
 
@@ -105,6 +105,8 @@ Read back after every completed or uncertain mutation path:
 - Fingerprint-only balances when money state may have changed.
 
 For SIM place or multileg place flows, cancel created open orders when the task requires cleanup. Verify the original open-order state by comparing sanitized counts, matching order fingerprints, and trade-message evidence.
+
+Place success returns process-scoped `safe_order_selectors` and `safe_cancel_by_instrument` (account selector + UIC + AssetType). Prefer cancel-by-instrument for cleanup when OrderId is redacted: create a write preview with `account_key` set to `safe_account_selector`, `instrument_uic` set to the fixture UIC, and a request body that uses the same selector fields (never raw OrderId). Exact single-order cancel may use `safe_order_selectors` as `OrderIds` in the cancel write preview.
 
 For cancel-by-instrument, readback must cover all matching orders because Saxo can return empty success when no order matched.
 

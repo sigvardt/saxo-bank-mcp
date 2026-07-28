@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, cast
 
 from pydantic import ValidationError
 
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_models import UpdateProbeEvidence
 from saxo_bank_mcp.agent_skill_install_producer import (
-    _align_update_probe_registration_roots,
-    _sanitized_validation_locations,
+    align_update_probe_registration_roots,
+    sanitized_validation_locations,
 )
 
 DIGEST: Final = "a" * 64
 
 
-def _proof(*, version: str, cache_root: str = "run_root/cache") -> dict[str, object]:
+def _proof(*, version: str, cache_root: str = "run_root/cache") -> dict[str, JsonValue]:
     return {
         "cache_root": cache_root,
         "version": version,
@@ -32,7 +33,7 @@ def _proof(*, version: str, cache_root: str = "run_root/cache") -> dict[str, obj
 
 
 def test_update_probe_good_payload_validates() -> None:
-    payload = {
+    payload: dict[str, JsonValue] = {
         "original_version": "0.1.0",
         "bumped_version": "0.1.1",
         "codex_reached_bumped": True,
@@ -53,7 +54,7 @@ def test_update_probe_good_payload_validates() -> None:
 
 
 def test_align_registration_roots_after_path_rewrite() -> None:
-    payload: dict[str, object] = {
+    payload: dict[str, JsonValue] = {
         "restored_proof": {
             "codex": {
                 "cache_root": "runtime/codex-cache",
@@ -61,13 +62,14 @@ def test_align_registration_roots_after_path_rewrite() -> None:
             }
         }
     }
-    _align_update_probe_registration_roots(payload)  # type: ignore[arg-type]
-    proof = payload["restored_proof"]["codex"]  # type: ignore[index]
+    align_update_probe_registration_roots(payload)
+    restored = cast("dict[str, JsonValue]", payload["restored_proof"])
+    proof = cast("dict[str, JsonValue]", restored["codex"])
     assert proof["registration_cache_root"] == proof["cache_root"]
 
 
 def test_sanitized_validation_locations_omit_values() -> None:
-    bad = {
+    bad: dict[str, JsonValue] = {
         "original_version": "0.1.0",
         "bumped_version": "0.1.1",
         "codex_reached_bumped": False,
@@ -87,7 +89,7 @@ def test_sanitized_validation_locations_omit_values() -> None:
     try:
         UpdateProbeEvidence.model_validate(bad)
     except ValidationError as exc:
-        locs = _sanitized_validation_locations(exc)
+        locs = sanitized_validation_locations(exc)
         assert locs
         assert all(set(item) <= {"loc", "type"} for item in locs)
         assert all("ctx" not in item and "msg" not in item and "input" not in item for item in locs)
