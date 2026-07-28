@@ -21,6 +21,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     remaining_live_pids,
     run_command,
 )
+from saxo_bank_mcp.agent_skill_install_cli_driver import build_client_report
 from saxo_bank_mcp.agent_skill_install_env import (
     DisposableCleanupError,
     cleanup_disposable_isolated_state,
@@ -37,9 +38,12 @@ from saxo_bank_mcp.agent_skill_install_ledger import (
     verify_fixture_ledger_binding,
 )
 from saxo_bank_mcp.agent_skill_install_models import (
+    EXPECTED_TOOLS,
     REQUIRED_FIXTURE_CONSUMERS,
     CommandReceipt,
     FixtureLedgerBinding,
+    StartupCheck,
+    StartupEvidence,
     VersionCacheProof,
 )
 from saxo_bank_mcp.agent_skill_install_privacy import (
@@ -51,6 +55,11 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
     produce_privacy_evidence,
     provisional_privacy_binding,
     scan_directory_normalized,
+)
+from saxo_bank_mcp.agent_skill_install_probe import (
+    ProbePayloadError,
+    startup_check_from_payload,
+    startup_from_probes,
 )
 from saxo_bank_mcp.agent_skill_install_qa import verify_install_report
 from saxo_bank_mcp.agent_skill_install_verify_live import (
@@ -1039,6 +1048,121 @@ def test_verify_receipt_not_passed_when_window_fails(
     assert "global_state_verify_window_mismatch" in payload["errors"]
     assert payload.get("global_state_unchanged") is not True
     assert payload.get("global_state_recomputed") is not True
+
+
+def _probe_result(name: str, payload: dict[str, JsonValue], *, cwd: Path) -> CommandResult:
+    receipt = CommandReceipt(
+        name=name,
+        argv=("uv", "run"),
+        cwd=str(cwd),
+        exit_code=0,
+        stdout_sha256="a" * 64,
+        stderr_sha256="b" * 64,
+        cleanup_attempted=True,
+    )
+    return CommandResult(
+        receipt=receipt,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+
+def test_list_tools_nonempty_annotations_fails_with_39_tools(tmp_path: Path) -> None:
+    """Independent list_tools missing annotations fails even when tool_count is 39."""
+    clean: dict[str, JsonValue] = {"tool_count": 39, "annotations_missing": []}
+    dirty: dict[str, JsonValue] = {
+        "tool_count": 39,
+        "annotations_missing": ["saxo_health"],
+    }
+    source = _probe_result("source", clean, cwd=tmp_path)
+    cache = _probe_result("cache", clean, cwd=tmp_path)
+    list_tools = _probe_result("list_tools", dirty, cwd=tmp_path)
+    # Parse succeeds for the dirty probe alone (typed list preserved).
+    dirty_check = startup_check_from_payload(dirty)
+    assert dirty_check.tool_count == EXPECTED_TOOLS
+    assert dirty_check.annotations_missing == ("saxo_health",)
+    # Combined producer path fail-closes on independent list_tools missings.
+    with pytest.raises(ProbePayloadError, match="list_tools_annotations_missing"):
+        startup_from_probes(source, cache, list_tools)
+    # Client aggregate still unions list_tools when constructing evidence by hand.
+    startup = StartupEvidence(
+        source=startup_check_from_payload(clean),
+        cache=startup_check_from_payload(clean),
+        list_tools=dirty_check,
+    )
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+    (cache_root / "pyproject.toml").write_text(
+        '[project]\nname = "saxo-bank-mcp"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    report = build_client_report(
+        cache=cache_root,
+        cache_source="codex_plugin_add_restored",
+        startup=startup,
+        receipts=(source.receipt,),
+        inventory={
+            "inventory_exact_match": True,
+            "forbidden_cache_paths": [],
+            "mismatches": [],
+        },
+        details_skill_count=None,
+    )
+    missing = report["annotations_missing"]
+    assert isinstance(missing, list)
+    assert "saxo_health" in missing
+    assert report["list_tools_annotations_missing"] == ["saxo_health"]
+    startup_dump = report["startup"]
+    assert isinstance(startup_dump, dict)
+    list_tools_dump = startup_dump["list_tools"]
+    assert isinstance(list_tools_dump, dict)
+    assert list_tools_dump["annotations_missing"] == ["saxo_health"]
+
+
+def test_missing_annotations_missing_key_fails() -> None:
+    with pytest.raises(ProbePayloadError, match="annotations_missing_missing"):
+        startup_check_from_payload({"tool_count": 39})
+
+
+def test_annotations_missing_wrong_type_and_mixed_members_fail() -> None:
+    with pytest.raises(ProbePayloadError, match="annotations_missing_not_list"):
+        startup_check_from_payload(
+            {"tool_count": 39, "annotations_missing": "saxo_health"},
+        )
+    with pytest.raises(ProbePayloadError, match="annotations_missing_null"):
+        startup_check_from_payload({"tool_count": 39, "annotations_missing": None})
+    with pytest.raises(ProbePayloadError, match="annotations_missing_non_string"):
+        startup_check_from_payload(
+            {"tool_count": 39, "annotations_missing": ["ok", 1]},
+        )
+    with pytest.raises(ValidationError):
+        StartupCheck.model_validate(
+            {"status": "passed", "tool_count": 39, "annotations_missing": None},
+        )
+    with pytest.raises(ValidationError):
+        StartupCheck.model_validate(
+            {"status": "passed", "tool_count": 39, "annotations_missing": ["ok", 2]},
+        )
+
+
+def test_clean_three_probe_startup_evidence_preserves_per_probe_fields(
+    tmp_path: Path,
+) -> None:
+    clean: dict[str, JsonValue] = {"tool_count": 39, "annotations_missing": []}
+    startup = startup_from_probes(
+        _probe_result("source", clean, cwd=tmp_path),
+        _probe_result("cache", clean, cwd=tmp_path),
+        _probe_result("list_tools", clean, cwd=tmp_path),
+    )
+    assert isinstance(startup, StartupEvidence)
+    for check in (startup.source, startup.cache, startup.list_tools):
+        assert check.tool_count == EXPECTED_TOOLS
+        assert check.annotations_missing == ()
+        assert check.status == "passed"
+    dumped = startup.model_dump(mode="json")
+    assert dumped["list_tools"]["annotations_missing"] == []
+    assert dumped["source"]["annotations_missing"] == []
+    assert dumped["cache"]["annotations_missing"] == []
 
 
 def test_privacy_still_rejects_secret_in_retained_state(tmp_path: Path) -> None:

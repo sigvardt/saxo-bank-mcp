@@ -525,7 +525,7 @@ def _valid_fingerprints(values: Mapping[str, JsonValue], *, production: bool) ->
     return True
 
 
-def _client_errors(  # noqa: C901
+def _client_errors(  # noqa: C901, PLR0912
     name: str,
     client: ClientInstallEvidence,
     clone: Path,
@@ -557,11 +557,28 @@ def _client_errors(  # noqa: C901
         errors.append(f"{name}_identity_version_invalid")
     if client.annotations_missing or client.forbidden_cache_paths:
         errors.append(f"{name}_cache_inventory_invalid")
-    if client.source_annotations_missing or client.cache_annotations_missing:
+    if (
+        client.source_annotations_missing
+        or client.cache_annotations_missing
+        or client.list_tools_annotations_missing
+    ):
         errors.append(f"{name}_annotations_missing")
     checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
-    if any(check.tool_count != EXPECTED_TOOL_COUNT for check in checks):
+    if any(
+        check.tool_count != EXPECTED_TOOL_COUNT or check.annotations_missing
+        for check in checks
+    ):
         errors.append(f"{name}_startup_invalid")
+    # Per-probe fields must match nested StartupCheck annotation lists.
+    if (
+        tuple(client.source_annotations_missing)
+        != client.startup.source.annotations_missing
+        or tuple(client.cache_annotations_missing)
+        != client.startup.cache.annotations_missing
+        or tuple(client.list_tools_annotations_missing)
+        != client.startup.list_tools.annotations_missing
+    ):
+        errors.append(f"{name}_startup_annotations_inconsistent")
     if production and len(client.command_receipts) < 1:
         errors.append(f"{name}_receipts_missing")
     required = required_cache_files(clone)

@@ -12,6 +12,14 @@ from saxo_bank_mcp.agent_skill_install_paths import PLUGIN_NAME, scrub_runtime_a
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 
 
+class ProbePayloadError(ValueError):
+    """Fail-closed parse error for a startup probe payload."""
+
+    def __init__(self, reason: str) -> None:  # noqa: D107
+        super().__init__(reason)
+        self.reason = reason
+
+
 def probe_root_stdio(
     name: str,
     root: Path,
@@ -79,18 +87,34 @@ def startup_from_probes(
     source_probe: CommandResult,
     cache_probe: CommandResult,
     list_tools_probe: CommandResult,
-) -> tuple[StartupEvidence, list[str], list[str]]:
-    source_payload = _probe_payload(source_probe.stdout)
-    cache_payload = _probe_payload(cache_probe.stdout)
-    list_payload = _probe_payload(list_tools_probe.stdout)
-    source_missing = _string_list(source_payload.get("annotations_missing"))
-    cache_missing = _string_list(cache_payload.get("annotations_missing"))
-    startup = StartupEvidence(
-        source=StartupCheck(status="passed", tool_count=_tool_count(source_payload)),
-        cache=StartupCheck(status="passed", tool_count=_tool_count(cache_payload)),
-        list_tools=StartupCheck(status="passed", tool_count=_tool_count(list_payload)),
+) -> StartupEvidence:
+    """Parse source, cache, and independent list_tools probes into typed StartupEvidence.
+
+    Fail-closed: missing/null/wrong-type/non-string annotations_missing raise ProbePayloadError.
+    Nonempty annotations on any of the three probes also fail closed.
+    """
+    source = startup_check_from_payload(_probe_payload(source_probe.stdout))
+    cache = startup_check_from_payload(_probe_payload(cache_probe.stdout))
+    list_tools = startup_check_from_payload(_probe_payload(list_tools_probe.stdout))
+    for label, check in (
+        ("source", source),
+        ("cache", cache),
+        ("list_tools", list_tools),
+    ):
+        if check.annotations_missing:
+            raise ProbePayloadError(f"{label}_annotations_missing")
+    return StartupEvidence(source=source, cache=cache, list_tools=list_tools)
+
+
+def startup_check_from_payload(payload: dict[str, JsonValue]) -> StartupCheck:
+    """Build a StartupCheck from a probe JSON object. Does not soft-map missing to empty."""
+    tool_count = _require_tool_count(payload)
+    annotations_missing = _require_annotations_missing(payload)
+    return StartupCheck(
+        status="passed",
+        tool_count=tool_count,
+        annotations_missing=tuple(annotations_missing),
     )
-    return startup, source_missing, cache_missing
 
 
 def _probe_payload(raw: str) -> dict[str, JsonValue]:
@@ -104,21 +128,30 @@ def _probe_payload(raw: str) -> dict[str, JsonValue]:
             continue
     try:
         return JSON_OBJECT_ADAPTER.validate_json(raw)
-    except ValidationError:
-        return {}
+    except ValidationError as exc:
+        raise ProbePayloadError("probe_payload_invalid") from exc
 
 
-def _tool_count(payload: dict[str, JsonValue]) -> int:
-    value = payload.get("tool_count")
-    return value if isinstance(value, int) else 0
+def _require_tool_count(payload: dict[str, JsonValue]) -> int:
+    if "tool_count" not in payload:
+        raise ProbePayloadError("tool_count_missing")
+    value = payload["tool_count"]
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ProbePayloadError("tool_count_invalid")
+    return value
 
 
-def _string_list(value: JsonValue | None) -> list[str]:
+def _require_annotations_missing(payload: dict[str, JsonValue]) -> list[str]:
+    if "annotations_missing" not in payload:
+        raise ProbePayloadError("annotations_missing_missing")
+    value = payload["annotations_missing"]
+    if value is None:
+        raise ProbePayloadError("annotations_missing_null")
     if not isinstance(value, list):
-        return []
+        raise ProbePayloadError("annotations_missing_not_list")
     strings: list[str] = []
     for item in value:
         if not isinstance(item, str):
-            return []
+            raise ProbePayloadError("annotations_missing_non_string")
         strings.append(item)
     return strings

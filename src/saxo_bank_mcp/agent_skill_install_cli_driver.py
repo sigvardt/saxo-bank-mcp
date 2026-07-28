@@ -387,8 +387,6 @@ def build_client_report(  # noqa: PLR0913
     cache: Path,
     cache_source: str,
     startup: StartupEvidence,
-    source_missing: list[str],
-    cache_missing: list[str],
     receipts: tuple[CommandReceipt, ...],
     inventory: dict[str, JsonValue],
     details_skill_count: int | None,
@@ -399,6 +397,9 @@ def build_client_report(  # noqa: PLR0913
     skill_count = len(skills)
     if details_skill_count is not None and details_skill_count != skill_count:
         skill_count = -1
+    source_missing = list(startup.source.annotations_missing)
+    cache_missing = list(startup.cache.annotations_missing)
+    list_tools_missing = list(startup.list_tools.annotations_missing)
     return {
         "installed": True,
         "cache_root": str(cache),
@@ -409,9 +410,12 @@ def build_client_report(  # noqa: PLR0913
         "skills": list(skills),
         "mcp_server_count": mcp_count,
         "tool_count": startup.cache.tool_count,
-        "annotations_missing": sorted(set(source_missing) | set(cache_missing)),
+        "annotations_missing": sorted(
+            set(source_missing) | set(cache_missing) | set(list_tools_missing),
+        ),
         "source_annotations_missing": source_missing,
         "cache_annotations_missing": cache_missing,
+        "list_tools_annotations_missing": list_tools_missing,
         "forbidden_cache_paths": inventory.get("forbidden_cache_paths", []),
         "installed_bytes_match": True,
         "install_command_exit_code": 0,

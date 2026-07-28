@@ -32,7 +32,6 @@ from saxo_bank_mcp.agent_skill_install_cli_driver import (
     run_claude_install,
     run_codex_install,
     run_update_probe,
-    startup_from_probes,
 )
 from saxo_bank_mcp.agent_skill_install_env import (
     DisposableCleanupError,
@@ -60,7 +59,11 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
     produce_privacy_evidence,
     provisional_privacy_binding,
 )
-from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
+from saxo_bank_mcp.agent_skill_install_probe import (
+    ProbePayloadError,
+    probe_root_stdio,
+    startup_from_probes,
+)
 from saxo_bank_mcp.agent_skill_install_qa import (
     EXPECTED_MCP_SERVER_COUNT,
     load_verified_install_report,
@@ -189,12 +192,12 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             env=claude_env,
             probe_env=probe_env,
         )
-        codex_startup, codex_source_missing, codex_cache_missing = startup_from_probes(
+        codex_startup = startup_from_probes(
             source_probe,
             codex_probe,
             codex_list_tools,
         )
-        claude_startup, claude_source_missing, claude_cache_missing = startup_from_probes(
+        claude_startup = startup_from_probes(
             source_probe,
             claude_probe,
             claude_list_tools,
@@ -235,6 +238,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     except (
         CommandDiscoveryError,
         EnvironmentContainmentError,
+        ProbePayloadError,
         FileNotFoundError,
         PermissionError,
         ValueError,
@@ -315,8 +319,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         cache=codex_cache,
         cache_source=codex_cache_source,
         startup=codex_startup,
-        source_missing=codex_source_missing,
-        cache_missing=codex_cache_missing,
         receipts=(
             *git_receipts,
             *(result.receipt for result in codex_receipts),
@@ -331,8 +333,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         cache=claude_cache,
         cache_source=claude_cache_source,
         startup=claude_startup,
-        source_missing=claude_source_missing,
-        cache_missing=claude_cache_missing,
         receipts=(
             *git_receipts,
             *(result.receipt for result in claude_receipts),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -47,10 +47,30 @@ class CommandReceipt(BaseModel):
 
 
 class StartupCheck(BaseModel):
+    """One probe result: tool_count plus required annotations_missing list of strings."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     status: Literal["passed"]
     tool_count: int
+    annotations_missing: tuple[str, ...]
+
+    @field_validator("annotations_missing", mode="before")
+    @classmethod
+    def _require_string_annotations(cls, value: object) -> list[str]:
+        if value is None:
+            msg = "annotations_missing_required"
+            raise ValueError(msg)
+        if not isinstance(value, (list, tuple)):
+            msg = "annotations_missing_not_list"
+            raise ValueError(msg)  # noqa: TRY004 - pydantic maps ValueError to ValidationError
+        strings: list[str] = []
+        for item in cast("list[object] | tuple[object, ...]", value):
+            if not isinstance(item, str):
+                msg = "annotations_missing_non_string"
+                raise ValueError(msg)  # noqa: TRY004
+            strings.append(item)
+        return strings
 
 
 class StartupEvidence(BaseModel):
@@ -74,8 +94,9 @@ class ClientInstallEvidence(BaseModel):
     mcp_server_count: int
     tool_count: int
     annotations_missing: tuple[str, ...]
-    source_annotations_missing: tuple[str, ...] = ()
-    cache_annotations_missing: tuple[str, ...] = ()
+    source_annotations_missing: tuple[str, ...]
+    cache_annotations_missing: tuple[str, ...]
+    list_tools_annotations_missing: tuple[str, ...]
     forbidden_cache_paths: tuple[str, ...]
     installed_bytes_match: Literal[True]
     install_command_exit_code: Literal[0]

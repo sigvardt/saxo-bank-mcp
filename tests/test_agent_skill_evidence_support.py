@@ -377,9 +377,9 @@ def _install_payload(
 
 def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
     startup: dict[str, JsonValue] = {
-        "source": {"status": "passed", "tool_count": 39},
-        "cache": {"status": "passed", "tool_count": 39},
-        "list_tools": {"status": "passed", "tool_count": 39},
+        "source": {"status": "passed", "tool_count": 39, "annotations_missing": []},
+        "cache": {"status": "passed", "tool_count": 39, "annotations_missing": []},
+        "list_tools": {"status": "passed", "tool_count": 39, "annotations_missing": []},
     }
     receipt = {
         "name": source,
@@ -416,6 +416,7 @@ def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
         "annotations_missing": [],
         "source_annotations_missing": [],
         "cache_annotations_missing": [],
+        "list_tools_annotations_missing": [],
         "forbidden_cache_paths": [],
         "installed_bytes_match": True,
         "install_command_exit_code": 0,
