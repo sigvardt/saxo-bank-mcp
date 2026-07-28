@@ -71,6 +71,9 @@ _SIM_ENV_KEYS: Final = (
     "SAXO_MCP_TOKEN_CACHE_PATH",
     "SAXO_MCP_SIM_AUTH_URL",
     "SAXO_MCP_SIM_TOKEN_URL",
+    # Case-scoped safety allowlists (account always when bound; instrument for lifecycle).
+    "SAXO_MCP_ACCOUNT_ALLOWLIST",
+    "SAXO_MCP_INSTRUMENT_ALLOWLIST",
     "PATH",
     "HOME",
     "UV_CACHE_DIR",

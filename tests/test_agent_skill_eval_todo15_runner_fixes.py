@@ -456,6 +456,63 @@ def test_claude_stdio_grants_and_mcp_config_shape(tmp_path: Path) -> None:
     assert command[0] == "claude" or Path(command[0]).name.startswith("claude")
 
 
+def test_claude_mcp_config_forwards_case_scoped_allowlists(tmp_path: Path) -> None:
+    """Claude stdio env must receive account/instrument allowlists when present on the case env.
+
+    Values stay only in the owner-only mcp-config file used by the child server process;
+    they are not printed to evidence or logs by this path.
+    """
+    from saxo_bank_mcp.agent_skill_matrix_env import (  # noqa: PLC0415
+        SIM_ORDER_LIFECYCLE_CASE_ID,
+        SIM_ORDER_LIFECYCLE_INSTRUMENT_UIC,
+        apply_case_eval_allowlists,
+    )
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    # Short non-secret canaries so credential regexes stay quiet.
+    account_canary = "SIM" + "ACCT01"
+    base = {
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_READS": "0",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+        "SAXO_MCP_ACCOUNT_ALLOWLIST": account_canary,
+        "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token.json"),
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/usr/bin",
+    }
+    lifecycle_env = apply_case_eval_allowlists(base, case_id=SIM_ORDER_LIFECYCLE_CASE_ID)
+    non_lifecycle_env = apply_case_eval_allowlists(base, case_id="auth-recovery")
+
+    lifecycle_path = write_claude_sim_mcp_config(
+        plugin_root=plugin,
+        dest=tmp_path / "lifecycle" / "claude-mcp.json",
+        env=lifecycle_env,
+    )
+    non_path = write_claude_sim_mcp_config(
+        plugin_root=plugin,
+        dest=tmp_path / "auth" / "claude-mcp.json",
+        env=non_lifecycle_env,
+    )
+    lifecycle_server = json.loads(lifecycle_path.read_text(encoding="utf-8"))["mcpServers"][
+        "saxo-bank-mcp"
+    ]
+    non_server = json.loads(non_path.read_text(encoding="utf-8"))["mcpServers"]["saxo-bank-mcp"]
+    assert lifecycle_server["env"]["SAXO_MCP_ACCOUNT_ALLOWLIST"] == account_canary
+    assert (
+        lifecycle_server["env"]["SAXO_MCP_INSTRUMENT_ALLOWLIST"]
+        == SIM_ORDER_LIFECYCLE_INSTRUMENT_UIC
+    )
+    assert non_server["env"]["SAXO_MCP_ACCOUNT_ALLOWLIST"] == account_canary
+    assert "SAXO_MCP_INSTRUMENT_ALLOWLIST" not in non_server["env"]
+    # LIVE remains disabled on both paths.
+    assert lifecycle_server["env"]["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
+    assert non_server["env"]["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
+    assert lifecycle_server["env"]["SAXO_MCP_ENVIRONMENT"] == "SIM"
+    assert lifecycle_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert non_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+
+
 def test_codex_server_list_mcp_resources_is_protocol_noise() -> None:
     """Codex discovery: server=codex tool=list_mcp_resources is harness protocol only."""
     stream = "\n".join(
