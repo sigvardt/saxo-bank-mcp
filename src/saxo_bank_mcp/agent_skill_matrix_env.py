@@ -50,6 +50,45 @@ def matrix_runtime_root(evidence_root: Path) -> Path:
     return evidence_root.resolve() / MATRIX_RUNTIME_NAME
 
 
+def resolve_matrix_child_evidence_path(
+    candidate: Path,
+    *,
+    evidence_root: Path,
+    installed_cache: Path,
+    runtime_root: Path,
+) -> Path:
+    """Resolve a child subprocess out/evidence path under the Todo 15 evidence root.
+
+    Always returns an absolute path resolved in the producer process (never relative
+    to the installed-cache cwd). Fails closed with a stable sanitized reason when
+    the path escapes the evidence root, aliases the installed cache or disposable
+    auth runtime, or cannot be prepared owner-only.
+    """
+    try:
+        root = evidence_root.resolve()
+        cache = installed_cache.resolve()
+        runtime = runtime_root.resolve()
+        resolved = candidate.expanduser().resolve()
+    except OSError as exc:
+        raise MatrixEnvError("child_out_invalid") from exc
+
+    if not resolved.is_relative_to(root):
+        raise MatrixEnvError("child_out_outside_evidence_root")
+    if resolved == cache or resolved.is_relative_to(cache):
+        raise MatrixEnvError("child_out_aliases_installed_cache")
+    if resolved == runtime or resolved.is_relative_to(runtime):
+        raise MatrixEnvError("child_out_aliases_matrix_runtime")
+    if not resolved.is_absolute():
+        raise MatrixEnvError("child_out_invalid")
+
+    parent = resolved.parent
+    try:
+        ensure_owner_only(parent)
+    except (OSError, PermissionError) as exc:
+        raise MatrixEnvError("child_out_create_failed") from exc
+    return resolved
+
+
 def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntime:
     """Create owner-only disposable roots and SIM-only auth copies under evidence_root."""
     run_root = matrix_runtime_root(evidence_root)

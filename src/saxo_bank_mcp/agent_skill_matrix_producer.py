@@ -35,8 +35,10 @@ from saxo_bank_mcp.agent_skill_matrix import (
 )
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
+    matrix_runtime_root,
     prepare_matrix_isolated_runtime,
     require_matrix_runtime_cleanup,
+    resolve_matrix_child_evidence_path,
 )
 from saxo_bank_mcp.qa_exact_tool_probe import ExactToolProbeReceipt
 from saxo_bank_mcp.qa_sim_tool_matrix import SimToolMatrixReceipt
@@ -73,8 +75,17 @@ def _execute_prepared_matrix(
     install: InstallEvidenceReport | FixtureSupportReport,
     tools: frozenset[str],
 ) -> int:
-    receipt_dir = options.out.parent / "probe-receipts"
-    receipt_dir.mkdir(parents=True, exist_ok=True)
+    evidence_root = options.out.parent.resolve()
+    try:
+        matrix_out = resolve_matrix_child_evidence_path(
+            options.out.parent / "probe-receipts" / "sim-tool-matrix.json",
+            evidence_root=evidence_root,
+            installed_cache=install.codex.cache_root,
+            runtime_root=matrix_runtime_root(evidence_root),
+        )
+    except MatrixEnvError as exc:
+        return _write_failure(options.out, exc.reason)
+    receipt_dir = matrix_out.parent
     probed = _probe_or_fail(options, install, receipt_dir)
     if isinstance(probed, int):
         return probed
@@ -203,7 +214,12 @@ def run_sim_matrix_probe(
     command_error: CommandFailureError | None = None
     result: CommandResult | None = None
     try:
-        out = receipt_dir / "sim-tool-matrix.json"
+        out = resolve_matrix_child_evidence_path(
+            receipt_dir / "sim-tool-matrix.json",
+            evidence_root=evidence_root,
+            installed_cache=cache,
+            runtime_root=runtime.run_root,
+        )
         command = (
             "uv",
             "run",

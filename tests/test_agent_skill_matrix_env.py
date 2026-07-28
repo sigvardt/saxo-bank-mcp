@@ -19,6 +19,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     matrix_runtime_root,
     prepare_matrix_isolated_runtime,
     require_matrix_runtime_cleanup,
+    resolve_matrix_child_evidence_path,
 )
 
 
@@ -258,3 +259,140 @@ def test_cleanup_matrix_runtime_is_idempotent(tmp_path: Path) -> None:
     root.mkdir(parents=True)
     assert cleanup_matrix_isolated_runtime(root) == []
     assert cleanup_matrix_isolated_runtime(root) == []
+
+
+def _cache_tree_snapshot(cache: Path) -> dict[str, bytes | None]:
+    snapshot: dict[str, bytes | None] = {}
+    for path in sorted(cache.rglob("*")):
+        key = str(path.relative_to(cache))
+        snapshot[key] = path.read_bytes() if path.is_file() else None
+    return snapshot
+
+
+def testrun_sim_matrix_probe_relative_out_is_absolute_under_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relative receipt_dir/--out must not write into the installed-cache cwd."""
+    evidence = tmp_path / "task-15-sim" / "manual"
+    evidence.mkdir(parents=True)
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    (cache / "fixture-marker.txt").write_text("retained-cache\n", encoding="utf-8")
+    cache_before = _cache_tree_snapshot(cache)
+    _write_auth_sources(tmp_path, monkeypatch)
+    monkeypatch.chdir(evidence)
+    captured: dict[str, Any] = {}
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        _ = env
+        out_index = argv.index("--out") + 1
+        out_arg = Path(argv[out_index])
+        captured["out"] = out_arg
+        captured["cwd"] = cwd
+        assert out_arg.is_absolute()
+        assert out_arg.resolve().is_relative_to(evidence.resolve())
+        assert not out_arg.resolve().is_relative_to(cache.resolve())
+        assert cwd == cache
+        receipt = CommandReceipt(
+            name=name,
+            argv=tuple(argv),
+            cwd=str(cwd),
+            pid=3,
+            pgid=3,
+            exit_code=0,
+            stdout_sha256="e" * 64,
+            stderr_sha256="e" * 64,
+            timed_out=False,
+            cleanup_attempted=True,
+        )
+        return CommandResult(receipt=receipt, stdout="", stderr="")
+
+    monkeypatch.setattr(matrix_producer, "run_command", fake_run_command)
+    options = MatrixPlanOptions(
+        manifest=Path("data/saxo/agent_tool_scenarios.json"),
+        environment="SIM",
+        require_tools=39,
+        install_report=Path("install.json"),
+        fixtures=SimFixtureOptions(
+            stock_uic="211",
+            amount="1",
+            limit_price="50",
+            modified_limit_price="51",
+            option_uics="30004846,30004926",
+            stream_uic="21",
+        ),
+        out=Path("tool-matrix.json"),
+    )
+    receipt_dir = Path("probe-receipts")
+    result = matrix_producer.run_sim_matrix_probe(cache, receipt_dir, options)
+    expected_out = (evidence / "probe-receipts" / "sim-tool-matrix.json").resolve()
+    assert result.receipt.exit_code == 0
+    assert captured["out"] == expected_out
+    assert captured["out"].is_absolute()
+    assert _cache_tree_snapshot(cache) == cache_before
+    assert not any(path.name == "sim-tool-matrix.json" for path in cache.rglob("*"))
+    assert expected_out.parent.is_dir()
+    assert (expected_out.parent.stat().st_mode & 0o777) == OWNER_DIR_MODE
+    assert not matrix_runtime_root(evidence).exists()
+
+
+def test_resolve_matrix_child_evidence_path_rejects_escape_and_cache_alias(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "task-15-sim" / "manual"
+    evidence.mkdir(parents=True)
+    # Cache nested under evidence so the alias check (not only outside) can fire.
+    cache = evidence / "installed-cache"
+    cache.mkdir()
+    outside_cache = tmp_path / "outside-installed-cache"
+    outside_cache.mkdir()
+    runtime = matrix_runtime_root(evidence)
+    runtime.mkdir(parents=True)
+
+    with pytest.raises(MatrixEnvError, match="child_out_outside_evidence_root"):
+        resolve_matrix_child_evidence_path(
+            tmp_path / "escape" / "sim-tool-matrix.json",
+            evidence_root=evidence,
+            installed_cache=outside_cache,
+            runtime_root=runtime,
+        )
+    with pytest.raises(MatrixEnvError, match="child_out_aliases_installed_cache"):
+        resolve_matrix_child_evidence_path(
+            cache / "sim-tool-matrix.json",
+            evidence_root=evidence,
+            installed_cache=cache,
+            runtime_root=runtime,
+        )
+    with pytest.raises(MatrixEnvError, match="child_out_aliases_matrix_runtime"):
+        resolve_matrix_child_evidence_path(
+            runtime / "sim-tool-matrix.json",
+            evidence_root=evidence,
+            installed_cache=cache,
+            runtime_root=runtime,
+        )
+    with pytest.raises(MatrixEnvError, match="child_out_outside_evidence_root"):
+        resolve_matrix_child_evidence_path(
+            evidence / "probe-receipts" / ".." / ".." / "escape.json",
+            evidence_root=evidence,
+            installed_cache=cache,
+            runtime_root=runtime,
+        )
+
+    contained = resolve_matrix_child_evidence_path(
+        evidence / "probe-receipts" / "sim-tool-matrix.json",
+        evidence_root=evidence,
+        installed_cache=cache,
+        runtime_root=runtime,
+    )
+    assert contained.is_absolute()
+    assert contained == (evidence / "probe-receipts" / "sim-tool-matrix.json").resolve()
+    assert contained.parent.is_dir()
+    assert (contained.parent.stat().st_mode & 0o777) == OWNER_DIR_MODE
