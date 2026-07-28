@@ -39,6 +39,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     matrix_runtime_root,
     prepare_matrix_child_receipt_path,
     prepare_matrix_isolated_runtime,
+    promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
     resolve_matrix_child_evidence_path,
 )
@@ -264,6 +265,9 @@ def run_sim_matrix_probe(
     runtime = prepare_matrix_isolated_runtime(evidence_root)
     command_error: CommandFailureError | None = None
     result: CommandResult | None = None
+    probe_error: MatrixEnvError | None = None
+    promote_error: MatrixEnvError | None = None
+    cleanup_error: MatrixEnvError | None = None
     try:
         out = resolve_matrix_child_evidence_path(
             receipt_dir / "sim-tool-matrix.json",
@@ -303,14 +307,24 @@ def run_sim_matrix_probe(
         )
     except CommandFailureError as exc:
         command_error = exc
+    except MatrixEnvError as exc:
+        probe_error = exc
     finally:
-        cleanup_error: MatrixEnvError | None = None
+        # Promote rotated SIM token before disposable runtime cleanup deletes it.
+        try:
+            promote_rotated_sim_token_cache(runtime)
+        except MatrixEnvError as exc:
+            promote_error = exc
         try:
             require_matrix_runtime_cleanup(runtime.run_root)
         except MatrixEnvError as exc:
             cleanup_error = exc
+    if promote_error is not None:
+        raise promote_error
     if command_error is not None:
         raise command_error
+    if probe_error is not None:
+        raise probe_error
     if cleanup_error is not None:
         raise cleanup_error
     if result is None:

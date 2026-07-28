@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
@@ -13,8 +14,17 @@ from saxo_bank_mcp.agent_skill_install_env import (
     write_bearing_env_keys,
 )
 from saxo_bank_mcp.agent_skill_install_paths import ensure_owner_only
+from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config_credentials import DEFAULT_SIM_CREDENTIAL_FILE
-from saxo_bank_mcp.token_cache import default_token_cache_path
+from saxo_bank_mcp.token_cache import (
+    TokenCachePathError,
+    default_token_cache_path,
+    load_token_cache,
+    save_token_cache,
+)
+from saxo_bank_mcp.token_cache import (
+    token_cache_path as resolve_token_cache_path,
+)
 
 MATRIX_RUNTIME_NAME: Final = "matrix-runtime"
 DEFAULT_SIM_REDIRECT_URI: Final = "http://localhost:8080/callback"
@@ -43,6 +53,9 @@ class MatrixIsolatedRuntime:
     auth_dir: Path
     sim_credential_path: Path
     token_cache_path: Path
+    # Continuity markers for optimistic SIM promotion only — never evidence fields.
+    sim_token_source: Path = field(repr=False)
+    sim_token_source_digest: str = field(repr=False)
 
 
 def matrix_runtime_root(evidence_root: Path) -> Path:
@@ -146,8 +159,9 @@ def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntim
             missing_reason="sim_credentials_missing",
             copy_reason="sim_credential_copy_failed",
         )
+        token_source, token_source_digest = _resolve_sim_token_source_with_digest()
         token_cache_path = _copy_owner_only_file(
-            _resolve_sim_token_cache_source(),
+            token_source,
             auth_dir / _TOKEN_CACHE_BASENAME,
             missing_reason="token_cache_missing",
             copy_reason="token_cache_copy_failed",
@@ -178,6 +192,8 @@ def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntim
             auth_dir=auth_dir,
             sim_credential_path=sim_credential_path,
             token_cache_path=token_cache_path,
+            sim_token_source=token_source,
+            sim_token_source_digest=token_source_digest,
         )
     except MatrixEnvError:
         cleanup_matrix_isolated_runtime(run_root)
@@ -188,6 +204,28 @@ def prepare_matrix_isolated_runtime(evidence_root: Path) -> MatrixIsolatedRuntim
     except OSError as exc:
         cleanup_matrix_isolated_runtime(run_root)
         raise MatrixEnvError("matrix_runtime_setup_failed") from exc
+
+
+def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
+    """Optimistically promote a rotated SIM token from the disposable cache to source.
+
+    No-op when the contained copy is unchanged. Fail closed with a stable sanitized
+    reason when promotion is required but validation, concurrency, write, or
+    verification fails. Never publishes tokens, account IDs, private paths, or digests.
+    """
+    contained_digest = _regular_file_digest(runtime.token_cache_path)
+    if contained_digest is not None and contained_digest == runtime.sim_token_source_digest:
+        return
+
+    token = _load_promotable_sim_token(runtime.token_cache_path)
+    destination = _resolve_promotion_destination(runtime.sim_token_source)
+    _require_owner_only_regular_file(
+        destination,
+        reason="token_promote_destination_invalid",
+    )
+    if _regular_file_digest(destination) != runtime.sim_token_source_digest:
+        raise MatrixEnvError("token_promote_source_changed")
+    _persist_and_verify_promotion(destination, token)
 
 
 def cleanup_matrix_isolated_runtime(run_root: Path) -> list[str]:
@@ -213,6 +251,47 @@ def require_matrix_runtime_cleanup(run_root: Path) -> None:
         raise MatrixEnvError("matrix_runtime_cleanup_residue")
 
 
+def _load_promotable_sim_token(contained: Path) -> SaxoTokenSet:
+    _require_owner_only_regular_file(
+        contained,
+        reason="token_promote_contained_invalid",
+    )
+    token = load_token_cache(contained)
+    if token is None:
+        raise MatrixEnvError("token_promote_token_invalid")
+    if token.environment != "SIM":
+        raise MatrixEnvError("token_promote_environment_not_sim")
+    if token.refresh_material() is None:
+        raise MatrixEnvError("token_promote_refresh_missing")
+    return token
+
+
+def _resolve_promotion_destination(source: Path) -> Path:
+    try:
+        return resolve_token_cache_path(source)
+    except TokenCachePathError as exc:
+        raise MatrixEnvError("token_promote_destination_refused") from exc
+
+
+def _persist_and_verify_promotion(destination: Path, token: SaxoTokenSet) -> None:
+    try:
+        save_token_cache(destination, token)
+    except OSError as exc:
+        raise MatrixEnvError("token_promote_write_failed") from exc
+    try:
+        _require_owner_only_regular_file(
+            destination,
+            reason="token_promote_verify_failed",
+        )
+        reloaded = load_token_cache(destination)
+    except MatrixEnvError:
+        raise
+    except OSError as exc:
+        raise MatrixEnvError("token_promote_verify_failed") from exc
+    if reloaded is None or reloaded != token:
+        raise MatrixEnvError("token_promote_verify_failed")
+
+
 def _resolve_sim_credential_source() -> Path:
     raw = os.environ.get("SAXO_MCP_SIM_CREDENTIAL_FILE", "").strip()
     if raw:
@@ -225,6 +304,26 @@ def _resolve_sim_token_cache_source() -> Path:
     if raw:
         return Path(raw).expanduser()
     return default_token_cache_path()
+
+
+def _resolve_sim_token_source_with_digest() -> tuple[Path, str]:
+    source = _resolve_sim_token_cache_source()
+    if source.is_symlink() or not source.is_file():
+        raise MatrixEnvError("token_cache_missing")
+    try:
+        mode = source.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError("token_cache_missing") from exc
+    if not stat.S_ISREG(mode):
+        raise MatrixEnvError("token_cache_missing")
+    try:
+        resolved = source.resolve()
+        digest = _regular_file_digest(resolved)
+    except OSError as exc:
+        raise MatrixEnvError("token_cache_copy_failed") from exc
+    if digest is None:
+        raise MatrixEnvError("token_cache_copy_failed")
+    return resolved, digest
 
 
 def _resolve_sim_redirect_uri() -> str:
@@ -252,6 +351,37 @@ def _copy_owner_only_file(
     if not stat.S_ISREG(target.stat().st_mode):
         raise MatrixEnvError("auth_permissions_invalid")
     return target.resolve()
+
+
+def _regular_file_digest(path: Path) -> str | None:
+    try:
+        if path.is_symlink():
+            return None
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _owner_only_regular_file_reason(path: Path) -> str | None:
+    try:
+        if path.is_symlink():
+            return "symlink"
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode):
+            return "not_regular"
+        if (mode & 0o777) != OWNER_FILE_MODE:
+            return "permissions"
+    except OSError:
+        return "os_error"
+    return None
+
+
+def _require_owner_only_regular_file(path: Path, *, reason: str) -> None:
+    if _owner_only_regular_file_reason(path) is not None:
+        raise MatrixEnvError(reason)
 
 
 def _assert_no_live_auth(env: dict[str, str]) -> None:

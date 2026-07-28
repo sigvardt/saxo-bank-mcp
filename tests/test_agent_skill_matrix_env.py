@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import stat
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,16 +22,41 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     matrix_runtime_root,
     prepare_matrix_child_receipt_path,
     prepare_matrix_isolated_runtime,
+    promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
     resolve_matrix_child_evidence_path,
 )
+from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
+from saxo_bank_mcp.token_cache import TokenCachePathError, load_token_cache, save_token_cache
 
 
-def _write_auth_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def _sim_token(
+    *,
+    access: str = "access-token-original",
+    refresh: str | None = "refresh-token-original",
+    verifier: str | None = "code-verifier-original",
+    environment: TokenEnvironment | None = "SIM",
+) -> SaxoTokenSet:
+    return SaxoTokenSet(
+        access_token=access,
+        refresh_token=refresh,
+        code_verifier=verifier,
+        environment=environment,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+
+def _write_auth_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token: SaxoTokenSet | None = None,
+    raw_token_text: str | None = None,
+) -> tuple[Path, Path]:
     source_root = tmp_path / "auth-source"
-    source_root.mkdir()
+    source_root.mkdir(exist_ok=True)
     credential = source_root / "sim-credentials.txt"
-    token = source_root / "token-cache.json"
+    token_path = source_root / "token-cache.json"
     credential.write_text(
         "App Key\n"
         "app-key-fixture-value\n"
@@ -42,15 +70,62 @@ def _write_auth_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tupl
         "https://sim.logonvalidation.net/token\n",
         encoding="utf-8",
     )
-    token.write_text("{}", encoding="utf-8")
+    if raw_token_text is not None:
+        token_path.write_text(raw_token_text, encoding="utf-8")
+        token_path.chmod(0o600)
+    elif token is not None:
+        save_token_cache(token_path, token)
+    else:
+        token_path.write_text("{}", encoding="utf-8")
+        token_path.chmod(0o600)
     credential.chmod(0o600)
-    token.chmod(0o600)
     monkeypatch.setenv("SAXO_MCP_SIM_CREDENTIAL_FILE", str(credential))
-    monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(token))
+    monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(token_path))
     monkeypatch.delenv("SAXO_MCP_LIVE_CREDENTIAL_FILE", raising=False)
     monkeypatch.delenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", raising=False)
     monkeypatch.delenv("SAXO_MCP_LIVE_APP_KEY", raising=False)
-    return credential, token
+    monkeypatch.delenv("SAXO_MCP_LIVE_CLIENT_ID", raising=False)
+    return credential, token_path
+
+
+def _matrix_options(tmp_path: Path, evidence: Path) -> MatrixPlanOptions:
+    return MatrixPlanOptions(
+        manifest=Path("data/saxo/agent_tool_scenarios.json"),
+        environment="SIM",
+        require_tools=39,
+        install_report=tmp_path / "install.json",
+        fixtures=SimFixtureOptions(
+            stock_uic="211",
+            amount="1",
+            limit_price="50",
+            modified_limit_price="51",
+            option_uics="30004846,30004926",
+            stream_uic="21",
+        ),
+        out=evidence / "tool-matrix.json",
+    )
+
+
+def _ok_receipt(
+    name: str,
+    argv: tuple[str, ...],
+    cwd: Path,
+    *,
+    exit_code: int = 0,
+) -> CommandResult:
+    receipt = CommandReceipt(
+        name=name,
+        argv=tuple(argv),
+        cwd=str(cwd),
+        pid=1,
+        pgid=1,
+        exit_code=exit_code,
+        stdout_sha256="e" * 64,
+        stderr_sha256="e" * 64,
+        timed_out=False,
+        cleanup_attempted=True,
+    )
+    return CommandResult(receipt=receipt, stdout="", stderr="")
 
 
 def test_prepare_matrix_runtime_is_contained_owner_only_and_sim_only(
@@ -543,3 +618,381 @@ def test_resolve_matrix_child_evidence_path_rejects_escape_and_cache_alias(
     assert contained == (evidence / "probe-receipts" / "sim-tool-matrix.json").resolve()
     assert contained.parent.is_dir()
     assert (contained.parent.stat().st_mode & 0o777) == OWNER_DIR_MODE
+
+
+def test_rotated_sim_token_promoted_atomically_with_0600_and_reload_equality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    rotated = _sim_token(
+        access="access-token-rotated",
+        refresh="refresh-token-rotated",
+        verifier="code-verifier-rotated",
+    )
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+    source_before = source_token.read_bytes()
+
+    def rotate_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        contained = Path(env["SAXO_MCP_TOKEN_CACHE_PATH"])
+        assert contained.resolve().is_relative_to(matrix_runtime_root(evidence).resolve())
+        assert not contained.resolve().samefile(source_token)
+        save_token_cache(contained, rotated)
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", rotate_run_command)
+    result = matrix_producer.run_sim_matrix_probe(
+        cache,
+        receipt_dir,
+        _matrix_options(tmp_path, evidence),
+    )
+    assert result.receipt.exit_code == 0
+    assert not matrix_runtime_root(evidence).exists()
+    assert source_token.read_bytes() != source_before
+    assert (source_token.stat().st_mode & 0o777) == OWNER_FILE_MODE
+    assert stat.S_ISREG(source_token.stat().st_mode)
+    assert not source_token.is_symlink()
+    assert load_token_cache(source_token) == rotated
+
+
+def test_unchanged_contained_token_is_promotion_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+    source_before = source_token.read_bytes()
+    mtime_before = source_token.stat().st_mtime_ns
+
+    def noop_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        contained = Path(env["SAXO_MCP_TOKEN_CACHE_PATH"])
+        assert contained.read_bytes() == source_before
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", noop_run_command)
+    matrix_producer.run_sim_matrix_probe(cache, receipt_dir, _matrix_options(tmp_path, evidence))
+    assert source_token.read_bytes() == source_before
+    assert source_token.stat().st_mtime_ns == mtime_before
+    assert load_token_cache(source_token) == original
+    assert not matrix_runtime_root(evidence).exists()
+
+
+def test_child_failure_still_promotes_rotated_token_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    rotated = _sim_token(
+        access="access-after-refresh",
+        refresh="refresh-after-refresh",
+        verifier="verifier-after-refresh",
+    )
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+
+    def failing_after_refresh(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        save_token_cache(Path(env["SAXO_MCP_TOKEN_CACHE_PATH"]), rotated)
+        raise CommandFailureError(_ok_receipt(name, argv, cwd, exit_code=1).receipt)
+
+    monkeypatch.setattr(matrix_producer, "run_command", failing_after_refresh)
+    with pytest.raises(CommandFailureError):
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert not matrix_runtime_root(evidence).exists()
+    assert load_token_cache(source_token) == rotated
+    assert (source_token.stat().st_mode & 0o777) == OWNER_FILE_MODE
+
+
+def test_source_concurrent_change_refuses_promotion_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    rotated = _sim_token(
+        access="access-rotated",
+        refresh="refresh-rotated",
+        verifier="verifier-rotated",
+    )
+    concurrent = _sim_token(
+        access="access-concurrent",
+        refresh="refresh-concurrent",
+        verifier="verifier-concurrent",
+    )
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+
+    def concurrent_source_change(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        save_token_cache(Path(env["SAXO_MCP_TOKEN_CACHE_PATH"]), rotated)
+        save_token_cache(source_token, concurrent)
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", concurrent_source_change)
+    with pytest.raises(MatrixEnvError, match="token_promote_source_changed") as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == "token_promote_source_changed"
+    assert str(source_token) not in str(err.value)
+    assert "refresh-rotated" not in str(err.value)
+    assert not matrix_runtime_root(evidence).exists()
+    assert load_token_cache(source_token) == concurrent
+
+
+def _mutate_invalid_json(contained: Path, _source: Path) -> None:
+    contained.write_text("{not-json", encoding="utf-8")
+    contained.chmod(0o600)
+
+
+def _mutate_live_environment(contained: Path, _source: Path) -> None:
+    save_token_cache(
+        contained,
+        _sim_token(
+            access="live-access",
+            refresh="live-refresh",
+            verifier="live-verifier",
+            environment="LIVE",
+        ),
+    )
+
+
+def _mutate_missing_refresh(contained: Path, _source: Path) -> None:
+    save_token_cache(contained, _sim_token(refresh=None, verifier=None))
+
+
+def _mutate_contained_symlink(contained: Path, source: Path) -> None:
+    contained.unlink()
+    contained.symlink_to(source)
+
+
+def _mutate_destination_permissions(contained: Path, source: Path) -> None:
+    save_token_cache(
+        contained,
+        _sim_token(
+            access="access-rotated",
+            refresh="refresh-rotated",
+            verifier="verifier-rotated",
+        ),
+    )
+    source.chmod(0o644)
+
+
+@pytest.mark.parametrize(
+    ("mutator", "expected_reason"),
+    [
+        (_mutate_invalid_json, "token_promote_token_invalid"),
+        (_mutate_live_environment, "token_promote_environment_not_sim"),
+        (_mutate_missing_refresh, "token_promote_refresh_missing"),
+        (_mutate_contained_symlink, "token_promote_contained_invalid"),
+        (_mutate_destination_permissions, "token_promote_destination_invalid"),
+    ],
+)
+def test_promotion_fail_closed_cases_cleanup_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutator: Callable[[Path, Path], None],
+    expected_reason: str,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    cache = tmp_path / "installed-cache"
+    cache.mkdir()
+    receipt_dir = evidence / "probe-receipts"
+    receipt_dir.mkdir()
+    original = _sim_token()
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+    source_before = source_token.read_bytes()
+
+    def mutate_and_succeed(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        timeout_seconds: int = 180,  # noqa: ARG001
+    ) -> CommandResult:
+        assert env is not None
+        contained = Path(env["SAXO_MCP_TOKEN_CACHE_PATH"])
+        mutator(contained, source_token)
+        return _ok_receipt(name, argv, cwd)
+
+    monkeypatch.setattr(matrix_producer, "run_command", mutate_and_succeed)
+    with pytest.raises(MatrixEnvError) as err:
+        matrix_producer.run_sim_matrix_probe(
+            cache,
+            receipt_dir,
+            _matrix_options(tmp_path, evidence),
+        )
+    assert err.value.reason == expected_reason
+    assert str(source_token) not in str(err.value)
+    assert "refresh-token-original" not in str(err.value)
+    assert not matrix_runtime_root(evidence).exists()
+    if expected_reason != "token_promote_destination_invalid":
+        assert source_token.read_bytes() == source_before
+
+
+def test_runtime_does_not_inherit_live_token_source_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    live_token = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        live_token,
+        _sim_token(
+            access="live-access",
+            refresh="live-refresh",
+            verifier="live-verifier",
+            environment="LIVE",
+        ),
+    )
+    _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
+    monkeypatch.setenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", str(live_token))
+    monkeypatch.setenv("SAXO_MCP_LIVE_CREDENTIAL_FILE", str(tmp_path / "live-creds"))
+    (tmp_path / "live-creds").write_text("live", encoding="utf-8")
+
+    runtime = prepare_matrix_isolated_runtime(evidence)
+    try:
+        assert "SAXO_MCP_LIVE_TOKEN_CACHE_PATH" not in runtime.env
+        assert "SAXO_MCP_LIVE_CREDENTIAL_FILE" not in runtime.env
+        assert runtime.env["SAXO_MCP_TOKEN_CACHE_PATH"] != str(live_token)
+        assert Path(runtime.env["SAXO_MCP_TOKEN_CACHE_PATH"]).resolve() != live_token.resolve()
+        assert runtime.sim_token_source.resolve() != live_token.resolve()
+        assert str(runtime.sim_token_source) not in repr(runtime)
+        assert runtime.sim_token_source_digest not in repr(runtime)
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+
+
+def test_promotion_failure_reason_omits_secrets_and_private_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    secret_refresh = "super-secret-refresh-material-do-not-leak"  # noqa: S105
+    original = _sim_token(refresh=secret_refresh, verifier="secret-verifier-material")
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+    runtime = prepare_matrix_isolated_runtime(evidence)
+    private_source = str(source_token.resolve())
+    private_digest = runtime.sim_token_source_digest
+    try:
+        save_token_cache(
+            runtime.token_cache_path,
+            _sim_token(
+                access="rotated-access",
+                refresh="rotated-refresh-secret",
+                verifier="rotated-verifier-secret",
+            ),
+        )
+        source_token.chmod(0o644)
+        with pytest.raises(MatrixEnvError) as err:
+            promote_rotated_sim_token_cache(runtime)
+        payload = {"status": "failed", "reason": err.value.reason}
+        rendered = json.dumps(payload)
+        assert err.value.reason == "token_promote_destination_invalid"
+        assert private_source not in str(err.value)
+        assert private_source not in rendered
+        assert private_digest not in rendered
+        assert secret_refresh not in rendered
+        assert "rotated-refresh-secret" not in rendered
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+        assert not runtime.run_root.exists()
+
+
+def test_promote_destination_refused_by_path_policy_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    original = _sim_token()
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+    runtime = prepare_matrix_isolated_runtime(evidence)
+
+    def refuse_path(path: Path, *, repo_root: Path | None = None) -> Path:
+        _ = repo_root
+        raise TokenCachePathError(path, "inside repository")
+
+    try:
+        save_token_cache(
+            runtime.token_cache_path,
+            _sim_token(
+                access="rotated",
+                refresh="rotated-refresh",
+                verifier="rotated-verifier",
+            ),
+        )
+        monkeypatch.setattr(
+            "saxo_bank_mcp.agent_skill_matrix_env.resolve_token_cache_path",
+            refuse_path,
+        )
+        with pytest.raises(MatrixEnvError, match="token_promote_destination_refused") as err:
+            promote_rotated_sim_token_cache(runtime)
+        assert err.value.reason == "token_promote_destination_refused"
+        assert str(source_token) not in str(err.value)
+        assert "rotated-refresh" not in str(err.value)
+        assert "inside repository" not in str(err.value)
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+        assert not runtime.run_root.exists()
