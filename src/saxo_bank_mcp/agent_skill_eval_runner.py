@@ -503,10 +503,15 @@ def _case_child_env(
     case: SkillEvalCase,
     harness: Harness,
 ) -> dict[str, str]:
+    from saxo_bank_mcp.agent_skill_matrix_env import (  # noqa: PLC0415
+        apply_case_eval_allowlists,
+    )
+
     # Router cases stay plan-only with the shared isolated env (no tool filter).
     if case.router_expectation is not None:
-        return dict(base_env)
-    return child_env_for_case(base_env, case.exact_tool_grants[harness])
+        return apply_case_eval_allowlists(dict(base_env), case_id=case.id)
+    filtered = child_env_for_case(base_env, case.exact_tool_grants[harness])
+    return apply_case_eval_allowlists(filtered, case_id=case.id)
 
 
 def _first_record_error(records: tuple[EvalRunRecord, ...]) -> str:

@@ -24,11 +24,13 @@
   ],
   "exact_tool_grants": {
     "codex": [
+      "saxo_auth_status",
       "saxo_get_session_capabilities",
       "saxo_list_registered_endpoints",
       "saxo_call_registered_endpoint"
     ],
     "claude": [
+      "saxo_auth_status",
       "saxo_get_session_capabilities",
       "saxo_list_registered_endpoints",
       "saxo_call_registered_endpoint"

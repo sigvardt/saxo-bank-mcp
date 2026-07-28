@@ -107,8 +107,13 @@ async def saxo_create_order_preview(  # noqa: C901, PLR0911
         dict[str, JsonValue],
         Field(
             description=(
-                "Exact Saxo order body. Prefer process-scoped SafeAccountSelector values from "
-                "registered account reads as AccountKey; raw AccountKey is never echoed."
+                "Exact Saxo order body for the intended write. Single-stock limit keys: "
+                "AccountKey (process-scoped SafeAccountSelector from a registered accounts "
+                "read), Uic, AssetType, Amount, BuySell, OrderType, OrderPrice, "
+                "OrderDuration with DurationType DayOrder when Day is required. "
+                "Raw AccountKey is never echoed. The tool adds precheck-only ManualOrder=false "
+                "and FieldGroups MarginImpactBuySell and Costs on the network precheck request; "
+                "those precheck-only fields are not stored in the preview execution body."
             ),
         ),
     ],
@@ -556,15 +561,22 @@ def _precheck_body(
     order_body: dict[str, JsonValue],
     environment: SaxoEnvironment,
 ) -> dict[str, JsonValue]:
-    if environment == SaxoEnvironment.SIM:
-        return order_body
+    """Build the Saxo precheck request body for SIM and LIVE.
+
+    Forces ManualOrder=false and FieldGroups Costs/MarginImpactBuySell on the
+    outbound precheck only. The caller's intended body is left unchanged for the
+    stored preview fingerprint and later execution.
+    """
+    del environment  # Same precheck-only shape in SIM and LIVE.
     body = dict(order_body)
     body["ManualOrder"] = False
     body["FieldGroups"] = ["MarginImpactBuySell", "Costs"]
-    orders = body.get("Orders")
-    if isinstance(orders, list):
-        body["Orders"] = [
-            {**row, "ManualOrder": False} if isinstance(row, dict) else row for row in orders
+    for child_key in ("Orders", "Legs"):
+        rows = body.get(child_key)
+        if not isinstance(rows, list):
+            continue
+        body[child_key] = [
+            {**row, "ManualOrder": False} if isinstance(row, dict) else row for row in rows
         ]
     return body
 

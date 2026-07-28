@@ -7,10 +7,10 @@
     "positive"
   ],
   "environment": "SIM",
-  "natural_prompt": "My SIM Saxo session looks expired. Recover it safely if refresh material exists, then prove the session with a capability read. Do not ask me to paste secrets.",
+  "natural_prompt": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets.",
   "harness_prompts": {
-    "codex": "My SIM Saxo session looks expired. Recover it safely if refresh material exists, then prove the session with a capability read. Do not ask me to paste secrets.",
-    "claude": "My SIM Saxo session looks expired. Recover it safely if refresh material exists, then prove the session with a capability read. Do not ask me to paste secrets."
+    "codex": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets.",
+    "claude": "My SIM Saxo session looks expired. Call saxo_auth_status first, then always call saxo_get_session_capabilities even when the local cache appears ready. Recover safely with refresh or PKCE only when status requires it. Do not ask me to paste secrets."
   },
   "expected_skill": "saxo-auth-session",
   "required_logical_tools": [

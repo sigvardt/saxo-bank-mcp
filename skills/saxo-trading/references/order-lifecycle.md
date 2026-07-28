@@ -42,6 +42,10 @@ Do not invent investment advice or choose a product when the user has not named 
 
 Use `saxo_create_order_preview` before placement. It posts the order precheck or evaluates a sanitized fixture, checks account-currency cost, cash, margin, precheck status, and disclaimer blockers, then creates a local preview token only when safe.
 
+For a controlled single-stock limit place, pass `order_body` with these keys only for the intended write: `AccountKey` (process-scoped `SafeAccountSelector` from a registered accounts read), `Uic`, `AssetType`, `Amount`, `BuySell`, `OrderType`, `OrderPrice`, and `OrderDuration` with `DurationType` `DayOrder` when Day is required. Do not invent raw account or order identifiers.
+
+The tool automatically adds precheck-only `ManualOrder=false` and `FieldGroups` `MarginImpactBuySell` and `Costs` on the network precheck request in SIM and LIVE. Those precheck-only fields are not stored in the preview execution body or place fingerprint.
+
 LIVE precheck can also use `saxo_precheck_live_order` for read-only proof. That tool uses `ManualOrder=false`, account lookup, instrument lookup, and `POST /trade/v2/orders/precheck`. It must never place, modify, cancel, or answer disclaimers.
 
 Precheck must include or establish:
