@@ -34,18 +34,34 @@ _SIM_CREDENTIAL_NAME: Final = "sim-credentials"
 _TOKEN_CACHE_BASENAME: Final = "token-cache.json"  # noqa: S105 - filename, not a secret
 OWNER_FILE_MODE: Final = 0o600
 OWNER_DIR_MODE: Final = 0o700
-# CLI auth/config inputs only — never session history or raw model transcripts.
-_CODEX_SEED_FILES: Final = ("auth.json", "config.toml")
-_CLAUDE_SEED_RELATIVES: Final = (
+# Actual CLI auth sources only — never session history, transcripts, hooks, or MCP state.
+_CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
+_CLAUDE_AUTH_SEED_RELATIVES: Final = (
     Path(".claude") / "settings.json",
     Path(".claude") / ".credentials.json",
     Path(".claude.json"),
 )
+# Retained install plugin registration/artifacts only (options.codex_home / options.claude_home).
+_CODEX_PLUGIN_SEED_FILES: Final = ("config.toml",)
+_CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
 _CLAUDE_PLUGIN_SEED_RELATIVES: Final = (
     Path(".claude") / "plugins" / "installed_plugins.json",
     Path(".claude") / "plugins" / "known_marketplaces.json",
 )
-_CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
+# Exact basenames only — never substring-match plugin package names.
+_EXCLUDED_SEED_NAMES: Final = frozenset(
+    {
+        "history",
+        "history.jsonl",
+        "transcripts",
+        "transcript",
+        "sessions",
+        "session-store",
+        "hooks",
+        "logs",
+        "debug",
+    },
+)
 
 
 class MatrixEnvError(ValueError):
@@ -242,16 +258,20 @@ def prepare_matrix_isolated_runtime(
         raise MatrixEnvError("matrix_runtime_setup_failed") from exc
 
 
-def prepare_eval_isolated_runtime(
+def prepare_eval_isolated_runtime(  # noqa: PLR0913
     evidence_root: Path,
     *,
     source_codex_home: Path | None,
     source_claude_home: Path | None,
+    retained_codex_home: Path | None = None,
+    retained_claude_home: Path | None = None,
+    retained_codex_plugin_root: Path | None = None,
 ) -> MatrixIsolatedRuntime:
     """SIM-only eval runtime under evidence_root with task-created CLI homes.
 
-    Source homes are read-only inputs for owner-only auth/config/plugin copies.
-    They are never written and never published as evidence fields.
+    Auth sources (source_*) default to actual global CLI roots when omitted.
+    Retained install homes seed plugin registration/artifacts only. Never conflate.
+    Sources are never written and never published as evidence fields.
     """
     runtime = prepare_matrix_isolated_runtime(
         evidence_root,
@@ -262,6 +282,9 @@ def prepare_eval_isolated_runtime(
             runtime,
             source_codex_home=source_codex_home,
             source_claude_home=source_claude_home,
+            retained_codex_home=retained_codex_home,
+            retained_claude_home=retained_claude_home,
+            retained_codex_plugin_root=retained_codex_plugin_root,
         )
     except MatrixEnvError:
         cleanup_matrix_isolated_runtime(runtime.run_root)
@@ -272,37 +295,77 @@ def prepare_eval_isolated_runtime(
     return runtime
 
 
-def seed_isolated_cli_homes(
+def seed_isolated_cli_homes(  # noqa: PLR0913
     runtime: MatrixIsolatedRuntime,
     *,
     source_codex_home: Path | None,
     source_claude_home: Path | None,
+    retained_codex_home: Path | None = None,
+    retained_claude_home: Path | None = None,
+    retained_codex_plugin_root: Path | None = None,
 ) -> None:
-    """Copy required CLI auth/config/plugin inputs into task-created homes."""
-    codex_source = _resolve_codex_source_home(source_codex_home)
-    claude_source = _resolve_claude_source_home(source_claude_home)
-    for name in _CODEX_SEED_FILES:
-        _copy_optional_owner_only_file(
-            codex_source / name,
-            runtime.codex_home / name,
-            copy_reason="codex_auth_copy_failed",
+    """Seed auth from actual CLI roots; seed plugin state from retained install homes."""
+    _seed_auth_files(runtime, source_codex_home, source_claude_home)
+    _seed_retained_plugin_registration(runtime, retained_codex_home, retained_claude_home)
+    if retained_codex_plugin_root is not None:
+        _seed_codex_plugin_tree(
+            runtime,
+            retained_codex_home=retained_codex_home,
+            retained_plugin_root=retained_codex_plugin_root,
         )
-    for relative in _CODEX_PLUGIN_SEED_RELATIVES:
-        _copy_optional_owner_only_file(
-            codex_source / relative,
-            runtime.codex_home / relative,
-            copy_reason="codex_plugin_state_copy_failed",
-        )
-    for relative in (*_CLAUDE_SEED_RELATIVES, *_CLAUDE_PLUGIN_SEED_RELATIVES):
-        _copy_optional_owner_only_file(
-            claude_source / relative,
-            runtime.home / relative,
-            copy_reason="claude_auth_copy_failed",
-        )
-    # Ensure config dirs stay owner-only after selective copies.
     for path in (runtime.home, runtime.codex_home, runtime.home / ".claude"):
         if path.exists():
             path.chmod(OWNER_DIR_MODE)
+
+
+def _seed_auth_files(
+    runtime: MatrixIsolatedRuntime,
+    source_codex_home: Path | None,
+    source_claude_home: Path | None,
+) -> None:
+    codex_auth = _resolve_codex_source_home(source_codex_home)
+    claude_auth = _resolve_claude_source_home(source_claude_home)
+    for name in _CODEX_AUTH_SEED_FILES:
+        _copy_optional_owner_only_file(
+            codex_auth / name,
+            runtime.codex_home / name,
+            copy_reason="codex_auth_copy_failed",
+        )
+    for relative in _CLAUDE_AUTH_SEED_RELATIVES:
+        _copy_optional_owner_only_file(
+            claude_auth / relative,
+            runtime.home / relative,
+            copy_reason="claude_auth_copy_failed",
+        )
+
+
+def _seed_retained_plugin_registration(
+    runtime: MatrixIsolatedRuntime,
+    retained_codex_home: Path | None,
+    retained_claude_home: Path | None,
+) -> None:
+    if retained_codex_home is not None:
+        retained_codex = retained_codex_home.expanduser()
+        for name in _CODEX_PLUGIN_SEED_FILES:
+            _copy_optional_owner_only_file(
+                retained_codex / name,
+                runtime.codex_home / name,
+                copy_reason="codex_plugin_state_copy_failed",
+            )
+        for relative in _CODEX_PLUGIN_SEED_RELATIVES:
+            _copy_optional_owner_only_file(
+                retained_codex / relative,
+                runtime.codex_home / relative,
+                copy_reason="codex_plugin_state_copy_failed",
+            )
+    if retained_claude_home is not None:
+        retained_claude = retained_claude_home.expanduser()
+        for relative in _CLAUDE_PLUGIN_SEED_RELATIVES:
+            _copy_optional_owner_only_file(
+                retained_claude / relative,
+                runtime.home / relative,
+                copy_reason="claude_plugin_state_copy_failed",
+            )
 
 
 def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
@@ -489,6 +552,7 @@ def _copy_optional_owner_only_file(
 
 
 def _resolve_codex_source_home(preferred: Path | None) -> Path:
+    """Actual global CLI auth root. Never falls back to retained install homes."""
     if preferred is not None:
         return preferred.expanduser()
     raw = os.environ.get("CODEX_HOME", "").strip()
@@ -498,12 +562,114 @@ def _resolve_codex_source_home(preferred: Path | None) -> Path:
 
 
 def _resolve_claude_source_home(preferred: Path | None) -> Path:
+    """Actual global CLI auth root. Never falls back to retained install homes."""
     if preferred is not None:
         return preferred.expanduser()
     raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     if raw:
         return Path(raw).expanduser().parent
     return Path.home()
+
+
+def resolve_actual_codex_auth_home(preferred: Path | None = None) -> Path:
+    return _resolve_codex_source_home(preferred)
+
+
+def resolve_actual_claude_auth_home(preferred: Path | None = None) -> Path:
+    return _resolve_claude_source_home(preferred)
+
+
+def _seed_codex_plugin_tree(
+    runtime: MatrixIsolatedRuntime,
+    *,
+    retained_codex_home: Path | None,
+    retained_plugin_root: Path,
+) -> None:
+    """Byte-exact owner-only copy of retained installed plugin into disposable CODEX_HOME."""
+    plugin = retained_plugin_root.expanduser()
+    if plugin.is_symlink():
+        raise MatrixEnvError("codex_plugin_source_symlink")
+    try:
+        plugin_resolved = plugin.resolve()
+    except OSError as exc:
+        raise MatrixEnvError("codex_plugin_seed_failed") from exc
+    if not plugin_resolved.is_dir() or plugin_resolved.is_symlink():
+        raise MatrixEnvError("codex_plugin_source_not_dir")
+    if retained_codex_home is not None:
+        home = retained_codex_home.expanduser().resolve()
+        if plugin_resolved.is_relative_to(home):
+            relative = plugin_resolved.relative_to(home)
+            _copy_owner_only_tree(plugin_resolved, runtime.codex_home / relative)
+            return
+    # Fallback placement preserves plugins/cache layout without absolute path leakage.
+    target = runtime.codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
+    _copy_owner_only_tree(plugin_resolved, target)
+
+
+def _copy_owner_only_tree(source: Path, target: Path) -> None:
+    """Copy regular files only; reject symlinks/special nodes; skip histories/hooks noise."""
+    _require_owner_seed_dir(source)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        target.chmod(OWNER_DIR_MODE)
+        for root, dirnames, filenames in os.walk(source, followlinks=False):
+            root_path = Path(root)
+            dirnames[:] = _filter_seed_dirnames(root_path, dirnames)
+            dest_root = _dest_root_for(source, target, root_path)
+            dest_root.mkdir(parents=True, exist_ok=True)
+            dest_root.chmod(OWNER_DIR_MODE)
+            for name in filenames:
+                if _is_excluded_seed_name(name):
+                    continue
+                _copy_seed_regular_file(root_path / name, dest_root / name)
+    except MatrixEnvError:
+        raise
+    except OSError as exc:
+        raise MatrixEnvError("codex_plugin_seed_failed") from exc
+
+
+def _require_owner_seed_dir(source: Path) -> None:
+    if source.is_symlink():
+        raise MatrixEnvError("codex_plugin_source_symlink")
+    try:
+        source_mode = source.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError("codex_plugin_seed_failed") from exc
+    if not stat.S_ISDIR(source_mode):
+        raise MatrixEnvError("codex_plugin_source_not_dir")
+
+
+def _filter_seed_dirnames(root_path: Path, dirnames: list[str]) -> list[str]:
+    return [
+        name
+        for name in dirnames
+        if not _is_excluded_seed_name(name) and not (root_path / name).is_symlink()
+    ]
+
+
+def _dest_root_for(source: Path, target: Path, root_path: Path) -> Path:
+    rel_root = root_path.relative_to(source)
+    return target if rel_root == Path() else target / rel_root
+
+
+def _copy_seed_regular_file(src_file: Path, dest_file: Path) -> None:
+    if src_file.is_symlink():
+        raise MatrixEnvError("codex_plugin_source_symlink")
+    try:
+        mode = src_file.lstat().st_mode
+    except OSError as exc:
+        raise MatrixEnvError("codex_plugin_seed_failed") from exc
+    if not stat.S_ISREG(mode):
+        raise MatrixEnvError("codex_plugin_source_not_regular")
+    try:
+        shutil.copy2(src_file, dest_file, follow_symlinks=False)
+        dest_file.chmod(OWNER_FILE_MODE)
+    except OSError as exc:
+        raise MatrixEnvError("codex_plugin_seed_failed") from exc
+
+
+def _is_excluded_seed_name(name: str) -> bool:
+    return name.lower() in _EXCLUDED_SEED_NAMES
 
 
 def _regular_file_digest(path: Path) -> str | None:

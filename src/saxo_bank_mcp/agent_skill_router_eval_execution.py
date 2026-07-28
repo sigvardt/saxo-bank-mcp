@@ -17,6 +17,7 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     RouterExpectation,
     SkillEvalCase,
 )
+from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_router_eval_protocol import (
     RouterOutput,
     claude_router_command,
@@ -150,14 +151,16 @@ def resolve_router_source_binding_request(
     )
 
 
-def execute_router_model_case(
+def execute_router_model_case(  # noqa: PLR0913
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
     context: RouterCaseContext,
     *,
     env: dict[str, str],
+    process_manager: EvalProcessManager | None = None,
 ) -> EvalRunRecord:
+    manager = process_manager or EvalProcessManager()
     try:
         source = router_source_text(context.plugin_root)
         source_digest = hashlib.sha256(source.encode()).hexdigest()
@@ -195,17 +198,14 @@ def execute_router_model_case(
                 grants,
                 _RouterOutcome(None, source, "ignore_user_config_forbidden"),
             )
-        result = subprocess.run(
+        result = manager.run(
             command,
             cwd=work_root,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=case.timeout_seconds,
-            check=False,
+            timeout_seconds=case.timeout_seconds,
         )
-        client_version = _client_version(harness, env)
-    except (OSError, subprocess.TimeoutExpired, ValidationError, KeyError):
+        client_version = _client_version(harness, env, process_manager=manager)
+    except (OSError, ValidationError, KeyError):
         return _router_record(
             case,
             harness,
@@ -228,6 +228,7 @@ def execute_router_model_case(
         )
     passed = (
         result.returncode == 0
+        and not result.timed_out
         and _matches_expectation(parsed.decision, case.router_expectation)
         and not parsed.decision.execution_allowed
         and parsed.tool_event_count == 0
@@ -252,10 +253,15 @@ def execute_router_model_case(
     )
 
 
-def client_versions(*, env: dict[str, str]) -> dict[str, str]:
+def client_versions(
+    *,
+    env: dict[str, str],
+    process_manager: EvalProcessManager | None = None,
+) -> dict[str, str]:
+    manager = process_manager or EvalProcessManager()
     return {
-        "codex": _client_version("codex", env),
-        "claude": _client_version("claude", env),
+        "codex": _client_version("codex", env, process_manager=manager),
+        "claude": _client_version("claude", env, process_manager=manager),
     }
 
 
@@ -270,18 +276,21 @@ def _router_command(spec: _RouterCommandSpec) -> tuple[str, ...]:
     return claude_router_command(spec.prompt, spec.schema_path)
 
 
-def _client_version(harness: Harness, env: dict[str, str]) -> str:
+def _client_version(
+    harness: Harness,
+    env: dict[str, str],
+    *,
+    process_manager: EvalProcessManager,
+) -> str:
     binary = "codex" if harness == "codex" else "claude"
     try:
-        result = subprocess.run(
+        result = process_manager.run(
             (binary, "--version"),
+            cwd=Path(env.get("TMPDIR") or env.get("HOME") or "."),
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
+            timeout_seconds=30,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return "unknown"
     text = (result.stdout or result.stderr).strip()
     return text.splitlines()[0] if text else "unknown"

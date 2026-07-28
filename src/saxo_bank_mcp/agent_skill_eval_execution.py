@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, Harness, SkillEvalCase
+from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_router_eval_execution import (
     RouterCaseContext,
     RouterHomes,
@@ -28,7 +28,9 @@ def execute_model_case(  # noqa: PLR0913
     roots: HarnessRoots,
     env: dict[str, str],
     expected_router_source_sha256: str | None = None,
+    process_manager: EvalProcessManager | None = None,
 ) -> EvalRunRecord:
+    manager = process_manager or EvalProcessManager()
     if case.router_expectation is not None:
         plugin_root = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
         return execute_router_model_case(
@@ -44,20 +46,21 @@ def execute_model_case(  # noqa: PLR0913
                 expected_router_source_sha256=expected_router_source_sha256,
             ),
             env=env,
+            process_manager=manager,
         )
     command = _model_command(case, harness, grants, roots)
+    plugin_cwd = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
     try:
-        result = subprocess.run(
+        result = manager.run(
             command,
-            cwd=roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root,
+            cwd=plugin_cwd,
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=case.timeout_seconds,
-            check=False,
+            timeout_seconds=case.timeout_seconds,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
         return _failed_record(case, harness, grants, type(exc).__name__)
+    if result.timed_out:
+        return _failed_record(case, harness, grants, "TimeoutExpired")
     transcript = f"{result.stdout}\n{result.stderr}"
     assertions_passed = _transcript_passed(case, transcript)
     if result.returncode != 0 or not assertions_passed:

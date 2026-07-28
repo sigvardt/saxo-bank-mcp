@@ -18,10 +18,12 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     select_cases,
     selected_harnesses,
 )
+from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
+    MatrixIsolatedRuntime,
     cleanup_matrix_isolated_runtime,
     prepare_eval_isolated_runtime,
     promote_rotated_sim_token_cache,
@@ -157,6 +159,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         or bool(report_error)
         or empty_selection
         or any(record.status == "failed" for record in records)
+        or not bool(outcome.cleanup.get("complete", True))
     )
     skipped_failure = bool(options.nonzero_on_skip and skipped_count)
     status: Literal["passed", "failed", "skipped", "planned"] = (
@@ -179,8 +182,11 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         records=records,
         cleanup={
             "complete": bool(outcome.cleanup.get("complete", True)),
-            "created_processes": 0,
-            "remaining_processes": 0,
+            "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
+            "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
+            "remaining_processes": _cleanup_int(outcome.cleanup, "remaining_processes"),
+            "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
+            "process_timed_out": bool(outcome.cleanup.get("process_timed_out", False)),
             "raw_transcripts_persisted": 0,
             "model_prompt_count": len(router_records),
             "model_prompt_counts": {
@@ -249,8 +255,12 @@ def run_eval_suite(options: EvalRunOptions) -> int:
     payload = report.to_json_value()
     payload["run_cleanup"] = {
         "complete": bool(outcome.cleanup.get("complete", True)),
+        "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
         "runtime_cleanup": outcome.cleanup.get("runtime_cleanup", "not_required"),
         "token_promote": outcome.cleanup.get("token_promote", "not_required"),
+        "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
+        "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
+        "remaining_processes": _cleanup_int(outcome.cleanup, "remaining_processes"),
     }
     payload["installation_fixture_preserved"] = installation_fixture_preserved
     write_json(options.out, payload)
@@ -271,11 +281,7 @@ def _select_execution_outcome(
         records=(),
         enforced_mode=CREDENTIAL_MODE_NONE,
         versions={},
-        cleanup={
-            "complete": True,
-            "runtime_cleanup": "not_required",
-            "token_promote": "not_required",
-        },
+        cleanup=_idle_cleanup(),
         error=binding_error,
     )
     if binding_error:
@@ -322,53 +328,70 @@ def _execute_with_ephemeral_runtime(
     roots: HarnessRoots,
     binding: RouterSourceBinding | None,
 ) -> _RuntimeOutcome:
-    evidence_root = options.out.parent.resolve()
-    promote_error: MatrixEnvError | None = None
-    cleanup_error: MatrixEnvError | None = None
-    records: tuple[EvalRunRecord, ...] = ()
-    versions: dict[str, str] = {}
+    process_manager = EvalProcessManager()
     try:
+        # source_* = actual CLI auth (omit -> global). *_home = retained install plugin state.
         runtime = prepare_eval_isolated_runtime(
-            evidence_root,
-            source_codex_home=options.source_codex_home or options.codex_home,
-            source_claude_home=options.source_claude_home or options.claude_home,
+            options.out.parent.resolve(),
+            source_codex_home=options.source_codex_home,
+            source_claude_home=options.source_claude_home,
+            retained_codex_home=options.codex_home,
+            retained_claude_home=options.claude_home,
+            retained_codex_plugin_root=(
+                options.codex_plugin_root if options.codex_home is not None else None
+            ),
         )
     except MatrixEnvError as exc:
         return _RuntimeOutcome(
             records=(),
             enforced_mode=CREDENTIAL_MODE_NONE,
             versions={},
-            cleanup={
-                "complete": True,
-                "runtime_cleanup": "not_required",
-                "token_promote": "not_required",
-            },
+            cleanup=_idle_cleanup(),
             error=exc.reason,
         )
+    return _run_cases_then_cleanup(
+        options,
+        cases=cases,
+        roots=roots,
+        binding=binding,
+        runtime=runtime,
+        process_manager=process_manager,
+    )
 
+
+def _run_cases_then_cleanup(  # noqa: PLR0913
+    options: EvalRunOptions,
+    *,
+    cases: tuple[SkillEvalCase, ...],
+    roots: HarnessRoots,
+    binding: RouterSourceBinding | None,
+    runtime: MatrixIsolatedRuntime,
+    process_manager: EvalProcessManager,
+) -> _RuntimeOutcome:
+    process_error: str | None = None
+    promote_error: MatrixEnvError | None = None
+    cleanup_error: MatrixEnvError | None = None
+    execution_error = ""
+    records: tuple[EvalRunRecord, ...] = ()
+    versions: dict[str, str] = {}
     try:
-        versions = client_versions(env=runtime.env)
-        child_roots = HarnessRoots(
-            codex_plugin_root=roots.codex_plugin_root,
-            claude_plugin_root=roots.claude_plugin_root,
-            codex_home=runtime.codex_home,
-            claude_home=runtime.home,
+        versions = client_versions(env=runtime.env, process_manager=process_manager)
+        records = _execute_selected_cases(
+            options,
+            cases=cases,
+            roots=roots,
+            binding=binding,
+            runtime=runtime,
+            process_manager=process_manager,
         )
-        records = tuple(
-            execute_model_case(
-                case,
-                harness,
-                resolve_tool_grants(harness, case.exact_tool_grants[harness]),
-                roots=child_roots,
-                env=runtime.env,
-                expected_router_source_sha256=(
-                    None if binding is None else binding.router_source_sha256
-                ),
-            )
-            for case in cases
-            for harness in selected_harnesses(options.harness)
-        )
+        execution_error = _first_record_error(records)
+    except OSError as exc:
+        execution_error = type(exc).__name__
     finally:
+        # Process cleanup must finish before token promotion and runtime deletion.
+        process_manager.finalize()
+        if process_manager.remaining_processes > 0:
+            process_error = "process_cleanup_residue"
         try:
             promote_rotated_sim_token_cache(runtime)
         except MatrixEnvError as exc:
@@ -378,37 +401,154 @@ def _execute_with_ephemeral_runtime(
         except MatrixEnvError as exc:
             cleanup_error = exc
             cleanup_matrix_isolated_runtime(runtime.run_root)
-
-    if promote_error is not None or cleanup_error is not None:
-        primary = promote_error.reason if promote_error is not None else None
-        if cleanup_error is not None and primary is not None:
-            reason = f"{primary}+{cleanup_error.reason}"
-        elif cleanup_error is not None:
-            reason = cleanup_error.reason
-        else:
-            reason = primary or "eval_runtime_failed"
-        return _RuntimeOutcome(
-            records=(),
-            enforced_mode=CREDENTIAL_MODE_NONE,
-            versions={},
-            cleanup={
-                "complete": cleanup_error is None,
-                "runtime_cleanup": "residue" if cleanup_error is not None else "passed",
-                "token_promote": "failed" if promote_error is not None else "passed",
-            },
-            error=reason,
-        )
     return _RuntimeOutcome(
         records=records,
         enforced_mode=CREDENTIAL_MODE_EPHEMERAL,
         versions=versions,
-        cleanup={
-            "complete": True,
-            "runtime_cleanup": "passed",
-            "token_promote": "passed",
-        },
-        error="",
+        cleanup=_cleanup_fields(
+            process_manager=process_manager,
+            process_error=process_error,
+            promote_error=promote_error,
+            cleanup_error=cleanup_error,
+        ),
+        error=_primary_runtime_error(
+            execution_error=execution_error,
+            process_error=process_error,
+            promote_error=promote_error,
+            cleanup_error=cleanup_error,
+        ),
     )
+
+
+def _execute_selected_cases(  # noqa: PLR0913
+    options: EvalRunOptions,
+    *,
+    cases: tuple[SkillEvalCase, ...],
+    roots: HarnessRoots,
+    binding: RouterSourceBinding | None,
+    runtime: MatrixIsolatedRuntime,
+    process_manager: EvalProcessManager,
+) -> tuple[EvalRunRecord, ...]:
+    codex_plugin = (
+        _disposable_codex_plugin_path(
+            runtime.codex_home,
+            retained_codex_home=options.codex_home,
+            retained_plugin_root=roots.codex_plugin_root,
+        )
+        or roots.codex_plugin_root
+    )
+    # Claude uses exact retained --plugin-dir; Codex uses disposable seeded copy.
+    child_roots = HarnessRoots(
+        codex_plugin_root=codex_plugin,
+        claude_plugin_root=roots.claude_plugin_root,
+        codex_home=runtime.codex_home,
+        claude_home=runtime.home,
+    )
+    return tuple(
+        execute_model_case(
+            case,
+            harness,
+            resolve_tool_grants(harness, case.exact_tool_grants[harness]),
+            roots=child_roots,
+            env=runtime.env,
+            expected_router_source_sha256=(
+                None if binding is None else binding.router_source_sha256
+            ),
+            process_manager=process_manager,
+        )
+        for case in cases
+        for harness in selected_harnesses(options.harness)
+    )
+
+
+def _first_record_error(records: tuple[EvalRunRecord, ...]) -> str:
+    for record in records:
+        if record.status == "failed":
+            return record.error or "model_case_failed"
+    return ""
+
+
+def _primary_runtime_error(
+    *,
+    execution_error: str,
+    process_error: str | None,
+    promote_error: MatrixEnvError | None,
+    cleanup_error: MatrixEnvError | None,
+) -> str:
+    if execution_error:
+        return execution_error
+    if process_error is not None:
+        return process_error
+    if promote_error is not None:
+        return promote_error.reason
+    if cleanup_error is not None:
+        return cleanup_error.reason
+    return ""
+
+
+def _cleanup_fields(
+    *,
+    process_manager: EvalProcessManager,
+    process_error: str | None,
+    promote_error: MatrixEnvError | None,
+    cleanup_error: MatrixEnvError | None,
+) -> dict[str, JsonValue]:
+    complete = process_error is None and promote_error is None and cleanup_error is None
+    process_cleanup = (
+        "residue" if process_error is not None else process_manager.process_cleanup
+    )
+    return {
+        "complete": complete,
+        "runtime_cleanup": "residue" if cleanup_error is not None else "passed",
+        "token_promote": "failed" if promote_error is not None else "passed",
+        "process_cleanup": process_cleanup,
+        "created_processes": process_manager.created_processes,
+        "terminated_processes": process_manager.terminated_processes,
+        "remaining_processes": process_manager.remaining_processes,
+        "process_timed_out": process_manager.timed_out,
+    }
+
+
+def _disposable_codex_plugin_path(
+    disposable_codex_home: Path,
+    *,
+    retained_codex_home: Path | None,
+    retained_plugin_root: Path,
+) -> Path | None:
+    plugin = retained_plugin_root.expanduser()
+    try:
+        plugin_resolved = plugin.resolve()
+    except OSError:
+        return None
+    if retained_codex_home is not None:
+        try:
+            home = retained_codex_home.expanduser().resolve()
+            if plugin_resolved.is_relative_to(home):
+                candidate = disposable_codex_home / plugin_resolved.relative_to(home)
+                if candidate.is_dir():
+                    return candidate
+        except OSError:
+            return None
+    fallback = disposable_codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
+    return fallback if fallback.is_dir() else None
+
+
+def _idle_cleanup() -> dict[str, JsonValue]:
+    return {
+        "complete": True,
+        "runtime_cleanup": "not_required",
+        "token_promote": "not_required",
+        "process_cleanup": "not_required",
+        "created_processes": 0,
+        "terminated_processes": 0,
+        "remaining_processes": 0,
+        "process_timed_out": False,
+    }
+
+
+def _cleanup_int(cleanup: dict[str, JsonValue], key: str) -> int:
+    value = cleanup.get(key, 0)
+    return value if isinstance(value, int) else 0
 
 
 def _credential_mode_error(mode: str) -> str:
