@@ -16,6 +16,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     shutil_which,
     terminate_process_group,
 )
+from saxo_bank_mcp.agent_skill_eval_commands import path_with_cli_dirs
 
 TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
@@ -53,12 +54,26 @@ class EvalProcessManager:
         env: dict[str, str],
         timeout_seconds: float,
     ) -> ManagedProcessResult:
-        executable = shutil_which(command[0], path=env.get("PATH"))
-        argv = command if executable is None else (executable, *command[1:])
+        # Missing cwd raises FileNotFoundError on Popen; fail with the cwd path so
+        # callers can distinguish it from a missing CLI binary.
+        if not cwd.is_dir():
+            raise FileNotFoundError(2, "No such file or directory", str(cwd))
+        child_env = dict(env)
+        path_value = child_env.get("PATH") or os.environ.get("PATH") or "/usr/bin:/bin"
+        child_env["PATH"] = path_with_cli_dirs(
+            path_value,
+            "uv",
+            "codex",
+            "claude",
+            "git",
+            "node",
+        )
+        executable = _resolve_run_executable(command[0], child_env.get("PATH"))
+        argv = (executable, *command[1:])
         process = subprocess.Popen(
             argv,
             cwd=cwd,
-            env=dict(env),
+            env=child_env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -184,3 +199,25 @@ def _signal_pid(pid: int, sig: signal.Signals) -> None:
         os.kill(pid, sig)
     except (ProcessLookupError, PermissionError):
         return
+
+
+def _resolve_run_executable(command0: str, path: str | None) -> str:
+    """Prefer an absolute executable that still exists; then PATH; then host PATH."""
+    candidate = Path(command0).expanduser()
+    if candidate.is_absolute():
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except OSError:
+            pass
+    found = shutil_which(command0, path=path)
+    if found is None:
+        found = shutil_which(Path(command0).name, path=path)
+    if found is None:
+        import shutil  # noqa: PLC0415
+
+        found = shutil.which(command0) or shutil.which(Path(command0).name)
+    if found is None:
+        # Keep original so Popen raises FileNotFoundError with a stable name.
+        return command0
+    return found

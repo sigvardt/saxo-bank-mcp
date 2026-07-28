@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_eval_commands import (
+    enrich_eval_cli_env,
     non_router_model_command,
     write_claude_sim_mcp_config,
 )
@@ -61,7 +62,7 @@ def execute_model_case(  # noqa: PLR0913
     return _execute_non_router_case(case, harness, grants, roots=roots, env=env, manager=manager)
 
 
-def _execute_non_router_case(  # noqa: PLR0913
+def _execute_non_router_case(  # noqa: PLR0913, PLR0911
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
@@ -71,26 +72,36 @@ def _execute_non_router_case(  # noqa: PLR0913
     manager: EvalProcessManager,
 ) -> EvalRunRecord:
     plugin_cwd = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
-    command = _model_command(case, harness, grants, roots, env=env)
+    # Harden PATH/CLI absolute resolution once per case so Node shebang CLIs and
+    # bare-name fallbacks do not raise FileNotFoundError mid dual-harness run.
+    launch_env = enrich_eval_cli_env(env)
+    if not plugin_cwd.is_dir():
+        return _failed_record(case, harness, grants, "cwd_not_found")
+    command = _model_command(case, harness, grants, roots, env=launch_env)
     try:
         result = manager.run(
             command,
             cwd=plugin_cwd,
-            env=env,
+            env=launch_env,
             timeout_seconds=case.timeout_seconds,
         )
-    except FileNotFoundError:
-        # Process never started: at most one retry after re-resolving executables.
+    except FileNotFoundError as first_exc:
+        # Process never started: one retry after re-enriching CLI PATH and bins.
         # Zero MCP/Saxo calls are guaranteed because Popen never launched.
+        if _fnfe_is_cwd(first_exc, plugin_cwd):
+            return _failed_record(case, harness, grants, "cwd_not_found")
         try:
-            retry_command = _model_command(case, harness, grants, roots, env=env)
+            retry_env = enrich_eval_cli_env(launch_env)
+            retry_command = _model_command(case, harness, grants, roots, env=retry_env)
             result = manager.run(
                 retry_command,
                 cwd=plugin_cwd,
-                env=env,
+                env=retry_env,
                 timeout_seconds=case.timeout_seconds,
             )
-        except FileNotFoundError:
+        except FileNotFoundError as retry_exc:
+            if _fnfe_is_cwd(retry_exc, plugin_cwd):
+                return _failed_record(case, harness, grants, "cwd_not_found")
             return _failed_record(
                 case,
                 harness,
@@ -102,6 +113,16 @@ def _execute_non_router_case(  # noqa: PLR0913
     except OSError as exc:
         return _failed_record(case, harness, grants, type(exc).__name__)
     return _record_from_process(case, harness, grants, result)
+
+
+def _fnfe_is_cwd(exc: FileNotFoundError, cwd: Path) -> bool:
+    filename = getattr(exc, "filename", None)
+    if filename is None:
+        return False
+    try:
+        return Path(str(filename)).resolve() == cwd.resolve()
+    except OSError:
+        return str(filename) == str(cwd)
 
 
 def _model_command(

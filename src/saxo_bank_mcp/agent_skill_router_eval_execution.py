@@ -289,12 +289,19 @@ def _client_version(
     *,
     process_manager: EvalProcessManager,
 ) -> str:
-    binary = "codex" if harness == "codex" else "claude"
+    from saxo_bank_mcp.agent_skill_eval_commands import (  # noqa: PLC0415
+        enrich_eval_cli_env,
+        resolve_cli_executable,
+    )
+
+    binary_name = "codex" if harness == "codex" else "claude"
+    launch_env = enrich_eval_cli_env(env)
+    binary = resolve_cli_executable(binary_name, launch_env)
     try:
         result = process_manager.run(
             (binary, "--version"),
-            cwd=Path(env.get("TMPDIR") or env.get("HOME") or "."),
-            env=env,
+            cwd=Path(launch_env.get("TMPDIR") or launch_env.get("HOME") or "."),
+            env=launch_env,
             timeout_seconds=30,
         )
     except OSError:

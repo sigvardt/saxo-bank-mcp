@@ -120,8 +120,9 @@ def codex_non_router_command(
     env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Ephemeral read-only Codex: shell/apps/web/hooks/multi-agent/goals off; Saxo MCP kept."""
+    path_env = enrich_eval_cli_env(env or {})
     mcp_overrides = _codex_unrelated_mcp_overrides(codex_home)
-    codex_bin = resolve_cli_executable("codex", env or {})
+    codex_bin = resolve_cli_executable("codex", path_env)
     return (
         codex_bin,
         "exec",
@@ -170,7 +171,8 @@ def claude_non_router_command(
     """
     allowed = ",".join(resolved_grants)
     disallowed = ",".join(CLAUDE_DISALLOWED_BUILTINS)
-    claude_bin = resolve_cli_executable("claude", env or {})
+    path_env = enrich_eval_cli_env(env or {})
+    claude_bin = resolve_cli_executable("claude", path_env)
     return (
         claude_bin,
         "--no-session-persistence",
@@ -201,11 +203,16 @@ def write_claude_sim_mcp_config(
 ) -> Path:
     """Write owner-only Claude mcp-config for the installed Saxo stdio server."""
     plugin = plugin_root.resolve()
-    server_env = {key: env[key] for key in _SIM_ENV_KEYS if key in env and env[key] != ""}
+    path_env = enrich_eval_cli_env(env)
+    server_env = {
+        key: path_env[key] for key in _SIM_ENV_KEYS if key in path_env and path_env[key] != ""
+    }
     # Preserve explicit empty LIVE writes disablement.
-    if "SAXO_MCP_ENABLE_LIVE_WRITES" in env:
-        server_env["SAXO_MCP_ENABLE_LIVE_WRITES"] = env["SAXO_MCP_ENABLE_LIVE_WRITES"]
-    uv_bin = resolve_cli_executable("uv", env)
+    if "SAXO_MCP_ENABLE_LIVE_WRITES" in path_env:
+        server_env["SAXO_MCP_ENABLE_LIVE_WRITES"] = path_env["SAXO_MCP_ENABLE_LIVE_WRITES"]
+    # MCP child must find node/uv on PATH for shebang and project runners.
+    server_env["PATH"] = path_env["PATH"]
+    uv_bin = resolve_cli_executable("uv", path_env)
     payload = {
         "mcpServers": {
             CLAUDE_STDIO_SERVER_NAME: {
@@ -230,15 +237,86 @@ def write_claude_sim_mcp_config(
 
 
 def resolve_cli_executable(name: str, env: Mapping[str, str]) -> str:
-    """Resolve a CLI binary to an absolute path when possible (deterministic Popen)."""
-    path = env.get("PATH") or os.environ.get("PATH")
-    found = shutil.which(name, path=path) if path else None
-    if found is None:
-        found = shutil.which(name)
-    if found is None:
-        # Keep the bare name so callers can still surface a clear FileNotFoundError.
-        return name
-    return str(Path(found).resolve())
+    """Resolve a CLI binary to an absolute executable path when possible.
+
+    Search order: EVAL_CLI_<NAME>_BIN override, env PATH, process PATH.
+    Prefer a path that still exists and is executable after symlink resolution so
+    Popen does not fail with FileNotFoundError on a bare name or a broken resolve.
+    Falls back to the bare name only when nothing executable is found.
+    """
+    override_key = f"EVAL_CLI_{name.upper().replace('-', '_')}_BIN"
+    candidates: list[str] = []
+    override = env.get(override_key) or os.environ.get(override_key)
+    if override:
+        candidates.append(override)
+    env_path = env.get("PATH") or ""
+    if env_path:
+        found = shutil.which(name, path=env_path)
+        if found:
+            candidates.append(found)
+    host_found = shutil.which(name)
+    if host_found:
+        candidates.append(host_found)
+    for candidate in candidates:
+        absolute = _absolute_executable(candidate)
+        if absolute is not None:
+            return absolute
+    return name
+
+
+def path_with_cli_dirs(path_value: str, *binaries: str) -> str:
+    """Prepend parent dirs of resolvable CLIs (and node for shebang scripts) onto PATH."""
+    parts = [part for part in path_value.split(os.pathsep) if part]
+    for binary in binaries:
+        located = shutil.which(binary, path=path_value) or shutil.which(binary)
+        if not located:
+            continue
+        directory = str(Path(located).resolve().parent)
+        if directory not in parts:
+            parts.insert(0, directory)
+    # node is required when claude/codex are Node shebang wrappers; seed even if
+    # the CLI itself was resolved via absolute path outside PATH.
+    for helper in ("node", "uv", "git"):
+        located = shutil.which(helper, path=path_value) or shutil.which(helper)
+        if not located:
+            continue
+        directory = str(Path(located).resolve().parent)
+        if directory not in parts:
+            parts.append(directory)
+    return os.pathsep.join(parts) if parts else path_value
+
+
+def enrich_eval_cli_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Copy env with PATH/CLI overrides hardened for model and MCP child processes."""
+    out = dict(env)
+    path = out.get("PATH") or os.environ.get("PATH") or "/usr/bin:/bin"
+    path = path_with_cli_dirs(path, "uv", "codex", "claude", "git", "node")
+    out["PATH"] = path
+    for name in ("uv", "codex", "claude"):
+        key = f"EVAL_CLI_{name.upper()}_BIN"
+        existing = out.get(key)
+        if existing:
+            continue
+        resolved = resolve_cli_executable(name, out)
+        if resolved != name and Path(resolved).is_file():
+            out[key] = resolved
+    return out
+
+
+def _absolute_executable(candidate: str) -> str | None:
+    try:
+        path = Path(candidate).expanduser()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        if path.is_file() and os.access(path, os.X_OK):
+            resolved = path.resolve()
+            if resolved.is_file() and os.access(resolved, os.X_OK):
+                return str(resolved)
+            return str(path if path.is_absolute() else path.absolute())
+    except OSError:
+        return None
+    return None
 
 
 def child_env_for_case(

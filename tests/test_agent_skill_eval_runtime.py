@@ -803,9 +803,13 @@ def test_non_router_execute_model_case_uses_provided_env_only(
         process_manager=manager,
     )
     assert record.status == "passed", record.error
-    assert captured["env"] is isolated
+    # Launch env is a hardened copy of the provided isolated env (PATH/CLI pins),
+    # not a reference to os.environ and not a mutated parent secret bag.
+    assert captured["env"] is not None
     assert captured["env"]["MARKER"] == "isolated-env-marker"
+    assert captured["env"]["HOME"] == isolated["HOME"]
     assert "OPENAI_API_KEY" not in captured["env"]
+    assert captured["env"].get("SAXO_MCP_ENVIRONMENT") == isolated["SAXO_MCP_ENVIRONMENT"]
 
 
 def test_router_client_versions_require_env_argument() -> None:

@@ -10,6 +10,9 @@ import pytest
 
 from saxo_bank_mcp.agent_skill_eval_commands import (
     claude_non_router_command,
+    enrich_eval_cli_env,
+    path_with_cli_dirs,
+    resolve_cli_executable,
     write_claude_sim_mcp_config,
 )
 from saxo_bank_mcp.agent_skill_eval_execution import (
@@ -795,6 +798,142 @@ def test_plan_only_case_passes_without_tool_calls() -> None:
     assert error == ""
 
 
+def test_resolve_cli_executable_prefers_existing_override_and_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bare-name fallback is last; absolute executable that still exists wins."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # Override wins even when PATH cannot see the binary.
+    resolved = resolve_cli_executable(
+        "claude",
+        {"PATH": "/usr/bin:/bin", "EVAL_CLI_CLAUDE_BIN": str(fake)},
+    )
+    assert resolved == str(fake.resolve())
+    # PATH search finds the binary.
+    via_path = resolve_cli_executable("claude", {"PATH": str(bin_dir)})
+    assert via_path == str(fake.resolve())
+    # Missing name stays bare so Popen can raise FileNotFoundError.
+    assert resolve_cli_executable("no-such-cli-xyz", {"PATH": "/usr/bin"}) == "no-such-cli-xyz"
+
+
+def test_path_with_cli_dirs_seeds_node_and_cli_parents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "cli"
+    bin_dir.mkdir()
+    for name in ("claude", "node", "uv"):
+        path = bin_dir / name
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    enriched = path_with_cli_dirs("/usr/bin", "claude")
+    assert str(bin_dir.resolve()) in enriched.split(":")
+    env = enrich_eval_cli_env({"PATH": "/usr/bin", "HOME": str(tmp_path)})
+    assert "PATH" in env
+    assert env.get("EVAL_CLI_CLAUDE_BIN", "").endswith("claude") or "claude" in env["PATH"]
+
+
+def test_process_manager_keeps_absolute_argv0_and_rejects_missing_cwd(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "tool"
+    script.write_text("#!/bin/sh\necho ran\n", encoding="utf-8")
+    script.chmod(0o755)
+    manager = EvalProcessManager()
+    result = manager.run(
+        (str(script.resolve()),),
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        timeout_seconds=5,
+    )
+    assert result.returncode == 0
+    assert "ran" in result.stdout
+    with pytest.raises(FileNotFoundError) as excinfo:
+        manager.run(
+            (str(script.resolve()),),
+            cwd=tmp_path / "missing-cwd",
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+            timeout_seconds=5,
+        )
+    assert "missing-cwd" in str(excinfo.value.filename)
+
+
+def test_execute_model_case_maps_missing_cwd_not_executable(
+    tmp_path: Path,
+) -> None:
+    case = _minimal_case(id="streaming-cleanup")
+    grants = resolve_tool_grants("claude", case.exact_tool_grants["claude"])
+    roots = HarnessRoots(
+        codex_plugin_root=tmp_path / "no-codex",
+        claude_plugin_root=tmp_path / "no-claude-plugin",
+        codex_home=tmp_path / "codex",
+        claude_home=tmp_path / "claude",
+    )
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "PATH": "/usr/bin:/bin",
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "0",
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "tmp").mkdir()
+    record = execute_model_case(
+        case,
+        "claude",
+        grants,
+        roots=roots,
+        env=env,
+    )
+    assert record.error == "cwd_not_found"
+    assert record.status == "failed"
+
+
+def test_lifecycle_prompt_and_skill_require_preview_place_cancel_ledger() -> None:
+    from saxo_bank_mcp.agent_skill_eval_models import load_eval_cases  # noqa: PLC0415
+
+    case = next(c for c in load_eval_cases() if c.id == "sim-order-lifecycle")
+    prompts = (
+        case.natural_prompt,
+        case.harness_prompts["codex"],
+        case.harness_prompts["claude"],
+    )
+    for prompt in prompts:
+        assert "saxo_create_order_preview" in prompt
+        assert "saxo_get_safe_request_ledger" in prompt
+        assert "always cancel" in prompt.lower() or "cancel once" in prompt.lower()
+        assert "saxo_place_order" in prompt or "saxo_place_sim_order" in prompt
+    skill = Path("skills/saxo-trading/SKILL.md").read_text(encoding="utf-8")
+    assert "saxo_create_order_preview" in skill
+    assert "always" in skill.lower()
+    assert "saxo_cancel_orders_by_instrument" in skill
+    assert "saxo_get_safe_request_ledger" in skill
+    # Codex dual-eval skip of preview alone must still fail closed.
+    missing_preview = _trace(
+        invoked=("saxo_call_registered_endpoint", "saxo_auth_status"),
+        assistant_text="SIM needs no human approval.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=missing_preview,
+            invoked_set=frozenset(missing_preview.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["codex"]),
+            assertions_passed=True,
+        )
+        == "required_tool_missing"
+    )
+
+
 def test_claude_keychain_seed_writes_owner_only_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -847,6 +986,7 @@ def test_claude_keychain_seed_writes_owner_only_credentials(
         "saxo_bank_mcp.agent_skill_matrix_env._export_claude_keychain_credentials",
         fake_export,
     )
+
     def _discover(_path: Path) -> str:
         return "SIMACCT01"
 

@@ -117,7 +117,7 @@ class DisposableCleanupError(ValueError):
         self.residual_paths = tuple(residual_paths)
 
 
-def build_isolated_env(  # noqa: C901
+def build_isolated_env(  # noqa: C901, PLR0912
     *,
     home: Path,
     codex_home: Path,
@@ -189,13 +189,27 @@ def build_isolated_env(  # noqa: C901
     if "PATH" not in env:
         env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     path_parts = env["PATH"].split(os.pathsep)
-    for binary in ("uv", "codex", "claude", "git"):
+    # node is required for Claude Code / some Codex Node shebang wrappers when
+    # the CLI is launched by absolute path and the shebang is `#!/usr/bin/env node`.
+    for binary in ("uv", "codex", "claude", "git", "node"):
         located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
         if located:
             directory = str(Path(located).resolve().parent)
             if directory not in path_parts:
                 path_parts.append(directory)
     env["PATH"] = os.pathsep.join(path_parts)
+    # Pin absolute CLI paths under a non-SAXO_ prefix so model children keep a
+    # stable argv0 without tripping parent-secret strip (SAXO_* is blocked).
+    for binary in ("uv", "codex", "claude"):
+        located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
+        if not located:
+            continue
+        try:
+            absolute = str(Path(located).resolve())
+        except OSError:
+            continue
+        if Path(absolute).is_file():
+            env[f"EVAL_CLI_{binary.upper()}_BIN"] = absolute
     if auth_targets:
         for key, target in auth_targets.items():
             resolved = target.resolve()
