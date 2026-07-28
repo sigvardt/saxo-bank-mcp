@@ -359,6 +359,113 @@ def test_lifecycle_case_requires_cancel_group_not_just_preview_and_ledger() -> N
         )
         == "required_tool_missing"
     )
+    # final-3aacee2 Claude path: place + repeated write previews + ledger, no cancel tool.
+    write_preview_only = _trace(
+        invoked=(
+            "saxo_list_registered_endpoints",
+            "saxo_call_registered_endpoint",
+            "saxo_create_order_preview",
+            "saxo_place_sim_order",
+            "saxo_create_write_preview",
+            "saxo_create_write_preview",
+            "saxo_create_write_preview",
+            "saxo_get_safe_request_ledger",
+        ),
+        assistant_text="SIM needs no human approval. cleanup attempted via write preview.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=write_preview_only,
+            invoked_set=frozenset(write_preview_only.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=True,
+        )
+        == "required_tool_missing"
+    )
+    for text in (
+        case.natural_prompt,
+        case.harness_prompts["claude"],
+        Path("skills/saxo-trading/SKILL.md").read_text(encoding="utf-8"),
+    ):
+        lowered = text.lower().replace("**", "")
+        assert "is not cancel" in lowered or "does not cancel" in lowered
+        assert (
+            "saxo_cancel_orders_by_instrument" in text
+            or "saxo_cancel_sim_orders_by_instrument" in text
+        )
+
+
+def test_streaming_cleanup_grants_auth_status_preflight() -> None:
+    """Codex final-3aacee2 failed out_of_grant_tool on legitimate saxo_auth_status preflight."""
+    from saxo_bank_mcp.agent_skill_eval_models import load_eval_cases  # noqa: PLC0415
+
+    case = next(c for c in load_eval_cases() if c.id == "streaming-cleanup")
+    for harness in ("codex", "claude"):
+        grants = frozenset(case.exact_tool_grants[harness])
+        assert "saxo_auth_status" in grants
+        assert "saxo_create_streaming_price_subscription" in grants
+        assert "saxo_cleanup_streaming_subscriptions" in grants
+    with_auth = _trace(
+        invoked=(
+            "saxo_auth_status",
+            "saxo_create_streaming_price_subscription",
+            "saxo_cleanup_streaming_subscriptions",
+        ),
+        assistant_text="SIM bounded stream cleanup complete.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=with_auth,
+            invoked_set=frozenset(with_auth.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["codex"]),
+            assertions_passed=transcript_passed(
+                case,
+                with_auth.assistant_text,
+                with_auth.invoked_logical_tools,
+            ),
+        )
+        == ""
+    )
+    # Auth remains optional: create+cleanup alone still pass.
+    no_auth = _trace(
+        invoked=(
+            "saxo_create_streaming_price_subscription",
+            "saxo_cleanup_streaming_subscriptions",
+        ),
+        assistant_text="SIM bounded stream cleanup complete.",
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=no_auth,
+            invoked_set=frozenset(no_auth.invoked_logical_tools),
+            grant_logical=frozenset(case.exact_tool_grants["claude"]),
+            assertions_passed=True,
+        )
+        == ""
+    )
+    # Without the grant, the same auth preflight must still fail closed.
+    narrow = frozenset(
+        (
+            "saxo_create_streaming_price_subscription",
+            "saxo_cleanup_streaming_subscriptions",
+        ),
+    )
+    assert (
+        non_router_error(
+            case=case,
+            trace=with_auth,
+            invoked_set=frozenset(with_auth.invoked_logical_tools),
+            grant_logical=narrow,
+            assertions_passed=True,
+        )
+        == "out_of_grant_tool"
+    )
+    skill = Path("skills/saxo-streaming/SKILL.md").read_text(encoding="utf-8")
+    assert "saxo_auth_status" in skill
+    assert "optional" in skill.lower() or "preflight" in skill.lower()
 
 
 def test_transcript_tool_names_satisfied_by_invoked_tools() -> None:
@@ -946,12 +1053,17 @@ def test_lifecycle_prompt_and_skill_require_preview_place_cancel_ledger() -> Non
         assert "saxo_place_order" in prompt or "saxo_place_sim_order" in prompt
         assert "SIM needs no human approval" in prompt
         assert "final answer must include exactly" in prompt.lower()
+        lowered = prompt.lower()
+        assert "not cancel" in lowered
+        assert "saxo_cancel_orders_by_instrument" in prompt
+        assert "saxo_cancel_sim_orders_by_instrument" in prompt
     skill = Path("skills/saxo-trading/SKILL.md").read_text(encoding="utf-8")
     assert "saxo_create_order_preview" in skill
     assert "always" in skill.lower()
     assert "saxo_cancel_orders_by_instrument" in skill
     assert "saxo_get_safe_request_ledger" in skill
     assert "Lifecycle close-out" in skill
+    assert "does not cancel" in skill.lower().replace("**", "")
     # Codex dual-eval skip of preview alone must still fail closed.
     missing_preview = _trace(
         invoked=("saxo_call_registered_endpoint", "saxo_auth_status"),

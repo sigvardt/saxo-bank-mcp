@@ -15,6 +15,7 @@ For Claude, invoke this skill as `/saxo-bank-mcp:saxo-streaming`.
 
 Use logical tool IDs only:
 
+- `saxo_auth_status` (optional SIM preflight: local cache/config only; no secrets in chat)
 - `saxo_create_streaming_price_subscription`
 - `saxo_cleanup_streaming_subscriptions`
 
@@ -61,14 +62,15 @@ Switch to execution only after the user explicitly asks to run a step and gives 
 
 Use this order for execution:
 
-1. Choose synthetic IDs. Use non-secret `context_id` and `reference_id` values, max 50 characters, using letters, digits, `_`, or `-`. Do not start `reference_id` with `_`.
-2. Keep limits visible. State Saxo's declared limits: 4 simultaneous streaming connections and 200 price instruments.
-3. Create the SIM price subscription with `saxo_create_streaming_price_subscription`.
-4. Inspect the structured result.
-5. Treat `completed` plus `streaming_completion_claim_allowed=true` as the only successful stream completion condition.
-6. Treat `control_only_no_data`, `incomplete_no_frame`, `http_error` after a partial create, or interruption after create as cleanup-required.
-7. Always run `saxo_cleanup_streaming_subscriptions` for the same context after any create path that records or may record a subscription.
-8. Report cleanup proof exactly. Local closure means local registry counts reached zero. Remote proof is not available unless the tool explicitly says `remote_cleanup_confirmed=true`; current runtime does not confirm remote deletion.
+1. Optional: call `saxo_auth_status` once as local SIM preflight when session readiness is unclear. It is local-only and does not replace create or cleanup.
+2. Choose synthetic IDs. Use non-secret `context_id` and `reference_id` values, max 50 characters, using letters, digits, `_`, or `-`. Do not start `reference_id` with `_`.
+3. Keep limits visible. State Saxo's declared limits: 4 simultaneous streaming connections and 200 price instruments.
+4. Create the SIM price subscription with `saxo_create_streaming_price_subscription`.
+5. Inspect the structured result.
+6. Treat `completed` plus `streaming_completion_claim_allowed=true` as the only successful stream completion condition.
+7. Treat `control_only_no_data`, `incomplete_no_frame`, `http_error` after a partial create, or interruption after create as cleanup-required.
+8. Always run `saxo_cleanup_streaming_subscriptions` for the same context after any create path that records or may record a subscription.
+9. Report cleanup proof exactly. Local closure means local registry counts reached zero. Remote proof is not available unless the tool explicitly says `remote_cleanup_confirmed=true`; current runtime does not confirm remote deletion.
 
 ## Result interpretation
 

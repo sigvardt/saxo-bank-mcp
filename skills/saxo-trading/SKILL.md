@@ -98,12 +98,14 @@ Required tool order (every name below is mandatory unless a listed alternate is 
 1. `saxo_list_registered_endpoints` then `saxo_call_registered_endpoint` for `GET /port/v1/accounts/me`. Put `SafeAccountSelector` into `order_body.AccountKey` (never invent a raw AccountKey).
 2. `saxo_create_order_preview` with single-stock limit keys: AccountKey (selector), Uic, AssetType, Amount, BuySell, OrderType, OrderPrice, OrderDuration.DurationType DayOrder. The tool adds precheck-only ManualOrder=false and FieldGroups.
 3. Place once: `saxo_place_order` or `saxo_place_sim_order` with that preview token.
-4. Cancel once for cleanup (always, even when outer place status is `completed` or `completed_unverified`): prefer place response `safe_cancel_by_instrument.write_preview_arguments` passed unchanged into `saxo_create_write_preview`, then one of `saxo_cancel_orders_by_instrument` or `saxo_cancel_sim_orders_by_instrument`. If that cleanup blob is missing, still create a cancel-by-instrument write preview from the known UIC/account selectors and cancel once. Do not invent OrderId or risk fields.
-5. `saxo_get_safe_request_ledger` last (after preview, place, and cancel have each been called).
+4. Cancel once for cleanup as its own tool call (always, even when outer place status is `completed` or `completed_unverified`, and even when readback shows no open order). Preferred path: place response `safe_cancel_by_instrument.write_preview_arguments` unchanged into `saxo_create_write_preview`, then immediately call one of `saxo_cancel_orders_by_instrument` or `saxo_cancel_sim_orders_by_instrument` with that preview token. If the cleanup blob is missing, still create a cancel-by-instrument write preview from the known UIC/account selectors and then call a cancel tool once. Do not invent OrderId or risk fields.
+5. `saxo_get_safe_request_ledger` last (after preview, place, and a cancel tool have each been called).
+
+Hard rule: `saxo_create_write_preview` is only the cancel authorization step. It does **not** cancel. Repeating write previews or registered reads without a `saxo_cancel_*` / `saxo_cancel_sim_*` / `saxo_cancel_orders_by_instrument` / `saxo_cancel_sim_orders_by_instrument` tool call fails the lifecycle. Ledger after place without cancel also fails.
 
 Do not finish after ledger alone if place or cancel was never called. Do not skip `saxo_create_order_preview`. Do not answer disclaimers in LIVE; treat SIM disclaimer blockers as blockers without inventing disclaimer context.
 
-Lifecycle close-out (mandatory): after the five tool steps above, your final user-facing answer must include the exact sentence `SIM needs no human approval.` and must mention cleanup or cancel (tool invocation of a cancel tool also satisfies the cleanup mention).
+Lifecycle close-out (mandatory): after the five tool steps above (including a real cancel tool call), your final user-facing answer must include the exact sentence `SIM needs no human approval.` and must mention cleanup or cancel.
 
 ## Result handling
 

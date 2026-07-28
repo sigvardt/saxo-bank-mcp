@@ -7,10 +7,10 @@
     "positive"
   ],
   "environment": "SIM",
-  "natural_prompt": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Do not claim remote deletion unless the tool proves it.",
+  "natural_prompt": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it.",
   "harness_prompts": {
-    "codex": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Do not claim remote deletion unless the tool proves it.",
-    "claude": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Do not claim remote deletion unless the tool proves it."
+    "codex": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it.",
+    "claude": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it."
   },
   "expected_skill": "saxo-streaming",
   "required_logical_tools": [
@@ -23,10 +23,12 @@
   ],
   "exact_tool_grants": {
     "codex": [
+      "saxo_auth_status",
       "saxo_create_streaming_price_subscription",
       "saxo_cleanup_streaming_subscriptions"
     ],
     "claude": [
+      "saxo_auth_status",
       "saxo_create_streaming_price_subscription",
       "saxo_cleanup_streaming_subscriptions"
     ]
