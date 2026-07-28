@@ -110,8 +110,8 @@ def test_exact_tool_permission_resolution_has_no_wildcards() -> None:
     grants = resolve_tool_grants("claude", ("saxo_health", "saxo_auth_status"))
 
     assert grants == (
-        "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_auth_status",
-        "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_health",
+        "mcp__saxo-bank-mcp__saxo_auth_status",
+        "mcp__saxo-bank-mcp__saxo_health",
     )
     assert all("*" not in grant for grant in grants)
 

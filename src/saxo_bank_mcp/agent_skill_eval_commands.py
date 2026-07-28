@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import json
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Final
 
@@ -17,15 +18,31 @@ SAXO_CODEX_MCP_SERVER_NAMES: Final = frozenset(
         "plugin_saxo_bank_mcp_saxo_bank_mcp",
     },
 )
+CLAUDE_STDIO_SERVER_NAME: Final = "saxo-bank-mcp"
+_SIM_ENV_KEYS: Final = (
+    "SAXO_MCP_ENVIRONMENT",
+    "SAXO_MCP_ENABLE_LIVE_READS",
+    "SAXO_MCP_ENABLE_LIVE_WRITES",
+    "SAXO_MCP_SIM_CREDENTIAL_FILE",
+    "SAXO_MCP_SIM_REDIRECT_URI",
+    "SAXO_MCP_TOKEN_CACHE_PATH",
+    "SAXO_MCP_SIM_AUTH_URL",
+    "SAXO_MCP_SIM_TOKEN_URL",
+    "PATH",
+    "HOME",
+    "UV_CACHE_DIR",
+    "UV_PROJECT_ENVIRONMENT",
+)
 
 
-def non_router_model_command(
+def non_router_model_command(  # noqa: PLR0913
     *,
     harness: Harness,
     prompt: str,
     resolved_grants: tuple[str, ...],
     plugin_root: Path,
     codex_home: Path | None,
+    claude_mcp_config_path: Path | None = None,
 ) -> tuple[str, ...]:
     match harness:
         case "codex":
@@ -35,9 +52,12 @@ def non_router_model_command(
                 codex_home=codex_home,
             )
         case "claude":
+            if claude_mcp_config_path is None:
+                msg = "claude_mcp_config_path_required"
+                raise ValueError(msg)
             return claude_non_router_command(
                 prompt,
-                plugin_root=plugin_root,
+                mcp_config_path=claude_mcp_config_path,
                 resolved_grants=resolved_grants,
             )
 
@@ -85,22 +105,21 @@ def codex_non_router_command(
 def claude_non_router_command(
     prompt: str,
     *,
-    plugin_root: Path,
+    mcp_config_path: Path,
     resolved_grants: tuple[str, ...],
 ) -> tuple[str, ...]:
-    """Claude SIM non-router: exact allowedTools only, no builtins, autonomous granted tools."""
+    """Claude 2.x SIM non-router: strict mcp-config + exact allowedTools only."""
     allowed = ",".join(resolved_grants)
     return (
         "claude",
-        "--plugin-dir",
-        str(plugin_root),
         "--no-session-persistence",
         "--no-chrome",
         "--disable-slash-commands",
         "--permission-mode",
         "bypassPermissions",
-        "--tools",
-        "",
+        "--mcp-config",
+        str(mcp_config_path),
+        "--strict-mcp-config",
         "--allowedTools",
         allowed,
         "--output-format",
@@ -109,6 +128,41 @@ def claude_non_router_command(
         "--print",
         prompt,
     )
+
+
+def write_claude_sim_mcp_config(
+    *,
+    plugin_root: Path,
+    dest: Path,
+    env: Mapping[str, str],
+) -> Path:
+    """Write owner-only Claude mcp-config for the installed Saxo stdio server."""
+    plugin = plugin_root.resolve()
+    server_env = {key: env[key] for key in _SIM_ENV_KEYS if key in env and env[key] != ""}
+    # Preserve explicit empty LIVE writes disablement.
+    if "SAXO_MCP_ENABLE_LIVE_WRITES" in env:
+        server_env["SAXO_MCP_ENABLE_LIVE_WRITES"] = env["SAXO_MCP_ENABLE_LIVE_WRITES"]
+    payload = {
+        "mcpServers": {
+            CLAUDE_STDIO_SERVER_NAME: {
+                "command": "uv",
+                "args": [
+                    "run",
+                    "--project",
+                    str(plugin),
+                    "saxo-bank-mcp",
+                    "--transport",
+                    "stdio",
+                ],
+                "cwd": str(plugin),
+                "env": server_env,
+            }
+        }
+    }
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    dest.chmod(0o600)
+    return dest
 
 
 def child_env_for_case(

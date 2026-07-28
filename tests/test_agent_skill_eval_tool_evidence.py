@@ -255,12 +255,14 @@ def test_non_router_command_shape_is_used(
         process_manager=EvalProcessManager(),
     )
 
-    # Then: the command is autonomous stream-json with exact grants and no builtins.
+    # Then: the command is autonomous stream-json with strict mcp-config and exact grants.
     command = captured["command"]
     assert command[0] == "claude"
     assert "--permission-mode" in command
     assert "bypassPermissions" in command
     assert "plan" not in command
     assert "stream-json" in command
-    assert command[command.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in command
+    assert "--mcp-config" in command
+    assert "--tools" not in command
     assert "*" not in command[command.index("--allowedTools") + 1]

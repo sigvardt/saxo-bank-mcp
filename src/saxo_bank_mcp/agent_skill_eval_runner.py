@@ -687,7 +687,8 @@ def resolve_tool_grants(harness: Harness, logical_tools: Iterable[str]) -> tuple
         case "codex":
             return tuple(f"mcp__saxo_bank_mcp__{tool}" for tool in tools)
         case "claude":
-            return tuple(f"mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__{tool}" for tool in tools)
+            # Claude 2.x stdio MCP config uses server name saxo-bank-mcp.
+            return tuple(f"mcp__saxo-bank-mcp__{tool}" for tool in tools)
 
 
 def global_state_fingerprint(

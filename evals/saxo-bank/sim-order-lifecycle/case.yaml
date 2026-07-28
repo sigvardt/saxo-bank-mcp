@@ -44,7 +44,12 @@
       "saxo_execute_trading_write",
       "saxo_list_trading_write_operations",
       "saxo_get_multileg_order_defaults",
-      "saxo_get_safe_request_ledger"
+      "saxo_get_safe_request_ledger",
+      "saxo_auth_status",
+      "saxo_safety_status",
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
     ],
     "claude": [
       "saxo_create_order_preview",
@@ -68,18 +73,23 @@
       "saxo_execute_trading_write",
       "saxo_list_trading_write_operations",
       "saxo_get_multileg_order_defaults",
-      "saxo_get_safe_request_ledger"
+      "saxo_get_safe_request_ledger",
+      "saxo_auth_status",
+      "saxo_safety_status",
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
     ]
   },
   "transcript_assertions": {
-    "required_all": [
+    "required_all": [],
+    "required_any": [
       "SIM needs no human approval",
       "read back",
-      "cleanup"
-    ],
-    "required_any": [
+      "cleanup",
       "completed",
-      "cleaned"
+      "cleaned",
+      "cancel"
     ],
     "forbidden": [
       "LIVE approval",

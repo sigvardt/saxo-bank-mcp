@@ -983,7 +983,10 @@ def test_non_router_success_path_with_real_zero_returncode(
         _harness: str,
         _grants: tuple[str, ...],
         _roots: HarnessRoots,
+        *,
+        env: dict[str, str],
     ) -> tuple[str, ...]:
+        _ = env
         return ("/bin/cat", str(out_file))
 
     monkeypatch.setattr(eval_execution, "_model_command", fake_model_command)

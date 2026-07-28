@@ -27,6 +27,16 @@ CLAUDE_COMMAND_TOOLS: Final = frozenset(
 CLAUDE_PROTOCOL_TOOLS: Final = frozenset({"structuredoutput"})
 CODEX_HARNESS_PREFIX: Final = "mcp__saxo_bank_mcp__"
 CLAUDE_HARNESS_PREFIX: Final = "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__"
+CLAUDE_STDIO_HARNESS_PREFIX: Final = "mcp__saxo-bank-mcp__"
+# Claude 2.x discovery helpers (not shell/files and not foreign MCP servers).
+CLAUDE_DISCOVERY_TOOLS: Final = frozenset(
+    {
+        "toolsearch",
+        "listmcpresourcestool",
+        "listmcpresources",
+        "readmcpresourcetool",
+    },
+)
 # Known installed-plugin / stdio server ids for Saxo MCP (not foreign MCPs).
 SAXO_MCP_SERVER_MARKERS: Final = frozenset(
     {
@@ -191,7 +201,11 @@ def normalize_logical_tool_name(raw: str, *, harness: HarnessName) -> str | None
 
 
 def _strip_known_mcp_prefix(name: str) -> str | None:
-    for prefix in (CODEX_HARNESS_PREFIX, CLAUDE_HARNESS_PREFIX):
+    for prefix in (
+        CODEX_HARNESS_PREFIX,
+        CLAUDE_HARNESS_PREFIX,
+        CLAUDE_STDIO_HARNESS_PREFIX,
+    ):
         if name.startswith(prefix):
             return name.removeprefix(prefix)
     return None
@@ -204,6 +218,8 @@ def logical_tools_from_grants(grants: tuple[str, ...]) -> tuple[str, ...]:
     for grant in grants:
         if grant.startswith(CLAUDE_HARNESS_PREFIX):
             logical = grant.removeprefix(CLAUDE_HARNESS_PREFIX)
+        elif grant.startswith(CLAUDE_STDIO_HARNESS_PREFIX):
+            logical = grant.removeprefix(CLAUDE_STDIO_HARNESS_PREFIX)
         elif grant.startswith(CODEX_HARNESS_PREFIX):
             logical = grant.removeprefix(CODEX_HARNESS_PREFIX)
         elif grant.startswith("mcp__") and "__" in grant:
@@ -289,23 +305,47 @@ def _codex_mcp_classification(item: _CodexItem) -> str:
     server = item.server.strip()
     tool = (item.tool or "").strip()
     name = (item.name or "").strip()
-    if _is_saxo_mcp_server(server):
-        if tool.lower() in SAXO_SERVER_PROTOCOL_TOOLS or name.lower() in SAXO_SERVER_PROTOCOL_TOOLS:
-            return "saxo_protocol"
-        # Unknown tool on a Saxo server is still not a foreign MCP server.
-        # Leave it as protocol noise so out-of-grant is enforced via grants, not side-channel.
-        if not tool and not name:
-            return "saxo_protocol"
-        if "saxo" in f"{tool} {name}".lower():
-            return "saxo_protocol"
+    if not server and not tool and not name:
+        # Empty MCP wrapper rows are harness noise, not a foreign server.
+        return "saxo_protocol"
+    if _is_saxo_mcp_server(server) or _is_saxo_mcp_qualified_name(tool, name):
+        # Saxo server wrapper/protocol noise is not a foreign MCP. Real tools still
+        # grade via logical invocation + exact grants; unknown servers stay fail-closed.
         return "saxo_protocol"
     return "non_saxo"
+
+
+def _is_saxo_mcp_qualified_name(*candidates: str) -> bool:
+    """Return True when tool/name carries a known Saxo MCP prefix or markers."""
+    for candidate in candidates:
+        text = candidate.strip()
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(
+            lowered.startswith(prefix)
+            for prefix in (
+                CODEX_HARNESS_PREFIX,
+                CLAUDE_HARNESS_PREFIX,
+                CLAUDE_STDIO_HARNESS_PREFIX,
+            )
+        ):
+            return True
+        if "saxo" in lowered and "mcp" in lowered:
+            return True
+        bare = text.rsplit("__", 1)[-1].lower() if "__" in text else lowered
+        if bare in SAXO_SERVER_PROTOCOL_TOOLS and "saxo" in lowered:
+            return True
+    return False
 
 
 def _classify_claude_tool(name: str, counts: _EventCounts, order: list[str]) -> None:
     lowered = name.lower()
     if lowered in CLAUDE_COMMAND_TOOLS:
         counts.command += 1
+        return
+    if lowered in CLAUDE_DISCOVERY_TOOLS:
+        # Discovery helpers are protocol noise, not foreign MCP/shell.
         return
     if name.startswith("mcp__") or lowered.startswith("mcp__"):
         counts.mcp += 1

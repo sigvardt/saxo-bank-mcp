@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from saxo_bank_mcp.agent_skill_eval_commands import non_router_model_command
+from saxo_bank_mcp.agent_skill_eval_commands import (
+    non_router_model_command,
+    write_claude_sim_mcp_config,
+)
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, Harness, SkillEvalCase
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_tool_protocol import (
@@ -67,7 +70,7 @@ def _execute_non_router_case(  # noqa: PLR0913
     env: dict[str, str],
     manager: EvalProcessManager,
 ) -> EvalRunRecord:
-    command = _model_command(case, harness, grants, roots)
+    command = _model_command(case, harness, grants, roots, env=env)
     plugin_cwd = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
     try:
         result = manager.run(
@@ -86,14 +89,25 @@ def _model_command(
     harness: Harness,
     grants: tuple[str, ...],
     roots: HarnessRoots,
+    *,
+    env: dict[str, str],
 ) -> tuple[str, ...]:
     plugin_root = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
+    claude_mcp_config_path = None
+    if harness == "claude":
+        tmp = Path(env.get("TMPDIR") or env.get("HOME") or ".")
+        claude_mcp_config_path = write_claude_sim_mcp_config(
+            plugin_root=plugin_root,
+            dest=tmp / f"claude-mcp-{case.id}.json",
+            env=env,
+        )
     return non_router_model_command(
         harness=harness,
         prompt=case.harness_prompts[harness],
         resolved_grants=grants,
         plugin_root=plugin_root,
         codex_home=roots.codex_home,
+        claude_mcp_config_path=claude_mcp_config_path,
     )
 
 

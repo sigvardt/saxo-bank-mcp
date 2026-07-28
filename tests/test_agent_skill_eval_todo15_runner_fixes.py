@@ -8,10 +8,16 @@ from typing import Final
 
 import pytest
 
+from saxo_bank_mcp.agent_skill_eval_commands import (
+    claude_non_router_command,
+    write_claude_sim_mcp_config,
+)
 from saxo_bank_mcp.agent_skill_eval_execution import non_router_error, transcript_passed
 from saxo_bank_mcp.agent_skill_eval_models import SkillEvalCase
+from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
 from saxo_bank_mcp.agent_skill_eval_tool_protocol import (
     ModelToolTrace,
+    logical_tools_from_grants,
     parse_claude_model_output,
     parse_codex_model_output,
 )
@@ -313,6 +319,161 @@ def test_required_tool_groups_need_one_member_each() -> None:
         )
         == "required_tool_missing"
     )
+
+
+def test_codex_empty_server_saxo_prefixed_protocol_is_not_foreign() -> None:
+    """Codex sometimes omits server while emitting Saxo MCP protocol names."""
+    stream = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "p1",
+                        "type": "mcp_tool_call",
+                        "server": "",
+                        "tool": "",
+                        "name": "mcp__saxo_bank_mcp__list_tools",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "p2",
+                        "type": "mcp_tool_call",
+                        "server": "",
+                        "tool": "list_resources",
+                        "name": "mcp__saxo_bank_mcp__",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "foreign",
+                        "type": "mcp_tool_call",
+                        "server": "filesystem",
+                        "tool": "read_file",
+                    },
+                },
+            ),
+        ),
+    )
+    trace = parse_codex_model_output(stream)
+    assert trace.invoked_logical_tools == ()
+    assert trace.non_saxo_mcp_event_count == 1
+    assert trace.parse_error == "non_saxo_mcp_event"
+    assert trace.mcp_event_count == len(stream.splitlines())
+
+
+def test_claude_discovery_tools_are_protocol_noise() -> None:
+    stream = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {"type": "tool_use", "id": "d1", "name": "ToolSearch"},
+                            {
+                                "type": "tool_use",
+                                "id": "d2",
+                                "name": "ListMcpResourcesTool",
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "t1",
+                                "name": "mcp__saxo-bank-mcp__saxo_auth_status",
+                            },
+                        ],
+                    },
+                },
+            ),
+            json.dumps({"type": "result", "result": "auth ok"}),
+        ),
+    )
+    trace = parse_claude_model_output(stream)
+    assert trace.invoked_logical_tools == ("saxo_auth_status",)
+    assert trace.non_saxo_mcp_event_count == 0
+    assert trace.command_event_count == 0
+    assert trace.parse_error == ""
+
+
+def test_claude_stdio_grants_and_mcp_config_shape(tmp_path: Path) -> None:
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    dest = tmp_path / "run" / "claude-mcp.json"
+    env = {
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "0",
+        "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token.json"),
+        "HOME": str(tmp_path / "home"),
+        "PATH": "/usr/bin",
+    }
+    path = write_claude_sim_mcp_config(plugin_root=plugin, dest=dest, env=env)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    server = payload["mcpServers"]["saxo-bank-mcp"]
+    assert server["command"] == "uv"
+    assert server["args"][:2] == ["run", "--project"]
+    assert server["env"]["SAXO_MCP_ENVIRONMENT"] == "SIM"
+    assert server["env"]["SAXO_MCP_ENABLE_LIVE_WRITES"] == "0"
+
+    grants = resolve_tool_grants("claude", ("saxo_auth_status", "saxo_health"))
+    assert grants == (
+        "mcp__saxo-bank-mcp__saxo_auth_status",
+        "mcp__saxo-bank-mcp__saxo_health",
+    )
+    assert logical_tools_from_grants(grants) == ("saxo_auth_status", "saxo_health")
+    command = claude_non_router_command(
+        "prompt",
+        mcp_config_path=path,
+        resolved_grants=grants,
+    )
+    assert "--plugin-dir" not in command
+    assert "--tools" not in command
+    assert "--strict-mcp-config" in command
+    assert command[command.index("--mcp-config") + 1] == str(path)
+    assert command[command.index("--allowedTools") + 1] == ",".join(grants)
+
+
+def test_plan_only_case_passes_without_tool_calls() -> None:
+    case = _minimal_case(
+        id="unknown-outcome",
+        required_logical_tools=(),
+        required_tool_groups=(),
+        exact_tool_grants={
+            "codex": (
+                "saxo_get_safe_request_ledger",
+                "saxo_call_registered_endpoint",
+                "saxo_safety_status",
+            ),
+            "claude": (
+                "saxo_get_safe_request_ledger",
+                "saxo_call_registered_endpoint",
+                "saxo_safety_status",
+            ),
+        },
+        transcript_assertions={
+            "required_all": (),
+            "required_any": ("unknown", "readback", "reconcile before retry"),
+            "forbidden": ("retry immediately",),
+        },
+    )
+    trace = _trace(
+        assistant_text="Outcome is unknown. Reconcile before retry with concrete readback.",
+    )
+    error = non_router_error(
+        case=case,
+        trace=trace,
+        invoked_set=frozenset(),
+        grant_logical=frozenset(case.exact_tool_grants["codex"]),
+        assertions_passed=transcript_passed(case, trace.assistant_text, ()),
+    )
+    assert error == ""
 
 
 def test_claude_keychain_seed_writes_owner_only_credentials(

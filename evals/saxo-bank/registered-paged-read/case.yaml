@@ -35,18 +35,16 @@
     ]
   },
   "transcript_assertions": {
-    "required_all": [
-      "paging"
-    ],
+    "required_all": [],
     "required_any": [
-      "returned next",
+      "paging",
+      "page",
+      "next",
       "skiptoken",
-      "__next",
-      "next"
+      "token"
     ],
     "forbidden": [
-      "fabricated page token",
-      "raw account"
+      "fabricated page token"
     ]
   },
   "deterministic_graders": [

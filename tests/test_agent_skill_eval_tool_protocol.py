@@ -251,15 +251,17 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     grants = (
-        "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_health",
-        "mcp__plugin_saxo_bank_mcp_saxo_bank_mcp__saxo_auth_status",
+        "mcp__saxo-bank-mcp__saxo_auth_status",
+        "mcp__saxo-bank-mcp__saxo_health",
     )
+    mcp_config = tmp_path / "claude-mcp.json"
+    mcp_config.write_text("{}", encoding="utf-8")
 
     # When: both non-router commands are built.
     codex = codex_non_router_command("prompt", plugin_root=plugin, codex_home=codex_home)
     claude = claude_non_router_command(
         "prompt",
-        plugin_root=plugin,
+        mcp_config_path=mcp_config,
         resolved_grants=grants,
     )
 
@@ -275,12 +277,14 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
     assert "mcp_servers.saxo_bank_mcp.enabled=false" not in codex
     assert "*" not in " ".join(codex)
 
-    # Then: Claude has exact allowedTools only, no builtins, autonomous SIM permission mode.
+    # Then: Claude uses strict mcp-config + exact allowedTools (no empty --tools disablement).
     assert (
         claude[claude.index("--permission-mode")],
         claude[claude.index("--permission-mode") + 1],
     ) == ("--permission-mode", "bypassPermissions")
-    assert (claude[claude.index("--tools")], claude[claude.index("--tools") + 1]) == ("--tools", "")
+    assert "--strict-mcp-config" in claude
+    assert claude[claude.index("--mcp-config") + 1] == str(mcp_config)
+    assert "--tools" not in claude
     allowed = claude[claude.index("--allowedTools") + 1]
     assert allowed == ",".join(grants)
     assert "*" not in allowed
