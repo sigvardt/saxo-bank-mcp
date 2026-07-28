@@ -137,6 +137,7 @@ class MatrixPlanOptions:
     install_report: Path
     fixtures: SimFixtureOptions
     out: Path
+    expected_source_commit: str | None = None
 
 
 def build_manifest_matrix_report(options: MatrixPlanOptions) -> int:

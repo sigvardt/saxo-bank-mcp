@@ -17,6 +17,7 @@ from test_agent_skill_evidence_support import (
 )
 
 import saxo_bank_mcp.agent_skill_matrix_producer as matrix_producer
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
@@ -303,14 +304,12 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     )
 
 
-def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
-    tmp_path: Path,
-    installed_report: InstallFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    out = tmp_path / "tool-matrix.json"
-    names = sorted(json.loads(SCENARIO_MANIFEST.read_text(encoding="utf-8"))["scenarios"], key=lambda row: row["tool"])
-    tool_names = [row["tool"] for row in names]
+def _scenario_tool_names() -> list[str]:
+    scenarios = json.loads(SCENARIO_MANIFEST.read_text(encoding="utf-8"))["scenarios"]
+    return sorted(row["tool"] for row in scenarios)
+
+
+def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
     state = {
         "open_orders": {"count": 0, "ids_digest": "a" * 64},
         "positions_money": {"fingerprint": "account_bound"},
@@ -318,6 +317,49 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
         "preview_write_state": {"fingerprint": "reset"},
     }
     non_exec = {"saxo_list_live_accounts", "saxo_precheck_live_order"}
+    return {
+        "status": "passed",
+        "environment": "SIM",
+        "reason": "",
+        "tool_receipts": [
+            {
+                "tool": tool,
+                "status": "expected_refusal" if tool in non_exec else "completed",
+                "mcp_call_observed": True,
+                "result_parsed": True,
+                "skipped": False,
+                "requested_tool_covered": True,
+                "network_call_made": False,
+                "hosts": ["gateway.saxobank.com"],
+                "request_digest": "b" * 64,
+                "response_digest": "c" * 64,
+                "call_path": "fastmcp.Client.call_tool",
+            }
+            for tool in tool_names
+        ],
+        "lifecycle_calls": list(LIFECYCLE_TOOLS),
+        "registered_trading_write_ops": ["post.trade.v2.orders"],
+        "disclaimer_response_completed": True,
+        "fixture_reference_validated": True,
+        "account_allowlist_resolved": True,
+        "auth_status_completed": True,
+        "session_capabilities_completed": True,
+        "before_state_fingerprint": state,
+        "after_state_fingerprint": state,
+        "uncleaned_resources": 0,
+        "hosts": ["gateway.saxobank.com"],
+        "live_events": 0,
+        "errors": [],
+    }
+
+
+def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "tool-matrix.json"
+    tool_names = _scenario_tool_names()
 
     def run_sim_probe(
         cache: Path,
@@ -327,40 +369,7 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
         _ = cache
         _ = options
         receipt_out = receipt_dir / "sim-tool-matrix.json"
-        payload = {
-            "status": "passed",
-            "environment": "SIM",
-            "reason": "",
-            "tool_receipts": [
-                {
-                    "tool": tool,
-                    "status": "expected_refusal" if tool in non_exec else "completed",
-                    "mcp_call_observed": True,
-                    "result_parsed": True,
-                    "skipped": False,
-                    "requested_tool_covered": True,
-                    "network_call_made": False,
-                    "hosts": ["gateway.saxobank.com"],
-                    "request_digest": "b" * 64,
-                    "response_digest": "c" * 64,
-                }
-                for tool in tool_names
-            ],
-            "lifecycle_calls": list(LIFECYCLE_TOOLS),
-            "registered_trading_write_ops": ["post.trade.v2.orders"],
-            "disclaimer_response_completed": True,
-            "fixture_reference_validated": True,
-            "account_allowlist_resolved": True,
-            "auth_status_completed": True,
-            "session_capabilities_completed": True,
-            "before_state_fingerprint": state,
-            "after_state_fingerprint": state,
-            "uncleaned_resources": 0,
-            "hosts": ["gateway.saxobank.com"],
-            "live_events": 0,
-            "errors": [],
-        }
-        write_json(receipt_out, payload)
+        write_json(receipt_out, _passed_matrix_payload(tool_names))
         return run_command(
             "probe_sim_tool_matrix",
             (sys.executable, "-c", "print('ok')"),
@@ -387,6 +396,7 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
                 stream_uic="21",
             ),
             out=out,
+            expected_source_commit=installed_report.commit,
         ),
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
@@ -404,6 +414,94 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     assert payload["cleanup"]["uncleaned_resources"] == 0
     assert payload["before_state_fingerprint"] == payload["after_state_fingerprint"]
     assert (out.parent / "probe-receipts" / "sim-tool-matrix.json").is_file()
+
+
+def test_matrix_rejects_stale_install_commit(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+) -> None:
+    out = tmp_path / "stale-matrix.json"
+    result = run_real_matrix_report(
+        MatrixPlanOptions(
+            manifest=SCENARIO_MANIFEST,
+            environment="SIM",
+            require_tools=EXPECTED_TOOL_CALLS,
+            install_report=installed_report.report,
+            fixtures=SimFixtureOptions(
+                stock_uic="211",
+                amount="1",
+                limit_price="50",
+                modified_limit_price="51",
+                option_uics="30004846,30004926",
+                stream_uic="21",
+            ),
+            out=out,
+            expected_source_commit="0" * 40,
+        ),
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert result != 0
+    assert payload["reason"] == "install_candidate_commit_mismatch"
+
+
+def test_matrix_rejects_missing_tool_receipt_without_fill(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out = tmp_path / "missing-tool.json"
+    tool_names = _scenario_tool_names()
+    incomplete = _passed_matrix_payload(tool_names)
+    tool_receipts = incomplete["tool_receipts"]
+    assert isinstance(tool_receipts, list)
+    incomplete["tool_receipts"] = tool_receipts[:-1]
+    incomplete["status"] = "failed"
+    missing_error = f"missing_tool_receipt:{tool_names[-1]}"
+    incomplete["errors"] = [missing_error]
+    incomplete["reason"] = missing_error
+
+    def run_sim_probe(
+        cache: Path,
+        receipt_dir: Path,
+        options: MatrixPlanOptions,
+    ) -> CommandResult:
+        _ = cache
+        _ = options
+        write_json(receipt_dir / "sim-tool-matrix.json", incomplete)
+        return run_command(
+            "probe_sim_tool_matrix",
+            (sys.executable, "-c", "print('ok')"),
+            cwd=ROOT,
+            env={
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", str(tmp_path)),
+            },
+        )
+
+    monkeypatch.setattr(matrix_producer, "_run_sim_matrix_probe", run_sim_probe)
+    result = run_real_matrix_report(
+        MatrixPlanOptions(
+            manifest=SCENARIO_MANIFEST,
+            environment="SIM",
+            require_tools=EXPECTED_TOOL_CALLS,
+            install_report=installed_report.report,
+            fixtures=SimFixtureOptions(
+                stock_uic="211",
+                amount="1",
+                limit_price="50",
+                modified_limit_price="51",
+                option_uics="30004846,30004926",
+                stream_uic="21",
+            ),
+            out=out,
+            expected_source_commit=installed_report.commit,
+        ),
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert result != 0
+    assert payload["status"] == "failed"
+    assert "missing_tool_receipt" in payload["reason"]
+    assert "tool_calls" not in payload
 
 
 def test_matrix_rejects_wrong_tool_no_call_and_legacy_fabricated_receipts(

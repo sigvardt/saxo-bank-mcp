@@ -14,7 +14,6 @@ from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
 from saxo_bank_mcp.hard_task_summary import handle_hard_task_summary
 from saxo_bank_mcp.loop_manifest import GitState, ManifestSpec, build_manifest
 from saxo_bank_mcp.qa_exact_tool_probe import handle_exact_tool_probe
-from saxo_bank_mcp.qa_sim_tool_matrix import handle_sim_tool_matrix
 from saxo_bank_mcp.qa_manual_live import handle_manual_live_boundary
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
@@ -47,6 +46,8 @@ from saxo_bank_mcp.qa_read_probes import (
 )
 from saxo_bank_mcp.qa_readme_probe import handle_readme_smoke
 from saxo_bank_mcp.qa_safety_probes import handle_approval_denied, handle_approval_happy
+from saxo_bank_mcp.qa_sim_tool_matrix import handle_sim_tool_matrix
+from saxo_bank_mcp.qa_sim_tool_matrix_models import MatrixCliFixtures
 from saxo_bank_mcp.qa_streaming_probes import handle_stream, handle_stream_cleanup
 from saxo_bank_mcp.qa_trade_probes import (
     handle_trade_disclaimer_blocked,
@@ -66,6 +67,15 @@ class ParserGroup(Protocol):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run implementation-plan QA probes.")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_simple_commands(subparsers)
+    _add_hard_task_summary(subparsers)
+    add_exact_tool_parser(subparsers)
+    add_sim_tool_matrix_parser(subparsers)
+    _add_extended_commands(subparsers)
+    return parser
+
+
+def _add_simple_commands(subparsers: ParserGroup) -> None:
     for name in (
         "health",
         "auth-status",
@@ -91,6 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         add_common(subparsers.add_parser(name))
 
+
+def _add_hard_task_summary(subparsers: ParserGroup) -> None:
     hard_task_summary = subparsers.add_parser("hard-task-summary")
     hard_task_summary.add_argument("--out", type=Path, required=True)
     hard_task_summary.add_argument(
@@ -101,55 +113,42 @@ def build_parser() -> argparse.ArgumentParser:
     hard_task_summary.add_argument("--expected-tool", action="append", default=[])
     hard_task_summary.add_argument("--expected-sha", default=None)
 
-    add_exact_tool_parser(subparsers)
-    add_sim_tool_matrix_parser(subparsers)
 
+def _add_extended_commands(subparsers: ParserGroup) -> None:
     gitignore = subparsers.add_parser("gitignore-secret")
     add_common(gitignore)
-
     live_read_refusal = subparsers.add_parser("live-read-refusal")
     add_common(live_read_refusal)
-
     approval_denied = subparsers.add_parser("approval-denied")
     add_common(approval_denied)
     approval_denied.add_argument("--missing", required=True)
-
     registered_denied = subparsers.add_parser("registered-endpoint-denied")
     add_common(registered_denied)
     registered_denied.add_argument("--method", required=True)
     registered_denied.add_argument("--path", required=True)
-
     list_registry_stdout = subparsers.add_parser("list-registry-stdout")
     list_registry_stdout.add_argument("--service-group", default=None)
     list_registry_stdout.add_argument("--limit", type=int, default=25)
     list_registry_stdout.add_argument("--offset", type=int, default=0)
-
     nontrade_denied = subparsers.add_parser("nontrade-denied")
     add_common(nontrade_denied)
     nontrade_denied.add_argument("--service", required=True)
-
     trade_disclaimer = subparsers.add_parser("trade-disclaimer-blocked")
     add_common(trade_disclaimer)
-
     trade_write_denied = subparsers.add_parser("trade-write-denied")
     add_common(trade_write_denied)
     trade_write_denied.add_argument("--missing", required=True)
-
     stream_cleanup = subparsers.add_parser("stream-cleanup")
     add_common(stream_cleanup)
     stream_cleanup.add_argument("--simulate-leak", action="store_true")
-
     live_read = subparsers.add_parser("live-read")
     add_common(live_read)
     live_read.add_argument("--skip-out", type=Path, required=True)
-
     live_write_refusal = subparsers.add_parser("live-write-refusal")
     add_common(live_write_refusal)
-
     secret_scan = subparsers.add_parser("secret-scan")
     add_common(secret_scan)
     secret_scan.add_argument("--paths", nargs="+", required=True)
-
     manifest = subparsers.add_parser("manifest")
     manifest.add_argument("--out", type=Path, required=True)
     manifest.add_argument("--run-id", required=True)
@@ -157,7 +156,6 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--expected-status", required=True)
     manifest.add_argument("--command", dest="replay_command", required=True)
     manifest.add_argument("--evidence-path", action="append", default=[])
-    return parser
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
@@ -227,12 +225,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
     elif command == "sim-tool-matrix":
         result = handle_sim_tool_matrix(
             args.out,
-            stock_uic=str(args.fixture_stock_uic),
-            amount=str(args.fixture_amount),
-            limit_price=str(args.fixture_limit_price),
-            modified_limit_price=str(args.fixture_modified_limit_price),
-            option_uics=str(args.fixture_option_uics),
-            stream_uic=str(args.fixture_stream_uic),
+            MatrixCliFixtures(
+                stock_uic=str(args.fixture_stock_uic),
+                amount=str(args.fixture_amount),
+                limit_price=str(args.fixture_limit_price),
+                modified_limit_price=str(args.fixture_modified_limit_price),
+                option_uics=str(args.fixture_option_uics),
+                stream_uic=str(args.fixture_stream_uic),
+            ),
         )
     elif command == "live-read-refusal":
         result = handle_live_read_refusal(args.out)

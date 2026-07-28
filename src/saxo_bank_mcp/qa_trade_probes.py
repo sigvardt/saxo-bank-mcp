@@ -682,3 +682,7 @@ _DISCOVERY_CANDIDATES: Final[tuple[tuple[int, str, str, float | None], ...]] = (
     (30004846, "StockIndexOption", "Limit", 1.0),
     (30004846, "StockIndexOption", "Market", None),
 )
+
+
+# Public aliases for Todo 15 matrix orchestration.
+discover_pretrade_disclaimer_input = _discover_pretrade_disclaimer_input

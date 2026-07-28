@@ -39,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--require-environment", default="SIM")
+    parser.add_argument("--expected-source-commit", default=None)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.verify_only:
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
                 stream_uic=args.fixture_stream_uic,
             ),
             out=args.out,
+            expected_source_commit=args.expected_source_commit,
         )
     )
 

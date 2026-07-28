@@ -23,12 +23,12 @@
         "reason": "Plugin install evidence model status, not production MCP tool response truth."
       },
       {
-        "module": "src/saxo_bank_mcp/agent_skill_install_probe.py",
-        "reason": "Plugin install stdio probe status, not production MCP tool response truth."
-      },
-      {
         "module": "src/saxo_bank_mcp/agent_skill_install_privacy.py",
         "reason": "Plugin install privacy evidence status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/agent_skill_install_probe.py",
+        "reason": "Plugin install stdio probe status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/agent_skill_install_producer.py",
@@ -157,6 +157,22 @@
       {
         "module": "src/saxo_bank_mcp/qa_safety_probes.py",
         "reason": "QA probe status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_sim_tool_matrix.py",
+        "reason": "SIM tool matrix QA orchestration status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_sim_tool_matrix_helpers.py",
+        "reason": "SIM tool matrix helper status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/qa_sim_tool_matrix_models.py",
+        "reason": "SIM tool matrix evidence model status, not production MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/sim_login.py",
+        "reason": "SIM browser login helper status, not production MCP tool response truth."
       },
       {
         "module": "src/saxo_bank_mcp/streaming_transport.py",

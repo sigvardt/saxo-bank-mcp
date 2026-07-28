@@ -1466,3 +1466,11 @@ _SAFETY_ENV_DEFAULTS: Final = {
         str(uic) for uic in (FIXTURE_INSTRUMENT, *MULTILEG_FIXTURE_UICS)
     ),
 }
+
+
+# Public aliases for Todo 15 matrix orchestration.
+create_order_preview_for_matrix = _create_preview
+call_order_tool_for_matrix = _call_order_tool
+post_tool_cleanup_for_matrix = _post_tool_cleanup
+safety_env_for_matrix = _safety_env
+raw_open_orders_for_matrix = _raw_open_orders
