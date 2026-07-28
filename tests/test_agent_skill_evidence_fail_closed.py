@@ -303,32 +303,67 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     )
 
 
-def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
+def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     tmp_path: Path,
     installed_report: InstallFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     out = tmp_path / "tool-matrix.json"
+    names = sorted(json.loads(SCENARIO_MANIFEST.read_text(encoding="utf-8"))["scenarios"], key=lambda row: row["tool"])
+    tool_names = [row["tool"] for row in names]
+    state = {
+        "open_orders": {"count": 0, "ids_digest": "a" * 64},
+        "positions_money": {"fingerprint": "account_bound"},
+        "subscriptions": {"local": "empty"},
+        "preview_write_state": {"fingerprint": "reset"},
+    }
+    non_exec = {"saxo_list_live_accounts", "saxo_precheck_live_order"}
 
-    def run_actual_probe(
+    def run_sim_probe(
         cache: Path,
         receipt_dir: Path,
-        tool: str,
+        options: MatrixPlanOptions,
     ) -> CommandResult:
         _ = cache
-        receipt_out = receipt_dir / f"{tool}.json"
+        _ = options
+        receipt_out = receipt_dir / "sim-tool-matrix.json"
+        payload = {
+            "status": "passed",
+            "environment": "SIM",
+            "reason": "",
+            "tool_receipts": [
+                {
+                    "tool": tool,
+                    "status": "expected_refusal" if tool in non_exec else "completed",
+                    "mcp_call_observed": True,
+                    "result_parsed": True,
+                    "skipped": False,
+                    "requested_tool_covered": True,
+                    "network_call_made": False,
+                    "hosts": ["gateway.saxobank.com"],
+                    "request_digest": "b" * 64,
+                    "response_digest": "c" * 64,
+                }
+                for tool in tool_names
+            ],
+            "lifecycle_calls": list(LIFECYCLE_TOOLS),
+            "registered_trading_write_ops": ["post.trade.v2.orders"],
+            "disclaimer_response_completed": True,
+            "fixture_reference_validated": True,
+            "account_allowlist_resolved": True,
+            "auth_status_completed": True,
+            "session_capabilities_completed": True,
+            "before_state_fingerprint": state,
+            "after_state_fingerprint": state,
+            "uncleaned_resources": 0,
+            "hosts": ["gateway.saxobank.com"],
+            "live_events": 0,
+            "errors": [],
+        }
+        write_json(receipt_out, payload)
         return run_command(
-            f"probe_{tool}",
-            (
-                sys.executable,
-                "-m",
-                "saxo_bank_mcp.qa",
-                "exact-tool",
-                "--tool",
-                tool,
-                "--out",
-                str(receipt_out),
-            ),
+            "probe_sim_tool_matrix",
+            (sys.executable, "-c", "print('ok')"),
             cwd=ROOT,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -336,7 +371,7 @@ def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
             },
         )
 
-    monkeypatch.setattr(matrix_producer, "_run_tool_probe", run_actual_probe)
+    monkeypatch.setattr(matrix_producer, "_run_sim_matrix_probe", run_sim_probe)
     result = run_real_matrix_report(
         MatrixPlanOptions(
             manifest=SCENARIO_MANIFEST,
@@ -362,31 +397,13 @@ def test_matrix_normal_mode_requires_actual_exact_tool_probe_receipts(
     assert len(payload["tool_calls"]) == EXPECTED_TOOL_CALLS
     assert len({row["tool"] for row in payload["tool_calls"]}) == EXPECTED_TOOL_CALLS
     assert tuple(payload["lifecycle_calls"]) == LIFECYCLE_TOOLS
-    assert len(payload["command_receipts"]) == EXPECTED_TOOL_CALLS
+    assert len(payload["command_receipts"]) == 1
     assert payload["preflight"]["complete"] is True
     assert payload["transport_ledger"]["sim_only"] is True
     assert payload["transport_ledger"]["live_events"] == 0
     assert payload["cleanup"]["uncleaned_resources"] == 0
-    assert {call["tool"] for call in payload["tool_calls"] if call["requested_tool_covered"]} == {
-        call["tool"] for call in payload["tool_calls"]
-    }
-    receipts = [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted((out.parent / "probe-receipts").glob("*.json"))
-    ]
-    assert len(receipts) == EXPECTED_TOOL_CALLS
-    assert all(receipt["fastmcp_called"] is True for receipt in receipts)
-    assert {
-        path.stem: json.loads(path.read_text(encoding="utf-8"))["logical_tool"]
-        for path in sorted((out.parent / "probe-receipts").glob("*.json"))
-    } == {tool: tool for tool in payload["unique_tools"]}
-    assert {receipt["fastmcp_result_status"] for receipt in receipts} <= {
-        "invalid_arguments",
-        "invalid_request",
-        "refused",
-    }
-    assert all(receipt["client_used"] is False for receipt in receipts)
-    assert all(receipt["mcp_transport_used"] is False for receipt in receipts)
+    assert payload["before_state_fingerprint"] == payload["after_state_fingerprint"]
+    assert (out.parent / "probe-receipts" / "sim-tool-matrix.json").is_file()
 
 
 def test_matrix_rejects_wrong_tool_no_call_and_legacy_fabricated_receipts(

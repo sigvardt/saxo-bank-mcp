@@ -13,6 +13,7 @@ from pathlib import Path
 
 from saxo_bank_mcp._evidence import write_json
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +43,29 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.fixture is not None:
         return _write_failure_fixture(args.fixture, args.out)
+    codex_plugin_root = args.codex_plugin_root
+    claude_plugin_root = args.claude_plugin_root
+    codex_home = args.codex_home
+    claude_home = args.claude_home
+    expected_source_commit = args.expected_source_commit
+    if args.install_report is not None:
+        install, install_errors = load_install_report_for_consumers(args.install_report)
+        if install is None:
+            write_json(
+                args.out,
+                {
+                    "status": "failed",
+                    "reason": "install_report_not_verified",
+                    "errors": list(install_errors),
+                },
+            )
+            return 1
+        codex_plugin_root = install.codex.cache_root
+        claude_plugin_root = install.claude.cache_root
+        run_root = Path(install.fixture_cleanup.run_root)
+        codex_home = codex_home or (run_root / "codex-home")
+        claude_home = claude_home or (run_root / "home")
+        expected_source_commit = expected_source_commit or install.candidate_commit
     return run_eval_suite(
         EvalRunOptions(
             harness=args.harness,
@@ -49,16 +73,18 @@ def main(argv: list[str] | None = None) -> int:
             tag=args.tag,
             environment=args.environment,
             case_root=args.case_root,
-            codex_plugin_root=args.codex_plugin_root,
-            claude_plugin_root=args.claude_plugin_root,
-            codex_home=args.codex_home,
-            claude_home=args.claude_home,
+            codex_plugin_root=codex_plugin_root,
+            claude_plugin_root=claude_plugin_root,
+            codex_home=codex_home,
+            claude_home=claude_home,
             out=args.out,
             dry_run=bool(args.dry_run),
             nonzero_on_skip=bool(args.nonzero_on_skip),
-            expected_source_commit=args.expected_source_commit,
+            expected_source_commit=expected_source_commit,
             expected_router_source_sha256=args.expected_router_source_sha256,
             source_repo=args.source_repo,
+            install_report=args.install_report,
+            credential_mode=str(args.credential_mode),
         ),
     )
 

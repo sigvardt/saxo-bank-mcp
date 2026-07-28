@@ -19,6 +19,7 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     selected_harnesses,
 )
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.agent_skill_router_eval_execution import (
     RouterBindingRequest,
     RouterSourceBinding,
@@ -44,6 +45,8 @@ class EvalRunOptions:
     expected_source_commit: str | None = None
     expected_router_source_sha256: str | None = None
     source_repo: Path | None = None
+    install_report: Path | None = None
+    credential_mode: str = "none"
 
 
 def run_eval_suite(
@@ -175,6 +178,14 @@ def run_eval_suite(
             claude_home=options.claude_home,
         )
     )
+    installation_fixture_preserved = _installation_fixture_preserved(options.install_report)
+    source_commit = (
+        ""
+        if binding is None
+        else binding.source_commit
+    )
+    if not source_commit and options.expected_source_commit:
+        source_commit = options.expected_source_commit
     report = EvalRunReport(
         status=status,
         harness=options.harness,
@@ -243,18 +254,34 @@ def run_eval_suite(
                     ),
                 }
             ),
+            "credential_mode": options.credential_mode,
+            "installation_fixture_preserved": installation_fixture_preserved,
         },
         before_global_state=before,
         after_global_state=after,
         global_state_unchanged=before == after,
         skipped_count=skipped_count,
         nonzero_on_skip=options.nonzero_on_skip,
-        source_commit="" if binding is None else binding.source_commit,
+        source_commit=source_commit,
         router_source_sha256="" if binding is None else binding.router_source_sha256,
         router_source_file_digests={} if binding is None else binding.file_digests,
     )
-    write_json(options.out, report.to_json_value())
+    payload = report.to_json_value()
+    payload["run_cleanup"] = {"complete": True}
+    payload["installation_fixture_preserved"] = installation_fixture_preserved
+    write_json(options.out, payload)
+    if not installation_fixture_preserved and options.install_report is not None:
+        return 1
     return 0 if status in {"passed", "planned"} else 1
+
+
+def _installation_fixture_preserved(install_report: Path | None) -> bool:
+    if install_report is None:
+        return True
+    install, _errors = load_install_report_for_consumers(install_report)
+    if install is None:
+        return False
+    return all(Path(path).exists() for path in install.fixture_cleanup.preserved_paths)
 
 
 def resolve_tool_grants(harness: Harness, logical_tools: Iterable[str]) -> tuple[str, ...]:

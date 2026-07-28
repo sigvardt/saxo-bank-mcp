@@ -14,6 +14,7 @@ from saxo_bank_mcp.hard_task_manifest import handle_hard_task_manifest
 from saxo_bank_mcp.hard_task_summary import handle_hard_task_summary
 from saxo_bank_mcp.loop_manifest import GitState, ManifestSpec, build_manifest
 from saxo_bank_mcp.qa_exact_tool_probe import handle_exact_tool_probe
+from saxo_bank_mcp.qa_sim_tool_matrix import handle_sim_tool_matrix
 from saxo_bank_mcp.qa_manual_live import handle_manual_live_boundary
 from saxo_bank_mcp.qa_nontrade_probes import (
     handle_nontrade_denial_sweep,
@@ -101,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     hard_task_summary.add_argument("--expected-sha", default=None)
 
     add_exact_tool_parser(subparsers)
+    add_sim_tool_matrix_parser(subparsers)
 
     gitignore = subparsers.add_parser("gitignore-secret")
     add_common(gitignore)
@@ -176,6 +178,19 @@ def add_exact_tool_parser(
     exact_tool.add_argument("--tool", required=True)
 
 
+def add_sim_tool_matrix_parser(
+    subparsers: ParserGroup,
+) -> None:
+    matrix = subparsers.add_parser("sim-tool-matrix")
+    matrix.add_argument("--out", type=Path, required=True)
+    matrix.add_argument("--fixture-stock-uic", required=True)
+    matrix.add_argument("--fixture-amount", required=True)
+    matrix.add_argument("--fixture-limit-price", required=True)
+    matrix.add_argument("--fixture-modified-limit-price", required=True)
+    matrix.add_argument("--fixture-option-uics", required=True)
+    matrix.add_argument("--fixture-stream-uic", required=True)
+
+
 def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
     args = build_parser().parse_args(argv)
     command = str(args.command)
@@ -209,6 +224,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0912, PLR0915
         result = handle_tool_inventory(args.out)
     elif command == "exact-tool":
         result = handle_exact_tool_probe(args.out, str(args.tool))
+    elif command == "sim-tool-matrix":
+        result = handle_sim_tool_matrix(
+            args.out,
+            stock_uic=str(args.fixture_stock_uic),
+            amount=str(args.fixture_amount),
+            limit_price=str(args.fixture_limit_price),
+            modified_limit_price=str(args.fixture_modified_limit_price),
+            option_uics=str(args.fixture_option_uics),
+            stream_uic=str(args.fixture_stream_uic),
+        )
     elif command == "live-read-refusal":
         result = handle_live_read_refusal(args.out)
     elif command == "secret-scan":
