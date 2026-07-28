@@ -45,22 +45,59 @@ def live_verify_errors(
     codex_global_home: Path,
     claude_global_home: Path,
 ) -> list[str]:
-    """Independent production verify checks (registration, fingerprints, startup, update)."""
+    """Independent production verify checks (registration, startup, update, window).
+
+    Producer historical before==after is checked from the report only.
+    Live global fingerprints are taken immediately before and after live work;
+    start==end is required (detects verifier mutation). Ambient drift between
+    producer and verify is allowed: current hashes need not match report history.
+    """
     errors: list[str] = []
     run_root = report.fixture_cleanup.run_root.resolve()
     clone = report.clone.path.resolve()
+    errors.extend(_historical_global_state_errors(report))
+
+    start_pair: dict[str, JsonValue] | None = None
+    try:
+        start_pair = global_fingerprint_pair(codex_global_home, claude_global_home)
+    except OSError:
+        errors.append("global_state_fingerprint_failed")
+
+    # Live work that may touch processes/scratch under the retained run_root only.
     errors.extend(_cache_source_errors(report))
     errors.extend(_registration_bind_errors(report, run_root=run_root))
-    errors.extend(
-        _recompute_global_state_errors(
-            report,
-            codex_global_home=codex_global_home,
-            claude_global_home=claude_global_home,
-        ),
-    )
     errors.extend(_startup_probe_errors(report, run_root=run_root, clone=clone))
     errors.extend(_update_proof_errors(report, run_root=run_root, clone=clone))
+
+    try:
+        end_pair = global_fingerprint_pair(codex_global_home, claude_global_home)
+    except OSError:
+        errors.append("global_state_fingerprint_failed")
+        return errors
+    if start_pair is None:
+        # Start fingerprint already failed; do not claim a successful window.
+        if "global_state_fingerprint_failed" not in errors:
+            errors.append("global_state_fingerprint_failed")
+        return errors
+    if start_pair != end_pair:
+        errors.append("global_state_verify_window_mismatch")
     return errors
+
+
+def global_fingerprint_pair(
+    codex_global_home: Path,
+    claude_global_home: Path,
+) -> dict[str, JsonValue]:
+    """Privacy-safe codex/claude fingerprint digests for the provided global homes."""
+    live = global_state_fingerprint(codex_global_home, claude_global_home)
+    return {"codex": live["codex"], "claude": live["claude"]}
+
+
+def _historical_global_state_errors(report: InstallEvidenceReport) -> list[str]:
+    """Reject producer reports where before and after fingerprints differ."""
+    if report.global_state.before != report.global_state.after:
+        return ["global_state_fingerprint_mismatch"]
+    return []
 
 
 def consumer_live_errors(report: InstallEvidenceReport) -> list[str]:
@@ -199,22 +236,6 @@ def _claude_registration_errors(  # noqa: PLR0911
     if bound != cache_root.resolve() or cache_root.resolve() != expected:
         return ["claude_cache_bind_mismatch"]
     return []
-
-
-def _recompute_global_state_errors(
-    report: InstallEvidenceReport,
-    *,
-    codex_global_home: Path,
-    claude_global_home: Path,
-) -> list[str]:
-    live = global_state_fingerprint(codex_global_home, claude_global_home)
-    live_pair = {"codex": live["codex"], "claude": live["claude"]}
-    errors: list[str] = []
-    if report.global_state.before != report.global_state.after:
-        errors.append("global_state_fingerprint_mismatch")
-    if report.global_state.after != live_pair or report.global_state.before != live_pair:
-        errors.append("global_state_recompute_mismatch")
-    return errors
 
 
 def _live_inventory_errors(report: InstallEvidenceReport, *, clone: Path) -> list[str]:

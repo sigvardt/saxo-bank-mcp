@@ -7,6 +7,7 @@ import string
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -51,8 +52,11 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
     provisional_privacy_binding,
     scan_directory_normalized,
 )
+from saxo_bank_mcp.agent_skill_install_qa import verify_install_report
 from saxo_bank_mcp.agent_skill_install_verify_live import (
     codex_registration_errors,
+    global_fingerprint_pair,
+    live_verify_errors,
     startup_probe_errors_for_caches,
 )
 from saxo_bank_mcp.secret_scan import scan_secret_text
@@ -816,6 +820,225 @@ def test_retained_secret_survives_verify_cleanup_for_privacy(
             codex_cache=codex_cache,
             claude_cache=claude_cache,
         )
+
+
+def _minimal_live_report(
+    roots: tuple[Path, Path, Path, Path],
+    *,
+    before: dict[str, str],
+    after: dict[str, str],
+) -> SimpleNamespace:
+    """Lightweight report stand-in for live_verify_errors with work functions stubbed."""
+    run_root, clone, codex_cache, claude_cache = roots
+    return SimpleNamespace(
+        global_state=SimpleNamespace(before=before, after=after),
+        fixture_cleanup=SimpleNamespace(run_root=run_root),
+        clone=SimpleNamespace(path=clone),
+        codex=SimpleNamespace(
+            cache_root=codex_cache,
+            version="0.1.0",
+            cache_root_source="codex_plugin_add_restored",
+        ),
+        claude=SimpleNamespace(
+            cache_root=claude_cache,
+            version="0.1.0",
+            cache_root_source="claude_plugin_list_restored",
+        ),
+        update_probe=None,
+        update_receipts=(),
+    )
+
+
+def _empty_errors(_report: object = None, **_kwargs: object) -> list[str]:
+    return []
+
+
+def _stub_live_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live._cache_source_errors",
+        _empty_errors,
+    )
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live._registration_bind_errors",
+        _empty_errors,
+    )
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live._startup_probe_errors",
+        _empty_errors,
+    )
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live._update_proof_errors",
+        _empty_errors,
+    )
+
+
+def test_historical_global_before_after_mismatch_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    codex_g = tmp_path / "codex-global"
+    claude_g = tmp_path / "claude-global"
+    codex_g.mkdir()
+    claude_g.mkdir()
+    _stub_live_work(monkeypatch)
+    report = _minimal_live_report(
+        (run_root, clone, codex_cache, claude_cache),
+        before={"codex": "a" * 64, "claude": "b" * 64},
+        after={"codex": "c" * 64, "claude": "b" * 64},
+    )
+    errors = live_verify_errors(
+        report,  # type: ignore[arg-type]
+        codex_global_home=codex_g,
+        claude_global_home=claude_g,
+    )
+    assert "global_state_fingerprint_mismatch" in errors
+
+
+def test_ambient_drift_before_verify_accepted_when_window_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical report digests may differ from current; window start==end still passes."""
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    codex_g = tmp_path / "codex-global"
+    claude_g = tmp_path / "claude-global"
+    codex_g.mkdir()
+    claude_g.mkdir()
+    (codex_g / "config.toml").write_text("x=1\n", encoding="utf-8")
+    _stub_live_work(monkeypatch)
+    live = global_fingerprint_pair(codex_g, claude_g)
+    # Historical producer digests deliberately differ from current ambient state.
+    report = _minimal_live_report(
+        (run_root, clone, codex_cache, claude_cache),
+        before={"codex": "d" * 64, "claude": "e" * 64},
+        after={"codex": "d" * 64, "claude": "e" * 64},
+    )
+    assert live["codex"] != "d" * 64
+    errors = live_verify_errors(
+        report,  # type: ignore[arg-type]
+        codex_global_home=codex_g,
+        claude_global_home=claude_g,
+    )
+    assert "global_state_recompute_mismatch" not in errors
+    assert "global_state_verify_window_mismatch" not in errors
+    assert "global_state_fingerprint_mismatch" not in errors
+
+
+def test_mutation_during_verify_window_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    codex_g = tmp_path / "codex-global"
+    claude_g = tmp_path / "claude-global"
+    codex_g.mkdir()
+    claude_g.mkdir()
+    config = codex_g / "config.toml"
+    config.write_text("x=1\n", encoding="utf-8")
+    _stub_live_work(monkeypatch)
+
+    def _mutate_registration(_report: object = None, **_kwargs: object) -> list[str]:
+        config.write_text("x=2\n", encoding="utf-8")
+        return []
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live._registration_bind_errors",
+        _mutate_registration,
+    )
+    report = _minimal_live_report(
+        (run_root, clone, codex_cache, claude_cache),
+        before={"codex": "f" * 64, "claude": "g" * 64},
+        after={"codex": "f" * 64, "claude": "g" * 64},
+    )
+    errors = live_verify_errors(
+        report,  # type: ignore[arg-type]
+        codex_global_home=codex_g,
+        claude_global_home=claude_g,
+    )
+    assert "global_state_verify_window_mismatch" in errors
+
+
+def test_fingerprint_exception_during_verify_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    codex_cache, claude_cache = _seed_retained_fixture(run_root)
+    clone = run_root / "source-clone"
+    codex_g = tmp_path / "codex-global"
+    claude_g = tmp_path / "claude-global"
+    codex_g.mkdir()
+    claude_g.mkdir()
+    _stub_live_work(monkeypatch)
+
+    def _boom(_codex: Path, _claude: Path) -> dict[str, JsonValue]:
+        raise OSError("fingerprint_boom")
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_verify_live.global_fingerprint_pair",
+        _boom,
+    )
+    report = _minimal_live_report(
+        (run_root, clone, codex_cache, claude_cache),
+        before={"codex": "h" * 64, "claude": "i" * 64},
+        after={"codex": "h" * 64, "claude": "i" * 64},
+    )
+    errors = live_verify_errors(
+        report,  # type: ignore[arg-type]
+        codex_global_home=codex_g,
+        claude_global_home=claude_g,
+    )
+    assert "global_state_fingerprint_failed" in errors
+
+
+def test_verify_receipt_not_passed_when_window_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install = tmp_path / "install.json"
+    out = tmp_path / "verify.json"
+    install.write_text("{}\n", encoding="utf-8")
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("\n", encoding="utf-8")
+    codex_g = tmp_path / "codex-global"
+    claude_g = tmp_path / "claude-global"
+    codex_g.mkdir()
+    claude_g.mkdir()
+
+    def _fail_load(
+        _path: Path,
+        *,
+        codex_global_home: Path,
+        claude_global_home: Path,
+        fixture_cleanup_ledger: Path,
+    ) -> tuple[None, tuple[str, ...]]:
+        _ = codex_global_home, claude_global_home, fixture_cleanup_ledger
+        return None, ("global_state_verify_window_mismatch",)
+
+    monkeypatch.setattr(
+        "saxo_bank_mcp.agent_skill_install_qa.load_verified_install_report",
+        _fail_load,
+    )
+    code = verify_install_report(
+        install,
+        out,
+        codex_global_home=codex_g,
+        claude_global_home=claude_g,
+        fixture_cleanup_ledger=ledger,
+    )
+    assert code == 1
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "failed"
+    assert "global_state_verify_window_mismatch" in payload["errors"]
+    assert payload.get("global_state_unchanged") is not True
+    assert payload.get("global_state_recomputed") is not True
 
 
 def test_privacy_still_rejects_secret_in_retained_state(tmp_path: Path) -> None:

@@ -137,8 +137,11 @@ def verify_install_report(
         fixture_cleanup_ledger=fixture_cleanup_ledger,
     )
     if report is None:
+        # Includes historical before!=after, fingerprint failure, and verify-window mismatch.
         write_json(out, {"status": "failed", "errors": list(errors)})
         return 1
+    # report is only returned when live_verify_errors passed, including verify-window
+    # start==end. Receipt booleans below are therefore true only after that window check.
     receipt = VerifyReceipt(
         status="passed",
         execution_mode="installed_verification",
