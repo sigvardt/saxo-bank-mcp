@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Final
@@ -19,6 +21,47 @@ SAXO_CODEX_MCP_SERVER_NAMES: Final = frozenset(
     },
 )
 CLAUDE_STDIO_SERVER_NAME: Final = "saxo-bank-mcp"
+# Claude 2.1.x: `--tools ""` disables built-ins but also leaves MCP tools unusable
+# (init tools=[], server pending). Exhaustive disallowedTools is the working containment.
+CLAUDE_DISALLOWED_BUILTINS: Final = (
+    "Bash",
+    "BashOutput",
+    "KillShell",
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep",
+    "NotebookEdit",
+    "Task",
+    "TaskCreate",
+    "TaskGet",
+    "TaskList",
+    "TaskUpdate",
+    "TaskStop",
+    "WebFetch",
+    "WebSearch",
+    "Agent",
+    "Computer",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "DesignSync",
+    "EnterWorktree",
+    "ExitWorktree",
+    "Monitor",
+    "PushNotification",
+    "RemoteTrigger",
+    "ReportFindings",
+    "ScheduleWakeup",
+    "SendMessage",
+    "Skill",
+    "TodoWrite",
+    "TodoRead",
+    "Workflow",
+    "ListMcpResourcesTool",
+    "ReadMcpResourceTool",
+)
 _SIM_ENV_KEYS: Final = (
     "SAXO_MCP_ENVIRONMENT",
     "SAXO_MCP_ENABLE_LIVE_READS",
@@ -43,13 +86,16 @@ def non_router_model_command(  # noqa: PLR0913
     plugin_root: Path,
     codex_home: Path | None,
     claude_mcp_config_path: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
+    path_env = env or {}
     match harness:
         case "codex":
             return codex_non_router_command(
                 prompt,
                 plugin_root=plugin_root,
                 codex_home=codex_home,
+                env=path_env,
             )
         case "claude":
             if claude_mcp_config_path is None:
@@ -59,6 +105,7 @@ def non_router_model_command(  # noqa: PLR0913
                 prompt,
                 mcp_config_path=claude_mcp_config_path,
                 resolved_grants=resolved_grants,
+                env=path_env,
             )
 
 
@@ -67,11 +114,13 @@ def codex_non_router_command(
     *,
     plugin_root: Path,
     codex_home: Path | None,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Ephemeral read-only Codex: shell/apps/web/hooks/multi-agent/goals off; Saxo MCP kept."""
     mcp_overrides = _codex_unrelated_mcp_overrides(codex_home)
+    codex_bin = resolve_cli_executable("codex", env or {})
     return (
-        "codex",
+        codex_bin,
         "exec",
         "--ignore-rules",
         "--ephemeral",
@@ -107,16 +156,27 @@ def claude_non_router_command(
     *,
     mcp_config_path: Path,
     resolved_grants: tuple[str, ...],
+    env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
-    """Claude 2.x SIM non-router: strict mcp-config + exact allowedTools only."""
+    """Claude 2.x SIM non-router: built-ins denied, strict mcp-config, exact allowedTools.
+
+    Claude 2.1.220 help documents ``--tools ""`` as disabling the built-in set. In practice
+    that form also leaves MCP tools unusable (empty init tools, server stuck pending).
+    Containment therefore uses exhaustive ``--disallowedTools`` so Bash/Read/Edit and other
+    side channels are unavailable while exact ``--allowedTools`` MCP grants stay callable.
+    """
     allowed = ",".join(resolved_grants)
+    disallowed = ",".join(CLAUDE_DISALLOWED_BUILTINS)
+    claude_bin = resolve_cli_executable("claude", env or {})
     return (
-        "claude",
+        claude_bin,
         "--no-session-persistence",
         "--no-chrome",
         "--disable-slash-commands",
         "--permission-mode",
         "bypassPermissions",
+        "--disallowedTools",
+        disallowed,
         "--mcp-config",
         str(mcp_config_path),
         "--strict-mcp-config",
@@ -142,10 +202,11 @@ def write_claude_sim_mcp_config(
     # Preserve explicit empty LIVE writes disablement.
     if "SAXO_MCP_ENABLE_LIVE_WRITES" in env:
         server_env["SAXO_MCP_ENABLE_LIVE_WRITES"] = env["SAXO_MCP_ENABLE_LIVE_WRITES"]
+    uv_bin = resolve_cli_executable("uv", env)
     payload = {
         "mcpServers": {
             CLAUDE_STDIO_SERVER_NAME: {
-                "command": "uv",
+                "command": uv_bin,
                 "args": [
                     "run",
                     "--project",
@@ -163,6 +224,18 @@ def write_claude_sim_mcp_config(
     dest.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
     dest.chmod(0o600)
     return dest
+
+
+def resolve_cli_executable(name: str, env: Mapping[str, str]) -> str:
+    """Resolve a CLI binary to an absolute path when possible (deterministic Popen)."""
+    path = env.get("PATH") or os.environ.get("PATH")
+    found = shutil.which(name, path=path) if path else None
+    if found is None:
+        found = shutil.which(name)
+    if found is None:
+        # Keep the bare name so callers can still surface a clear FileNotFoundError.
+        return name
+    return str(Path(found).resolve())
 
 
 def child_env_for_case(

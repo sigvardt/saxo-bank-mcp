@@ -28,7 +28,7 @@ Use `saxo_list_registered_endpoints` before any registered read. Use `saxo_call_
 Before an order preview, discover or confirm:
 
 - Environment: SIM or LIVE.
-- Account alias and internal account selector.
+- Account alias and internal account selector from session capabilities (prefer selected SIM account alias in user text).
 - Instrument UIC and asset type.
 - Tradability and account permission for that instrument.
 - Tick size, supported order types, supported duration types, and trading conditions.
@@ -36,7 +36,7 @@ Before an order preview, discover or confirm:
 - Multileg defaults through `saxo_get_multileg_order_defaults` for supported option strategies.
 - Quantity, price, duration, side, and order type all match account-aware settings.
 
-Do not choose an instrument, side, size, price, strategy, or timing for the user. If the user asks what to buy or sell, refuse that part and offer to precheck a user-specified order.
+Do not invent investment advice or choose a product when the user has not named one. When the user names a controlled SIM lifecycle fixture (for example stock UIC `211`, amount `1`, Buy limit `50`, Day), use that fixture to construct the order body after capability and settings reads. Do not guess account keys from memory; read them from SIM session/capabilities tools and keep them out of user-facing text.
 
 ## Precheck
 

@@ -12,8 +12,14 @@ from saxo_bank_mcp.agent_skill_eval_commands import (
     claude_non_router_command,
     write_claude_sim_mcp_config,
 )
-from saxo_bank_mcp.agent_skill_eval_execution import non_router_error, transcript_passed
+from saxo_bank_mcp.agent_skill_eval_execution import (
+    HarnessRoots,
+    execute_model_case,
+    non_router_error,
+    transcript_passed,
+)
 from saxo_bank_mcp.agent_skill_eval_models import SkillEvalCase
+from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
 from saxo_bank_mcp.agent_skill_eval_tool_protocol import (
     ModelToolTrace,
@@ -411,13 +417,16 @@ def test_claude_stdio_grants_and_mcp_config_shape(tmp_path: Path) -> None:
         "SAXO_MCP_ENABLE_LIVE_WRITES": "0",
         "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token.json"),
         "HOME": str(tmp_path / "home"),
-        "PATH": "/usr/bin",
+        "PATH": "/usr/bin:/opt/homebrew/bin",
     }
     path = write_claude_sim_mcp_config(plugin_root=plugin, dest=dest, env=env)
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert path.stat().st_mode & 0o777 == OWNER_FILE_MODE
     server = payload["mcpServers"]["saxo-bank-mcp"]
-    assert server["command"] == "uv"
+    # Deterministic absolute uv when PATH can resolve it; else keep bare name.
+    assert server["command"] in {"uv", "/opt/homebrew/bin/uv", "/usr/bin/uv"} or server[
+        "command"
+    ].endswith("/uv")
     assert server["args"][:2] == ["run", "--project"]
     assert server["env"]["SAXO_MCP_ENVIRONMENT"] == "SIM"
     assert server["env"]["SAXO_MCP_ENABLE_LIVE_WRITES"] == "0"
@@ -432,12 +441,152 @@ def test_claude_stdio_grants_and_mcp_config_shape(tmp_path: Path) -> None:
         "prompt",
         mcp_config_path=path,
         resolved_grants=grants,
+        env=env,
     )
     assert "--plugin-dir" not in command
-    assert "--tools" not in command
+    assert "--disallowedTools" in command
+    disallowed = command[command.index("--disallowedTools") + 1]
+    assert "Bash" in disallowed
+    assert "Read" in disallowed
+    assert "Edit" in disallowed
     assert "--strict-mcp-config" in command
     assert command[command.index("--mcp-config") + 1] == str(path)
     assert command[command.index("--allowedTools") + 1] == ",".join(grants)
+    # First argv is absolute claude when resolvable (may end with .exe on Node installs).
+    assert command[0] == "claude" or Path(command[0]).name.startswith("claude")
+
+
+def test_codex_server_list_mcp_resources_is_protocol_noise() -> None:
+    """Codex discovery: server=codex tool=list_mcp_resources is harness protocol only."""
+    stream = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "d1",
+                        "type": "mcp_tool_call",
+                        "server": "codex",
+                        "tool": "list_mcp_resources",
+                        "name": "",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "d2",
+                        "type": "mcp_tool_call",
+                        "server": "codex",
+                        "tool": "list_mcp_resource_templates",
+                        "name": "list_mcp_resource_templates",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "ok",
+                        "type": "mcp_tool_call",
+                        "server": "saxo-bank-mcp",
+                        "tool": "saxo_auth_status",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "foreign",
+                        "type": "mcp_tool_call",
+                        "server": "playwright",
+                        "tool": "browser_navigate",
+                    },
+                },
+            ),
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "id": "unknown_codex",
+                        "type": "mcp_tool_call",
+                        "server": "codex",
+                        "tool": "run_shell",
+                        "name": "run_shell",
+                    },
+                },
+            ),
+        ),
+    )
+    trace = parse_codex_model_output(stream)
+    assert trace.invoked_logical_tools == ("saxo_auth_status",)
+    assert trace.saxo_event_count == 1
+    # playwright + unknown codex helper both fail closed as non-Saxo MCP.
+    assert trace.non_saxo_mcp_event_count == TWO
+    assert trace.parse_error == "non_saxo_mcp_event"
+
+
+def test_file_not_found_retry_only_when_process_never_started(tmp_path: Path) -> None:
+    case = _minimal_case(id="registered-paged-read")
+    grants = resolve_tool_grants("claude", case.exact_tool_grants["claude"])
+    calls = {"n": 0}
+
+    class FlakyManager(EvalProcessManager):
+        def run(
+            self,
+            command: tuple[str, ...],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            timeout_seconds: float,
+        ) -> ManagedProcessResult:
+            del cwd, env, timeout_seconds
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise FileNotFoundError(2, "No such file or directory", command[0])
+            # Usable empty success: process started, zero tools (graded missing, not FNFE).
+            return ManagedProcessResult(
+                stdout='{"type":"result","result":"ok"}\n',
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=0,
+                remaining_processes=0,
+                process_cleanup="passed",
+            )
+
+    roots = HarnessRoots(
+        codex_plugin_root=tmp_path,
+        claude_plugin_root=tmp_path,
+        codex_home=tmp_path / "codex",
+        claude_home=tmp_path / "claude",
+    )
+    (tmp_path / "codex").mkdir()
+    (tmp_path / "claude").mkdir()
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+        "PATH": "/opt/homebrew/bin:/usr/bin",
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "0",
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "tmp").mkdir()
+    record = execute_model_case(
+        case,
+        "claude",
+        grants,
+        roots=roots,
+        env=env,
+        process_manager=FlakyManager(),
+    )
+    assert calls["n"] == TWO
+    # Process started on retry; grade normally (required tools missing is fine here).
+    assert record.error != "FileNotFoundError"
+    assert record.error in {"required_tool_missing", "transcript_assertion_failed", ""}
 
 
 def test_plan_only_case_passes_without_tool_calls() -> None:

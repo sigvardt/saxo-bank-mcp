@@ -347,17 +347,18 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     claude_client = _sanitize_client_report(claude_client, path_roots)
     sanitized_update = _sanitize_json_paths(dict(update_probe), path_roots)
     update_probe = dict(sanitized_update) if isinstance(sanitized_update, dict) else {}
-    remaining_temp_paths = [str(path) for path in remaining_temps] + list(disposable_residual)
-    update_probe["temporary_fixtures_removed"] = (
-        bool(update_probe.get("temporary_fixtures_removed")) and not remaining_temp_paths
-    )
-    prior_remaining = update_probe.get("remaining_temporary_paths")
-    if isinstance(prior_remaining, list):
-        remaining_temp_paths = sorted(
-            {str(item) for item in prior_remaining if isinstance(item, str)}
-            | set(remaining_temp_paths),
-        )
-    update_probe["remaining_temporary_paths"] = remaining_temp_paths
+    # Path sanitization rewrites absolute roots; keep registration_cache_root locked
+    # to the sanitized cache_root so typed equality still holds after rewrite.
+    _align_update_probe_registration_roots(update_probe)
+    # Bumped-cache fixtures already removed by run_update_probe when
+    # temporary_fixtures_removed is True. Do not reintroduce disposable residuals
+    # (those fail earlier as disposable_cleanup_failed).
+    if update_probe.get("temporary_fixtures_removed") is True and not remaining_temps:
+        update_probe["remaining_temporary_paths"] = []
+    else:
+        live_remaining = [str(path) for path in remaining_temps if Path(path).exists()]
+        update_probe["remaining_temporary_paths"] = live_remaining
+        update_probe["temporary_fixtures_removed"] = not live_remaining
     try:
         typed_update = UpdateProbeEvidence.model_validate(update_probe)
     except Exception as exc:  # noqa: BLE001 - producer fail-closed on untyped proof
@@ -367,6 +368,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
                 "status": "failed",
                 "reason": "update_probe_invalid",
                 "error": type(exc).__name__,
+                "validation_locations": _sanitized_validation_locations(exc),
             },
         )
         return 1
@@ -727,3 +729,46 @@ def _sanitize_auth_files(
             row["target"] = _public_path(Path(target), roots)
         sanitized_copied.append(row)
     return {"copied": sanitized_copied, "values_published": False}
+
+
+def _align_update_probe_registration_roots(update_probe: dict[str, JsonValue]) -> None:
+    """Keep registration_cache_root identical to sanitized cache_root for each proof."""
+    for side in ("bumped_proof", "restored_proof"):
+        bundle = update_probe.get(side)
+        if not isinstance(bundle, dict):
+            continue
+        for client in ("codex", "claude"):
+            proof = bundle.get(client)
+            if not isinstance(proof, dict):
+                continue
+            cache_root = proof.get("cache_root")
+            if isinstance(cache_root, str) and cache_root:
+                proof["registration_cache_root"] = cache_root
+
+
+def _sanitized_validation_locations(exc: BaseException) -> list[dict[str, JsonValue]]:
+    """Return pydantic error locs/types only (no values, paths, or messages with data)."""
+    from typing import cast  # noqa: PLC0415
+
+    errors_fn = getattr(exc, "errors", None)
+    if not callable(errors_fn):
+        return []
+    out: list[dict[str, JsonValue]] = []
+    try:
+        raw_errors = cast("list[object]", errors_fn())
+    except Exception:  # noqa: BLE001
+        return []
+    for raw_item in raw_errors:
+        if not isinstance(raw_item, dict):
+            continue
+        item = cast("dict[str, object]", raw_item)
+        loc_obj = item.get("loc")
+        err_type_obj = item.get("type")
+        loc_parts: list[str] = []
+        if isinstance(loc_obj, list):
+            loc_parts = [str(part) for part in cast("list[object]", loc_obj)]
+        elif isinstance(loc_obj, tuple):
+            loc_parts = [str(part) for part in cast("tuple[object, ...]", loc_obj)]
+        err_type = str(err_type_obj) if err_type_obj is not None else "unknown"
+        out.append({"loc": loc_parts, "type": err_type})
+    return out

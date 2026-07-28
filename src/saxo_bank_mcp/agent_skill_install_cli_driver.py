@@ -28,6 +28,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     export_publishable_tree,
     installed_inventory_check,
     publishable_tracked_files,
+    scrub_runtime_artifacts,
     tree_digest,
 )
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio, startup_from_probes
@@ -55,9 +56,11 @@ CODEX_UPDATE_RECEIPTS = (
     "codex_plugin_list_restored",
 )
 CLAUDE_UPDATE_RECEIPTS = (
-    "claude_plugin_update_bumped",
+    "claude_plugin_uninstall_bumped",
+    "claude_plugin_install_bumped",
     "claude_plugin_list_bumped",
-    "claude_plugin_update_restored",
+    "claude_plugin_uninstall_restored",
+    "claude_plugin_install_restored",
     "claude_plugin_list_restored",
 )
 
@@ -448,6 +451,10 @@ def _version_cache_proof(  # noqa: PLR0913
     # Probe first (may resolve/lock under the cache), scrub runtime debris, then
     # require publishable bytes still match the bumped/restored source.
     probe = probe_root_stdio(f"{label}_stdio_probe", cache, env=env, probe_env=probe_env)
+    # Probe already scrubs; scrub again immediately before digests so debris cannot
+    # split cache digest from marketplace source digest.
+    scrub_runtime_artifacts(cache)
+    scrub_runtime_artifacts(source)
     payload = _json_from_probe(probe.stdout)
     missing = payload.get("annotations_missing")
     missing_list = (
@@ -458,11 +465,13 @@ def _version_cache_proof(  # noqa: PLR0913
     tool_count = payload.get("tool_count") if isinstance(payload.get("tool_count"), int) else 0
     inventory = installed_inventory_check(source, cache, publishable=publishable)
     cache_resolved = str(cache.resolve())
+    digest = tree_digest(cache, publishable)
+    source_digest = tree_digest(source, publishable)
     return {
         "cache_root": cache_resolved,
         "version": expected_version if identity_version(cache)[1] == expected_version else "",
-        "digest": tree_digest(cache, publishable),
-        "source_digest": tree_digest(source, publishable),
+        "digest": digest,
+        "source_digest": source_digest,
         "inventory_exact_match": inventory.get("inventory_exact_match") is True,
         "tool_count": tool_count,
         "annotations_missing": missing_list,
@@ -523,13 +532,24 @@ def _update_claude(
     env: dict[str, str],
     label: str,
 ) -> tuple[CommandResult, ...]:
-    update = run_command(
-        f"claude_plugin_update_{label}",
-        ("claude", "plugin", "update", PLUGIN_REF, "--scope", "user"),
+    """Reinstall Claude plugin from marketplace so restored bytes match publishable tree.
+
+    ``plugin update`` alone left inventory_exact_match false on restore; uninstall+install
+    mirrors Codex remove+add and keeps UpdateProbeEvidence typed.
+    """
+    uninstall = run_command(
+        f"claude_plugin_uninstall_{label}",
+        ("claude", "plugin", "uninstall", PLUGIN_REF, "--scope", "user"),
         cwd=marketplace,
         env=env,
     )
-    return (update,)
+    install = run_command(
+        f"claude_plugin_install_{label}",
+        ("claude", "plugin", "install", PLUGIN_REF, "--scope", "user"),
+        cwd=marketplace,
+        env=env,
+    )
+    return (uninstall, install)
 
 
 def _json_file(path: Path) -> dict[str, JsonValue]:

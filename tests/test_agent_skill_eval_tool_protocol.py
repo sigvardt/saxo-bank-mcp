@@ -277,14 +277,16 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
     assert "mcp_servers.saxo_bank_mcp.enabled=false" not in codex
     assert "*" not in " ".join(codex)
 
-    # Then: Claude uses strict mcp-config + exact allowedTools (no empty --tools disablement).
+    # Then: Claude denies built-ins, keeps strict mcp-config + exact grants.
     assert (
         claude[claude.index("--permission-mode")],
         claude[claude.index("--permission-mode") + 1],
     ) == ("--permission-mode", "bypassPermissions")
     assert "--strict-mcp-config" in claude
     assert claude[claude.index("--mcp-config") + 1] == str(mcp_config)
-    assert "--tools" not in claude
+    disallowed = claude[claude.index("--disallowedTools") + 1]
+    assert "Bash" in disallowed
+    assert "Read" in disallowed
     allowed = claude[claude.index("--allowedTools") + 1]
     assert allowed == ",".join(grants)
     assert "*" not in allowed

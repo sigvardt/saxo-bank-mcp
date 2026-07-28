@@ -7,10 +7,10 @@
     "positive"
   ],
   "environment": "SIM",
-  "natural_prompt": "Run a controlled SIM order lifecycle for a tiny allowed fixture, read it back, then clean up every created order. SIM needs no human approval.",
+  "natural_prompt": "Run a controlled SIM order lifecycle for the tiny allowed stock fixture UIC 211: amount 1, Buy, limit 50, Day duration, on the selected SIM account from session capabilities. Preview with saxo_create_order_preview, place once (saxo_place_order or saxo_place_sim_order), read back via registered portfolio order reads, cancel the created order, confirm ledger/readback cleanup. SIM needs no human approval. Do not print account keys, raw order ids, or broker payloads. Use only the granted Saxo MCP tools; do not use Bash, Read, Edit, or other built-ins.",
   "harness_prompts": {
-    "codex": "Run a controlled SIM order lifecycle for a tiny allowed fixture, read it back, then clean up every created order. SIM needs no human approval.",
-    "claude": "Run a controlled SIM order lifecycle for a tiny allowed fixture, read it back, then clean up every created order. SIM needs no human approval."
+    "codex": "Run a controlled SIM order lifecycle for the tiny allowed stock fixture UIC 211: amount 1, Buy, limit 50, Day duration, on the selected SIM account from session capabilities. Preview with saxo_create_order_preview, place once (saxo_place_order or saxo_place_sim_order), read back via registered portfolio order reads, cancel the created order, confirm ledger/readback cleanup. SIM needs no human approval. Do not print account keys, raw order ids, or broker payloads. Use only the granted Saxo MCP tools; do not use Bash, Read, Edit, or other built-ins.",
+    "claude": "Run a controlled SIM order lifecycle for the tiny allowed stock fixture UIC 211: amount 1, Buy, limit 50, Day duration, on the selected SIM account from session capabilities. Preview with saxo_create_order_preview, place once (saxo_place_order or saxo_place_sim_order), read back via registered portfolio order reads, cancel the created order, confirm ledger/readback cleanup. SIM needs no human approval. Do not print account keys, raw order ids, or broker payloads. Use only the granted Saxo MCP tools; do not use Bash, Read, Edit, or other built-ins."
   },
   "expected_skill": "saxo-trading",
   "required_logical_tools": [

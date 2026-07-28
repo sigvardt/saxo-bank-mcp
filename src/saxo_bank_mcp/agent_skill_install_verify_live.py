@@ -414,7 +414,7 @@ def _bumped_proof_errors(  # noqa: C901
             "claude",
             probe.bumped_proof.claude,
             "claude_plugin_list_bumped",
-            "claude_plugin_update_bumped",
+            "claude_plugin_install_bumped",
         ),
     ):
         expected_cache = _expected_cache_root(
@@ -518,8 +518,8 @@ def _update_receipt_errors(report: InstallEvidenceReport) -> list[str]:
     required = {
         "codex_plugin_add_bumped",
         "codex_plugin_add_restored",
-        "claude_plugin_update_bumped",
-        "claude_plugin_update_restored",
+        "claude_plugin_install_bumped",
+        "claude_plugin_install_restored",
         "codex_plugin_list_bumped",
         "claude_plugin_list_bumped",
         "codex_plugin_list_restored",

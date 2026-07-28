@@ -70,8 +70,8 @@ def _execute_non_router_case(  # noqa: PLR0913
     env: dict[str, str],
     manager: EvalProcessManager,
 ) -> EvalRunRecord:
-    command = _model_command(case, harness, grants, roots, env=env)
     plugin_cwd = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
+    command = _model_command(case, harness, grants, roots, env=env)
     try:
         result = manager.run(
             command,
@@ -79,6 +79,26 @@ def _execute_non_router_case(  # noqa: PLR0913
             env=env,
             timeout_seconds=case.timeout_seconds,
         )
+    except FileNotFoundError:
+        # Process never started: at most one retry after re-resolving executables.
+        # Zero MCP/Saxo calls are guaranteed because Popen never launched.
+        try:
+            retry_command = _model_command(case, harness, grants, roots, env=env)
+            result = manager.run(
+                retry_command,
+                cwd=plugin_cwd,
+                env=env,
+                timeout_seconds=case.timeout_seconds,
+            )
+        except FileNotFoundError:
+            return _failed_record(
+                case,
+                harness,
+                grants,
+                "executable_not_found",
+            )
+        except OSError as exc:
+            return _failed_record(case, harness, grants, type(exc).__name__)
     except OSError as exc:
         return _failed_record(case, harness, grants, type(exc).__name__)
     return _record_from_process(case, harness, grants, result)
@@ -108,6 +128,7 @@ def _model_command(
         plugin_root=plugin_root,
         codex_home=roots.codex_home,
         claude_mcp_config_path=claude_mcp_config_path,
+        env=env,
     )
 
 

@@ -58,6 +58,15 @@ SAXO_SERVER_PROTOCOL_TOOLS: Final = frozenset(
         "ping",
     },
 )
+# Exact Codex harness MCP discovery helpers (server=codex). Unknown tools fail closed.
+CODEX_HARNESS_SERVER_NAMES: Final = frozenset({"codex"})
+CODEX_MCP_DISCOVERY_TOOLS: Final = frozenset(
+    {
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+    },
+)
 type HarnessName = Literal["codex", "claude"]
 
 
@@ -308,11 +317,21 @@ def _codex_mcp_classification(item: _CodexItem) -> str:
     if not server and not tool and not name:
         # Empty MCP wrapper rows are harness noise, not a foreign server.
         return "saxo_protocol"
+    if _is_codex_mcp_discovery(server=server, tool=tool, name=name):
+        # Exact known Codex discovery helpers only (server=codex + list_mcp_resources...).
+        return "saxo_protocol"
     if _is_saxo_mcp_server(server) or _is_saxo_mcp_qualified_name(tool, name):
         # Saxo server wrapper/protocol noise is not a foreign MCP. Real tools still
         # grade via logical invocation + exact grants; unknown servers stay fail-closed.
         return "saxo_protocol"
     return "non_saxo"
+
+
+def _is_codex_mcp_discovery(*, server: str, tool: str, name: str) -> bool:
+    if server.strip().lower() not in CODEX_HARNESS_SERVER_NAMES:
+        return False
+    candidates = {tool.strip().lower(), name.strip().lower()}
+    return bool(candidates & CODEX_MCP_DISCOVERY_TOOLS)
 
 
 def _is_saxo_mcp_qualified_name(*candidates: str) -> bool:
