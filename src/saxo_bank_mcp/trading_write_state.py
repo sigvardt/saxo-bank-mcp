@@ -5,7 +5,6 @@ import json
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
@@ -13,9 +12,8 @@ from pydantic_core import PydanticCustomError
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.config import SaxoEnvironment
 from saxo_bank_mcp.live_approval import live_approval_statement
+from saxo_bank_mcp.safety_models import PREVIEW_TTL_SECONDS
 from saxo_bank_mcp.trading_write_registry import TradingWriteSpec
-
-TRADING_WRITE_PREVIEW_TTL_SECONDS: Final = 300
 
 
 class TradingWriteRequest(BaseModel):
@@ -68,7 +66,10 @@ def create_trading_write_preview(
     token = secrets.token_urlsafe(32)
     preview_token_fingerprint = _sha256(token)
     approval = (
-        live_approval_statement(f"{fingerprint}:{preview_token_fingerprint}")
+        live_approval_statement(
+            _trading_write_approval_action(spec),
+            f"{fingerprint}:{preview_token_fingerprint}",
+        )
         if environment == SaxoEnvironment.LIVE
         else None
     )
@@ -80,7 +81,7 @@ def create_trading_write_preview(
         request_fingerprint=fingerprint,
         preview_token_fingerprint=preview_token_fingerprint,
         expected_approval_statement=approval,
-        expires_at=datetime.now(UTC) + timedelta(seconds=TRADING_WRITE_PREVIEW_TTL_SECONDS),
+        expires_at=datetime.now(UTC) + timedelta(seconds=PREVIEW_TTL_SECONDS),
     )
     _PREVIEWS[token] = prepared
     return token, prepared
@@ -121,3 +122,24 @@ def trading_write_fingerprint(
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _trading_write_approval_action(spec: TradingWriteSpec) -> str:
+    match spec.method:
+        case "POST":
+            verb = "SUBMIT"
+        case "PUT":
+            verb = "UPDATE"
+        case "PATCH":
+            verb = "MODIFY"
+        case "DELETE":
+            verb = "DELETE"
+        case "GET" | "HEAD" | "OPTIONS":
+            verb = "EXECUTE"
+    action = f"{verb} {spec.service} using Saxo operation {spec.operation_id}"
+    names = spec.path_parameter_names
+    if not names:
+        return action
+    field_word = "field" if len(names) == 1 else "fields"
+    value_word = "value" if len(names) == 1 else "values"
+    return f"{action} for target {field_word} {', '.join(names)} ({value_word} hidden)"

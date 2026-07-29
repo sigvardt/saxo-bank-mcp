@@ -1,215 +1,81 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from typing import Final, Literal, TypedDict
+from collections.abc import Mapping
+from typing import Final
 
-from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, SaxoAuthStatus
-from saxo_bank_mcp.config import SaxoRuntimeConfig
 from saxo_bank_mcp.fastmcp_logging_safety import (
     FASTMCP_VALIDATION_SAFETY_TRANSFORM,
     SafeFastMCP,
     install_fastmcp_argument_log_filter,
 )
-from saxo_bank_mcp.live_precheck_tool import create_live_precheck_tool
-from saxo_bank_mcp.mcp_auth_tools import (
-    saxo_exchange_pkce_code,
-    saxo_get_session_capabilities,
-    saxo_refresh_token,
-    saxo_start_pkce_login,
+from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
+from saxo_bank_mcp.server_core_tools import (
+    AUTH_STATUS_TOOL_DESCRIPTION,
+    HEALTH_DOES_NOT_VERIFY,
+    HEALTH_SCOPE,
+    HEALTH_TOOL_DESCRIPTION,
+    HEALTH_VERIFIES,
+    SERVICE_NAME,
+    SaxoHealth,
+    saxo_auth_status,
+    saxo_health,
 )
-from saxo_bank_mcp.mcp_entitlement_tools import (
-    ENTITLEMENTS_TOOL_DESCRIPTION,
-    saxo_get_entitlements,
+from saxo_bank_mcp.server_eval_tool_filter import (
+    EvalToolFilterError,
+    resolve_eval_tool_filter,
 )
-from saxo_bank_mcp.mcp_live_account_tools import (
-    LIVE_ACCOUNTS_TOOL_DESCRIPTION,
-    saxo_list_live_accounts,
-)
-from saxo_bank_mcp.mcp_order_tools import (
-    ORDER_WRITE_TOOL_DESCRIPTION,
-    PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION,
-    saxo_cancel_multileg_order,
-    saxo_cancel_multileg_sim_order,
-    saxo_cancel_order,
-    saxo_cancel_orders_by_instrument,
-    saxo_cancel_sim_order,
-    saxo_cancel_sim_orders_by_instrument,
-    saxo_modify_multileg_order,
-    saxo_modify_multileg_sim_order,
-    saxo_modify_order,
-    saxo_modify_sim_order,
-    saxo_place_multileg_order,
-    saxo_place_multileg_sim_order,
-    saxo_place_order,
-    saxo_place_sim_order,
-)
-from saxo_bank_mcp.mcp_portal_token_tools import (
-    SIM_ACCESS_CACHE_TOOL_DESCRIPTION,
-    saxo_cache_sim_access_token,
-)
-from saxo_bank_mcp.mcp_request_ledger_tools import (
-    SAFE_REQUEST_LEDGER_MIDDLEWARE,
-    SAFE_REQUEST_LEDGER_TOOL_DESCRIPTION,
-    saxo_get_safe_request_ledger,
-)
-from saxo_bank_mcp.mcp_safety_tools import (
-    COMMIT_TOOL_DESCRIPTION,
-    PREVIEW_TOOL_DESCRIPTION,
-    SAFETY_STATUS_TOOL_DESCRIPTION,
-    saxo_commit_write_preview,
-    saxo_create_write_preview,
-    saxo_safety_status,
-)
-from saxo_bank_mcp.mcp_streaming_tools import (
-    STREAMING_CLEANUP_TOOL_DESCRIPTION,
-    STREAMING_TOOL_DESCRIPTION,
-    saxo_cleanup_streaming_subscriptions,
-    saxo_create_streaming_price_subscription,
-)
-from saxo_bank_mcp.mcp_tool_results import (
-    PKCE_EXCHANGE_TOOL_DESCRIPTION,
-    PKCE_START_TOOL_DESCRIPTION,
-    REFRESH_TOOL_DESCRIPTION,
-    SESSION_CAPABILITIES_TOOL_DESCRIPTION,
-)
-from saxo_bank_mcp.mcp_trade_tools import (
-    DISCLAIMER_LOOKUP_TOOL_DESCRIPTION,
-    DISCLAIMER_RESPONSE_TOOL_DESCRIPTION,
-    MULTILEG_DEFAULTS_TOOL_DESCRIPTION,
-    ORDER_PREVIEW_TOOL_DESCRIPTION,
-    saxo_create_order_preview,
-    saxo_get_multileg_order_defaults,
-    saxo_get_required_disclaimers,
-    saxo_register_disclaimer_response,
-)
-from saxo_bank_mcp.mcp_trading_write_tools import (
-    TRADING_WRITE_EXECUTE_DESCRIPTION,
-    TRADING_WRITE_LIST_DESCRIPTION,
-    TRADING_WRITE_PREPARE_DESCRIPTION,
-    saxo_execute_trading_write,
-    saxo_list_trading_write_operations,
-    saxo_prepare_trading_write,
-)
-from saxo_bank_mcp.read_tools import (
-    REGISTERED_CALL_TOOL_DESCRIPTION,
-    saxo_call_registered_endpoint,
-)
-from saxo_bank_mcp.registry_list_tools import (
-    READ_LIST_TOOL_DESCRIPTION,
-    saxo_list_registered_endpoints,
-)
+from saxo_bank_mcp.server_tool_registration import register_saxo_tools
 
-SERVICE_NAME: Final = "saxo-bank-mcp"
 DEFAULT_HOST: Final = "127.0.0.1"
 DEFAULT_PORT: Final = 8000
-HEALTH_SCOPE: Final = "local_mcp_server_liveness_only"
-type HealthVerification = Literal[
-    "local MCP process is running",
-    "FastMCP tool call path is ready",
-]
-type HealthNonVerification = Literal[
-    "Saxo connectivity",
-    "credentials/session",
-    "account access",
-    "trading readiness/order placement",
-    "live write readiness",
-]
-HEALTH_VERIFIES: Final[tuple[HealthVerification, ...]] = (
-    "local MCP process is running",
-    "FastMCP tool call path is ready",
-)
-HEALTH_DOES_NOT_VERIFY: Final[tuple[HealthNonVerification, ...]] = (
-    "Saxo connectivity",
-    "credentials/session",
-    "account access",
-    "trading readiness/order placement",
-    "live write readiness",
-)
-HEALTH_TOOL_DESCRIPTION: Final = (
-    "Reports local MCP server liveness/readiness only. Does not verify Saxo connectivity, "
-    "credentials/session, account access, trading readiness/order placement, "
-    "or live write readiness."
-)
-AUTH_STATUS_TOOL_DESCRIPTION: Final = (
-    "Reports local Saxo auth configuration/cache state without secrets or network calls. "
-    "Does not prove Saxo login, account access, session validity, session capabilities, "
-    "trading readiness, or live-write permission."
+
+# Re-exports for existing importers/tests.
+__all__ = (
+    "AUTH_STATUS_TOOL_DESCRIPTION",
+    "DEFAULT_HOST",
+    "DEFAULT_PORT",
+    "HEALTH_DOES_NOT_VERIFY",
+    "HEALTH_SCOPE",
+    "HEALTH_TOOL_DESCRIPTION",
+    "HEALTH_VERIFIES",
+    "SERVICE_NAME",
+    "SaxoHealth",
+    "create_mcp_server",
+    "main",
+    "mcp",
+    "run_http",
+    "run_stdio",
+    "saxo_auth_status",
+    "saxo_health",
 )
 
 
-class SaxoHealth(TypedDict):
-    status: Literal["passed"]
-    service: Literal["saxo-bank-mcp"]
-    mode: EffectiveReadEnvironment
-    live_writes: Literal[False]
-    scope: Literal["local_mcp_server_liveness_only"]
-    verifies: list[HealthVerification]
-    does_not_verify: list[HealthNonVerification]
+def create_mcp_server(
+    *,
+    allowed_tools: frozenset[str] | None = None,
+) -> SafeFastMCP:
+    """Build a SafeFastMCP instance with optional SIM-only eval tool filter."""
+    install_fastmcp_argument_log_filter()
+    server = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
+    server.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
+    server.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
+    register_saxo_tools(server, allowed_tools=allowed_tools)
+    return server
 
 
-install_fastmcp_argument_log_filter()
-mcp: Final = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
-mcp.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
-mcp.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
+def create_mcp_server_from_env(env: Mapping[str, str] | None = None) -> SafeFastMCP:
+    """Build server from env; eval filter activates only with the explicit flag."""
+    try:
+        allowed = resolve_eval_tool_filter(os.environ if env is None else env)
+    except EvalToolFilterError as exc:
+        raise SystemExit(f"eval tool filter rejected: {exc.reason}") from exc
+    return create_mcp_server(allowed_tools=allowed)
 
 
-@mcp.tool(description=HEALTH_TOOL_DESCRIPTION)
-def saxo_health() -> SaxoHealth:
-    runtime = SaxoRuntimeConfig.from_env()
-    return {
-        "status": "passed",
-        "service": SERVICE_NAME,
-        "mode": runtime.effective_read_environment(),
-        "live_writes": False,
-        "scope": HEALTH_SCOPE,
-        "verifies": list(HEALTH_VERIFIES),
-        "does_not_verify": list(HEALTH_DOES_NOT_VERIFY),
-    }
-
-
-@mcp.tool(description=AUTH_STATUS_TOOL_DESCRIPTION)
-def saxo_auth_status() -> SaxoAuthStatus:
-    return SaxoRuntimeConfig.from_env().redacted_status()
-
-
-mcp.tool(description=PKCE_START_TOOL_DESCRIPTION)(saxo_start_pkce_login)
-mcp.tool(description=PKCE_EXCHANGE_TOOL_DESCRIPTION)(saxo_exchange_pkce_code)
-mcp.tool(description=SIM_ACCESS_CACHE_TOOL_DESCRIPTION)(saxo_cache_sim_access_token)
-mcp.tool(description=REFRESH_TOOL_DESCRIPTION)(saxo_refresh_token)
-mcp.tool(description=SESSION_CAPABILITIES_TOOL_DESCRIPTION)(saxo_get_session_capabilities)
-mcp.tool(description=ENTITLEMENTS_TOOL_DESCRIPTION)(saxo_get_entitlements)
-mcp.tool(description=LIVE_ACCOUNTS_TOOL_DESCRIPTION)(saxo_list_live_accounts)
-mcp.add_tool(create_live_precheck_tool())
-mcp.tool(description=SAFE_REQUEST_LEDGER_TOOL_DESCRIPTION)(saxo_get_safe_request_ledger)
-mcp.tool(description=READ_LIST_TOOL_DESCRIPTION)(saxo_list_registered_endpoints)
-mcp.tool(description=REGISTERED_CALL_TOOL_DESCRIPTION)(saxo_call_registered_endpoint)
-mcp.tool(description=SAFETY_STATUS_TOOL_DESCRIPTION)(saxo_safety_status)
-mcp.tool(description=PREVIEW_TOOL_DESCRIPTION)(saxo_create_write_preview)
-mcp.tool(description=COMMIT_TOOL_DESCRIPTION)(saxo_commit_write_preview)
-mcp.tool(description=ORDER_PREVIEW_TOOL_DESCRIPTION)(saxo_create_order_preview)
-mcp.tool(description=MULTILEG_DEFAULTS_TOOL_DESCRIPTION)(saxo_get_multileg_order_defaults)
-mcp.tool(description=DISCLAIMER_LOOKUP_TOOL_DESCRIPTION)(saxo_get_required_disclaimers)
-mcp.tool(description=DISCLAIMER_RESPONSE_TOOL_DESCRIPTION)(saxo_register_disclaimer_response)
-mcp.tool(description=TRADING_WRITE_LIST_DESCRIPTION)(saxo_list_trading_write_operations)
-mcp.tool(description=TRADING_WRITE_PREPARE_DESCRIPTION)(saxo_prepare_trading_write)
-mcp.tool(description=TRADING_WRITE_EXECUTE_DESCRIPTION)(saxo_execute_trading_write)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_order)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_order)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_order)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_orders_by_instrument)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_multileg_order)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_multileg_order)
-mcp.tool(description=PRODUCTION_ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_multileg_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_sim_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_sim_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_sim_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_sim_orders_by_instrument)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_place_multileg_sim_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_modify_multileg_sim_order)
-mcp.tool(description=ORDER_WRITE_TOOL_DESCRIPTION)(saxo_cancel_multileg_sim_order)
-mcp.tool(description=STREAMING_TOOL_DESCRIPTION)(saxo_create_streaming_price_subscription)
-mcp.tool(description=STREAMING_CLEANUP_TOOL_DESCRIPTION)(saxo_cleanup_streaming_subscriptions)
+mcp: Final = create_mcp_server_from_env()
 
 
 def run_stdio() -> None:

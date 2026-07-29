@@ -9,12 +9,13 @@ from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json, redact_text
-from saxo_bank_mcp.auth import TokenEnvironment
+from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.endpoint_registry import EndpointOperation
 from saxo_bank_mcp.live_mode import (
     live_read_missing_requirements_for_reason,
     live_read_next_action,
 )
+from saxo_bank_mcp.process_scoped_selectors import inject_account_selectors
 from saxo_bank_mcp.read_tool_types import READ_DOES_NOT_VERIFY, ReadLeaf, ReadToolResult
 from saxo_bank_mcp.strict_json import StrictJsonError, parse_json_value
 
@@ -186,7 +187,11 @@ def auth_required(reason: str) -> ReadToolResult:
     }
 
 
-def response_body(response: httpx2.Response) -> ReadLeaf:
+def response_body(
+    response: httpx2.Response,
+    *,
+    token: SaxoTokenSet | None = None,
+) -> ReadLeaf:
     if not response.content:
         return None
     try:
@@ -196,6 +201,8 @@ def response_body(response: httpx2.Response) -> ReadLeaf:
         )
     except (StrictJsonError, ValidationError):
         return redact_text(response.text)
+    if token is not None:
+        parsed = inject_account_selectors(parsed, token)
     return json.dumps(redact_json(parsed), separators=(",", ":"), sort_keys=True)
 
 

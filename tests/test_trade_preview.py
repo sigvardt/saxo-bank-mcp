@@ -145,8 +145,100 @@ async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approv
     assert summary_body["BuySell"] == intended_order["BuySell"]
     assert payload["network_call_made"] is True
     assert payload["order_placed"] is False
+    prompt = str(payload["approval_prompt"])
+    assert "PLACE a BUY order for 10 Stock units (UIC 21)" in prompt
+    assert "Market order" in prompt
+    assert "valid for DayOrder" in prompt
+    assert FIXTURE_ACCOUNT not in prompt
     assert sent[0]["ManualOrder"] is False
+    assert sent[0]["FieldGroups"] == ["MarginImpactBuySell", "Costs"]
     assert intended_order["ManualOrder"] is True
+
+
+@pytest.mark.anyio
+async def test_sim_order_preview_precheck_forces_manual_order_and_child_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from saxo_bank_mcp.safety import get_preview  # noqa: PLC0415
+
+    sent: list[dict[str, JsonValue]] = []
+
+    def access(
+        _tool_name: str,
+        environment: SaxoEnvironment,
+    ) -> trade_tools.TradePrecheckAccess:
+        return trade_tools.TradePrecheckAccess(
+            environment=environment,
+            rest_base_url="https://gateway.saxobank.com/sim/openapi/",
+            token=SaxoTokenSet(
+                access_token="sim-access-token",  # noqa: S106
+                environment="SIM",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(JSON_OBJECT_ADAPTER.validate_json(request.content))
+        return httpx2.Response(200, json=precheck_response(), request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(trade_tools, "_precheck_access", access)
+    monkeypatch.setattr(trade_tools, "create_async_client", client_factory)
+    intended = {
+        **order_body(),
+        "Orders": [{"Uic": FIXTURE_INSTRUMENT, "ManualOrder": True}],
+        "Legs": [{"Uic": FIXTURE_INSTRUMENT, "ManualOrder": True}],
+    }
+    assert "FieldGroups" not in intended
+    assert "ManualOrder" not in intended
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": intended,
+                "disclaimer_response_state": "none",
+            },
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert payload["status"] == "preview_created"
+    assert sent[0]["ManualOrder"] is False
+    assert sent[0]["FieldGroups"] == ["MarginImpactBuySell", "Costs"]
+    sent_orders = sent[0]["Orders"]
+    sent_legs = sent[0]["Legs"]
+    assert isinstance(sent_orders, list)
+    assert isinstance(sent_orders[0], dict)
+    assert isinstance(sent_legs, list)
+    assert isinstance(sent_legs[0], dict)
+    assert sent_orders[0]["ManualOrder"] is False
+    assert sent_legs[0]["ManualOrder"] is False
+    assert intended["Orders"] == [{"Uic": FIXTURE_INSTRUMENT, "ManualOrder": True}]
+    assert intended["Legs"] == [{"Uic": FIXTURE_INSTRUMENT, "ManualOrder": True}]
+    assert "FieldGroups" not in intended
+    assert "ManualOrder" not in intended
+    token = payload.get("preview_token")
+    assert isinstance(token, str)
+    assert token
+    stored = get_preview(token)
+    assert stored is not None
+    assert "FieldGroups" not in stored.request.request_body
+    assert stored.request.request_body.get("ManualOrder") is None
+    assert stored.request.request_body["Uic"] == intended["Uic"]
+    assert stored.request.request_body["Amount"] == intended["Amount"]
+    assert stored.request.request_body["Orders"] == intended["Orders"]
+    assert stored.request.request_body["Legs"] == intended["Legs"]
 
 
 @pytest.mark.anyio
@@ -164,6 +256,56 @@ async def test_order_preview_normalizes_disclaimer_state_when_none_present() -> 
     payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
     assert payload["status"] == "preview_created"
     assert payload["disclaimer_response_state"] == "none"  # normalized to none on success
+
+
+@pytest.mark.anyio
+async def test_stock_preview_uses_unit_contract_multiplier_when_saxo_omits_it() -> None:
+    stock_order = {key: value for key, value in order_body().items() if key != "ContractMultiplier"}
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": stock_order,
+                "precheck_response": precheck_response(),
+                "disclaimer_response_state": "none",
+            },
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert payload["status"] == "preview_created"
+    assert payload["preview_created"] is True
+
+
+@pytest.mark.anyio
+async def test_order_preview_blocks_saxo_error_info_without_exposing_message() -> None:
+    precheck = {
+        **precheck_response(),
+        "ErrorInfo": {
+            "ErrorCode": "InsufficientCash",
+            "Message": "sensitive submitted value",
+        },
+    }
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": order_body(),
+                "precheck_response": precheck,
+                "disclaimer_response_state": "none",
+            },
+            raise_on_error=False,
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert result.is_error is True
+    assert payload["status"] == "denied"
+    assert "precheck_error_info_present" in string_list(payload["denial_reasons"])
+    assert payload["precheck_error_code"] == "InsufficientCash"
+    assert "sensitive submitted value" not in str(payload)
+    assert payload["preview_created"] is False
+    assert payload["order_placed"] is False
 
 
 @pytest.mark.anyio

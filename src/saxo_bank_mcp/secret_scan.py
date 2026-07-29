@@ -31,6 +31,7 @@ from saxo_bank_mcp.secret_scan_python import (
 )
 from saxo_bank_mcp.secret_scan_safe_values import (
     SAFE_EMAIL_PATTERN_PARTS,
+    SAFE_PUBLIC_METADATA_TOKENS,
     SAFE_SECRET_PLACEHOLDERS,
     scrub_bounded_fragments,
 )
@@ -125,7 +126,9 @@ def _secret_patterns_in_text(file_path: Path, text: str) -> list[SecretPattern]:
         scan_line = _placeholder_scrubbed_line(line)
         patterns.extend(_credential_patterns(scan_line))
         patterns.extend(_email_patterns(scan_line))
-        patterns.extend(_person_identifier_patterns(scan_line))
+        patterns.extend(
+            _person_identifier_patterns(_person_scan_line(file_path, scan_line)),
+        )
     return patterns
 
 
@@ -139,7 +142,11 @@ def _python_secret_patterns(text: str) -> list[SecretPattern]:
     for line in text.splitlines():
         scan_line = _placeholder_scrubbed_line(line)
         patterns.extend(_email_patterns(scan_line))
-        patterns.extend(_person_identifier_patterns(scan_line))
+        patterns.extend(
+            _person_identifier_patterns(
+                _person_scan_line(Path("source.py"), scan_line),
+            ),
+        )
     return patterns
 
 
@@ -153,8 +160,23 @@ def _invalid_python_secret_patterns(text: str) -> list[SecretPattern]:
             patterns.extend(_credential_patterns(_placeholder_scrubbed_line(candidate)))
         scan_line = _placeholder_scrubbed_line(line)
         patterns.extend(_email_patterns(scan_line))
-        patterns.extend(_person_identifier_patterns(scan_line))
+        patterns.extend(
+            _person_identifier_patterns(
+                _person_scan_line(Path("source.py"), scan_line),
+            ),
+        )
     return patterns
+
+
+def _person_scan_line(file_path: Path, line: str) -> str:
+    # Exact public marketplace slug exemption applies everywhere; other public
+    # plugin metadata tokens remain path-gated.
+    scrubbed = scrub_bounded_fragments(
+        line,
+        SAFE_PUBLIC_METADATA_TOKENS,
+        adjacent_character_pattern=r"[A-Za-z0-9_+-]",
+    )
+    return _public_metadata_scrubbed_line(file_path, scrubbed)
 
 
 def _public_pattern(pattern: SecretPattern) -> str:
@@ -277,4 +299,38 @@ def _placeholder_scrubbed_line(line: str) -> str:
         line,
         SAFE_SECRET_PLACEHOLDERS,
         adjacent_character_pattern="[^'\"\\s{}&?=]",
+    )
+
+
+def _public_metadata_scrubbed_line(file_path: Path, line: str) -> str:
+    if not _is_public_plugin_metadata_path(file_path):
+        return line
+    lowered = line.lower()
+    metadata_markers = (
+        '"name"',
+        "author",
+        "description",
+        "developername",
+        "github.com/",
+        "homepage",
+        "marketplace",
+        "owner",
+        "repository",
+        "websiteurl",
+    )
+    if not any(marker in lowered for marker in metadata_markers):
+        return line
+    return scrub_bounded_fragments(
+        line,
+        SAFE_PUBLIC_METADATA_TOKENS,
+        adjacent_character_pattern=r"[A-Za-z0-9_+-]",
+    )
+
+
+def _is_public_plugin_metadata_path(file_path: Path) -> bool:
+    parts = file_path.parts
+    return (
+        ".codex-plugin" in parts
+        or ".claude-plugin" in parts
+        or (".agents" in parts and "plugins" in parts and file_path.name == "marketplace.json")
     )

@@ -41,14 +41,18 @@ def saxo_safety_status() -> ToolResult:
     return ToolResult(structured_content=status)
 
 
-def saxo_create_write_preview(  # noqa: PLR0913
+async def saxo_create_write_preview(  # noqa: C901, PLR0911, PLR0912, PLR0913
     operation_id: Annotated[
         str,
         Field(description="Registered write operation identifier, for example trade.order.place"),
     ],
     account_key: Annotated[
         str | None,
-        Field(description="Target account key; never echoed raw"),
+        Field(
+            description=(
+                "Target account key or process-scoped SafeAccountSelector; never echoed raw"
+            ),
+        ),
     ] = None,
     instrument_uic: Annotated[
         int | None,
@@ -72,9 +76,35 @@ def saxo_create_write_preview(  # noqa: PLR0913
     ] = None,
     request_body: Annotated[
         dict[str, JsonValue] | None,
-        Field(description="Exact request body to bind into the preview fingerprint"),
+        Field(
+            description=(
+                "Exact request body to bind into the preview fingerprint. OrderIds may use "
+                "process-scoped SafeOrderSelector values returned from place."
+            ),
+        ),
     ] = None,
 ) -> PreviewResult | ToolResult:
+    from saxo_bank_mcp.config import (  # noqa: PLC0415
+        SaxoEnvironment,
+        SaxoRuntimeConfig,
+        SimAuthSettingsError,
+        resolve_sim_auth_settings,
+    )
+    from saxo_bank_mcp.mcp_token_state import (  # noqa: PLC0415
+        CachedTokenBlocked,
+        CachedTokenReady,
+        cached_token_for_tool,
+    )
+    from saxo_bank_mcp.process_scoped_selectors import (  # noqa: PLC0415
+        consume_order_selectors,
+        fetch_account_rows_for_token,
+        is_account_selector,
+        is_order_selector,
+        resolve_account_key_input,
+        resolve_request_body_selectors,
+    )
+    from saxo_bank_mcp.safety_state import discard_preview  # noqa: PLC0415
+
     operation = nontrade_write_operation_for_id(operation_id)
     if operation is not None:
         payload: dict[str, JsonValue] = {
@@ -112,17 +142,149 @@ def saxo_create_write_preview(  # noqa: PLR0913
             ),
             is_error=True,
         )
+    resolved_account = account_key
+    resolved_body = dict(request_body)
+    pending_order_selectors: tuple[str, ...] = ()
+    needs_resolve = is_account_selector(account_key) or any(
+        (isinstance(value, str) and is_order_selector(value))
+        or (
+            isinstance(value, list)
+            and any(isinstance(item, str) and is_order_selector(item) for item in value)
+        )
+        for value in request_body.values()
+    )
+    if needs_resolve:
+        environment = SaxoRuntimeConfig.from_env().requested_environment
+        if environment == SaxoEnvironment.LIVE:
+            # LIVE selector resolution is not supported on local write preview (SIM scope).
+            return ToolResult(
+                structured_content={
+                    "status": "denied",
+                    "tool_name": "saxo_create_write_preview",
+                    "denial_reason": "live_selector_resolution_not_supported_on_write_preview",
+                    "preview_created": False,
+                    "network_call_made": False,
+                },
+                is_error=True,
+            )
+        try:
+            settings = resolve_sim_auth_settings(require_redirect=False)
+        except SimAuthSettingsError as error:
+            return ToolResult(
+                structured_content={
+                    "status": "denied",
+                    "tool_name": "saxo_create_write_preview",
+                    "denial_reason": str(error.code),
+                    "preview_created": False,
+                    "network_call_made": False,
+                },
+                is_error=True,
+            )
+        cache_check = cached_token_for_tool("saxo_create_write_preview", settings.cache_path)
+        match cache_check:
+            case CachedTokenReady(token=token):
+                accounts = await fetch_account_rows_for_token(
+                    token,
+                    rest_base_url=settings.rest_base_url,
+                )
+                resolved_key, account_reason = resolve_account_key_input(
+                    token,
+                    accounts,
+                    account_key,
+                )
+                if resolved_key is None:
+                    return ToolResult(
+                        structured_content={
+                            "status": "denied",
+                            "tool_name": "saxo_create_write_preview",
+                            "denial_reason": account_reason or "account_selector_invalid",
+                            "preview_created": False,
+                            "network_call_made": True,
+                        },
+                        is_error=True,
+                    )
+                resolved_account = resolved_key
+                body, body_reason, pending_order_selectors = resolve_request_body_selectors(
+                    request_body,
+                    token,
+                    accounts,
+                    environment=environment.value,
+                    account_key_context=resolved_account,
+                )
+                if body is None:
+                    return ToolResult(
+                        structured_content={
+                            "status": "denied",
+                            "tool_name": "saxo_create_write_preview",
+                            "denial_reason": body_reason or "order_selector_invalid",
+                            "preview_created": False,
+                            "network_call_made": True,
+                        },
+                        is_error=True,
+                    )
+                resolved_body = body
+                if "AccountKey" not in resolved_body:
+                    resolved_body["AccountKey"] = resolved_account
+            case CachedTokenBlocked(result=blocked):
+                return ToolResult(
+                    structured_content={
+                        "status": "denied",
+                        "tool_name": "saxo_create_write_preview",
+                        "denial_reason": str(blocked.get("reason", "auth_required")),
+                        "preview_created": False,
+                        "network_call_made": False,
+                    },
+                    is_error=True,
+                )
+    body_account = resolved_body.get("AccountKey")
+    if (
+        isinstance(body_account, str)
+        and body_account.strip()
+        and body_account != resolved_account
+    ):
+        # Fail before create_preview so agents never receive a token that execute will deny.
+        return ToolResult(
+            structured_content={
+                "status": "denied",
+                "tool_name": "saxo_create_write_preview",
+                "denial_reason": "request_body_account_key_mismatch",
+                "preview_created": False,
+                "network_call_made": False,
+            },
+            is_error=True,
+        )
     request = WritePreviewRequest(
         operation_id=operation_id,
-        account_key=account_key,
+        account_key=resolved_account,
         instrument_uic=instrument_uic,
         quantity=quantity,
         estimated_notional=estimated_notional,
         account_currency=account_currency,
         risk=risk,
-        request_body=request_body,
+        request_body=resolved_body,
     )
-    return SafetyKernel().create_preview(request)
+    preview = SafetyKernel().create_preview(request)
+    # Consume only after a successful preview is stored. Validation/audit failures
+    # before create must not burn the one-time selector. If consume loses a race,
+    # discard the just-created preview so no usable orphan token remains.
+    if pending_order_selectors and preview.get("status") == "preview_created":
+        consume_reason = consume_order_selectors(pending_order_selectors)
+        if consume_reason:
+            token = preview.get("preview_token")
+            if isinstance(token, str) and token.strip():
+                discard_preview(token)
+            return ToolResult(
+                structured_content={
+                    "status": "denied",
+                    "tool_name": "saxo_create_write_preview",
+                    "denial_reason": consume_reason,
+                    "preview_created": False,
+                    "network_call_made": True,
+                    "preview_discarded_after_selector_race": True,
+                },
+                is_error=True,
+            )
+    return preview
 
 
 def _missing_trade_preview_payload(  # noqa: PLR0913

@@ -33,7 +33,17 @@ def current_safety_reasons(
         *_allowlist_reasons(config, request),
         *_limit_reasons(config, request),
         *_risk_reasons(request),
+        *_request_body_account_reasons(request),
     ]
+
+
+def _request_body_account_reasons(request: WritePreviewRequest) -> list[str]:
+    body_account = request.request_body.get("AccountKey")
+    if not isinstance(body_account, str) or not body_account.strip():
+        return []
+    if body_account != request.account_key:
+        return ["request_body_account_key_mismatch"]
+    return []
 
 
 def _environment_reasons(config: SafetyConfig) -> list[str]:

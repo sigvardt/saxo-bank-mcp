@@ -424,3 +424,8 @@ def _safety_environment(account_key: str, audit_dir: Path) -> Generator[None, No
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+
+# Public aliases for Todo 15 matrix orchestration.
+exercise_trading_write_spec = _exercise_spec
+safety_environment_for_matrix = _safety_environment

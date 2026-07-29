@@ -1,0 +1,57 @@
+{
+  "id": "streaming-cleanup",
+  "title": "SIM streaming cleanup",
+  "tags": [
+    "streaming",
+    "sim",
+    "positive"
+  ],
+  "environment": "SIM",
+  "natural_prompt": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it.",
+  "harness_prompts": {
+    "codex": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it.",
+    "claude": "Create one bounded SIM price stream, inspect one frame if available, then clean the subscription context. Optional preflight: saxo_auth_status only (local cache, no secrets). Required tools: saxo_create_streaming_price_subscription then saxo_cleanup_streaming_subscriptions. Do not claim remote deletion unless the tool proves it."
+  },
+  "expected_skill": "saxo-streaming",
+  "required_logical_tools": [
+    "saxo_create_streaming_price_subscription",
+    "saxo_cleanup_streaming_subscriptions"
+  ],
+  "forbidden_logical_tools": [
+    "saxo_place_order",
+    "saxo_precheck_live_order"
+  ],
+  "exact_tool_grants": {
+    "codex": [
+      "saxo_auth_status",
+      "saxo_create_streaming_price_subscription",
+      "saxo_cleanup_streaming_subscriptions"
+    ],
+    "claude": [
+      "saxo_auth_status",
+      "saxo_create_streaming_price_subscription",
+      "saxo_cleanup_streaming_subscriptions"
+    ]
+  },
+  "transcript_assertions": {
+    "required_all": [
+      "cleanup"
+    ],
+    "required_any": [
+      "SIM",
+      "bounded"
+    ],
+    "forbidden": [
+      "LIVE streaming verified",
+      "remote deleted"
+    ]
+  },
+  "deterministic_graders": [
+    "required_text",
+    "forbidden_text",
+    "cleanup"
+  ],
+  "max_turns": 8,
+  "timeout_seconds": 360,
+  "cleanup_required": true
+}

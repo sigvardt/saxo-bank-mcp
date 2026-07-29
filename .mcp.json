@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "saxo-bank-mcp": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        ".",
+        "saxo-bank-mcp",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "."
+    }
+  }
+}

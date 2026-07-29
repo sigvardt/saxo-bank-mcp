@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo QA operations"
+  short_description: "Guide Saxo dual-client QA"
+  default_prompt: "Use -bank-mcp:saxo-qa-operations to plan matched Saxo QA evidence without executing model, MCP, or broker calls."

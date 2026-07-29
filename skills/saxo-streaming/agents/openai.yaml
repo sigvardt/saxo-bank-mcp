@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo streaming"
+  short_description: "Guide bounded SIM price streams"
+  default_prompt: "Use $saxo-bank-mcp:saxo-streaming to plan a SIM price stream lifecycle without executing it."

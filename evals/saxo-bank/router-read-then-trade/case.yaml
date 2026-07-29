@@ -1,0 +1,31 @@
+{
+  "id": "router-read-then-trade",
+  "title": "Router sequences SIM read before trade",
+  "tags": ["router", "router-proof", "read", "trading", "sim"],
+  "environment": "SIM",
+  "natural_prompt": "In SIM, inspect my positions first, then assess whether my user-specified order is feasible. Classify the first route and explicit follow-on. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+  "harness_prompts": {
+    "codex": "In SIM, inspect my positions first, then assess whether my user-specified order is feasible. Classify the first route and explicit follow-on. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup.",
+    "claude": "In SIM, inspect my positions first, then assess whether my user-specified order is feasible. Classify the first route and explicit follow-on. Do not run commands or call any tool, MCP server, Saxo endpoint, browser, auth flow, or cleanup."
+  },
+  "expected_skill": "saxo-reads",
+  "required_logical_tools": [],
+  "forbidden_logical_tools": ["saxo_call_registered_endpoint", "saxo_create_order_preview"],
+  "exact_tool_grants": {"codex": [], "claude": []},
+  "transcript_assertions": {"required_all": [], "required_any": [], "forbidden": []},
+  "deterministic_graders": ["router_structure", "no_model_tool_events"],
+  "max_turns": 2,
+  "timeout_seconds": 180,
+  "cleanup_required": false,
+  "router_expectation": {
+    "environment": "SIM",
+    "intent": "read",
+    "mutation_risk": "SIM mutation",
+    "evidence_need": "plan-only",
+    "primary_skill": "saxo-reads",
+    "follow_on_skills": ["saxo-trading"],
+    "requires_environment_clarification": false,
+    "approval_bypass_refused": false,
+    "trade_choice_refused": false
+  }
+}

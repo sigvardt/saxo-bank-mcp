@@ -1,0 +1,58 @@
+{
+  "status": "passed",
+  "base_head": "e4fb8cb713cf308b3b7f3ef232d4b8917e157efb",
+  "commit_subject": "fix(evals): fail closed on missing release evidence",
+  "commit_sha": null,
+  "commit_sha_note": "Final commit SHA is reported in the final response; a file cannot contain the hash of the commit that includes it.",
+  "pass_counts": {
+    "focused_pytest": 18,
+    "ruff_errors": 0,
+    "basedpyright_errors": 0,
+    "eval_cases": 12,
+    "tools": 39,
+    "skills": 8,
+    "operations": 294,
+    "implemented": 182,
+    "refused": 112,
+    "service_groups": 17,
+    "scenarios": 39,
+    "secret_findings": 0,
+    "secret_scan_errors": 0
+  },
+  "adversarial_exit_assertions": {
+    "install_nonexistent_repo": {"exit_code": 1, "reason": "repo_not_found"},
+    "install_bogus_commit": {"exit_code": 1, "reason": "commit_unresolved"},
+    "matrix_missing_install_report": {"exit_code": 1, "reason": "missing_install_report"},
+    "matrix_zero_calls": {"exit_code": 1, "error": "tool_call_evidence_missing"},
+    "release_empty_evidence": {"exit_code": 1, "reason": "evidence_root_empty", "latest_unchanged": true},
+    "release_bogus_commit": {"exit_code": 1, "reason": "source_commit_unresolved", "latest_unchanged": true},
+    "release_missing_live_proof": {"exit_code": 1, "reason": "live_proof_required", "latest_unchanged": true},
+    "release_missing_privacy": {"exit_code": 1, "reason": "privacy_evidence_missing", "latest_unchanged": true}
+  },
+  "generated_stability": {
+    "validate_agent_skill_evals_all_runs": 2,
+    "generate_agent_skill_catalogs_check_runs": 2,
+    "pre_post_diff_sha256_unchanged": true
+  },
+  "dry_run": {
+    "install_status": "planned",
+    "matrix_status": "validated",
+    "passed_status_observed": false
+  },
+  "cleanup": {
+    "debug_journal_removed_before_commit": true,
+    "task_raw_fixture_outputs_removed": true,
+    "native_clients_run": false,
+    "model_suite_run": false,
+    "mcp_run": false,
+    "saxo_run": false
+  },
+  "artifacts": {
+    "code_review_report": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/code-review-report.md",
+    "manual_qa_matrix": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/manual-qa-matrix.json",
+    "notepad": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/notepad.md",
+    "adversarial_summary": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/adversarial-cli/summary.json",
+    "dry_run_summary": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/dry-run/summary.json",
+    "scoped_secret_scan": ".omo/evidence/saxo-bank-agent-skills-dual-harness/task-12-evals/fix/scoped-secret-scan.json"
+  }
+}

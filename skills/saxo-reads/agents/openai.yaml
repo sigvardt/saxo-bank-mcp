@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo reads"
+  short_description: "Guide safe Saxo registered reads"
+  default_prompt: "Use $saxo-bank-mcp:saxo-reads to plan or run safe registered Saxo reads without leaking account data."

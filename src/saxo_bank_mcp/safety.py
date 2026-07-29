@@ -28,6 +28,7 @@ from saxo_bank_mcp.safety_models import (
 )
 from saxo_bank_mcp.safety_state import (
     committed_fingerprint_count,
+    discard_preview,
     get_preview,
     is_committed,
     is_preview_token_committed,
@@ -45,6 +46,9 @@ __all__ = (
     "SafetyConfig",
     "SafetyKernel",
     "WritePreviewRequest",
+    "discard_preview",
+    "get_preview",
+    "pending_preview_count",
     "request_fingerprint",
     "reset_safety_state",
     "token_fingerprint",
@@ -137,6 +141,7 @@ class SafetyKernel:
         }
         if self.config.environment == "LIVE":
             result["approval_prompt"] = live_approval_statement(
+                _order_approval_action(request),
                 f"{fingerprint}:{preview_token_fingerprint}",
             )
             result["approval_summary"] = {
@@ -237,6 +242,7 @@ class SafetyKernel:
         reasons.extend(current_safety_reasons(self.config, stored.request))
         if self.config.environment == "LIVE":
             expected = live_approval_statement(
+                _order_approval_action(stored.request),
                 f"{stored.request_fingerprint}:{token_fingerprint(preview_token)}",
             )
             if approval_factor is None or not approval_factor.strip():
@@ -313,3 +319,36 @@ class SafetyKernel:
             "does_not_verify": list(SAFETY_TOOL_DOES_NOT_VERIFY),
             "next_action": f"fix safety condition: {reason}",
         }
+
+
+def _order_approval_action(request: WritePreviewRequest) -> str:
+    body = request.request_body
+    side_value = body.get("BuySell")
+    side = side_value.upper() if isinstance(side_value, str) else ""
+    asset_value = body.get("AssetType")
+    asset = asset_value if isinstance(asset_value, str) else "instrument"
+    unit = "unit" if request.quantity == 1 else "units"
+    match request.operation_id:
+        case operation if operation.startswith("post.") or operation.endswith(".place"):
+            action = f"PLACE a {side} order" if side else "PLACE an order"
+        case operation if operation.startswith("patch.") or operation.endswith(".modify"):
+            action = f"MODIFY a {side} order" if side else "MODIFY an order"
+        case operation if operation.startswith("delete.") or operation.endswith(".cancel"):
+            action = "CANCEL an order"
+        case _:
+            action = "EXECUTE an order action"
+    summary = f"{action} for {request.quantity:g} {asset} {unit} (UIC {request.instrument_uic})"
+    order_type = body.get("OrderType")
+    order_price = body.get("OrderPrice")
+    if isinstance(order_type, str):
+        summary += f" as a {order_type} order"
+        if order_type == "Limit" and isinstance(order_price, int | float):
+            summary += f" at price {order_price:g} in the instrument currency"
+    duration = body.get("OrderDuration")
+    duration_type = duration.get("DurationType") if isinstance(duration, dict) else None
+    if isinstance(duration_type, str):
+        summary += f" valid for {duration_type}"
+    return (
+        f"{summary}, with estimated account impact {request.estimated_notional:g} "
+        f"{request.account_currency}, on the allowlisted account"
+    )

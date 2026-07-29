@@ -1,0 +1,119 @@
+{
+  "id": "sim-order-lifecycle",
+  "title": "SIM order lifecycle cleanup",
+  "tags": [
+    "trading",
+    "sim",
+    "positive"
+  ],
+  "environment": "SIM",
+  "natural_prompt": "Controlled SIM stock lifecycle for UIC 211 amount 1 Buy limit 50 Day with cleanup. Call these granted tools in order and do not stop early: (1) saxo_list_registered_endpoints then saxo_call_registered_endpoint GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) saxo_place_order or saxo_place_sim_order once; (4) always cancel once as its own tool call: saxo_create_write_preview then immediately saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (prefer place.safe_cancel_by_instrument.write_preview_arguments unchanged; cancel even if place is completed or completed_unverified). saxo_create_write_preview alone is not cancel; repeating write previews without a cancel_* tool fails; (5) saxo_get_safe_request_ledger only after a cancel tool ran. Skipping saxo_create_order_preview or any cancel tool fails. Do not invent raw AccountKey/OrderId or risk fields. After tools finish, your final answer must include exactly: SIM needs no human approval. Also mention cleanup or cancel. Never print secrets or broker payloads. Use only granted Saxo MCP tools.",
+  "harness_prompts": {
+    "codex": "Controlled SIM stock lifecycle for UIC 211 amount 1 Buy limit 50 Day with cleanup. Call these granted tools in order and do not stop early: (1) saxo_list_registered_endpoints then saxo_call_registered_endpoint GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) saxo_place_order or saxo_place_sim_order once; (4) always cancel once as its own tool call: saxo_create_write_preview then immediately saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (prefer place.safe_cancel_by_instrument.write_preview_arguments unchanged; cancel even if place is completed or completed_unverified). saxo_create_write_preview alone is not cancel; repeating write previews without a cancel_* tool fails; (5) saxo_get_safe_request_ledger only after a cancel tool ran. Skipping saxo_create_order_preview or any cancel tool fails. Do not invent raw AccountKey/OrderId or risk fields. After tools finish, your final answer must include exactly: SIM needs no human approval. Also mention cleanup or cancel. Never print secrets or broker payloads. Use only granted Saxo MCP tools.",
+    "claude": "Controlled SIM stock lifecycle for UIC 211 amount 1 Buy limit 50 Day with cleanup. Call these granted tools in order and do not stop early: (1) saxo_list_registered_endpoints then saxo_call_registered_endpoint GET /port/v1/accounts/me and put SafeAccountSelector into order_body.AccountKey; (2) saxo_create_order_preview with AccountKey selector, Uic 211, AssetType Stock, Amount 1, BuySell Buy, OrderType Limit, OrderPrice 50, OrderDuration DurationType DayOrder; (3) saxo_place_order or saxo_place_sim_order once; (4) always cancel once as its own tool call: saxo_create_write_preview then immediately saxo_cancel_orders_by_instrument or saxo_cancel_sim_orders_by_instrument (prefer place.safe_cancel_by_instrument.write_preview_arguments unchanged; cancel even if place is completed or completed_unverified). saxo_create_write_preview alone is not cancel; repeating write previews without a cancel_* tool fails; (5) saxo_get_safe_request_ledger only after a cancel tool ran. Skipping saxo_create_order_preview or any cancel tool fails. Do not invent raw AccountKey/OrderId or risk fields. After tools finish, your final answer must include exactly: SIM needs no human approval. Also mention cleanup or cancel. Never print secrets or broker payloads. Use only granted Saxo MCP tools."
+  },
+  "expected_skill": "saxo-trading",
+  "required_logical_tools": [
+    "saxo_create_order_preview",
+    "saxo_get_safe_request_ledger"
+  ],
+  "forbidden_logical_tools": [
+    "saxo_precheck_live_order",
+    "saxo_list_live_accounts"
+  ],
+  "exact_tool_grants": {
+    "codex": [
+      "saxo_create_order_preview",
+      "saxo_create_write_preview",
+      "saxo_commit_write_preview",
+      "saxo_place_order",
+      "saxo_modify_order",
+      "saxo_cancel_order",
+      "saxo_cancel_orders_by_instrument",
+      "saxo_place_sim_order",
+      "saxo_modify_sim_order",
+      "saxo_cancel_sim_order",
+      "saxo_cancel_sim_orders_by_instrument",
+      "saxo_place_multileg_order",
+      "saxo_modify_multileg_order",
+      "saxo_cancel_multileg_order",
+      "saxo_place_multileg_sim_order",
+      "saxo_modify_multileg_sim_order",
+      "saxo_cancel_multileg_sim_order",
+      "saxo_prepare_trading_write",
+      "saxo_execute_trading_write",
+      "saxo_list_trading_write_operations",
+      "saxo_get_multileg_order_defaults",
+      "saxo_get_safe_request_ledger",
+      "saxo_auth_status",
+      "saxo_safety_status",
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
+    ],
+    "claude": [
+      "saxo_create_order_preview",
+      "saxo_create_write_preview",
+      "saxo_commit_write_preview",
+      "saxo_place_order",
+      "saxo_modify_order",
+      "saxo_cancel_order",
+      "saxo_cancel_orders_by_instrument",
+      "saxo_place_sim_order",
+      "saxo_modify_sim_order",
+      "saxo_cancel_sim_order",
+      "saxo_cancel_sim_orders_by_instrument",
+      "saxo_place_multileg_order",
+      "saxo_modify_multileg_order",
+      "saxo_cancel_multileg_order",
+      "saxo_place_multileg_sim_order",
+      "saxo_modify_multileg_sim_order",
+      "saxo_cancel_multileg_sim_order",
+      "saxo_prepare_trading_write",
+      "saxo_execute_trading_write",
+      "saxo_list_trading_write_operations",
+      "saxo_get_multileg_order_defaults",
+      "saxo_get_safe_request_ledger",
+      "saxo_auth_status",
+      "saxo_safety_status",
+      "saxo_get_session_capabilities",
+      "saxo_list_registered_endpoints",
+      "saxo_call_registered_endpoint"
+    ]
+  },
+  "transcript_assertions": {
+    "required_all": [
+      "SIM needs no human approval"
+    ],
+    "required_any": [
+      "cleanup",
+      "cancel",
+      "cleaned",
+      "read back"
+    ],
+    "forbidden": [
+      "LIVE approval",
+      "purchase occurred"
+    ]
+  },
+  "deterministic_graders": [
+    "required_text",
+    "forbidden_text",
+    "cleanup"
+  ],
+  "max_turns": 16,
+  "timeout_seconds": 600,
+  "cleanup_required": true,
+  "required_tool_groups": [
+    [
+      "saxo_place_order",
+      "saxo_place_sim_order"
+    ],
+    [
+      "saxo_cancel_order",
+      "saxo_cancel_sim_order",
+      "saxo_cancel_orders_by_instrument",
+      "saxo_cancel_sim_orders_by_instrument"
+    ]
+  ]
+}

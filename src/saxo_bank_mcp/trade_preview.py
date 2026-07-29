@@ -52,6 +52,8 @@ def account_currency_risk(
     multiplier = _first_number(order_body, ("ContractMultiplier",))
     if multiplier is None:
         multiplier = _first_number(precheck, ("ContractMultiplier",))
+    if multiplier is None and order_body.get("AssetType") == "Stock":
+        multiplier = 1.0
     conversion_rate = _first_number(precheck, ("InstrumentToAccountConversionRate",))
     reasons: list[str] = []
     if cost is None:
@@ -80,6 +82,18 @@ def account_currency_risk(
 
 def account_currency(precheck: Mapping[str, JsonValue]) -> str | None:
     value = precheck.get("EstimatedCashRequiredCurrency")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def has_precheck_error(precheck: Mapping[str, JsonValue]) -> bool:
+    return bool(_object_at(precheck, "ErrorInfo"))
+
+
+def precheck_error_code(precheck: Mapping[str, JsonValue]) -> str | None:
+    error_info = _object_at(precheck, "ErrorInfo")
+    if error_info is None:
+        return None
+    value = error_info.get("ErrorCode")
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 

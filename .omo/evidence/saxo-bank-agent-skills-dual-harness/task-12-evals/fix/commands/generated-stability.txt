@@ -1,0 +1,61 @@
+PRE_STATUS
+ M data/saxo/agent_status_routes.json
+ M scripts/assemble_agent_skill_release.py
+ M scripts/qa_dual_plugin_install.py
+ M scripts/run_mcp_tool_matrix.py
+ M skills/saxo-bank/references/tool-catalog.md
+ M skills/saxo-openapi/references/operation-catalog.md
+ M skills/saxo-qa-operations/references/scenario-coverage.md
+ M skills/saxo-safety-recovery/references/status-recovery.md
+ M src/saxo_bank_mcp/agent_skill_install_qa.py
+ M src/saxo_bank_mcp/agent_skill_matrix.py
+ M src/saxo_bank_mcp/agent_skill_release.py
+ M tests/test_agent_skill_evals.py
+?? .debug-journal.md
+?? src/saxo_bank_mcp/agent_skill_evidence_io.py
+?? src/saxo_bank_mcp/agent_skill_install_models.py
+?? src/saxo_bank_mcp/agent_skill_release_models.py
+?? tests/agent_skill_cli_support.py
+?? tests/test_agent_skill_evidence_fail_closed.py
+?? tests/test_agent_skill_evidence_support.py
+?? tests/test_agent_skill_release_fail_closed.py
+PRE_DIFF_SHA256 f8d45123aeefb02c57c28ad141b3d4aab866e078e238a00bf9d34ce6f313f8b0
+
+COMMAND1: uv run python scripts/validate_agent_skill_evals.py --all
+status=passed cases=12 tools=39 skills=8 errors=0
+EXIT1: 0
+
+COMMAND2: uv run python scripts/generate_agent_skill_catalogs.py --check
+tool_count=39 operation_count=294 implemented_count=182 refused_count=112 service_group_count=17 scenarios=39 only_completed_unqualified_success=true
+EXIT2: 0
+
+COMMAND3: uv run python scripts/validate_agent_skill_evals.py --all
+status=passed cases=12 tools=39 skills=8 errors=0
+EXIT3: 0
+
+COMMAND4: uv run python scripts/generate_agent_skill_catalogs.py --check
+tool_count=39 operation_count=294 implemented_count=182 refused_count=112 service_group_count=17 scenarios=39 only_completed_unqualified_success=true
+EXIT4: 0
+
+POST_STATUS
+ M data/saxo/agent_status_routes.json
+ M scripts/assemble_agent_skill_release.py
+ M scripts/qa_dual_plugin_install.py
+ M scripts/run_mcp_tool_matrix.py
+ M skills/saxo-bank/references/tool-catalog.md
+ M skills/saxo-openapi/references/operation-catalog.md
+ M skills/saxo-qa-operations/references/scenario-coverage.md
+ M skills/saxo-safety-recovery/references/status-recovery.md
+ M src/saxo_bank_mcp/agent_skill_install_qa.py
+ M src/saxo_bank_mcp/agent_skill_matrix.py
+ M src/saxo_bank_mcp/agent_skill_release.py
+ M tests/test_agent_skill_evals.py
+?? .debug-journal.md
+?? src/saxo_bank_mcp/agent_skill_evidence_io.py
+?? src/saxo_bank_mcp/agent_skill_install_models.py
+?? src/saxo_bank_mcp/agent_skill_release_models.py
+?? tests/agent_skill_cli_support.py
+?? tests/test_agent_skill_evidence_fail_closed.py
+?? tests/test_agent_skill_evidence_support.py
+?? tests/test_agent_skill_release_fail_closed.py
+POST_DIFF_SHA256 f8d45123aeefb02c57c28ad141b3d4aab866e078e238a00bf9d34ce6f313f8b0

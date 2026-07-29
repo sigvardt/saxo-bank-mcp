@@ -1,0 +1,11 @@
+# Portable dual-harness validators (CI + local). No machine-local paths.
+# Codex plugin validator: trusted-codex/plugin-creator/validate_plugin.py (vendored)
+# Skill quick validator: trusted-codex/skill-creator/quick_validate.py (vendored)
+# Claude plugin validator: @anthropic-ai/claude-code@2.1.220 (npm, Node >= 22)
+# Pin date: 2026-07-27
+# Run with: uv run --locked python scripts/validators/<validator>.py
+CODEX_PLUGIN_VALIDATOR=scripts/validators/validate_plugin.py
+SKILL_QUICK_VALIDATOR=scripts/validators/quick_validate.py
+CLAUDE_CODE_NPM_PACKAGE=@anthropic-ai/claude-code@2.1.220
+TRUSTED_SOURCE_PLUGIN_VALIDATOR=trusted-codex/plugin-creator/validate_plugin.py
+TRUSTED_SOURCE_SKILL_VALIDATOR=trusted-codex/skill-creator/quick_validate.py

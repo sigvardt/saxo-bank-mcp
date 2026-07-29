@@ -1,0 +1,2 @@
+.omo/evidence/saxo-bank-agent-skills-dual-harness/task-5-router/green/secret-scan-evidence-final.log
+.omo/evidence/saxo-bank-agent-skills-dual-harness/task-5-router/cleanup/empty-file-check.txt

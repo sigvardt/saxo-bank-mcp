@@ -1,0 +1,19 @@
+{
+  "name": "sigvardt",
+  "description": "Saxo Bank MCP plugins from sigvardt.",
+  "owner": {
+    "name": "sigvardt"
+  },
+  "plugins": [
+    {
+      "name": "saxo-bank-mcp",
+      "version": "0.1.0",
+      "description": "Saxo Bank OpenAPI MCP server for agent-safe SIM and gated LIVE workflows.",
+      "author": {
+        "name": "sigvardt"
+      },
+      "source": ".",
+      "repository": "https://github.com/sigvardt/saxo-bank-mcp"
+    }
+  ]
+}

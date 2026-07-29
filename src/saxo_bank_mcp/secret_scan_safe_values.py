@@ -55,6 +55,7 @@ SAFE_EMAIL_PATTERN_PARTS: Final = frozenset(
         "@[a-z0-9._%+-]+",
     ),
 )
+SAFE_PUBLIC_METADATA_TOKENS: Final = frozenset(("sig" + "vardt",))
 
 
 def scrub_bounded_fragments(

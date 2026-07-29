@@ -483,6 +483,8 @@ def _synthetic_disclaimer_input(
 
 
 def _disclaimer_discovery_candidates(account_key: str) -> tuple[dict[str, JsonValue], ...]:
+    # Saxo returns PreTradeDisclaimers in the precheck body when required.
+    # PreTradeDisclaimers is not a valid FieldGroups value on SIM precheck.
     return tuple(
         {
             "AccountKey": account_key,
@@ -490,11 +492,17 @@ def _disclaimer_discovery_candidates(account_key: str) -> tuple[dict[str, JsonVa
             "AssetType": asset_type,
             "Amount": 1,
             "BuySell": "Buy",
-            "OrderType": "Market",
+            "OrderType": order_type,
             "OrderDuration": {"DurationType": "DayOrder"},
-            "FieldGroups": ["PreTradeDisclaimers"],
+            "ManualOrder": False,
+            **(
+                {"OrderPrice": limit_price}
+                if order_type == "Limit" and limit_price is not None
+                else {}
+            ),
+            "FieldGroups": ["Costs", "MarginImpactBuySell"],
         }
-        for uic, asset_type in _DISCOVERY_CANDIDATES
+        for uic, asset_type, order_type, limit_price in _DISCOVERY_CANDIDATES
     )
 
 
@@ -664,8 +672,17 @@ _SAFETY_ENV_DEFAULTS: Final = {
     "SAXO_MCP_ACCOUNT_ALLOWLIST": FIXTURE_ACCOUNT,
     "SAXO_MCP_INSTRUMENT_ALLOWLIST": str(FIXTURE_INSTRUMENT),
 }
-_DISCOVERY_CANDIDATES: Final[tuple[tuple[int, str], ...]] = (
-    (211, "CfdOnStock"),
-    (211, "Stock"),
-    (21, "FxSpot"),
+_DISCOVERY_CANDIDATES: Final[tuple[tuple[int, str, str, float | None], ...]] = (
+    (211, "Stock", "Limit", 50.0),
+    (211, "Stock", "Market", None),
+    (211, "CfdOnStock", "Limit", 50.0),
+    (211, "CfdOnStock", "Market", None),
+    (21, "FxSpot", "Market", None),
+    (21, "FxSpot", "Limit", 1.1),
+    (30004846, "StockIndexOption", "Limit", 1.0),
+    (30004846, "StockIndexOption", "Market", None),
 )
+
+
+# Public aliases for Todo 15 matrix orchestration.
+discover_pretrade_disclaimer_input = _discover_pretrade_disclaimer_input

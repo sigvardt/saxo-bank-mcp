@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Final
 
 from fastmcp.tools import Tool, ToolResult
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
@@ -71,11 +72,12 @@ class LivePrecheckTool(Tool):
             return generic_tool_error_result()
 
 
-def create_live_precheck_tool() -> Tool:
+def create_live_precheck_tool(annotations: ToolAnnotations | None = None) -> Tool:
     return LivePrecheckTool(
         name=LIVE_PRECHECK_TOOL_NAME,
         description=LIVE_PRECHECK_TOOL_DESCRIPTION,
         parameters=LIVE_PRECHECK_INPUT_SCHEMA,
+        annotations=annotations,
     )
 
 
