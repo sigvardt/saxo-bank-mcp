@@ -19,6 +19,11 @@ from saxo_bank_mcp.config import (
     resolve_sim_auth_settings,
 )
 from saxo_bank_mcp.http_client import create_async_client
+from saxo_bank_mcp.live_instrument_refs import (
+    LiveInstrumentIdentity,
+    instrument_details_path,
+    parse_live_instrument_identity,
+)
 from saxo_bank_mcp.live_mode import (
     LiveReadSettingsError,
     live_cached_token_for_tool,
@@ -102,7 +107,7 @@ class TradePrecheckAccess:
     token: SaxoTokenSet
 
 
-async def saxo_create_order_preview(  # noqa: C901, PLR0911
+async def saxo_create_order_preview(  # noqa: C901, PLR0911, PLR0912
     order_body: Annotated[
         dict[str, JsonValue],
         Field(
@@ -206,6 +211,7 @@ async def saxo_create_order_preview(  # noqa: C901, PLR0911
                 ),
             )
         resolved_body = resolved
+    instrument_identity: LiveInstrumentIdentity | None = None
     if source_precheck is None:
         if not isinstance(access_or_result, TradePrecheckAccess):
             return _tool_result(
@@ -216,6 +222,18 @@ async def saxo_create_order_preview(  # noqa: C901, PLR0911
                     precheck_endpoint=endpoint,
                 ),
             )
+        if environment == SaxoEnvironment.LIVE:
+            identity_or_denied = await _fetch_live_instrument_identity(
+                resolved_body,
+                access_or_result.token,
+                base_url=access_or_result.rest_base_url,
+                order_kind=order_kind,
+                precheck_endpoint=endpoint,
+            )
+            if isinstance(identity_or_denied, ToolResult):
+                return identity_or_denied
+            instrument_identity = identity_or_denied
+            network_call_made = True
         fetched = await _post_saxo_json(
             endpoint,
             _precheck_body(resolved_body, environment),
@@ -234,6 +252,7 @@ async def saxo_create_order_preview(  # noqa: C901, PLR0911
         disclaimer_details=disclaimer_details,
         disclaimer_response_state=disclaimer_response_state,
         network_call_made=network_call_made,
+        instrument_identity=instrument_identity,
     )
     content = result.structured_content
     if (
@@ -392,6 +411,7 @@ def _preview_result(  # noqa: PLR0913
     disclaimer_details: dict[str, JsonValue] | None,
     disclaimer_response_state: DisclaimerState,
     network_call_made: bool,
+    instrument_identity: LiveInstrumentIdentity | None = None,
 ) -> ToolResult:
     endpoint = precheck_endpoint_for_order_kind(order_kind)
     risk, risk_reasons, estimated_notional = account_currency_risk(precheck_response, order_body)
@@ -444,6 +464,7 @@ def _preview_result(  # noqa: PLR0913
                 risk=risk,
                 request_body=order_body,
             ),
+            instrument_identity=instrument_identity,
         ),
     )
     preview.update(
@@ -487,6 +508,55 @@ async def _post_saxo_json(
         return _tool_result(payload)
     raw = payload.get("response")
     return raw if isinstance(raw, dict) else {"raw_response": raw}
+
+
+async def _fetch_live_instrument_identity(
+    order_body: dict[str, JsonValue],
+    token: SaxoTokenSet,
+    *,
+    base_url: str,
+    order_kind: OrderKind,
+    precheck_endpoint: str,
+) -> LiveInstrumentIdentity | ToolResult:
+    """Load trusted LIVE instrument labels before precheck. Fail closed on any doubt."""
+
+    def denied(*, network_call_made: bool) -> ToolResult:
+        return _tool_result(
+            _denied(
+                "saxo_create_order_preview",
+                ["live_instrument_identity_unavailable"],
+                order_kind=order_kind,
+                precheck_endpoint=precheck_endpoint,
+                network_call_made=network_call_made,
+            ),
+        )
+
+    # A single trusted label cannot describe every leg safely. Until all legs
+    # are resolved and rendered, LIVE multileg approvals must not be minted.
+    if order_kind == "multileg":
+        return denied(network_call_made=False)
+
+    uic = order_instrument_uic(order_body)
+    asset_raw = order_body.get("AssetType")
+    if uic is None or not isinstance(asset_raw, str):
+        return denied(network_call_made=False)
+    asset_type = asset_raw.strip()
+    if not asset_type:
+        return denied(network_call_made=False)
+    path = instrument_details_path(uic, asset_type).lstrip("/")
+    try:
+        async with create_async_client(base_url=base_url, retries=0) as client:
+            response = await client.get(path, headers=_headers(token))
+    except httpx2.HTTPError:
+        return denied(network_call_made=True)
+    if not (HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX):
+        return denied(network_call_made=True)
+    identity = parse_live_instrument_identity(
+        response.content,
+        expected_uic=uic,
+        expected_asset_type=asset_type,
+    )
+    return denied(network_call_made=True) if identity is None else identity
 
 
 def _order_input_reasons(

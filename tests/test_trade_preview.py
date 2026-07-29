@@ -87,6 +87,7 @@ async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approv
     monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
     monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
     sent: list[dict[str, JsonValue]] = []
+    requested_paths: list[str] = []
 
     def access(
         _tool_name: str,
@@ -103,6 +104,20 @@ async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approv
         )
 
     def handler(request: httpx2.Request) -> httpx2.Response:
+        requested_paths.append(request.url.path)
+        if request.method == "GET":
+            return httpx2.Response(
+                200,
+                json={
+                    "AssetType": "Stock",
+                    "Description": "Space Exploration Technologies Corp. - SpaceX",
+                    "IsTradable": True,
+                    "PriceCurrency": "USD",
+                    "Symbol": "SPCX:xnas",
+                    "Uic": FIXTURE_INSTRUMENT,
+                },
+                request=request,
+            )
         sent.append(JSON_OBJECT_ADAPTER.validate_json(request.content))
         return httpx2.Response(200, json=precheck_response(), request=request)
 
@@ -146,13 +161,188 @@ async def test_live_order_preview_uses_real_precheck_and_returns_one_chat_approv
     assert payload["network_call_made"] is True
     assert payload["order_placed"] is False
     prompt = str(payload["approval_prompt"])
-    assert "PLACE a BUY order for 10 Stock units (UIC 21)" in prompt
+    assert (
+        "PLACE a BUY order for 10 shares of Space Exploration Technologies Corp. - SpaceX "
+        "(SPCX:xnas, UIC 21)"
+    ) in prompt
     assert "Market order" in prompt
     assert "valid for DayOrder" in prompt
     assert FIXTURE_ACCOUNT not in prompt
+    assert summary["instrument_description"] == (
+        "Space Exploration Technologies Corp. - SpaceX"
+    )
+    assert summary["instrument_symbol"] == "SPCX:xnas"
+    assert summary["instrument_identity_source"] == "saxo_live_reference_data"
+    assert requested_paths == [
+        "/openapi/ref/v1/instruments/details/21/Stock",
+        "/openapi/trade/v2/orders/precheck",
+    ]
     assert sent[0]["ManualOrder"] is False
     assert sent[0]["FieldGroups"] == ["MarginImpactBuySell", "Costs"]
     assert intended_order["ManualOrder"] is True
+
+
+@pytest.mark.anyio
+async def test_live_order_preview_refuses_missing_instrument_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
+    requested_methods: list[str] = []
+
+    def access(
+        _tool_name: str,
+        environment: SaxoEnvironment,
+    ) -> trade_tools.TradePrecheckAccess:
+        return trade_tools.TradePrecheckAccess(
+            environment=environment,
+            rest_base_url="https://gateway.saxobank.com/openapi/",
+            token=SaxoTokenSet(
+                access_token="live-access-token",  # noqa: S106
+                environment="LIVE",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requested_methods.append(request.method)
+        return httpx2.Response(
+            200,
+            json={
+                "AssetType": "Stock",
+                "IsTradable": True,
+                "Uic": FIXTURE_INSTRUMENT,
+            },
+            request=request,
+        )
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(trade_tools, "_precheck_access", access)
+    monkeypatch.setattr(trade_tools, "create_async_client", client_factory)
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": {**order_body(), "ManualOrder": True},
+                "disclaimer_response_state": "none",
+            },
+            raise_on_error=False,
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert result.is_error is True
+    assert payload["status"] == "denied"
+    assert payload["denial_reasons"] == ["live_instrument_identity_unavailable"]
+    assert payload["preview_created"] is False
+    assert payload["order_placed"] is False
+    assert requested_methods == ["GET"]
+
+
+@pytest.mark.anyio
+async def test_live_multileg_preview_refuses_incomplete_instrument_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "I_UNDERSTAND_REAL_MONEY_RISK")
+    monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", "21,22")
+    requested_methods: list[str] = []
+
+    def access(
+        _tool_name: str,
+        environment: SaxoEnvironment,
+    ) -> trade_tools.TradePrecheckAccess:
+        return trade_tools.TradePrecheckAccess(
+            environment=environment,
+            rest_base_url="https://gateway.saxobank.com/openapi/",
+            token=SaxoTokenSet(
+                access_token="live-access-token",  # noqa: S106
+                environment="LIVE",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            ),
+        )
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requested_methods.append(request.method)
+        if request.method == "GET":
+            return httpx2.Response(
+                200,
+                json={
+                    "AssetType": "Stock",
+                    "Description": "Only First Leg Shown",
+                    "IsTradable": True,
+                    "PriceCurrency": "USD",
+                    "Symbol": "LEG1:xnas",
+                    "Uic": 21,
+                },
+                request=request,
+            )
+        return httpx2.Response(200, json=precheck_response(), request=request)
+
+    def client_factory(
+        *,
+        base_url: str = "",
+        transport: httpx2.AsyncBaseTransport | None = None,
+        retries: int | None = None,
+    ) -> httpx2.AsyncClient:
+        del retries
+        return httpx2.AsyncClient(
+            base_url=base_url,
+            transport=httpx2.MockTransport(handler) if transport is None else transport,
+        )
+
+    monkeypatch.setattr(trade_tools, "_precheck_access", access)
+    monkeypatch.setattr(trade_tools, "create_async_client", client_factory)
+    body = {
+        **order_body(),
+        "ManualOrder": True,
+        "Legs": [
+            {
+                "Amount": 1,
+                "AssetType": "Stock",
+                "BuySell": "Buy",
+                "ManualOrder": True,
+                "Uic": 21,
+            },
+            {
+                "Amount": 1,
+                "AssetType": "Stock",
+                "BuySell": "Sell",
+                "ManualOrder": True,
+                "Uic": 22,
+            },
+        ],
+    }
+
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "saxo_create_order_preview",
+            {
+                "order_body": body,
+                "order_kind": "multileg",
+                "disclaimer_response_state": "none",
+            },
+            raise_on_error=False,
+        )
+
+    payload = JSON_OBJECT_ADAPTER.validate_python(result.structured_content)
+    assert result.is_error is True
+    assert payload["status"] == "denied"
+    assert payload["denial_reasons"] == ["live_instrument_identity_unavailable"]
+    assert payload["preview_created"] is False
+    assert payload["order_placed"] is False
+    assert requested_methods == []
 
 
 @pytest.mark.anyio
