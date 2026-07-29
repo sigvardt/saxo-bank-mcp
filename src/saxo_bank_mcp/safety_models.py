@@ -128,6 +128,8 @@ class StoredPreview:
     request_fingerprint: str
     expires_at: datetime
     environment: SafetyEnvironment
+    # Exact LIVE chat statement stored at preview time; commit must not recompute it.
+    expected_approval_statement: str | None = None
 
 
 def _safety_environment(raw: str | None) -> SafetyEnvironment:

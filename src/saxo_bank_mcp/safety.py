@@ -7,6 +7,7 @@ from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.audit import AuditPathError, append_audit_event
 from saxo_bank_mcp.live_approval import live_approval_statement
+from saxo_bank_mcp.live_instrument_refs import LiveInstrumentIdentity
 from saxo_bank_mcp.safety_audit import (
     audit_mode,
     is_inside_repo,
@@ -76,7 +77,12 @@ class SafetyKernel:
             "does_not_verify": list(SAFETY_TOOL_DOES_NOT_VERIFY),
         }
 
-    def create_preview(self, request: WritePreviewRequest) -> PreviewResult:
+    def create_preview(
+        self,
+        request: WritePreviewRequest,
+        *,
+        instrument_identity: LiveInstrumentIdentity | None = None,
+    ) -> PreviewResult:
         fingerprint = request_fingerprint(request)
         try:
             denial_reasons = preview_denial_reasons(self.config, request, fingerprint)
@@ -90,6 +96,12 @@ class SafetyKernel:
         token = secrets.token_urlsafe(32)
         preview_token_fingerprint = token_fingerprint(token)
         expires_at = datetime.now(UTC) + timedelta(seconds=PREVIEW_TTL_SECONDS)
+        approval_prompt: str | None = None
+        if self.config.environment == "LIVE":
+            approval_prompt = live_approval_statement(
+                _order_approval_action(request, instrument_identity),
+                f"{fingerprint}:{preview_token_fingerprint}",
+            )
         try:
             audit_path = append_audit_event(
                 self.config.audit_dir,
@@ -107,7 +119,13 @@ class SafetyKernel:
             return self._deny_preview(request, fingerprint, ["audit_write_failed"])
         store_preview(
             token,
-            StoredPreview(request, fingerprint, expires_at, self.config.environment),
+            StoredPreview(
+                request,
+                fingerprint,
+                expires_at,
+                self.config.environment,
+                expected_approval_statement=approval_prompt,
+            ),
         )
         result: PreviewResult = {
             "status": "preview_created",
@@ -139,12 +157,9 @@ class SafetyKernel:
                 else "call saxo_commit_write_preview; SIM needs no human approval"
             ),
         }
-        if self.config.environment == "LIVE":
-            result["approval_prompt"] = live_approval_statement(
-                _order_approval_action(request),
-                f"{fingerprint}:{preview_token_fingerprint}",
-            )
-            result["approval_summary"] = {
+        if approval_prompt is not None:
+            result["approval_prompt"] = approval_prompt
+            summary: dict[str, JsonValue] = {
                 "account_key_redacted": True,
                 "estimated_notional": request.estimated_notional,
                 "instrument_uic": request.instrument_uic,
@@ -152,6 +167,11 @@ class SafetyKernel:
                 "quantity": request.quantity,
                 "request_body": redact_json(request.request_body),
             }
+            if instrument_identity is not None:
+                summary["instrument_description"] = instrument_identity.description
+                summary["instrument_symbol"] = instrument_identity.symbol
+                summary["instrument_identity_source"] = instrument_identity.source
+            result["approval_summary"] = summary
         return result
 
     def commit_preview(
@@ -241,13 +261,13 @@ class SafetyKernel:
             reasons.append("preview_environment_changed")
         reasons.extend(current_safety_reasons(self.config, stored.request))
         if self.config.environment == "LIVE":
-            expected = live_approval_statement(
-                _order_approval_action(stored.request),
-                f"{stored.request_fingerprint}:{token_fingerprint(preview_token)}",
-            )
+            expected = stored.expected_approval_statement
             if approval_factor is None or not approval_factor.strip():
                 reasons.append("chat_approval_missing")
-            elif not secrets.compare_digest(approval_factor, expected):
+            elif (
+                expected is None
+                or not secrets.compare_digest(approval_factor, expected)
+            ):
                 reasons.append("chat_approval_mismatch")
         if is_preview_token_committed(token_fingerprint(preview_token)) or is_committed(
             stored.request_fingerprint,
@@ -321,13 +341,13 @@ class SafetyKernel:
         }
 
 
-def _order_approval_action(request: WritePreviewRequest) -> str:
+def _order_approval_action(
+    request: WritePreviewRequest,
+    instrument_identity: LiveInstrumentIdentity | None = None,
+) -> str:
     body = request.request_body
     side_value = body.get("BuySell")
     side = side_value.upper() if isinstance(side_value, str) else ""
-    asset_value = body.get("AssetType")
-    asset = asset_value if isinstance(asset_value, str) else "instrument"
-    unit = "unit" if request.quantity == 1 else "units"
     match request.operation_id:
         case operation if operation.startswith("post.") or operation.endswith(".place"):
             action = f"PLACE a {side} order" if side else "PLACE an order"
@@ -337,13 +357,29 @@ def _order_approval_action(request: WritePreviewRequest) -> str:
             action = "CANCEL an order"
         case _:
             action = "EXECUTE an order action"
-    summary = f"{action} for {request.quantity:g} {asset} {unit} (UIC {request.instrument_uic})"
+    quantity = f"{request.quantity:g}"
+    if instrument_identity is not None:
+        unit = _quantity_unit(request.quantity, instrument_identity.asset_type)
+        instrument = (
+            f"{instrument_identity.description} ({instrument_identity.symbol}, "
+            f"UIC {request.instrument_uic})"
+        )
+        summary = f"{action} for {quantity} {unit} of {instrument}"
+        price_currency = instrument_identity.price_currency
+    else:
+        asset_value = body.get("AssetType")
+        asset = asset_value if isinstance(asset_value, str) else "instrument"
+        unit = "unit" if request.quantity == 1 else "units"
+        summary = f"{action} for {quantity} {asset} {unit} (UIC {request.instrument_uic})"
+        price_currency = None
     order_type = body.get("OrderType")
     order_price = body.get("OrderPrice")
+    stop_price = body.get("StopLimitPrice")
+    if stop_price is None:
+        stop_price = body.get("StopPrice")
     if isinstance(order_type, str):
         summary += f" as a {order_type} order"
-        if order_type == "Limit" and isinstance(order_price, int | float):
-            summary += f" at price {order_price:g} in the instrument currency"
+        summary += _order_price_phrase(order_type, order_price, stop_price, price_currency)
     duration = body.get("OrderDuration")
     duration_type = duration.get("DurationType") if isinstance(duration, dict) else None
     if isinstance(duration_type, str):
@@ -352,3 +388,35 @@ def _order_approval_action(request: WritePreviewRequest) -> str:
         f"{summary}, with estimated account impact {request.estimated_notional:g} "
         f"{request.account_currency}, on the allowlisted account"
     )
+
+
+def _quantity_unit(quantity: float, asset_type: str) -> str:
+    if asset_type == "Stock":
+        return "share" if quantity == 1 else "shares"
+    return "unit" if quantity == 1 else "units"
+
+
+def _order_price_phrase(
+    order_type: str,
+    order_price: object,
+    stop_price: object,
+    price_currency: str | None,
+) -> str:
+    parts: list[str] = []
+    if order_type in {"Limit", "StopLimit"} and isinstance(order_price, int | float):
+        parts.append(f"at price {_format_money(order_price, price_currency)}")
+    if order_type in {"Stop", "StopIfTraded", "StopLimit"} and isinstance(
+        stop_price,
+        int | float,
+    ):
+        parts.append(f"with stop price {_format_money(stop_price, price_currency)}")
+    if not parts:
+        return ""
+    return " " + " and ".join(parts)
+
+
+def _format_money(value: float, currency: str | None) -> str:
+    amount = f"{value:g}"
+    if currency is None:
+        return f"{amount} in the instrument currency"
+    return f"{amount} {currency}"
