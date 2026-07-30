@@ -4,9 +4,9 @@ import os
 import stat
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import ClassVar, Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _APP_STATE_DIR: Final = "saxo-bank-mcp"
 _ANALYTICS_DIR: Final = "analytics"
@@ -29,14 +29,20 @@ class AnalyticsLimits(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    sync_instruments: int = 25
-    sync_rows: int = 50_000
-    job_instruments: int = 100
-    job_rows: int = 5_000_000
-    response_rows: int = 500
-    concurrent_jobs: int = 4
-    artifact_bytes: int = 25 * _MIB
-    store_quota_bytes: int = Field(gt=0)
+    sync_instruments: ClassVar[int] = 25
+    sync_rows: ClassVar[int] = 50_000
+    job_instruments: ClassVar[int] = 100
+    job_rows: ClassVar[int] = 5_000_000
+    response_rows: ClassVar[int] = 500
+    concurrent_jobs: ClassVar[int] = 4
+    artifact_bytes: ClassVar[int] = 25 * _MIB
+    store_quota_bytes: int = Field(default=_DEFAULT_STORE_QUOTA_GIB * _GIB, gt=0)
+
+    @model_validator(mode="after")
+    def _validate_public_quota(self) -> AnalyticsLimits:
+        if self.store_quota_bytes != _DEFAULT_STORE_QUOTA_GIB * _GIB:
+            raise ValueError("analytics store quota must be loaded from configuration")
+        return self
 
     def can_accept_ingestion(self, current_bytes: int, incoming_bytes: int) -> bool:
         """Return whether an ingestion fits without deleting stored data."""
@@ -82,8 +88,8 @@ def load_analytics_config(env: Mapping[str, str]) -> AnalyticsConfig:
     store_path = _path_under_state_root(resolved_state_root, analytics_root / _STORE_FILE)
     store_path = prepare_owner_only_path(store_path)
 
-    return AnalyticsConfig(
-        limits=AnalyticsLimits(store_quota_bytes=_store_quota_bytes(env)),
+    return AnalyticsConfig.model_construct(
+        limits=_configured_limits(_store_quota_bytes(env)),
         paths=AnalyticsPaths(
             state_root=resolved_state_root,
             analytics_root=analytics_root,
@@ -131,6 +137,10 @@ def _store_quota_bytes(env: Mapping[str, str]) -> int:
             f"{_QUOTA_OVERRIDE} must be between 1 and {_MAX_STORE_QUOTA_GIB}",
         )
     return quota_gib * _GIB
+
+
+def _configured_limits(store_quota_bytes: int) -> AnalyticsLimits:
+    return AnalyticsLimits.model_construct(store_quota_bytes=store_quota_bytes)
 
 
 def _path_under_state_root(state_root: Path, path: Path) -> Path:

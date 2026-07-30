@@ -4,9 +4,11 @@ import stat
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfigError,
+    AnalyticsLimits,
     load_analytics_config,
     prepare_owner_only_path,
 )
@@ -42,6 +44,11 @@ def test_config_has_fixed_request_limits_and_refuses_over_quota(tmp_path: Path) 
     assert config.limits.store_quota_bytes == 50 * 1024 * 1024 * 1024
     assert config.limits.can_accept_ingestion(config.limits.store_quota_bytes - 1, 1)
     assert not config.limits.can_accept_ingestion(config.limits.store_quota_bytes - 1, 2)
+
+
+def test_public_limits_construction_rejects_changed_fixed_limits_and_quota() -> None:
+    with pytest.raises(ValidationError):
+        AnalyticsLimits(sync_rows=1, artifact_bytes=1, store_quota_bytes=1)
 
 
 def test_config_creates_owner_only_directories_and_files(tmp_path: Path) -> None:
