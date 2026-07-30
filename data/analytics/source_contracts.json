@@ -74,8 +74,51 @@
       "method": "GET",
       "operation_id": "get.chart.v3.charts",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "max_length": 2048,
+            "min_length": 1,
+            "name": "$skiptoken",
+            "value_type": "token"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skiptoken"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/chart/v3/charts",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "DataVersion",
+            "required": true,
+            "value_type": "string_or_integer"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "AccountKey",
         "AssetType",
@@ -158,8 +201,59 @@
       "method": "GET",
       "operation_id": "get.ref.v1.instruments",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/ref/v1/instruments",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -216,6 +310,30 @@
           "enum_values": [],
           "name": "Exchange",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "CountryCode",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "ExchangeId",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Name",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ],
           "required": false,
           "value_type": "object"
         }
@@ -223,8 +341,59 @@
       "method": "GET",
       "operation_id": "get.ref.v1.instruments.details",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/ref/v1/instruments/details",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -260,6 +429,11 @@
         },
         {
           "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "date"
+          },
           "name": "ExpiryDates",
           "nullable": false,
           "required": true,
@@ -267,6 +441,35 @@
         },
         {
           "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "closed",
+            "properties": [
+              {
+                "enum_values": [],
+                "name": "PutCall",
+                "nullable": true,
+                "required": false,
+                "value_type": "string"
+              },
+              {
+                "enum_values": [],
+                "name": "Strike",
+                "nullable": true,
+                "required": false,
+                "value_type": "number"
+              },
+              {
+                "enum_values": [],
+                "name": "Uic",
+                "nullable": true,
+                "required": false,
+                "value_type": "integer"
+              }
+            ],
+            "value_type": "object"
+          },
           "name": "SpecificOptions",
           "nullable": true,
           "required": false,
@@ -276,10 +479,15 @@
       "method": "GET",
       "operation_id": "get.ref.v1.instruments.contractoptionspaces.optionrootid",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [
         "OptionRootId"
       ],
       "path_template": "/ref/v1/instruments/contractoptionspaces/{OptionRootId}",
+      "response_envelope": {
+        "row_location": "root",
+        "structural_fields": []
+      },
       "query_parameters": [
         "CanParticipateInMultiLegOrder",
         "ClientKey",
@@ -323,6 +531,44 @@
           "enum_values": [],
           "name": "Quote",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Ask",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Bid",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "DelayedByMinutes",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "Mid",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "PriceType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ],
           "required": false,
           "value_type": "object"
         },
@@ -330,6 +576,37 @@
           "enum_values": [],
           "name": "PriceInfo",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "High",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Low",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "NetChange",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "PercentChange",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            }
+          ],
           "required": false,
           "value_type": "object"
         },
@@ -351,8 +628,13 @@
       "method": "GET",
       "operation_id": "get.trade.v1.infoprices",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/trade/v1/infoprices",
+      "response_envelope": {
+        "row_location": "root",
+        "structural_fields": []
+      },
       "query_parameters": [
         "AccountKey",
         "Amount",
@@ -404,6 +686,44 @@
           "enum_values": [],
           "name": "Quote",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Ask",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Bid",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "DelayedByMinutes",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "Mid",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "PriceType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ],
           "required": false,
           "value_type": "object"
         }
@@ -411,8 +731,32 @@
       "method": "GET",
       "operation_id": "get.trade.v1.infoprices.list",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/trade/v1/infoprices/list",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "AccountKey",
         "Amount",
@@ -471,8 +815,13 @@
       "method": "GET",
       "operation_id": "get.hist.v4.performance.summary",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/hist/v4/performance/summary",
+      "response_envelope": {
+        "row_location": "root",
+        "structural_fields": []
+      },
       "query_parameters": [
         "AccountGroupKey",
         "AccountKey",
@@ -530,8 +879,32 @@
       "method": "GET",
       "operation_id": "get.hist.v4.performance.timeseries",
       "page_limit": 100,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/hist/v4/performance/timeseries",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "AccountGroupKey",
         "AccountKey",
@@ -585,8 +958,13 @@
       "method": "GET",
       "operation_id": "get.port.v1.balances",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/port/v1/balances",
+      "response_envelope": {
+        "row_location": "root",
+        "structural_fields": []
+      },
       "query_parameters": [
         "AccountGroupKey",
         "AccountKey",
@@ -620,6 +998,44 @@
           "enum_values": [],
           "name": "PositionBase",
           "nullable": false,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Amount",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "AssetType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "ExecutionTimeOpen",
+              "nullable": true,
+              "required": false,
+              "value_type": "timestamp"
+            },
+            {
+              "enum_values": [],
+              "name": "OpenPrice",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Uic",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            }
+          ],
           "required": true,
           "value_type": "object"
         },
@@ -627,6 +1043,30 @@
           "enum_values": [],
           "name": "PositionView",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "CurrentPrice",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Exposure",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ProfitLossOnTrade",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            }
+          ],
           "required": false,
           "value_type": "object"
         }
@@ -634,8 +1074,59 @@
       "method": "GET",
       "operation_id": "get.port.v1.positions",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/port/v1/positions",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -690,8 +1181,59 @@
       "method": "GET",
       "operation_id": "get.port.v1.orders",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/port/v1/orders",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -758,8 +1300,72 @@
       "method": "GET",
       "operation_id": "get.hist.v1.transactions",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "max_length": 2048,
+            "min_length": 1,
+            "name": "$skiptoken",
+            "value_type": "token"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skiptoken"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ],
+          [
+            "$skiptoken",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/hist/v1/transactions",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -823,10 +1429,74 @@
       "method": "GET",
       "operation_id": "get.cs.v1.reports.bookings.clientkey",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "max_length": 2048,
+            "min_length": 1,
+            "name": "$skiptoken",
+            "value_type": "token"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skiptoken"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ],
+          [
+            "$skiptoken",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [
         "ClientKey"
       ],
       "path_template": "/cs/v1/reports/bookings/{ClientKey}",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$skiptoken",
@@ -870,6 +1540,30 @@
           "enum_values": [],
           "name": "ClosingPosition",
           "nullable": false,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Amount",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "AssetType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Uic",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            }
+          ],
           "required": true,
           "value_type": "object"
         },
@@ -877,6 +1571,23 @@
           "enum_values": [],
           "name": "ClosedPosition",
           "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "ClosedProfitLoss",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ExecutionTimeClose",
+              "nullable": true,
+              "required": false,
+              "value_type": "timestamp"
+            }
+          ],
           "required": false,
           "value_type": "object"
         }
@@ -884,12 +1595,63 @@
       "method": "GET",
       "operation_id": "get.cs.v1.reports.closedpositions.clientkey.fromdate.todate",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [
         "ClientKey",
         "FromDate",
         "ToDate"
       ],
       "path_template": "/cs/v1/reports/closedPositions/{ClientKey}/{FromDate}/{ToDate}",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -945,8 +1707,32 @@
       "method": "GET",
       "operation_id": "get.port.v1.exposure.instruments",
       "page_limit": 100,
+      "pagination": null,
       "path_parameters": [],
       "path_template": "/port/v1/exposure/instruments",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "AccountGroupKey",
         "AccountKey",
@@ -983,6 +1769,30 @@
           "enum_values": [],
           "name": "Cost",
           "nullable": false,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Commission",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "StampDuty",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "TotalCost",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            }
+          ],
           "required": true,
           "value_type": "object"
         },
@@ -1004,12 +1814,17 @@
       "method": "GET",
       "operation_id": "get.cs.v1.tradingconditions.cost.accountkey.uic.assettype",
       "page_limit": 1,
+      "pagination": null,
       "path_parameters": [
         "AccountKey",
         "Uic",
         "AssetType"
       ],
       "path_template": "/cs/v1/tradingconditions/cost/{AccountKey}/{Uic}/{AssetType}",
+      "response_envelope": {
+        "row_location": "root",
+        "structural_fields": []
+      },
       "query_parameters": [
         "Amount",
         "ApplyCostsZeroFloor",
@@ -1071,8 +1886,59 @@
       "method": "GET",
       "operation_id": "get.ca.v2.events",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/ca/v2/events",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",
@@ -1140,8 +2006,59 @@
       "method": "GET",
       "operation_id": "get.ca.v2.holdings",
       "page_limit": 100,
+      "pagination": {
+        "cursor_fields": [
+          {
+            "maximum": 1000000,
+            "minimum": 0,
+            "name": "$skip",
+            "value_type": "integer"
+          },
+          {
+            "maximum": 1000,
+            "minimum": 1,
+            "name": "$top",
+            "value_type": "integer"
+          }
+        ],
+        "valid_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$top"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
+        ]
+      },
       "path_parameters": [],
       "path_template": "/ca/v2/holdings",
+      "response_envelope": {
+        "row_location": "data",
+        "structural_fields": [
+          {
+            "items": "source_row",
+            "name": "Data",
+            "required": true,
+            "value_type": "array"
+          },
+          {
+            "name": "MaxRows",
+            "value_type": "integer"
+          },
+          {
+            "name": "__count",
+            "value_type": "integer"
+          },
+          {
+            "name": "__next",
+            "value_type": "string"
+          }
+        ]
+      },
       "query_parameters": [
         "$skip",
         "$top",

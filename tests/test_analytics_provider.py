@@ -40,6 +40,14 @@ _EXPECTED_THREE_ATTEMPTS = 3
 _EXPECTED_TWO_ATTEMPTS = 2
 _SYNTHETIC_UIC = 1001
 _SOURCE_OBJECT_ADAPTER = TypeAdapter(dict[str, SourceJsonValue])
+_POSITION_CURSOR_PAYLOAD: Mapping[str, Any] = {
+    "Data": [
+        {
+            "PositionBase": {"Amount": 1},
+            "PositionId": "synthetic-position",
+        }
+    ]
+}
 
 
 def _fixture_bytes(name: str) -> bytes:
@@ -474,6 +482,91 @@ async def test_path_scoped_continuation_is_rebuilt_before_transport() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("contract_id", "next_link", "payload", "quarantined_kind"),
+    [
+        (
+            "positions_v1",
+            "/port/v1/positions?$top=999999999",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$top=" + ("9" * 5_000),
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "chart_v3",
+            "/chart/v3/charts?$skiptoken=",
+            {
+                "Data": [{"CloseBid": 101.0, "Time": "2026-07-29T08:00:00Z"}],
+                "DataVersion": 7,
+            },
+            "instrument_risk",
+        ),
+        (
+            "chart_v3",
+            "/chart/v3/charts?$skiptoken=invalid%20token",
+            {
+                "Data": [{"CloseBid": 101.0, "Time": "2026-07-29T08:00:00Z"}],
+                "DataVersion": 7,
+            },
+            "instrument_risk",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$skip=-1",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$skip=1.5",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$cursor=opaque",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$skip=1&$skip=2",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+        (
+            "positions_v1",
+            "/port/v1/positions?$skip=1&$skiptoken=opaque",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
+    ],
+)
+async def test_returned_pagination_rejects_invalid_cursor_schema_before_transport(
+    contract_id: str,
+    next_link: str,
+    payload: Mapping[str, Any],
+    quarantined_kind: str,
+) -> None:
+    first_payload = dict(payload)
+    first_payload["__next"] = next_link
+    executor = FakeExecutor([_json_response(200, first_payload)])
+    provider = _provider(executor)
+
+    with pytest.raises(SourceEndpointError) as caught:
+        _ = [page async for page in provider.fetch(contract_id, {})]
+
+    assert caught.value.code == "source_pagination_cursor_invalid"
+    assert len(executor.calls) == 1
+    assert quarantined_kind in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
 async def test_chart_pagination_cannot_cross_data_version_revisions() -> None:
     executor = FakeExecutor(
         [
@@ -677,7 +770,7 @@ async def test_returned_pagination_may_advance_registered_offset_controls() -> N
 
 
 @pytest.mark.anyio
-async def test_additive_data_version_cannot_override_a_contract_revision_policy() -> None:
+async def test_additive_data_version_is_refused_without_a_revision_contract() -> None:
     executor = FakeExecutor(
         [
             _json_response(
@@ -697,10 +790,12 @@ async def test_additive_data_version_cannot_override_a_contract_revision_policy(
     )
     provider = _provider(executor)
 
-    page = next(iter([item async for item in provider.fetch("transactions_v1", {})]))
+    with pytest.raises(SourceSchemaDriftError) as caught:
+        _ = [item async for item in provider.fetch("transactions_v1", {})]
 
-    assert page.data_version is None
-    assert page.source_revision.startswith("fetch:")
+    assert caught.value.additive_fields == ("DataVersion",)
+    assert "portfolio_performance" in provider.quarantined_analysis_kinds
+    assert len(executor.calls) == 1
 
 
 @pytest.mark.anyio
@@ -952,6 +1047,89 @@ async def test_additive_field_is_refused_and_quarantines_dependent_analysis() ->
     assert caught.value.additive_fields == ("NewChartField",)
     assert marker not in str(caught.value)
     assert "instrument_risk" in provider.quarantined_analysis_kinds
+    assert len(executor.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    (
+        "contract_id",
+        "source_request",
+        "payload",
+        "additive_path",
+        "quarantined_kind",
+    ),
+    [
+        (
+            "chart_v3",
+            {},
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-07-29T08:00:00Z",
+                    }
+                ],
+                "DataVersion": 7,
+                "NewEnvelopeField": {"private": "marker"},
+            },
+            "NewEnvelopeField",
+            "instrument_risk",
+        ),
+        (
+            "positions_v1",
+            {},
+            {
+                "Data": [
+                    {
+                        "PositionBase": {
+                            "Amount": 1,
+                            "AssetType": "Stock",
+                            "NewNestedField": "private-marker",
+                            "Uic": 1001,
+                        },
+                        "PositionId": "synthetic-position",
+                    }
+                ]
+            },
+            "PositionBase.NewNestedField",
+            "portfolio_exposure",
+        ),
+        (
+            "options_chain_reference_v1",
+            {"OptionRootId": 17},
+            {
+                "ExpiryDates": ["2026-09-18"],
+                "OptionRootId": 17,
+                "SpecificOptions": [
+                    {
+                        "NewNestedField": "private-marker",
+                        "PutCall": "Call",
+                        "Strike": 100.0,
+                        "Uic": 1001,
+                    }
+                ],
+            },
+            "SpecificOptions[].NewNestedField",
+            "option_chain",
+        ),
+    ],
+)
+async def test_recursive_schema_drift_is_refused_before_source_page_yield(
+    contract_id: str,
+    source_request: Mapping[str, object],
+    payload: Mapping[str, Any],
+    additive_path: str,
+    quarantined_kind: str,
+) -> None:
+    executor = FakeExecutor([_json_response(200, payload)])
+    provider = _provider(executor)
+
+    with pytest.raises(SourceSchemaDriftError) as caught:
+        _ = [page async for page in provider.fetch(contract_id, source_request)]
+
+    assert additive_path in caught.value.additive_fields
+    assert quarantined_kind in provider.quarantined_analysis_kinds
     assert len(executor.calls) == 1
 
 

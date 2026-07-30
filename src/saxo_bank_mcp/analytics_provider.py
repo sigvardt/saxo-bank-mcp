@@ -23,6 +23,8 @@ from saxo_bank_mcp.analytics_pagination import (
 from saxo_bank_mcp.analytics_source_contracts import (
     SchemaComparison,
     SourceContract,
+    SourceCursorField,
+    SourceCursorValueType,
     SourceJsonValue,
     SourcePage,
     SourceResponseShape,
@@ -105,14 +107,9 @@ _BLOCKED_ROUTING_KEYS: Final = frozenset(
         "url",
     }
 )
-_PAGINATION_CONTROL_QUERY_PARAMETERS: Final = frozenset(
-    {
-        "$skip",
-        "$skiptoken",
-        "$top",
-    }
-)
 _SAFE_PATH_VALUE_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+-]{1,255}$")
+_SAFE_CURSOR_INTEGER_PATTERN: Final = re.compile(r"^[0-9]+$")
+_SAFE_CURSOR_TOKEN_PATTERN: Final = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 _SAFE_ERROR_CODE_PATTERN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,127}$")
 _SAFE_REASON_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SAFE_RESET_HINT_PATTERN: Final = re.compile(r"^[0-9]{1,20}$")
@@ -693,15 +690,29 @@ def _registered_continuation_request(
         keep_blank_values=True,
     )
     returned_names = tuple(parameter for parameter, _value in returned_pairs)
+    duplicate_names = {
+        parameter for parameter in returned_names if returned_names.count(parameter) > 1
+    }
+    if any(parameter.startswith("$") for parameter in duplicate_names):
+        raise _pagination_cursor_error(contract)
+    returned_cursors = tuple(
+        (parameter, value) for parameter, value in returned_pairs if parameter.startswith("$")
+    )
+    _validate_returned_cursors(contract, returned_cursors)
+    declared_cursor_names: frozenset[str] = (
+        frozenset(field.name for field in contract.pagination.cursor_fields)
+        if contract.pagination is not None
+        else frozenset[str]()
+    )
     initial_scope = {
         parameter: value
         for parameter, value in initial_params.items()
-        if parameter not in _PAGINATION_CONTROL_QUERY_PARAMETERS
+        if parameter not in declared_cursor_names
     }
     returned_scope = {
         parameter: value
         for parameter, value in returned_pairs
-        if parameter not in _PAGINATION_CONTROL_QUERY_PARAMETERS
+        if parameter not in declared_cursor_names
     }
     if len(returned_names) != len(set(returned_names)) or returned_scope != initial_scope:
         raise SourceEndpointError(
@@ -709,12 +720,56 @@ def _registered_continuation_request(
             "returned pagination link changed the scoped source query",
             contract_id=contract.contract_id,
         )
-    next_params = dict(initial_scope)
-    for parameter, value in returned_pairs:
-        if parameter in _PAGINATION_CONTROL_QUERY_PARAMETERS:
-            next_params[parameter] = _query_parameter(value, contract.contract_id)
+    next_params = {**initial_scope, **dict(returned_cursors)}
     next_operation = _registered_operation(contract, initial_path)
     return next_operation, initial_path, next_params
+
+
+def _validate_returned_cursors(
+    contract: SourceContract,
+    cursor_pairs: tuple[tuple[str, str], ...],
+) -> None:
+    pagination = contract.pagination
+    if pagination is None:
+        raise _pagination_cursor_error(contract)
+    fields_by_name = {field.name: field for field in pagination.cursor_fields}
+    cursor_names = tuple(parameter for parameter, _value in cursor_pairs)
+    if any(parameter not in fields_by_name for parameter in cursor_names):
+        raise _pagination_cursor_error(contract)
+    returned_combination = tuple(
+        field.name for field in pagination.cursor_fields if field.name in cursor_names
+    )
+    if returned_combination not in pagination.valid_combinations:
+        raise _pagination_cursor_error(contract)
+    for parameter, value in cursor_pairs:
+        if not _valid_cursor_value(fields_by_name[parameter], value):
+            raise _pagination_cursor_error(contract)
+
+
+def _valid_cursor_value(field: SourceCursorField, value: str) -> bool:
+    if field.value_type is SourceCursorValueType.INTEGER:
+        if (
+            _SAFE_CURSOR_INTEGER_PATTERN.fullmatch(value) is None
+            or field.maximum is None
+            or len(value) > len(str(field.maximum))
+        ):
+            return False
+        numeric_value = int(value)
+        return field.minimum is not None and field.minimum <= numeric_value <= field.maximum
+    return (
+        field.min_length is not None
+        and field.max_length is not None
+        and field.min_length <= len(value) <= field.max_length
+        and _SAFE_CURSOR_TOKEN_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _pagination_cursor_error(contract: SourceContract) -> SourceEndpointError:
+    return SourceEndpointError(
+        "source_pagination_cursor_invalid",
+        "returned pagination cursor does not match its frozen source contract",
+        contract_id=contract.contract_id,
+    )
 
 
 def _sanitized_request_error_type(error: httpx2.RequestError) -> str:

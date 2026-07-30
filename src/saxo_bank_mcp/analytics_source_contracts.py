@@ -11,7 +11,7 @@ from functools import cache
 from importlib.resources import files
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Literal, Self, TypeGuard, cast
+from typing import Final, Literal, Self, cast
 from urllib.parse import urlparse
 
 from pydantic import (
@@ -52,16 +52,6 @@ _FIELD_PATH_PATTERN: Final = re.compile(
 _QUERY_NAME_PATTERN: Final = re.compile(r"^\$?[A-Za-z][A-Za-z0-9]*$")
 _PATH_PLACEHOLDER_PATTERN: Final = re.compile(r"\{([A-Za-z][A-Za-z0-9]*)\}")
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
-_STRUCTURAL_FIELDS: Final = frozenset(
-    {
-        "Data",
-        "DataVersion",
-        "MaxRows",
-        "__count",
-        "__next",
-    }
-)
-_MISSING: Final = object()
 
 
 class SourceValueType(StrEnum):
@@ -76,6 +66,7 @@ class SourceValueType(StrEnum):
     ARRAY = "array"
     DATE = "date"
     TIMESTAMP = "timestamp"
+    STRING_OR_INTEGER = "string_or_integer"
 
 
 class SourceResponseShape(StrEnum):
@@ -85,23 +76,115 @@ class SourceResponseShape(StrEnum):
     OBJECT = "object"
 
 
-class SourceField(BaseModel):
-    """One source field and its compatibility behavior."""
+class SourceObjectMode(StrEnum):
+    """Whether an object has a closed schema or an explicit opaque-map escape."""
+
+    CLOSED = "closed"
+    OPAQUE_MAP = "opaque_map"
+
+
+class SourceEnvelopeRowLocation(StrEnum):
+    """Where source rows live inside the response envelope."""
+
+    DATA = "data"
+    ROOT = "root"
+
+
+class SourceCursorValueType(StrEnum):
+    """Validated value classes for returned pagination cursors."""
+
+    INTEGER = "integer"
+    TOKEN = "token"  # noqa: S105
+
+
+class SourceCursorField(BaseModel):
+    """One returned cursor field with explicit safe bounds."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    name: str
+    name: Literal["$skip", "$skiptoken", "$top"]
+    value_type: SourceCursorValueType
+    minimum: int | None = None
+    maximum: int | None = None
+    min_length: int | None = Field(default=None, ge=1, le=4_096)
+    max_length: int | None = Field(default=None, ge=1, le=4_096)
+
+    @model_validator(mode="after")
+    def validate_cursor_bounds(self) -> Self:
+        if self.value_type is SourceCursorValueType.INTEGER:
+            if (
+                self.minimum is None
+                or self.maximum is None
+                or self.minimum > self.maximum
+                or self.min_length is not None
+                or self.max_length is not None
+            ):
+                raise PydanticCustomError(
+                    "integer_cursor_bounds_invalid",
+                    "integer cursor fields require only ordered numeric bounds",
+                )
+        elif (
+            self.minimum is not None
+            or self.maximum is not None
+            or self.min_length is None
+            or self.max_length is None
+            or self.min_length > self.max_length
+        ):
+            raise PydanticCustomError(
+                "token_cursor_bounds_invalid",
+                "token cursor fields require only ordered length bounds",
+            )
+        return self
+
+
+class SourcePagination(BaseModel):
+    """Allowed returned cursor fields and exact valid combinations."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    cursor_fields: tuple[SourceCursorField, ...]
+    valid_combinations: tuple[tuple[str, ...], ...]
+
+    @model_validator(mode="after")
+    def validate_cursor_contract(self) -> Self:
+        field_names = tuple(field.name for field in self.cursor_fields)
+        if not field_names or len(set(field_names)) != len(field_names):
+            raise PydanticCustomError(
+                "pagination_cursor_fields_invalid",
+                "pagination cursor fields must be non-empty and unique",
+            )
+        combinations = tuple(tuple(combination) for combination in self.valid_combinations)
+        if not combinations or len(set(combinations)) != len(combinations):
+            raise PydanticCustomError(
+                "pagination_cursor_combinations_invalid",
+                "pagination cursor combinations must be non-empty and unique",
+            )
+        field_order = {name: index for index, name in enumerate(field_names)}
+        for combination in combinations:
+            if (
+                not combination
+                or len(set(combination)) != len(combination)
+                or any(name not in field_order for name in combination)
+                or tuple(sorted(combination, key=field_order.__getitem__)) != combination
+            ):
+                raise PydanticCustomError(
+                    "pagination_cursor_combination_invalid",
+                    "pagination cursor combination must use declared fields in declaration order",
+                )
+        return self
+
+
+class SourceValueSchema(BaseModel):
+    """Recursive closed shape for one source value."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
     value_type: SourceValueType
-    required: bool = False
     nullable: bool = True
     enum_values: tuple[str, ...] = ()
-
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, value: str) -> str:
-        if _FIELD_PATH_PATTERN.fullmatch(value) is None:
-            raise ValueError("source field name is invalid")
-        return value
+    object_mode: SourceObjectMode | None = None
+    properties: tuple[SourceField, ...] = ()
+    items: SourceValueSchema | None = None
 
     @field_validator("enum_values")
     @classmethod
@@ -111,17 +194,144 @@ class SourceField(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_field_contract(self) -> Self:
+    def validate_value_schema(self) -> Self:
         if self.enum_values and self.value_type is not SourceValueType.STRING:
             raise PydanticCustomError(
                 "enum_type_invalid",
                 "source enum fields must use the string value type",
             )
+        property_names = tuple(source_field.name for source_field in self.properties)
+        if len(set(property_names)) != len(property_names):
+            raise PydanticCustomError(
+                "source_properties_invalid",
+                "closed source object properties must be unique",
+            )
+        if self.value_type is SourceValueType.OBJECT:
+            if self.object_mode is None or self.items is not None:
+                raise PydanticCustomError(
+                    "source_object_schema_invalid",
+                    "source objects require an explicit object mode and no array items",
+                )
+            if self.object_mode is SourceObjectMode.CLOSED and not self.properties:
+                raise PydanticCustomError(
+                    "closed_source_object_empty",
+                    "closed source objects require declared properties",
+                )
+            if self.object_mode is SourceObjectMode.OPAQUE_MAP and self.properties:
+                raise PydanticCustomError(
+                    "opaque_source_object_has_properties",
+                    "opaque source maps cannot also declare closed properties",
+                )
+        elif self.value_type is SourceValueType.ARRAY:
+            if self.items is None or self.object_mode is not None or self.properties:
+                raise PydanticCustomError(
+                    "source_array_schema_invalid",
+                    "source arrays require only an explicit item schema",
+                )
+        elif self.object_mode is not None or self.properties or self.items is not None:
+            raise PydanticCustomError(
+                "source_scalar_schema_invalid",
+                "scalar source values cannot declare object or array shape",
+            )
+        return self
+
+
+class SourceField(SourceValueSchema):
+    """One named source field and its compatibility behavior."""
+
+    name: str
+    required: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if _FIELD_PATH_PATTERN.fullmatch(value) is None or "." in value:
+            raise ValueError("source field name is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def validate_field_contract(self) -> Self:
         if self.required and self.nullable:
             raise PydanticCustomError(
                 "required_nullable_field",
                 "required task fields must fail closed on null",
             )
+        return self
+
+
+SourceValueSchema.model_rebuild()
+
+
+class SourceEnvelopeField(BaseModel):
+    """One explicitly declared structural response-envelope field."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    name: str
+    value_type: SourceValueType
+    required: bool = False
+    nullable: bool = False
+    items: Literal["source_row"] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if _FIELD_PATH_PATTERN.fullmatch(value) is None or "." in value:
+            raise ValueError("source envelope field name is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def validate_envelope_field(self) -> Self:
+        if (self.items is None) == (self.value_type is SourceValueType.ARRAY):
+            raise PydanticCustomError(
+                "source_envelope_items_invalid",
+                "only envelope arrays require source-row items",
+            )
+        if self.required and self.nullable:
+            raise PydanticCustomError(
+                "required_nullable_envelope_field",
+                "required envelope fields must fail closed on null",
+            )
+        return self
+
+
+class SourceResponseEnvelope(BaseModel):
+    """Closed structural envelope around root or `Data` source rows."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    row_location: SourceEnvelopeRowLocation
+    structural_fields: tuple[SourceEnvelopeField, ...]
+
+    @model_validator(mode="after")
+    def validate_response_envelope(self) -> Self:
+        field_names = tuple(source_field.name for source_field in self.structural_fields)
+        if len(set(field_names)) != len(field_names):
+            raise PydanticCustomError(
+                "source_envelope_fields_invalid",
+                "source envelope fields must be unique",
+            )
+        if self.row_location is SourceEnvelopeRowLocation.ROOT:
+            if self.structural_fields:
+                raise PydanticCustomError(
+                    "root_source_envelope_has_structural_fields",
+                    "root source envelopes use the contract fields directly",
+                )
+        else:
+            data_fields = tuple(
+                source_field
+                for source_field in self.structural_fields
+                if source_field.name == "Data"
+            )
+            if (
+                len(data_fields) != 1
+                or not data_fields[0].required
+                or data_fields[0].items != "source_row"
+            ):
+                raise PydanticCustomError(
+                    "data_source_envelope_invalid",
+                    "data source envelopes require one source-row Data array",
+                )
         return self
 
 
@@ -139,10 +349,12 @@ class SourceContract(BaseModel):
     response_shape: SourceResponseShape
     path_parameters: tuple[str, ...] = ()
     query_parameters: tuple[str, ...] = ()
+    response_envelope: SourceResponseEnvelope
     fields: tuple[SourceField, ...]
     stable_key_fields: tuple[str, ...] = ()
     revision_fields: tuple[str, ...] = ()
     dependent_analysis_kinds: tuple[str, ...]
+    pagination: SourcePagination | None
     page_limit: int = Field(default=100, ge=1, le=1_000)
     retry_attempts: int = Field(default=3, ge=1, le=3)
 
@@ -198,6 +410,16 @@ class SourceContract(BaseModel):
 
     @model_validator(mode="after")
     def validate_registered_source(self) -> Self:
+        expected_row_location = (
+            SourceEnvelopeRowLocation.DATA
+            if self.response_shape is SourceResponseShape.DATA_ARRAY
+            else SourceEnvelopeRowLocation.ROOT
+        )
+        if self.response_envelope.row_location is not expected_row_location:
+            raise PydanticCustomError(
+                "source_response_envelope_mismatch",
+                "source response envelope does not match its response shape",
+            )
         registered = find_registered_endpoint(self.method, self.path_template)
         if (
             registered is None
@@ -475,13 +697,41 @@ def compare_source_schema(
     next_link = response.get("__next")
     if next_link is not None and not isinstance(next_link, str):
         observed.structural_errors.add("next_link_not_string")
+    _observe_response_envelope(contract, response, observed)
     rows = _response_rows(contract, response, observed.structural_errors)
     _observe_top_level_revisions(contract, response, observed)
     if observed.structural_errors:
         return _comparison(contract, observed)
     _observe_fields(contract, rows, observed)
-    _observe_additive_fields(contract, rows, observed)
     return _comparison(contract, observed)
+
+
+def _observe_response_envelope(
+    contract: SourceContract,
+    response: Mapping[str, object],
+    observed: _ObservedSchema,
+) -> None:
+    if contract.response_envelope.row_location is SourceEnvelopeRowLocation.ROOT:
+        return
+    envelope_fields = {
+        source_field.name: source_field
+        for source_field in contract.response_envelope.structural_fields
+    }
+    observed.additive_fields.update(key for key in response if key not in envelope_fields)
+    for field_name, source_field in envelope_fields.items():
+        if field_name not in response:
+            if source_field.required:
+                observed.missing_required_fields.add(field_name)
+            continue
+        value = response[field_name]
+        if value is None:
+            if source_field.nullable:
+                observed.null_optional_fields.add(field_name)
+            else:
+                observed.structural_errors.add(f"envelope_field_null:{field_name}")
+            continue
+        if not _matches_source_type(value, source_field.value_type):
+            observed.structural_errors.add(f"envelope_field_type_mismatch:{field_name}")
 
 
 def _observe_top_level_revisions(
@@ -511,31 +761,46 @@ def _observe_fields(
     observed: _ObservedSchema,
 ) -> None:
     for row in rows:
-        for source_field in contract.fields:
-            _observe_field(row, source_field, observed)
+        _observe_closed_object(row, contract.fields, "", observed)
+
+
+def _observe_closed_object(
+    value: Mapping[str, object],
+    properties: tuple[SourceField, ...],
+    path_prefix: str,
+    observed: _ObservedSchema,
+) -> None:
+    properties_by_name = {source_field.name: source_field for source_field in properties}
+    observed.additive_fields.update(
+        _field_path(path_prefix, key) for key in value if key not in properties_by_name
+    )
+    for source_field in properties:
+        field_path = _field_path(path_prefix, source_field.name)
+        _observe_field(value, source_field, field_path, observed)
 
 
 def _observe_field(
-    row: Mapping[str, object],
+    parent: Mapping[str, object],
     source_field: SourceField,
+    field_path: str,
     observed: _ObservedSchema,
 ) -> None:
-    value = _value_at_path(row, source_field.name)
-    if value is _MISSING:
+    if source_field.name not in parent:
         target = (
             observed.missing_required_fields
             if source_field.required
             else observed.missing_optional_fields
         )
-        target.add(source_field.name)
+        target.add(field_path)
         return
+    value = parent[source_field.name]
     if value is None:
         target = (
             observed.null_required_fields
             if source_field.required
             else observed.null_optional_fields
         )
-        target.add(source_field.name)
+        target.add(field_path)
         return
     if not _matches_source_type(value, source_field.value_type):
         target = (
@@ -543,30 +808,121 @@ def _observe_field(
             if source_field.required
             else observed.optional_type_mismatches
         )
-        target.add(source_field.name)
+        target.add(field_path)
         return
     if (
         source_field.enum_values
         and isinstance(value, str)
         and value not in source_field.enum_values
     ):
-        observed.unknown_enum_values.setdefault(source_field.name, set()).add(value)
-
-
-def _observe_additive_fields(
-    contract: SourceContract,
-    rows: Sequence[Mapping[str, object]],
-    observed: _ObservedSchema,
-) -> None:
-    known_top_level_fields = {field.name.split(".", maxsplit=1)[0] for field in contract.fields}
-    observed.additive_fields.update(
-        {
-            key
-            for row in rows
-            for key in row
-            if key not in known_top_level_fields and key not in _STRUCTURAL_FIELDS
-        }
+        observed.unknown_enum_values.setdefault(field_path, set()).add(value)
+    _observe_nested_value(
+        value,
+        source_field,
+        field_path,
+        observed,
+        required=source_field.required,
     )
+
+
+def _observe_nested_value(
+    value: object,
+    schema: SourceValueSchema,
+    field_path: str,
+    observed: _ObservedSchema,
+    *,
+    required: bool,
+) -> None:
+    if schema.value_type is SourceValueType.OBJECT:
+        _observe_nested_object(
+            value,
+            schema,
+            field_path,
+            observed,
+            required=required,
+        )
+        return
+    if schema.value_type is not SourceValueType.ARRAY or schema.items is None:
+        return
+    _observe_nested_array(
+        value,
+        schema.items,
+        field_path,
+        observed,
+        required=required,
+    )
+
+
+def _observe_nested_object(
+    value: object,
+    schema: SourceValueSchema,
+    field_path: str,
+    observed: _ObservedSchema,
+    *,
+    required: bool,
+) -> None:
+    if schema.object_mode is SourceObjectMode.OPAQUE_MAP or not isinstance(
+        value,
+        Mapping,
+    ):
+        return
+    untyped = cast("Mapping[object, object]", value)
+    if any(not isinstance(key, str) for key in untyped):
+        _type_mismatch_target(observed, required=required).add(field_path)
+        return
+    string_mapping = {key: item for key, item in untyped.items() if isinstance(key, str)}
+    _observe_closed_object(
+        string_mapping,
+        schema.properties,
+        field_path,
+        observed,
+    )
+
+
+def _observe_nested_array(
+    value: object,
+    item_schema: SourceValueSchema,
+    field_path: str,
+    observed: _ObservedSchema,
+    *,
+    required: bool,
+) -> None:
+    if not isinstance(value, list):
+        return
+    item_path = f"{field_path}[]"
+    for item in cast("list[object]", value):
+        if item is None:
+            if not item_schema.nullable:
+                _type_mismatch_target(observed, required=required).add(item_path)
+            continue
+        if not _matches_source_type(item, item_schema.value_type):
+            _type_mismatch_target(observed, required=required).add(item_path)
+            continue
+        if (
+            item_schema.enum_values
+            and isinstance(item, str)
+            and item not in item_schema.enum_values
+        ):
+            observed.unknown_enum_values.setdefault(item_path, set()).add(item)
+        _observe_nested_value(
+            item,
+            item_schema,
+            item_path,
+            observed,
+            required=required,
+        )
+
+
+def _type_mismatch_target(
+    observed: _ObservedSchema,
+    *,
+    required: bool,
+) -> set[str]:
+    return observed.required_type_mismatches if required else observed.optional_type_mismatches
+
+
+def _field_path(prefix: str, name: str) -> str:
+    return f"{prefix}.{name}" if prefix else name
 
 
 def source_page_fingerprint(rows: Sequence[Mapping[str, object]]) -> str:
@@ -614,24 +970,6 @@ def _response_rows(
     return tuple(rows)
 
 
-def _value_at_path(row: Mapping[str, object], field_path: str) -> object:
-    current: object = row
-    for part in field_path.split("."):
-        if not _is_string_object_dict(current):
-            return _MISSING
-        if part not in current:
-            return _MISSING
-        current = current[part]
-    return current
-
-
-def _is_string_object_dict(value: object) -> TypeGuard[dict[str, object]]:
-    if not isinstance(value, dict):
-        return False
-    untyped = cast("dict[object, object]", value)
-    return all(isinstance(key, str) for key in untyped)
-
-
 def _matches_source_type(value: object, value_type: SourceValueType) -> bool:
     if value_type is SourceValueType.ANY:
         matches = True
@@ -649,8 +987,10 @@ def _matches_source_type(value: object, value_type: SourceValueType) -> bool:
         matches = isinstance(value, list)
     elif value_type is SourceValueType.DATE:
         matches = isinstance(value, str) and _is_date(value)
-    else:
+    elif value_type is SourceValueType.TIMESTAMP:
         matches = isinstance(value, str) and _is_timestamp(value)
+    else:
+        matches = isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool))
     return matches
 
 

@@ -126,6 +126,33 @@ def test_contracts_cover_every_required_source_family_with_registered_reads() ->
         assert contract.retry_attempts <= _MAX_CONTRACT_RETRY_ATTEMPTS
 
 
+def test_pagination_cursor_schemas_are_frozen_per_source_contract() -> None:
+    contracts = source_contracts_by_id()
+    chart_pagination = contracts["chart_v3"].pagination
+    positions_pagination = contracts["positions_v1"].pagination
+
+    assert chart_pagination is not None
+    assert [
+        (field.name, field.value_type.value, field.minimum, field.maximum)
+        for field in chart_pagination.cursor_fields
+    ] == [("$skiptoken", "token", None, None)]
+    assert chart_pagination.valid_combinations == (("$skiptoken",),)
+
+    assert positions_pagination is not None
+    assert [
+        (field.name, field.value_type.value, field.minimum, field.maximum)
+        for field in positions_pagination.cursor_fields
+    ] == [
+        ("$skip", "integer", 0, 1_000_000),
+        ("$top", "integer", 1, 1_000),
+    ]
+    assert positions_pagination.valid_combinations == (
+        ("$skip",),
+        ("$top",),
+        ("$skip", "$top"),
+    )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -167,6 +194,97 @@ def test_additive_fields_quarantine_dependent_analytics() -> None:
     assert comparison.quarantined_analysis_kinds == chart.dependent_analysis_kinds
     assert "NewChartField" in comparison.additive_fields
     assert "AskVolume" in comparison.missing_optional_fields
+
+
+def test_response_contract_closes_envelope_objects_and_list_items() -> None:
+    contracts = source_contracts_by_id()
+    positions = contracts["positions_v1"]
+    options = contracts["options_chain_reference_v1"]
+
+    assert positions.response_envelope.row_location.value == "data"
+    position_base = next(field for field in positions.fields if field.name == "PositionBase")
+    assert position_base.object_mode is not None
+    assert position_base.object_mode.value == "closed"
+    assert {field.name for field in position_base.properties} >= {
+        "Amount",
+        "AssetType",
+        "Uic",
+    }
+
+    specific_options = next(field for field in options.fields if field.name == "SpecificOptions")
+    assert specific_options.items is not None
+    assert specific_options.items.value_type is SourceValueType.OBJECT
+    assert {field.name for field in specific_options.items.properties} >= {
+        "PutCall",
+        "Strike",
+        "Uic",
+    }
+
+
+@pytest.mark.parametrize(
+    ("contract_id", "payload", "additive_path"),
+    [
+        (
+            "chart_v3",
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-07-29T08:00:00Z",
+                    }
+                ],
+                "DataVersion": 7,
+                "NewEnvelopeField": {"private": "marker"},
+            },
+            "NewEnvelopeField",
+        ),
+        (
+            "positions_v1",
+            {
+                "Data": [
+                    {
+                        "PositionBase": {
+                            "Amount": 1,
+                            "AssetType": "Stock",
+                            "NewNestedField": "private-marker",
+                            "Uic": 1001,
+                        },
+                        "PositionId": "synthetic-position",
+                    }
+                ]
+            },
+            "PositionBase.NewNestedField",
+        ),
+        (
+            "options_chain_reference_v1",
+            {
+                "ExpiryDates": ["2026-09-18"],
+                "OptionRootId": 17,
+                "SpecificOptions": [
+                    {
+                        "NewNestedField": "private-marker",
+                        "PutCall": "Call",
+                        "Strike": 100.0,
+                        "Uic": 1001,
+                    }
+                ],
+            },
+            "SpecificOptions[].NewNestedField",
+        ),
+    ],
+)
+def test_additive_envelope_and_recursive_fields_are_incompatible(
+    contract_id: str,
+    payload: dict[str, Any],
+    additive_path: str,
+) -> None:
+    contract = source_contracts_by_id()[contract_id]
+
+    comparison = compare_source_schema(contract, payload)
+
+    assert comparison.compatible is False
+    assert additive_path in comparison.additive_fields
+    assert comparison.quarantined_analysis_kinds == contract.dependent_analysis_kinds
 
 
 def test_unknown_enum_values_quarantine_dependent_analytics() -> None:
