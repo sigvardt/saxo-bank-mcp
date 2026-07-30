@@ -750,11 +750,58 @@ class AnalyticsStore:
             raise StoreError("analytics store is closed")
 
     def _current_storage_bytes(self) -> int:
-        return sum(
-            path.stat().st_size
-            for path in self._config.paths.analytics_root.rglob("*")
-            if path.is_file()
+        return sum(path.stat().st_size for path in self._owner_managed_files())
+
+    def _owner_managed_files(self) -> set[Path]:
+        paths: set[Path] = set()
+        for root in {
+            self._config.paths.analytics_root,
+            self._config.paths.artifacts_dir,
+        }:
+            paths.update(
+                path.resolve(strict=True)
+                for path in root.rglob("*")
+                if path.is_file() and not path.is_symlink()
+            )
+
+        store_path = self._config.paths.store_path
+        candidates = {
+            store_path,
+            Path(f"{store_path}.wal"),
+            store_writer_lock_path(store_path),
+            *self._migration_resource_files(store_path),
+        }
+        paths.update(
+            path.resolve(strict=True)
+            for path in candidates
+            if path.is_file() and not path.is_symlink()
         )
+        return paths
+
+    @staticmethod
+    def _migration_resource_files(store_path: Path) -> set[Path]:
+        backup_pattern = re.compile(
+            rf"^{re.escape(store_path.stem)}\.before-v[0-9]+\.[0-9a-f]{{32}}"
+            r"\.duckdb$",
+        )
+        temporary_pattern = re.compile(
+            rf"^\.{re.escape(store_path.name)}\.[A-Za-z0-9_-]+"
+            r"\.migrating(?:\.wal)?$",
+        )
+        candidates = {
+            *store_path.parent.glob(
+                f"{store_path.stem}.before-v*.*.duckdb",
+            ),
+            *store_path.parent.glob(
+                f".{store_path.name}.*.migrating*",
+            ),
+        }
+        return {
+            path
+            for path in candidates
+            if backup_pattern.fullmatch(path.name) is not None
+            or temporary_pattern.fullmatch(path.name) is not None
+        }
 
     def _ensure_capacity(self, incoming_bytes: int) -> None:
         reserved_bytes = (
@@ -1214,13 +1261,17 @@ class AnalyticsStore:
                 """
                 SELECT DISTINCT c.contract_sha256
                 FROM dataset_source_pages AS d
-                JOIN source_pages AS p ON p.page_id = d.page_id
-                JOIN source_contracts AS c ON c.contract_id = p.contract_id
+                LEFT JOIN source_pages AS p ON p.page_id = d.page_id
+                LEFT JOIN source_contracts AS c ON c.contract_id = p.contract_id
                 WHERE d.dataset_id = ?
                 """,
                 (dataset_id,),
             ).fetchall(),
         )
+        if any(row[0] is None for row in rows):
+            raise StoreNotFoundError(
+                "analysis dataset source contract does not exist",
+            )
         return frozenset(_require_str(row[0]) for row in rows)
 
     def create_snapshot(  # noqa: PLR0913
@@ -1466,10 +1517,7 @@ class AnalyticsStore:
         contracts = self._dataset_contracts(connection, dataset_id)
         if not contracts:
             raise StoreNotFoundError("analysis dataset source contract does not exist")
-        if result.provenance.source_contract_sha256 not in contracts:
-            raise StoreValidationError(
-                "analysis source contract does not match its dataset",
-            )
+        self._validate_analysis_contract_binding(result, contracts)
         request = result.request
         if isinstance(request, InstrumentAnalysisRequest):
             self._validate_analysis_instruments(
@@ -1488,6 +1536,39 @@ class AnalyticsStore:
                 raise StoreValidationError(
                     "analysis snapshot does not belong to its dataset",
                 )
+
+    @staticmethod
+    def _validate_analysis_contract_binding(
+        result: AnalysisResult,
+        contracts: frozenset[str],
+    ) -> None:
+        expected = tuple(sorted(contracts))
+        supplied = result.provenance.source_contract_sha256s
+        if len(expected) == 1:
+            if supplied not in {(), expected}:
+                raise StoreValidationError(
+                    "analysis source contract set does not match its dataset",
+                )
+            if result.provenance.source_contract_sha256 != expected[0]:
+                raise StoreValidationError(
+                    "analysis source contract set fingerprint is invalid",
+                )
+            return
+        if supplied != expected:
+            raise StoreValidationError(
+                "analysis source contract set does not match its dataset",
+            )
+        expected_fingerprint = _fingerprint(
+            _canonical_json(
+                {
+                    "source_contract_sha256s": list(expected),
+                },
+            )
+        )
+        if result.provenance.source_contract_sha256 != expected_fingerprint:
+            raise StoreValidationError(
+                "analysis source contract set fingerprint is invalid",
+            )
 
     @staticmethod
     def _validate_analysis_instruments(

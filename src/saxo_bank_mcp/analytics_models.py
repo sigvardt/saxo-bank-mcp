@@ -664,6 +664,7 @@ class ProofSourceBinding(_StrictAnalyticsModel):
     source_scope: Literal["saxo_openapi"]
     source_revision: SourceRevision
     source_contract_sha256: Sha256Fingerprint
+    source_contract_sha256s: tuple[Sha256Fingerprint, ...] = ()
 
 
 class ProofEngineBinding(_StrictAnalyticsModel):
@@ -711,6 +712,7 @@ class AnalysisProvenance(_StrictAnalyticsModel):
     source_scope: Literal["saxo_openapi"]
     source_revision: SourceRevision
     source_contract_sha256: Sha256Fingerprint
+    source_contract_sha256s: tuple[Sha256Fingerprint, ...] = ()
     source_timestamp: UtcDateTime
     proof_receipts: tuple[ActiveProofReceipt, ...] = Field(min_length=1)
     engine_name: EngineName
@@ -838,6 +840,7 @@ class AnalysisResult(_EvidenceAwareModel):
             source_scope=self.provenance.source_scope,
             source_revision=self.provenance.source_revision,
             source_contract_sha256=self.provenance.source_contract_sha256,
+            source_contract_sha256s=self.provenance.source_contract_sha256s,
         )
         expected_engine_binding = ProofEngineBinding(
             engine_name=self.provenance.engine_name,

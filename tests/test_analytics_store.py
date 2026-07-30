@@ -68,6 +68,9 @@ from saxo_bank_mcp.analytics_store import (
 
 _OWNER_FILE_MODE = 0o600
 _SCHEMA_SHA256 = "a" * 64
+_SECOND_SCHEMA_SHA256 = "b" * 64
+_EXTRA_SCHEMA_SHA256 = "c" * 64
+_MULTI_CONTRACT_SHA256 = "ec085bd7249a33c0dc2f8cde734ae66755acb51a5a186398b116a5873962f762"
 _CODE_COMMIT = "b" * 40
 _PROOF_PROFILE = "vp_store-proof"
 _SOURCE_AT = datetime(2026, 7, 30, 8, tzinfo=UTC)
@@ -123,12 +126,29 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     )
 
 
+def _config_with_alternate_store(tmp_path: Path) -> AnalyticsConfig:
+    default = _config(tmp_path)
+    alternate_store = prepare_owner_only_path(
+        default.paths.state_root / "alternate" / "custom.duckdb",
+    )
+    return AnalyticsConfig(
+        limits=default.limits,
+        paths=AnalyticsPaths(
+            state_root=default.paths.state_root,
+            analytics_root=default.paths.analytics_root,
+            artifacts_dir=default.paths.artifacts_dir,
+            store_path=alternate_store,
+        ),
+    )
+
+
 def _source_page(  # noqa: PLR0913
     store: AnalyticsStore,
     *,
     source_kind: str = "price_bars",
     page_key: str = "bars-page-1",
     source_revision: str = "rev-1",
+    contract_sha256: str = _SCHEMA_SHA256,
     payload: dict[str, object] | None = None,
     row_count: int = 1,
     source_timestamp: datetime = _SOURCE_AT,
@@ -140,7 +160,7 @@ def _source_page(  # noqa: PLR0913
         page_key=page_key,
         source_revision=source_revision,
         contract_name=f"{source_kind}_page",
-        contract_sha256=_SCHEMA_SHA256,
+        contract_sha256=contract_sha256,
         payload=payload or {"row_count": 1, "schema": "redacted_bar_page"},
         row_count=row_count,
         source_timestamp=source_timestamp,
@@ -157,17 +177,48 @@ def _dataset(
     account_scope: str = "aggregate",
     source_revision: str = "rev-1",
 ) -> store_module.StoredDataset:
+    return _dataset_from_pages(
+        store,
+        (page_id,),
+        dataset_id=dataset_id,
+        account_scope=account_scope,
+        source_revision=source_revision,
+    )
+
+
+def _dataset_from_pages(
+    store: AnalyticsStore,
+    page_ids: tuple[str, ...],
+    *,
+    dataset_id: str | None = None,
+    account_scope: str = "aggregate",
+    source_revision: str = "rev-1",
+) -> store_module.StoredDataset:
     return store.create_dataset(
         dataset_id=dataset_id or new_safe_handle(HandleKind.DATASET_ID),
         account_scope=account_scope,
         source_scope="saxo_openapi",
         source_revision=source_revision,
-        source_page_ids=(page_id,),
+        source_page_ids=page_ids,
         created_at=_SOURCE_AT + timedelta(minutes=1),
         coverage_start=_SOURCE_AT,
         coverage_end=_SOURCE_AT,
         quality_state=QualityState.COMPLETE,
     )
+
+
+def _multi_contract_dataset(store: AnalyticsStore) -> store_module.StoredDataset:
+    first = _source_page(
+        store,
+        page_key="contract-page-a",
+        contract_sha256=_SCHEMA_SHA256,
+    )
+    second = _source_page(
+        store,
+        page_key="contract-page-b",
+        contract_sha256=_SECOND_SCHEMA_SHA256,
+    )
+    return _dataset_from_pages(store, (first.page_id, second.page_id))
 
 
 def _analysis_result(  # noqa: PLR0913
@@ -177,6 +228,7 @@ def _analysis_result(  # noqa: PLR0913
     account_scope: str = "aggregate",
     source_revision: str = "rev-1",
     source_contract_sha256: str = _SCHEMA_SHA256,
+    source_contract_sha256s: tuple[str, ...] = (),
     request: MarketAnalysisRequest
     | InstrumentAnalysisRequest
     | PortfolioAnalysisRequest
@@ -194,6 +246,7 @@ def _analysis_result(  # noqa: PLR0913
         source_scope="saxo_openapi",
         source_revision=source_revision,
         source_contract_sha256=source_contract_sha256,
+        source_contract_sha256s=source_contract_sha256s,
     )
     engine_binding = ProofEngineBinding(
         engine_name="store_test_engine",
@@ -253,6 +306,7 @@ def _analysis_result(  # noqa: PLR0913
             source_scope="saxo_openapi",
             source_revision=source_revision,
             source_contract_sha256=source_contract_sha256,
+            source_contract_sha256s=source_contract_sha256s,
             source_timestamp=_SOURCE_AT,
             proof_receipts=(receipt,),
             engine_name="store_test_engine",
@@ -480,6 +534,16 @@ def _write_two_quota_pages_in_one_transaction(store: AnalyticsStore) -> None:
         )
 
 
+def _write_one_quota_page_then_abort(store: AnalyticsStore) -> None:
+    with store.transaction():
+        _source_page(
+            store,
+            page_key="bars-page-2",
+            payload={"data": "x" * 8_000},
+        )
+        raise RuntimeError("abort quota probe")
+
+
 def test_open_creates_the_normalized_schema_and_owner_only_database(tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
@@ -500,6 +564,33 @@ def test_open_creates_the_normalized_schema_and_owner_only_database(tmp_path: Pa
     assert names >= _REQUIRED_TABLES
     assert version == (LATEST_SCHEMA_VERSION,)
     assert _mode(config.paths.store_path) == _OWNER_FILE_MODE
+
+
+def test_analysis_provenance_accepts_an_explicit_contract_set_binding() -> None:
+    result = _analysis_result(
+        new_safe_handle(HandleKind.DATASET_ID),
+        new_safe_handle(HandleKind.ANALYSIS_ID),
+        source_contract_sha256=_MULTI_CONTRACT_SHA256,
+    )
+    payload = result.model_dump(mode="python")
+    provenance = cast("dict[str, Any]", payload["provenance"])
+    provenance["source_contract_sha256s"] = (
+        _SCHEMA_SHA256,
+        _SECOND_SCHEMA_SHA256,
+    )
+    receipts = cast("tuple[dict[str, Any], ...]", provenance["proof_receipts"])
+    source_binding = cast("dict[str, Any]", receipts[0]["source_binding"])
+    source_binding["source_contract_sha256s"] = (
+        _SCHEMA_SHA256,
+        _SECOND_SCHEMA_SHA256,
+    )
+
+    rebound = AnalysisResult.model_validate(payload)
+
+    assert rebound.provenance.source_contract_sha256s == (
+        _SCHEMA_SHA256,
+        _SECOND_SCHEMA_SHA256,
+    )
 
 
 def test_v0_fixture_contains_only_schema_metadata_and_no_private_rows() -> None:
@@ -1046,6 +1137,113 @@ def test_analysis_rejects_dataset_binding_mismatches(
         store.close()
 
 
+def test_multi_contract_analysis_accepts_the_complete_sorted_set_and_fingerprint(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        dataset = _multi_contract_dataset(store)
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            source_contract_sha256=_MULTI_CONTRACT_SHA256,
+            source_contract_sha256s=(
+                _SCHEMA_SHA256,
+                _SECOND_SCHEMA_SHA256,
+            ),
+        )
+
+        stored = store.put_analysis(result)
+
+        assert stored.analysis_id == result.analysis_id
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("source_contract_sha256", "source_contract_sha256s"),
+    [
+        pytest.param(_SCHEMA_SHA256, (), id="missing"),
+        pytest.param(_SCHEMA_SHA256, (_SCHEMA_SHA256,), id="partial"),
+        pytest.param(
+            _SCHEMA_SHA256,
+            (
+                _SCHEMA_SHA256,
+                _SECOND_SCHEMA_SHA256,
+                _EXTRA_SCHEMA_SHA256,
+            ),
+            id="extra",
+        ),
+        pytest.param(
+            _SCHEMA_SHA256,
+            (
+                _SCHEMA_SHA256,
+                _SCHEMA_SHA256,
+                _SECOND_SCHEMA_SHA256,
+            ),
+            id="duplicate",
+        ),
+        pytest.param(
+            _MULTI_CONTRACT_SHA256,
+            (_SECOND_SCHEMA_SHA256, _SCHEMA_SHA256),
+            id="reordered",
+        ),
+        pytest.param(
+            _SCHEMA_SHA256,
+            (_SCHEMA_SHA256, _SECOND_SCHEMA_SHA256),
+            id="wrong-fingerprint",
+        ),
+    ],
+)
+def test_multi_contract_analysis_rejects_incomplete_or_inconsistent_bindings(
+    tmp_path: Path,
+    source_contract_sha256: str,
+    source_contract_sha256s: tuple[str, ...],
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        dataset = _multi_contract_dataset(store)
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            source_contract_sha256=source_contract_sha256,
+            source_contract_sha256s=source_contract_sha256s,
+        )
+
+        with pytest.raises(StoreValidationError, match="contract set"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
+def test_multi_contract_analysis_rejects_a_missing_dataset_contract_row(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        dataset = _multi_contract_dataset(store)
+        with store_module._connect_store_database(  # noqa: SLF001
+            config.paths.store_path,
+            read_only=False,
+        ) as connection:
+            connection.execute(
+                "DELETE FROM source_contracts WHERE contract_sha256 = ?",
+                (_SECOND_SCHEMA_SHA256,),
+            )
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            source_contract_sha256=_SCHEMA_SHA256,
+            source_contract_sha256s=(_SCHEMA_SHA256,),
+        )
+
+        with pytest.raises(StoreNotFoundError, match="source contract"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
 def test_portfolio_analysis_rejects_a_snapshot_from_another_dataset(
     tmp_path: Path,
 ) -> None:
@@ -1131,6 +1329,80 @@ def test_transaction_reserves_cumulative_quota_and_rolls_back_all_writes(
         )
         assert tuple(entry.object_id for entry in entries) == (existing.page_id,)
         assert sparse.exists()
+    finally:
+        store.close()
+
+
+def test_alternate_store_resources_count_toward_transaction_quota(
+    tmp_path: Path,
+) -> None:
+    config = _config_with_alternate_store(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        existing = _source_page(store)
+        store_path = config.paths.store_path
+        lock_path = store_path.with_name(f".{store_path.name}.write.lock")
+        backup = store_path.with_name(
+            f"{store_path.stem}.before-v1.{'f' * 32}.duckdb",
+        )
+        migration_temp = store_path.with_name(
+            f".{store_path.name}.fixture.migrating",
+        )
+        migration_wal = Path(f"{migration_temp}.wal")
+        for path, size in (
+            (backup, 2_048),
+            (migration_temp, 2_048),
+            (migration_wal, 2_048),
+        ):
+            path.touch(mode=_OWNER_FILE_MODE)
+            with path.open("r+b") as managed:
+                managed.truncate(size)
+            path.chmod(_OWNER_FILE_MODE)
+        unrelated = store_path.parent / "unrelated-parent-file.bin"
+        unrelated.touch(mode=_OWNER_FILE_MODE)
+        with unrelated.open("r+b") as ignored:
+            ignored.truncate(config.limits.store_quota_bytes)
+        unrelated.chmod(_OWNER_FILE_MODE)
+        unrelated_lookalike = store_path.with_name(
+            f"{store_path.stem}.before-vacation.notes.duckdb",
+        )
+        unrelated_lookalike.touch(mode=_OWNER_FILE_MODE)
+        with unrelated_lookalike.open("r+b") as ignored:
+            ignored.truncate(config.limits.store_quota_bytes)
+        unrelated_lookalike.chmod(_OWNER_FILE_MODE)
+        managed_external = (store_path, lock_path, backup, migration_temp, migration_wal)
+        sparse = config.paths.artifacts_dir / "reserved.bin"
+        sparse.touch(mode=_OWNER_FILE_MODE)
+
+        def reset_headroom() -> None:
+            with sparse.open("r+b") as reserved:
+                reserved.truncate(0)
+            analytics_bytes = _all_local_bytes(config.paths.analytics_root)
+            external_bytes = sum(path.stat().st_size for path in managed_external)
+            with sparse.open("r+b") as reserved:
+                reserved.truncate(
+                    config.limits.store_quota_bytes
+                    - analytics_bytes
+                    - external_bytes
+                    - 12_000,
+                )
+            sparse.chmod(_OWNER_FILE_MODE)
+
+        reset_headroom()
+        with pytest.raises(RuntimeError, match="quota probe"):
+            _write_one_quota_page_then_abort(store)
+
+        reset_headroom()
+        with pytest.raises(StoreQuotaError, match="quota"):
+            _write_two_quota_pages_in_one_transaction(store)
+
+        entries = store.list_storage(
+            StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
+        )
+        assert tuple(entry.object_id for entry in entries) == (existing.page_id,)
+        assert unrelated.exists()
+        assert unrelated_lookalike.exists()
+        assert all(path.exists() for path in managed_external)
     finally:
         store.close()
 
