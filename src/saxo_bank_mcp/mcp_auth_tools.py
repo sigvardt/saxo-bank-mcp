@@ -71,10 +71,7 @@ AUTHORIZATION_URL_SENSITIVITY: Final = (
 def _registered_redirect_uri_hint(runtime_redirect_uri: str) -> str:
     parsed = urlparse(runtime_redirect_uri)
     if parsed.hostname != "localhost" or parsed.port is None:
-        return (
-            "Saxo must accept this runtime callback URL for the app before login "
-            "returns a code"
-        )
+        return "Saxo must accept this runtime callback URL for the app before login returns a code"
     registered_uri = urlunparse((parsed.scheme, "localhost", parsed.path, "", "", ""))
     return (
         "For Saxo PKCE localhost callbacks, Saxo docs say the app registration "
@@ -247,6 +244,7 @@ async def _read_sim_session_capabilities() -> ToolResult:
     return {
         "status": "passed",
         "tool_name": "saxo_get_session_capabilities",
+        "call_class": "sim_read_succeeded",
         "environment": "SIM",
         "endpoint_path": SESSION_CAPABILITIES_PATH,
         "token_refreshed": refreshed,
@@ -254,6 +252,8 @@ async def _read_sim_session_capabilities() -> ToolResult:
         "token_refresh_supported": token.refresh_material() is not None,
         "scope_used": False,
         "network_call_made": True,
+        "live_write_called": False,
+        "order_or_subscription_created": False,
         "capabilities": session_capabilities(capabilities),
         "next_action": (
             "use these fields only as current session-capability proof; if a later "

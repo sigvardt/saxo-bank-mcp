@@ -147,7 +147,8 @@
       "source_kind": "chart",
       "stable_key_fields": [
         "Time"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "reference_instruments_v1",
@@ -295,7 +296,8 @@
       "stable_key_fields": [
         "Identifier",
         "AssetType"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "reference_instrument_details_v1",
@@ -443,7 +445,8 @@
       "stable_key_fields": [
         "Uic",
         "AssetType"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "options_chain_reference_v1",
@@ -535,7 +538,8 @@
       "source_kind": "options_chain",
       "stable_key_fields": [
         "OptionRootId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "info_price_v1",
@@ -690,7 +694,8 @@
       "stable_key_fields": [
         "Uic",
         "AssetType"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "info_prices_list_v1",
@@ -815,7 +820,8 @@
       "stable_key_fields": [
         "Uic",
         "AssetType"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "performance_summary_v4",
@@ -872,7 +878,8 @@
       "revision_fields": [],
       "schema_version": "1",
       "source_kind": "performance",
-      "stable_key_fields": []
+      "stable_key_fields": [],
+      "stable_key_policy": "unkeyed_snapshot"
     },
     {
       "contract_id": "performance_timeseries_v4",
@@ -961,7 +968,8 @@
       "source_kind": "performance",
       "stable_key_fields": [
         "Date"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "balances_v1",
@@ -1244,7 +1252,8 @@
       "revision_fields": [],
       "schema_version": "1",
       "source_kind": "balances",
-      "stable_key_fields": []
+      "stable_key_fields": [],
+      "stable_key_policy": "unkeyed_snapshot"
     },
     {
       "contract_id": "positions_v1",
@@ -1426,7 +1435,8 @@
       "source_kind": "positions",
       "stable_key_fields": [
         "PositionId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "orders_v1",
@@ -1544,7 +1554,8 @@
       "source_kind": "orders",
       "stable_key_fields": [
         "OrderId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "transactions_v1",
@@ -1704,7 +1715,8 @@
       "source_kind": "transactions",
       "stable_key_fields": [
         "TransactionId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "bookings_v1",
@@ -1848,7 +1860,8 @@
       "source_kind": "bookings",
       "stable_key_fields": [
         "BookingId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "closed_positions_history_v1",
@@ -2007,7 +2020,8 @@
       "source_kind": "closed_positions",
       "stable_key_fields": [
         "ClosedPositionId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "exposure_instruments_v1",
@@ -2100,7 +2114,8 @@
       "stable_key_fields": [
         "Uic",
         "AssetType"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "costs_v1",
@@ -2183,7 +2198,8 @@
       "revision_fields": [],
       "schema_version": "1",
       "source_kind": "costs",
-      "stable_key_fields": []
+      "stable_key_fields": [],
+      "stable_key_policy": "unkeyed_snapshot"
     },
     {
       "contract_id": "corporate_action_events_v2",
@@ -2329,7 +2345,8 @@
       "source_kind": "corporate_actions",
       "stable_key_fields": [
         "EventId"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     },
     {
       "contract_id": "corporate_action_holdings_v2",
@@ -2447,7 +2464,8 @@
       "stable_key_fields": [
         "EventId",
         "Uic"
-      ]
+      ],
+      "stable_key_policy": "required_unique"
     }
   ],
   "schema_version": "1"

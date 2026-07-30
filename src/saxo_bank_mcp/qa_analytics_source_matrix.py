@@ -4,10 +4,12 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from importlib.metadata import PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -39,6 +41,12 @@ _SOURCE_COUNT: Final = 18
 _REGISTRY_PAGE_SIZE: Final = 100
 _HTTP_STATUS_MIN: Final = 100
 _HTTP_STATUS_MAX: Final = 599
+_HTTP_STATUS_OK: Final = 200
+_SELF_REFERENCE_EXCLUSION_COUNT: Final = 2
+_ENTRYPOINT_TARGET_PART_COUNT: Final = 2
+_INSTALLER_GENERATED_METADATA: Final = frozenset(
+    {"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"},
+)
 _STATE_PATHS: Final = (
     "/port/v1/orders/me",
     "/port/v1/positions/me",
@@ -49,6 +57,27 @@ _HISTORY_CONTRACTS: Final = frozenset(
 )
 _SAFE_SOURCE_REASON_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_:.-]{0,159}$")
 _JSON_OBJECT: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(dict[str, JsonValue])
+_SOURCE_PLAN_UNAVAILABLE_SHA256: Final = hashlib.sha256(
+    b"source-plan-unavailable",
+).hexdigest()
+_REDUCIBLE_SOURCE_FIXTURES: Final = {
+    "bookings_v1": "fixture_client_key_unavailable",
+    "closed_positions_history_v1": "fixture_client_key_unavailable",
+    "costs_v1": "fixture_account_key_unavailable",
+}
+_LEDGER_EVENT_FIELDS: Final = frozenset(
+    {
+        "timestamp",
+        "phase",
+        "host_role",
+        "method",
+        "path",
+        "query_names",
+        "query_present",
+        "status",
+        "environment",
+    },
+)
 
 type MatrixClient = Client[FastMCPTransport]
 type SourceStatus = Literal["observed", "reduced", "refused"]
@@ -85,9 +114,14 @@ class SourceMatrixCandidateIdentity(BaseModel):
 class _SourceMatrixCandidateManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["1"]
+    schema_version: Literal["2"]
     source_contract_catalog_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    harness_files: Mapping[str, str]
+    source_files: Mapping[str, str]
+    installed_files: Mapping[str, str]
+    source_exclusions: tuple[str, ...]
+    installed_exclusions: tuple[str, ...]
+    source_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    installed_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     harness_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     candidate_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -118,6 +152,12 @@ class SourceContractReceipt(BaseModel):
     row_count: int = Field(ge=0)
     continuation_call_count: int = Field(ge=0)
     network_call_count: int = Field(ge=0)
+    attempt_count: int = Field(ge=0)
+    initial_attempt_count: int = Field(ge=0)
+    continuation_attempt_count: int = Field(ge=0)
+    retry_count: int = Field(ge=0)
+    distinct_target_count: int = Field(ge=0)
+    successful_page_count: int = Field(ge=0)
     pagination_state: PaginationState
     entitlement_state: Literal["observed", "denied", "unverified", "not_required"]
     response_visibility: Literal[
@@ -131,9 +171,22 @@ class SourceContractReceipt(BaseModel):
     )
     request_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     schema_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_revision_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     timestamp_value_count: int = Field(ge=0)
     timestamp_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     http_status: int | None = Field(default=None, ge=100, le=599)
+
+
+class _SourcePageProof(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    page_number: int = Field(ge=1)
+    row_count: int = Field(ge=0)
+    page_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_revision_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    schema_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    timestamp_value_count: int = Field(ge=0)
+    timestamp_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class CleanupReceipt(BaseModel):
@@ -170,6 +223,21 @@ class PrivacyReceipt(BaseModel):
     raw_private_values_retained: Literal[False] = False
 
 
+class SourcePlanExclusion(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    contract_id: str
+    reason: str
+
+
+class _SourceExecutionPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    included_contract_ids: tuple[str, ...]
+    exclusions: tuple[SourcePlanExclusion, ...]
+    plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class AnalyticsSourceMatrixReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -180,6 +248,11 @@ class AnalyticsSourceMatrixReceipt(BaseModel):
     harness_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     candidate_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     captured_at: datetime
+    source_plan_sha256: str = Field(
+        default=_SOURCE_PLAN_UNAVAILABLE_SHA256,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    source_plan_exclusions: tuple[SourcePlanExclusion, ...] = ()
     environment_proof: EnvironmentProof
     auth_status: str
     session_status: str
@@ -226,7 +299,7 @@ def prove_sim_environment(env: Mapping[str, str]) -> EnvironmentProof:
     )
 
 
-async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
+async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     server: FastMCP,
     *,
     env: Mapping[str, str],
@@ -254,6 +327,20 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
             proof,
             "source_contract_count_mismatch",
         )
+    requests = _source_requests(fixtures, capture_time.date())
+    try:
+        source_plan = _source_execution_plan(
+            contracts,
+            requests,
+            candidate_identity,
+        )
+    except ValueError:
+        return _refused_without_calls(
+            candidate_identity,
+            capture_time,
+            proof,
+            "source_plan_invalid",
+        )
     errors: list[str] = []
     async with Client(server) as client:
         auth = await _call_tool(client, "saxo_auth_status", {})
@@ -280,8 +367,11 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
                 reason="registered_operation_mismatch",
             )
         session = await _call_tool(client, "saxo_get_session_capabilities", {})
-        session_status = _safe_status(session)
-        if session_status not in {"passed", "completed"}:
+        session_status = _network_read_receipt_status(
+            session,
+            "saxo_get_session_capabilities",
+        )
+        if session_status != "passed":
             return _readiness_refusal(
                 candidate_identity,
                 capture_time,
@@ -292,8 +382,11 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
                 reason="sim_session_unavailable",
             )
         entitlements = await _call_tool(client, "saxo_get_entitlements", {})
-        entitlement_status = _safe_status(entitlements)
-        if entitlement_status not in {"passed", "completed"}:
+        entitlement_status = _network_read_receipt_status(
+            entitlements,
+            "saxo_get_entitlements",
+        )
+        if entitlement_status != "passed":
             return _readiness_refusal(
                 candidate_identity,
                 capture_time,
@@ -308,11 +401,7 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
             "saxo_get_safe_request_ledger",
             {"clear": True},
         )
-        if (
-            cleared.get("status") != "cleared"
-            or cleared.get("ledger_complete") is not True
-            or cleared.get("negative_proof_available") is not True
-        ):
+        if not _ledger_clear_valid(cleared):
             return _readiness_refusal(
                 candidate_identity,
                 capture_time,
@@ -335,8 +424,10 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
         before = await _state_fingerprint(client, registry)
         if before is None:
             errors.append("state_fingerprint_unverified")
-        requests = _source_requests(fixtures, capture_time.date())
         source_receipts_list: list[SourceContractReceipt] = []
+        exclusion_reasons = {
+            exclusion.contract_id: exclusion.reason for exclusion in source_plan.exclusions
+        }
         for contract in contracts.values():
             request = requests.get(contract.contract_id)
             if request is None:
@@ -344,7 +435,7 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
                     _unavailable_source_receipt(
                         contract,
                         registered=True,
-                        reason="source_fixture_unavailable",
+                        reason=exclusion_reasons[contract.contract_id],
                     ),
                 )
                 continue
@@ -377,6 +468,8 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913
             harness_build_sha256=candidate_identity.harness_build_sha256,
             candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
             captured_at=capture_time,
+            source_plan_sha256=source_plan.plan_sha256,
+            source_plan_exclusions=source_plan.exclusions,
             environment_proof=proof,
             auth_status=auth_status,
             session_status=session_status,
@@ -427,9 +520,7 @@ def _execute_analytics_source_matrix_once(  # noqa: PLR0913
             source_matrix_candidate_identity() if candidate_identity is None else candidate_identity
         )
         selected_state_root = (
-            _source_matrix_state_root(selected_env)
-            if state_root is None
-            else state_root.resolve(strict=False)
+            _source_matrix_state_root() if state_root is None else state_root.resolve(strict=False)
         )
     except (OSError, ValidationError, ValueError):
         return 1
@@ -590,43 +681,62 @@ async def _run_provider_source(
         },
     )
     operation = find_registered_operation("GET", path)
-    protocol_valid = (
+    status = _safe_status(payload)
+    page_proofs = _source_page_proofs(payload.get("page_receipts"))
+    expected_request_fingerprint = _request_fingerprint(contract, request)
+    common_valid = (
         operation is not None
+        and payload.get("tool_name") == "saxo_call_registered_endpoint"
+        and payload.get("operation_id") == contract.operation_id
+        and payload.get("method") == "GET"
+        and payload.get("path") == contract.path_template
+        and payload.get("environment") == "SIM"
+        and payload.get("live_write_called") is False
+        and payload.get("order_or_subscription_created") is False
         and payload.get("analytics_contract_id") == contract.contract_id
         and payload.get("analytics_contract_sha256") == source_contract_fingerprint(contract)
         and payload.get("response") is None
         and payload.get("response_visibility") == "analytics_contract_receipt"
         and payload.get("response_fingerprint_scope") == "analytics_contract_receipt"
     )
-    if operation is not None:
-        _require_sim_registered_read(payload, operation)
-    status = _safe_status(payload)
-    passed = status == "passed" and protocol_valid
+    proof_valid = (
+        common_valid
+        and status == "passed"
+        and payload.get("call_class") == "sim_read_succeeded"
+        and _source_success_proof_valid(
+            payload,
+            page_proofs,
+            expected_request_fingerprint,
+        )
+    )
+    failure_valid = (
+        common_valid
+        and status in {"http_error", "refused"}
+        and payload.get("call_class") in {"sim_read_http_error", "sim_read_refused"}
+        and _source_failure_proof_valid(payload)
+    )
     raw_reason = payload.get("reason")
     reason = (
         ""
-        if passed
+        if proof_valid
         else (
             _safe_source_reason(raw_reason)
-            if isinstance(raw_reason, str)
+            if failure_valid and isinstance(raw_reason, str)
             else "analytics_contract_receipt_invalid"
         )
     )
     source_status: SourceStatus = (
-        "observed" if passed else "reduced" if status in {"http_error", "refused"} else "refused"
+        "observed" if proof_valid else "reduced" if failure_valid else "refused"
     )
-    page_count = _safe_count(payload.get("page_count")) if passed else 0
-    row_count = _safe_count(payload.get("row_count")) if passed else 0
-    continuation_count = _safe_count(payload.get("continuation_call_count")) if passed else 0
+    page_count = _safe_count(payload.get("page_count")) if proof_valid else 0
+    row_count = _safe_count(payload.get("row_count")) if proof_valid else 0
+    continuation_count = _safe_count(payload.get("continuation_call_count")) if proof_valid else 0
     network_count = _safe_count(payload.get("network_call_count"))
-    page_receipts = payload.get("page_receipts")
-    schema_hashes: list[str] = []
-    if isinstance(page_receipts, Sequence) and not isinstance(page_receipts, str):
-        for item in page_receipts:
-            if isinstance(item, Mapping):
-                schema_hash = _safe_fingerprint(item.get("schema_fingerprint_sha256"))
-                if schema_hash is not None:
-                    schema_hashes.append(schema_hash)
+    schema_hashes = (
+        [page.schema_fingerprint_sha256 for page in page_proofs]
+        if proof_valid and page_proofs is not None
+        else []
+    )
     return SourceContractReceipt(
         contract_id=contract.contract_id,
         operation_id=contract.operation_id,
@@ -639,9 +749,19 @@ async def _run_provider_source(
         row_count=row_count,
         continuation_call_count=continuation_count,
         network_call_count=network_count,
+        attempt_count=_safe_count(payload.get("attempt_count")),
+        initial_attempt_count=_safe_count(payload.get("initial_attempt_count")),
+        continuation_attempt_count=_safe_count(
+            payload.get("continuation_attempt_count"),
+        ),
+        retry_count=_safe_count(payload.get("retry_count")),
+        distinct_target_count=_safe_count(payload.get("distinct_target_count")),
+        successful_page_count=(
+            _safe_count(payload.get("successful_page_count")) if proof_valid else 0
+        ),
         pagination_state=(
             "completed"
-            if passed and contract.pagination is not None
+            if proof_valid and contract.pagination is not None
             else "not_applicable"
             if contract.pagination is None
             else "reduced"
@@ -652,20 +772,128 @@ async def _run_provider_source(
             "denied"
             if reason == "source_entitlement_unavailable"
             else "observed"
-            if passed
+            if proof_valid
             else "unverified"
         ),
-        response_visibility=("analytics_contract_receipt" if protocol_valid else "unavailable"),
+        response_visibility=("analytics_contract_receipt" if common_valid else "unavailable"),
         response_fingerprint_sha256=_safe_fingerprint(
             payload.get("response_fingerprint"),
         ),
-        request_fingerprint_sha256=_request_fingerprint(contract, request),
+        request_fingerprint_sha256=expected_request_fingerprint,
         schema_fingerprint_sha256=_digest(schema_hashes),
-        timestamp_value_count=(_safe_count(payload.get("timestamp_value_count")) if passed else 0),
+        source_revision_fingerprint_sha256=(
+            _safe_fingerprint(payload.get("source_revision_fingerprint_sha256")) or _digest([])
+        ),
+        timestamp_value_count=(
+            _safe_count(payload.get("timestamp_value_count")) if proof_valid else 0
+        ),
         timestamp_fingerprint_sha256=(
             _safe_fingerprint(payload.get("timestamp_fingerprint_sha256")) or _digest([])
         ),
         http_status=_safe_http_status(payload.get("http_status")),
+    )
+
+
+def _source_page_proofs(
+    value: JsonValue | None,
+) -> tuple[_SourcePageProof, ...] | None:
+    if not isinstance(value, Sequence) or isinstance(value, str):
+        return None
+    try:
+        return tuple(_SourcePageProof.model_validate(item, strict=True) for item in value)
+    except ValidationError:
+        return None
+
+
+def _source_success_proof_valid(
+    payload: Mapping[str, JsonValue],
+    pages: tuple[_SourcePageProof, ...] | None,
+    expected_request_fingerprint: str,
+) -> bool:
+    if pages is None or not pages:
+        return False
+    page_material = [page.model_dump(mode="json") for page in pages]
+    declared_counts = _strict_counts(
+        payload.get("page_count"),
+        payload.get("row_count"),
+        payload.get("network_call_count"),
+        payload.get("attempt_count"),
+        payload.get("initial_attempt_count"),
+        payload.get("continuation_attempt_count"),
+        payload.get("retry_count"),
+        payload.get("distinct_target_count"),
+        payload.get("successful_page_count"),
+        payload.get("continuation_call_count"),
+        payload.get("timestamp_value_count"),
+    )
+    if declared_counts is None:
+        return False
+    (
+        page_count,
+        row_count,
+        network_count,
+        attempt_count,
+        initial_attempt_count,
+        continuation_attempt_count,
+        retry_count,
+        distinct_target_count,
+        successful_page_count,
+        continuation_count,
+        timestamp_count,
+    ) = declared_counts
+    return (
+        [page.page_number for page in pages] == list(range(1, len(pages) + 1))
+        and page_count == len(pages)
+        and successful_page_count == len(pages)
+        and row_count == sum(page.row_count for page in pages)
+        and distinct_target_count == len(pages)
+        and continuation_count == max(0, distinct_target_count - 1)
+        and attempt_count == initial_attempt_count + continuation_attempt_count
+        and network_count == attempt_count
+        and initial_attempt_count >= 1
+        and retry_count == attempt_count - distinct_target_count
+        and payload.get("network_call_made") is True
+        and payload.get("request_fingerprint_sha256") == expected_request_fingerprint
+        and payload.get("response_fingerprint") == _digest(page_material)
+        and payload.get("source_revision_fingerprint_sha256")
+        == _digest([page.source_revision_sha256 for page in pages])
+        and timestamp_count == sum(page.timestamp_value_count for page in pages)
+        and payload.get("timestamp_fingerprint_sha256")
+        == _digest([page.timestamp_fingerprint_sha256 for page in pages])
+        and payload.get("http_status") == _HTTP_STATUS_OK
+    )
+
+
+def _source_failure_proof_valid(payload: Mapping[str, JsonValue]) -> bool:
+    declared_counts = _strict_counts(
+        payload.get("attempt_count"),
+        payload.get("network_call_count"),
+        payload.get("initial_attempt_count"),
+        payload.get("continuation_attempt_count"),
+        payload.get("retry_count"),
+        payload.get("distinct_target_count"),
+        payload.get("continuation_call_count"),
+    )
+    if declared_counts is None:
+        return False
+    (
+        attempt_count,
+        network_count,
+        initial_attempt_count,
+        continuation_attempt_count,
+        retry_count,
+        distinct_target_count,
+        continuation_count,
+    ) = declared_counts
+    return (
+        attempt_count == initial_attempt_count + continuation_attempt_count
+        and network_count <= attempt_count
+        and retry_count == max(0, attempt_count - distinct_target_count)
+        and continuation_count == max(0, distinct_target_count - 1)
+        and payload.get("network_call_made") is (network_count > 0)
+        and _safe_count(payload.get("page_count")) == 0
+        and _safe_count(payload.get("row_count")) == 0
+        and _safe_count(payload.get("successful_page_count")) == 0
     )
 
 
@@ -687,6 +915,12 @@ def _unavailable_source_receipt(
         row_count=0,
         continuation_call_count=0,
         network_call_count=0,
+        attempt_count=0,
+        initial_attempt_count=0,
+        continuation_attempt_count=0,
+        retry_count=0,
+        distinct_target_count=0,
+        successful_page_count=0,
         pagination_state="refused" if contract.pagination is not None else "not_applicable",
         entitlement_state="unverified",
         response_visibility="unavailable",
@@ -694,6 +928,7 @@ def _unavailable_source_receipt(
             {"contract_id": contract.contract_id, "request": "unavailable"},
         ),
         schema_fingerprint_sha256=_digest([]),
+        source_revision_fingerprint_sha256=_digest([]),
         timestamp_value_count=0,
         timestamp_fingerprint_sha256=_digest([]),
     )
@@ -737,13 +972,14 @@ async def _state_fingerprint(
 
 def _ledger_receipt(payload: Mapping[str, JsonValue]) -> LedgerReceipt:
     events = payload.get("events")
-    attempted: list[Mapping[str, JsonValue]] = []
+    all_events: list[Mapping[str, JsonValue]] = []
+    event_list_valid = isinstance(events, Sequence) and not isinstance(events, str)
     if isinstance(events, Sequence) and not isinstance(events, str):
-        attempted = [
-            item
-            for item in events
-            if isinstance(item, Mapping) and item.get("phase") == "attempted"
-        ]
+        all_events = [item for item in events if isinstance(item, Mapping)]
+        event_list_valid = len(all_events) == len(events) and _ledger_events_valid(
+            all_events,
+        )
+    attempted = [item for item in all_events if item.get("phase") == "attempted"]
     methods = tuple(
         sorted({str(item.get("method", "unavailable")) for item in attempted}),
     )
@@ -752,7 +988,7 @@ def _ledger_receipt(payload: Mapping[str, JsonValue]) -> LedgerReceipt:
     )
     gateway_events = [item for item in attempted if item.get("host_role") == "gateway"]
     gateway_non_get = sum(item.get("method") != "GET" for item in gateway_events)
-    invalid_host = sum(item.get("host_role") not in {"gateway", "oauth"} for item in attempted)
+    all_non_get = sum(item.get("method") != "GET" for item in attempted)
     gateway_environments = tuple(
         sorted({str(item.get("environment", "UNKNOWN")) for item in gateway_events}),
     )
@@ -760,9 +996,17 @@ def _ledger_receipt(payload: Mapping[str, JsonValue]) -> LedgerReceipt:
     negative = payload.get("negative_proof_available") is True
     evicted = payload.get("events_evicted")
     events_evicted = evicted if isinstance(evicted, int) and evicted >= 0 else 0
-    unsafe_declared = (
-        payload.get("unsafe_gateway_request_detected") is True
-        or payload.get("order_placement_endpoint_called") is True
+    declared_request_count = _strict_count(payload.get("request_count"))
+    declared_non_get = _strict_count(payload.get("non_get_request_count"))
+    receipt_metadata_valid = (
+        payload.get("status") == "passed"
+        and payload.get("tool_name") == "saxo_get_safe_request_ledger"
+        and payload.get("scope") == "current_mcp_session"
+        and payload.get("safe_fields_only") is True
+        and payload.get("unsafe_gateway_request_detected") is False
+        and payload.get("order_placement_endpoint_called") is False
+        and declared_request_count == len(attempted)
+        and declared_non_get == all_non_get
     )
     live_events = sum(item.get("environment") == "LIVE" for item in gateway_events)
     unknown_gateway = sum(item.get("environment") not in {"SIM", "LIVE"} for item in gateway_events)
@@ -770,28 +1014,95 @@ def _ledger_receipt(payload: Mapping[str, JsonValue]) -> LedgerReceipt:
         ledger_complete
         and negative
         and events_evicted == 0
+        and event_list_valid
+        and receipt_metadata_valid
         and gateway_non_get == 0
-        and invalid_host == 0
         and live_events == 0
         and unknown_gateway == 0
-        and not unsafe_declared
     )
-    request_count = payload.get("request_count")
     return LedgerReceipt(
         ledger_complete=ledger_complete,
         events_evicted=events_evicted,
         negative_proof_available=negative,
-        request_count=(
-            request_count
-            if isinstance(request_count, int) and request_count >= 0
-            else len(attempted)
-        ),
-        non_get_request_count=gateway_non_get,
+        request_count=declared_request_count or 0,
+        non_get_request_count=declared_non_get or 0,
         methods=methods,
         host_roles=host_roles,
         gateway_environments=gateway_environments,
         sim_only=sim_only,
         live_events=live_events,
+    )
+
+
+def _ledger_events_valid(events: Sequence[Mapping[str, JsonValue]]) -> bool:
+    unmatched: list[tuple[object, ...]] = []
+    for event in events:
+        timestamp = event.get("timestamp")
+        status = event.get("status")
+        query_names = event.get("query_names")
+        if (
+            frozenset(event) != _LEDGER_EVENT_FIELDS
+            or not isinstance(timestamp, str)
+            or not _valid_iso_timestamp(timestamp)
+            or event.get("phase") not in {"attempted", "completed"}
+            or event.get("host_role") not in {"gateway", "oauth"}
+            or event.get("environment") not in {"SIM", "LIVE"}
+            or not isinstance(event.get("method"), str)
+            or not bool(str(event.get("method")))
+            or not isinstance(event.get("path"), str)
+            or not str(event.get("path")).startswith("/")
+            or not isinstance(query_names, Sequence)
+            or isinstance(query_names, str)
+            or any(not isinstance(name, str) for name in query_names)
+            or not isinstance(event.get("query_present"), bool)
+        ):
+            return False
+        binding = (
+            event.get("host_role"),
+            event.get("environment"),
+            event.get("method"),
+            event.get("path"),
+            tuple(query_names),
+            event.get("query_present"),
+        )
+        if event.get("phase") == "attempted":
+            if status is not None:
+                return False
+            unmatched.append(binding)
+        else:
+            if (
+                not isinstance(status, int)
+                or isinstance(status, bool)
+                or not _HTTP_STATUS_MIN <= status <= _HTTP_STATUS_MAX
+                or binding not in unmatched
+            ):
+                return False
+            unmatched.remove(binding)
+    return True
+
+
+def _valid_iso_timestamp(value: str) -> bool:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _ledger_clear_valid(payload: Mapping[str, JsonValue]) -> bool:
+    return (
+        payload.get("status") == "cleared"
+        and payload.get("tool_name") == "saxo_get_safe_request_ledger"
+        and payload.get("scope") == "current_mcp_session"
+        and payload.get("safe_fields_only") is True
+        and payload.get("ledger_complete") is True
+        and payload.get("events_evicted") == 0
+        and payload.get("negative_proof_available") is True
+        and payload.get("request_count") == 0
+        and payload.get("non_get_request_count") == 0
+        and payload.get("unsafe_gateway_request_detected") is False
+        and payload.get("order_placement_endpoint_called") is False
+        and payload.get("events") == []
     )
 
 
@@ -915,6 +1226,42 @@ def _source_requests(
     }
 
 
+def _source_execution_plan(
+    contracts: Mapping[str, SourceContract],
+    requests: Mapping[str, Mapping[str, object] | None],
+    candidate_identity: SourceMatrixCandidateIdentity,
+) -> _SourceExecutionPlan:
+    if set(requests) != set(contracts):
+        raise ValueError("source execution plan does not cover the catalog")
+    included = tuple(
+        sorted(contract_id for contract_id, request in requests.items() if request is not None)
+    )
+    exclusions: list[SourcePlanExclusion] = []
+    for contract_id, request in sorted(requests.items()):
+        if request is not None:
+            continue
+        reason = _REDUCIBLE_SOURCE_FIXTURES.get(contract_id)
+        if reason is None:
+            raise ValueError("source execution plan has an undeclared exclusion")
+        exclusions.append(
+            SourcePlanExclusion(
+                contract_id=contract_id,
+                reason=reason,
+            ),
+        )
+    material = {
+        "candidate_identity_sha256": candidate_identity.candidate_identity_sha256,
+        "exclusions": [exclusion.model_dump(mode="json") for exclusion in exclusions],
+        "included_contract_ids": included,
+        "source_contract_catalog_sha256": (candidate_identity.source_contract_catalog_sha256),
+    }
+    return _SourceExecutionPlan(
+        included_contract_ids=included,
+        exclusions=tuple(exclusions),
+        plan_sha256=_digest(material),
+    )
+
+
 def _require_sim_registered_read(
     payload: Mapping[str, JsonValue],
     operation: EndpointOperation,
@@ -934,11 +1281,15 @@ def _request_fingerprint(
     contract: SourceContract,
     request: Mapping[str, object],
 ) -> str:
+    normalized = {
+        key: (str(value) if key in contract.path_parameters else _render_query_value(value))
+        for key, value in request.items()
+        if key in set(contract.path_parameters) | set(contract.query_parameters)
+    }
     return _digest(
         {
             "contract_id": contract.contract_id,
-            "operation_id": contract.operation_id,
-            "request": dict(request),
+            "request": normalized,
         },
     )
 
@@ -1138,14 +1489,21 @@ def _safe_status(payload: Mapping[str, JsonValue]) -> str:
 
 def _auth_receipt_status(payload: Mapping[str, JsonValue]) -> str:
     if (
-        payload.get("requested_environment") == "SIM"
+        payload.get("status") == "passed"
+        and payload.get("tool_name") == "saxo_auth_status"
+        and payload.get("call_class") == "local_status_succeeded"
+        and payload.get("requested_environment") == "SIM"
         and payload.get("effective_read_environment") == "SIM"
         and payload.get("live_reads") is False
         and payload.get("live_writes") is False
+        and payload.get("network_call_made") is False
+        and payload.get("live_write_called") is False
+        and payload.get("order_or_subscription_created") is False
         and payload.get("token_cache_present") is True
         and payload.get("token_cache_readable") is True
         and payload.get("token_cache_expired") is False
         and payload.get("token_cache_environment") == "SIM"
+        and payload.get("blocking_reasons") == []
     ):
         return "ready"
     blocking_reasons = payload.get("blocking_reasons")
@@ -1161,6 +1519,24 @@ def _auth_receipt_status(payload: Mapping[str, JsonValue]) -> str:
     ):
         return "auth_required"
     return "unavailable"
+
+
+def _network_read_receipt_status(
+    payload: Mapping[str, JsonValue],
+    tool_name: str,
+) -> str:
+    if (
+        payload.get("status") == "passed"
+        and payload.get("tool_name") == tool_name
+        and payload.get("environment") == "SIM"
+        and payload.get("call_class") == "sim_read_succeeded"
+        and payload.get("network_call_made") is True
+        and payload.get("live_write_called") is False
+        and payload.get("order_or_subscription_created") is False
+    ):
+        return "passed"
+    status = _safe_status(payload)
+    return "unverified" if status == "passed" else status
 
 
 def _safe_source_reason(reason: str) -> str:
@@ -1183,6 +1559,17 @@ def _safe_count(value: JsonValue | None) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _strict_count(value: JsonValue | None) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _strict_counts(*values: JsonValue | None) -> tuple[int, ...] | None:
+    counts = tuple(_strict_count(value) for value in values)
+    if any(value is None for value in counts):
+        return None
+    return cast("tuple[int, ...]", counts)
+
+
 def _digest(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -1198,30 +1585,40 @@ def _enabled(value: str | None) -> bool:
 
 
 def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
-    """Verify the installed immutable source catalog and harness manifest."""
-    resource = files("saxo_bank_mcp").joinpath(
-        _CANDIDATE_RESOURCE_DIR,
-        _CANDIDATE_RESOURCE_NAME,
-    )
-    text = (
-        resource.read_text(encoding="utf-8")
-        if resource.is_file()
-        else _CANDIDATE_SOURCE_PATH.read_text(encoding="utf-8")
-    )
+    """Verify the complete source or installed distribution closure."""
+    source_mode = _CANDIDATE_SOURCE_PATH.is_file()
+    if source_mode:
+        text = _CANDIDATE_SOURCE_PATH.read_text(encoding="utf-8")
+    else:
+        resource = files("saxo_bank_mcp").joinpath(
+            _CANDIDATE_RESOURCE_DIR,
+            _CANDIDATE_RESOURCE_NAME,
+        )
+        if not resource.is_file():
+            raise ValueError("source matrix candidate manifest is unavailable")
+        text = resource.read_text(encoding="utf-8")
     manifest = _SourceMatrixCandidateManifest.model_validate_json(text, strict=True)
-    actual_files: dict[str, str] = {}
-    for name, expected_sha256 in sorted(manifest.harness_files.items()):
-        if (
-            re.fullmatch(r"[a-z][a-z0-9_]{0,127}\.py", name) is None
-            or _SHA256_PATTERN.fullmatch(expected_sha256) is None
-        ):
-            raise ValueError("source matrix candidate manifest is invalid")
-        source = files("saxo_bank_mcp").joinpath(name)
-        if not source.is_file():
-            raise ValueError("source matrix harness file is not installed")
-        actual_files[name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    _validate_candidate_manifest_paths(manifest)
+    actual_files = (
+        _source_candidate_files(Path(__file__).resolve().parents[2])
+        if source_mode
+        else _installed_candidate_files(manifest.installed_exclusions)
+    )
+    expected_files = dict(manifest.source_files) if source_mode else dict(manifest.installed_files)
+    if actual_files != expected_files:
+        raise ValueError("source matrix candidate artifact closure mismatch")
     catalog_sha256 = source_contract_catalog_sha256()
-    harness_sha256 = _digest(actual_files)
+    source_build_sha256 = _digest(dict(manifest.source_files))
+    installed_build_sha256 = _digest(dict(manifest.installed_files))
+    harness_sha256 = _digest(
+        {
+            "installed_build_sha256": installed_build_sha256,
+            "installed_exclusions": manifest.installed_exclusions,
+            "schema_version": manifest.schema_version,
+            "source_build_sha256": source_build_sha256,
+            "source_exclusions": manifest.source_exclusions,
+        },
+    )
     identity_sha256 = _digest(
         {
             "harness_build_sha256": harness_sha256,
@@ -1229,8 +1626,9 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
         },
     )
     if (
-        actual_files != dict(manifest.harness_files)
-        or catalog_sha256 != manifest.source_contract_catalog_sha256
+        catalog_sha256 != manifest.source_contract_catalog_sha256
+        or source_build_sha256 != manifest.source_build_sha256
+        or installed_build_sha256 != manifest.installed_build_sha256
         or harness_sha256 != manifest.harness_build_sha256
         or identity_sha256 != manifest.candidate_identity_sha256
     ):
@@ -1242,21 +1640,153 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
     )
 
 
+def _validate_candidate_manifest_paths(
+    manifest: _SourceMatrixCandidateManifest,
+) -> None:
+    expected_source_exclusions = ("data/analytics/source_matrix_candidate.json",)
+    candidate_resource = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
+    if (
+        manifest.source_exclusions != expected_source_exclusions
+        or len(manifest.installed_exclusions) != _SELF_REFERENCE_EXCLUSION_COUNT
+        or candidate_resource not in manifest.installed_exclusions
+        or not any(name.endswith(".dist-info/RECORD") for name in manifest.installed_exclusions)
+    ):
+        raise ValueError("source matrix candidate exclusions are invalid")
+    for mapping in (manifest.source_files, manifest.installed_files):
+        if not mapping or any(
+            not _safe_artifact_path(name) or _SHA256_PATTERN.fullmatch(sha256) is None
+            for name, sha256 in mapping.items()
+        ):
+            raise ValueError("source matrix candidate file map is invalid")
+    if set(manifest.source_files) & set(manifest.source_exclusions):
+        raise ValueError("source matrix source closure includes an exclusion")
+    if set(manifest.installed_files) & set(manifest.installed_exclusions):
+        raise ValueError("source matrix installed closure includes an exclusion")
+
+
+def _source_candidate_files(repository_root: Path) -> dict[str, str]:
+    source_package = repository_root / "src" / "saxo_bank_mcp"
+    selected: list[Path] = [
+        repository_root / "pyproject.toml",
+        repository_root / "uv.lock",
+        repository_root / "data" / "analytics" / "source_contracts.json",
+        repository_root / "data" / "saxo" / "openapi_inventory.json",
+        *(repository_root / "data" / "analytics" / "migrations").rglob("*"),
+        *source_package.rglob("*"),
+    ]
+    result: dict[str, str] = {}
+    for path in sorted(set(selected)):
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or "__pycache__" in path.parts
+            or path.suffix == ".pyc"
+        ):
+            continue
+        relative = path.relative_to(repository_root).as_posix()
+        if relative == "data/analytics/source_matrix_candidate.json":
+            continue
+        result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
+def _installed_candidate_files(  # noqa: C901
+    exclusions: Sequence[str],
+) -> dict[str, str]:
+    try:
+        installed_distribution = distribution("saxo-bank-mcp")
+    except PackageNotFoundError as error:
+        raise ValueError("installed source matrix distribution is unavailable") from error
+    distribution_files = installed_distribution.files
+    if distribution_files is None:
+        raise ValueError("installed source matrix RECORD is unavailable")
+    excluded = set(exclusions)
+    console_scripts = {
+        entry_point.name: entry_point.value
+        for entry_point in installed_distribution.entry_points
+        if entry_point.group == "console_scripts"
+    }
+    observed_exclusions: set[str] = set()
+    result: dict[str, str] = {}
+    for package_path in distribution_files:
+        name = str(package_path).replace(os.sep, "/")
+        path = Path(str(installed_distribution.locate_file(package_path)))
+        if _installer_entrypoint_projection(name, console_scripts):
+            if not _installer_entrypoint_projection_valid(
+                path,
+                console_scripts[path.name],
+            ):
+                raise ValueError("installed console entry point projection is invalid")
+            continue
+        if not _safe_artifact_path(name):
+            raise ValueError("installed source matrix path is invalid")
+        if ".dist-info/" in name and Path(name).name in _INSTALLER_GENERATED_METADATA:
+            continue
+        if name in excluded:
+            if not path.is_file():
+                raise ValueError("installed source matrix exclusion is unavailable")
+            observed_exclusions.add(name)
+            continue
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("installed source matrix file is unavailable")
+        result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed_exclusions != excluded:
+        raise ValueError("installed source matrix exclusions are incomplete")
+    return dict(sorted(result.items()))
+
+
+def _installer_entrypoint_projection(
+    value: str,
+    console_scripts: Mapping[str, str],
+) -> bool:
+    path = Path(value)
+    return path.name in console_scripts and "bin" in path.parts and value not in console_scripts
+
+
+def _installer_entrypoint_projection_valid(path: Path, target: str) -> bool:
+    if not path.is_file() or path.is_symlink():
+        return False
+    target_parts = target.split(":")
+    if (
+        len(target_parts) != _ENTRYPOINT_TARGET_PART_COUNT
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", target_parts[0]) is None
+        or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target_parts[1]) is None
+    ):
+        return False
+    try:
+        first_line, body = path.read_text(encoding="utf-8").split("\n", 1)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    module, callable_name = target_parts
+    expected_body = (
+        "# -*- coding: utf-8 -*-\n"
+        "import sys\n"
+        f"from {module} import {callable_name}\n"
+        'if __name__ == "__main__":\n'
+        '    if sys.argv[0].endswith("-script.pyw"):\n'
+        "        sys.argv[0] = sys.argv[0][:-11]\n"
+        '    elif sys.argv[0].endswith(".exe"):\n'
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        f"    sys.exit({callable_name}())\n"
+    )
+    return first_line.startswith("#!/") and body == expected_body
+
+
+def _safe_artifact_path(value: str) -> bool:
+    path = Path(value)
+    return bool(value) and not path.is_absolute() and ".." not in path.parts and "\\" not in value
+
+
 def _require_sha256(value: str) -> None:
     if _SHA256_PATTERN.fullmatch(value) is None:
         raise ValueError("candidate identity must be lowercase SHA-256")
 
 
-def _source_matrix_state_root(env: Mapping[str, str]) -> Path:
-    configured = env.get("XDG_STATE_HOME", "").strip()
-    if not configured:
-        return (Path.home() / ".local" / "state" / "saxo-bank-mcp").resolve(
-            strict=False,
-        )
-    state_home = Path(configured).expanduser()
-    if not state_home.is_absolute():
-        raise ValueError("XDG_STATE_HOME must be absolute")
-    return (state_home / "saxo-bank-mcp").resolve(strict=False)
+def _source_matrix_state_root(*, owner_home: Path | None = None) -> Path:
+    selected_home = Path(pwd.getpwuid(os.getuid()).pw_dir) if owner_home is None else owner_home
+    if not selected_home.is_absolute():
+        raise ValueError("source matrix owner home must be absolute")
+    return (selected_home / ".local" / "state" / "saxo-bank-mcp").resolve(strict=False)
 
 
 def _prepare_owner_only_directory(path: Path) -> None:
@@ -1295,6 +1825,11 @@ def _claim_candidate_guard(
         handle.flush()
         os.fsync(handle.fileno())
     path.chmod(0o600)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
     return True
 
 

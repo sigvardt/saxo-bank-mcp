@@ -198,6 +198,7 @@ def entitlements_success(
     return {
         "status": "passed",
         "tool_name": "saxo_get_entitlements",
+        "call_class": ("sim_read_succeeded" if environment == "SIM" else "live_read_succeeded"),
         "environment": environment,
         "endpoint_path": ENTITLEMENTS_PATH,
         "entitlement_field_set": ENTITLEMENT_FIELD_SET,

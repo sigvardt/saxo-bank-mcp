@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -8,7 +10,6 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Protocol, cast
 from urllib.parse import parse_qsl, urlparse
-from uuid import uuid4
 
 import httpx2
 from pydantic import TypeAdapter, ValidationError
@@ -218,6 +219,18 @@ class SourceRequestError(SourceProviderError):
 
 class SourcePayloadError(SourceProviderError):
     """Raised when a Saxo response cannot be parsed as a safe JSON object."""
+
+
+class SourceStableKeyError(SourceProviderError):
+    """Raised before page release when stable row identity is missing or repeated."""
+
+    def __init__(self, contract_id: str) -> None:
+        """Retain only the affected frozen contract ID."""
+        super().__init__(
+            "source_stable_key_invalid",
+            "source rows do not have unique non-empty stable keys",
+            contract_id=contract_id,
+        )
 
 
 class SourceEndpointError(SourceProviderError):
@@ -457,8 +470,16 @@ class SaxoAnalyticsProvider:
             if self._page_limit is None
             else min(contract.page_limit, self._page_limit)
         )
-        fetch_revision = f"fetch:{uuid4().hex}"
+        fetch_revision = "fetch:" + _fingerprint(
+            {
+                "capture_revision": capture_context.capture_revision,
+                "contract_sha256": source_contract_fingerprint(contract),
+                "request_fingerprint_sha256": request_fingerprint,
+            },
+        )
         page_number = 0
+        pages: list[SourcePage] = []
+        stable_keys_seen: set[str] = set()
         try:
             async for payload in follow_registered_pagination(
                 first_page,
@@ -470,33 +491,45 @@ class SaxoAnalyticsProvider:
                 if comparison is None:
                     comparison = self._require_compatible(contract, payload)
                 rows = _source_rows(contract, payload)
+                if not _stable_keys_are_valid(
+                    contract,
+                    rows,
+                    stable_keys_seen,
+                ):
+                    self._quarantine_contract(
+                        contract,
+                        "source_stable_key_invalid",
+                    )
+                    raise SourceStableKeyError(contract.contract_id)
                 page_fingerprint = source_page_fingerprint(rows)
                 frozen_rows = freeze_source_rows(rows)
                 data_version = (
                     _data_version(payload) if "DataVersion" in contract.revision_fields else None
                 )
-                yield SourcePage(
-                    contract_id=contract.contract_id,
-                    operation_id=contract.operation_id,
-                    contract_sha256=source_contract_fingerprint(contract),
-                    source_kind=contract.source_kind,
-                    capture_revision=capture_context.capture_revision,
-                    source_timestamp=capture_context.captured_at,
-                    account_scope=capture_context.account_scope,
-                    instrument_scope_sha256=capture_context.instrument_scope_sha256,
-                    request_fingerprint_sha256=request_fingerprint,
-                    page_number=page_number,
-                    rows=frozen_rows,
-                    row_count=len(rows),
-                    next_link=_next_link(payload),
-                    data_version=data_version,
-                    source_revision=(
-                        f"data_version:{data_version}"
-                        if data_version is not None
-                        else fetch_revision
+                pages.append(
+                    SourcePage(
+                        contract_id=contract.contract_id,
+                        operation_id=contract.operation_id,
+                        contract_sha256=source_contract_fingerprint(contract),
+                        source_kind=contract.source_kind,
+                        capture_revision=capture_context.capture_revision,
+                        source_timestamp=capture_context.captured_at,
+                        account_scope=capture_context.account_scope,
+                        instrument_scope_sha256=capture_context.instrument_scope_sha256,
+                        request_fingerprint_sha256=request_fingerprint,
+                        page_number=page_number,
+                        rows=frozen_rows,
+                        row_count=len(rows),
+                        next_link=_next_link(payload),
+                        data_version=data_version,
+                        source_revision=(
+                            f"data_version:{data_version}"
+                            if data_version is not None
+                            else fetch_revision
+                        ),
+                        page_fingerprint_sha256=page_fingerprint,
+                        schema_comparison=comparison,
                     ),
-                    page_fingerprint_sha256=page_fingerprint,
-                    schema_comparison=comparison,
                 )
         except (
             DuplicateSourcePageError,
@@ -506,6 +539,8 @@ class SaxoAnalyticsProvider:
         ):
             self._quarantine_contract(contract, "source_pagination_drift")
             raise
+        for page in pages:
+            yield page
 
     def _require_compatible(
         self,
@@ -1003,6 +1038,45 @@ def _source_rows(
             )
         rows.append(item)
     return tuple(rows)
+
+
+def _stable_keys_are_valid(
+    contract: SourceContract,
+    rows: Sequence[Mapping[str, SourceJsonValue]],
+    seen: set[str],
+) -> bool:
+    if contract.stable_key_policy == "unkeyed_snapshot":
+        return not contract.stable_key_fields
+    for row in rows:
+        values = tuple(row.get(field) for field in contract.stable_key_fields)
+        if any(not _stable_key_value_present(value) for value in values):
+            return False
+        fingerprint = _fingerprint(values)
+        if fingerprint in seen:
+            return False
+        seen.add(fingerprint)
+    return True
+
+
+def _stable_key_value_present(value: SourceJsonValue) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list | dict):
+        return bool(value)
+    return True
+
+
+def _fingerprint(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
 
 
 def _next_link(payload: Mapping[str, SourceJsonValue]) -> str | None:

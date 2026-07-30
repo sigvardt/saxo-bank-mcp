@@ -17,6 +17,7 @@ from typing import Final, Self, cast
 from uuid import RFC_4122, UUID, uuid4
 
 import duckdb
+from pydantic import ValidationError
 
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
@@ -37,8 +38,8 @@ from saxo_bank_mcp.analytics_models import (
     new_safe_handle,
 )
 from saxo_bank_mcp.analytics_source_contracts import (
+    SourceCaptureEnvelope,
     SourceJsonValue,
-    SourcePage,
     source_contract_fingerprint,
     source_contracts_by_id,
     source_page_fingerprint,
@@ -116,24 +117,13 @@ _DELETION_COLUMNS: Final = {
 }
 _BYTE_SUM_QUERIES: Final = {
     "account_snapshots": (
-        "SELECT coalesce(sum(byte_count), 0) FROM account_snapshots "
-        "WHERE snapshot_id = ANY(?)"
+        "SELECT coalesce(sum(byte_count), 0) FROM account_snapshots WHERE snapshot_id = ANY(?)"
     ),
-    "analyses": (
-        "SELECT coalesce(sum(byte_count), 0) FROM analyses "
-        "WHERE analysis_id = ANY(?)"
-    ),
-    "artifacts": (
-        "SELECT coalesce(sum(byte_count), 0) FROM artifacts "
-        "WHERE artifact_id = ANY(?)"
-    ),
-    "datasets": (
-        "SELECT coalesce(sum(byte_count), 0) FROM datasets "
-        "WHERE dataset_id = ANY(?)"
-    ),
+    "analyses": ("SELECT coalesce(sum(byte_count), 0) FROM analyses WHERE analysis_id = ANY(?)"),
+    "artifacts": ("SELECT coalesce(sum(byte_count), 0) FROM artifacts WHERE artifact_id = ANY(?)"),
+    "datasets": ("SELECT coalesce(sum(byte_count), 0) FROM datasets WHERE dataset_id = ANY(?)"),
     "source_pages": (
-        "SELECT coalesce(sum(byte_count), 0) FROM source_pages "
-        "WHERE page_id = ANY(?)"
+        "SELECT coalesce(sum(byte_count), 0) FROM source_pages WHERE page_id = ANY(?)"
     ),
 }
 _DELETION_ORDER: Final = (
@@ -154,15 +144,7 @@ _DELETION_ORDER: Final = (
     "costs",
     "source_pages",
 )
-type JsonValue = (
-    str
-    | int
-    | float
-    | bool
-    | None
-    | list[JsonValue]
-    | dict[str, JsonValue]
-)
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
 
 class StoreError(RuntimeError):
@@ -384,11 +366,7 @@ class StorageScope:
             _validate_utc(self.from_at)
         if self.to_at is not None:
             _validate_utc(self.to_at)
-        if (
-            self.from_at is not None
-            and self.to_at is not None
-            and self.to_at < self.from_at
-        ):
+        if self.from_at is not None and self.to_at is not None and self.to_at < self.from_at:
             raise StoreValidationError("storage scope end precedes its start")
 
 
@@ -552,10 +530,7 @@ def _validate_account_scope(value: str) -> None:
     if _ACCOUNT_ALIAS_PATTERN.fullmatch(value) is None:
         raise StoreValidationError("account scope must use a safe alias or aggregate")
     opaque_uuid = UUID(hex=value.removeprefix("aa_"))
-    if (
-        opaque_uuid.version != _OPAQUE_UUID_VERSION
-        or opaque_uuid.variant != RFC_4122
-    ):
+    if opaque_uuid.version != _OPAQUE_UUID_VERSION or opaque_uuid.variant != RFC_4122:
         raise StoreValidationError("account scope must use a safe alias or aggregate")
 
 
@@ -567,10 +542,7 @@ def _validate_handle(value: str, prefix: str) -> None:
     if re.fullmatch(r"[0-9a-f]{32}", payload) is None:
         raise StoreValidationError("analytics handle must be opaque")
     opaque_uuid = UUID(hex=payload)
-    if (
-        opaque_uuid.version != _OPAQUE_UUID_VERSION
-        or opaque_uuid.variant != RFC_4122
-    ):
+    if opaque_uuid.version != _OPAQUE_UUID_VERSION or opaque_uuid.variant != RFC_4122:
         raise StoreValidationError("analytics handle must be opaque")
 
 
@@ -855,9 +827,7 @@ class AnalyticsStore:
 
     def _ensure_capacity(self, incoming_bytes: int) -> None:
         reserved_bytes = (
-            self._transaction_reserved_bytes
-            if self._transaction_owner == get_ident()
-            else 0
+            self._transaction_reserved_bytes if self._transaction_owner == get_ident() else 0
         )
         if not self._config.limits.can_accept_ingestion(
             self._current_storage_bytes(),
@@ -1038,12 +1008,19 @@ class AnalyticsStore:
 
     def ingest_source_capture(  # noqa: C901
         self,
-        pages: Sequence[SourcePage],
+        envelope: SourceCaptureEnvelope,
     ) -> StoredSourceCapture:
         """Persist one exact, validated provider capture and derive its dataset."""
-        source_pages = tuple(pages)
-        if not source_pages:
-            raise StoreValidationError("source capture requires at least one page")
+        try:
+            authenticated = SourceCaptureEnvelope.model_validate_json(
+                envelope.model_dump_json(),
+                strict=True,
+            )
+        except (AttributeError, TypeError, ValidationError, ValueError) as error:
+            raise StoreValidationError(
+                "source capture envelope authentication failed",
+            ) from error
+        source_pages = authenticated.pages
         capture_revisions = {page.capture_revision for page in source_pages}
         account_scopes = {page.account_scope for page in source_pages}
         instrument_scopes = {page.instrument_scope_sha256 for page in source_pages}
@@ -1249,8 +1226,7 @@ class AnalyticsStore:
         if any(row[7] is not None and row[8] is None for row in rows):
             raise StoreNotFoundError("dataset instrument does not exist")
         if any(
-            (page_scope := _optional_str(row[4])) is not None
-            and page_scope != account_scope
+            (page_scope := _optional_str(row[4])) is not None and page_scope != account_scope
             for row in rows
         ):
             raise StoreValidationError(
@@ -1908,11 +1884,7 @@ class AnalyticsStore:
             entries.extend(self._deletion_receipt_entries(connection))
         return tuple(
             sorted(
-                (
-                    entry
-                    for entry in entries
-                    if self._entry_matches_scope(entry, scope)
-                ),
+                (entry for entry in entries if self._entry_matches_scope(entry, scope)),
                 key=lambda entry: (entry.data_type.value, entry.object_id),
             ),
         )
@@ -2204,24 +2176,14 @@ class AnalyticsStore:
             if scope.data_types
             else entry.data_type is not StorageDataType.DELETION_RECEIPTS
         )
-        account_matches = (
-            scope.account_scope is None
-            or entry.account_scope == scope.account_scope
-        )
+        account_matches = scope.account_scope is None or entry.account_scope == scope.account_scope
         instrument_matches = (
-            not scope.instrument_handles
-            or entry.instrument_handle in scope.instrument_handles
+            not scope.instrument_handles or entry.instrument_handle in scope.instrument_handles
         )
         start_matches = (
-            scope.from_at is None
-            or entry.end_at is None
-            or entry.end_at >= scope.from_at
+            scope.from_at is None or entry.end_at is None or entry.end_at >= scope.from_at
         )
-        end_matches = (
-            scope.to_at is None
-            or entry.start_at is None
-            or entry.start_at <= scope.to_at
-        )
+        end_matches = scope.to_at is None or entry.start_at is None or entry.start_at <= scope.to_at
         return (
             type_matches
             and account_matches
@@ -2237,9 +2199,7 @@ class AnalyticsStore:
         scope: StorageScope,
     ) -> bool:
         """Match optional safe object handles without widening other data types."""
-        has_object_filter = bool(
-            scope.dataset_ids or scope.analysis_ids or scope.artifact_ids
-        )
+        has_object_filter = bool(scope.dataset_ids or scope.analysis_ids or scope.artifact_ids)
         if not has_object_filter:
             return True
         if entry.data_type is StorageDataType.DATASETS:
@@ -2312,9 +2272,7 @@ class AnalyticsStore:
             if entry.data_type in _SOURCE_PAGE_BACKED_DATA_TYPES
         }
         dataset_ids = {
-            entry.object_id
-            for entry in entries
-            if entry.data_type is StorageDataType.DATASETS
+            entry.object_id for entry in entries if entry.data_type is StorageDataType.DATASETS
         }
         snapshot_ids = {
             entry.object_id
@@ -2322,14 +2280,10 @@ class AnalyticsStore:
             if entry.data_type is StorageDataType.ACCOUNT_SNAPSHOTS
         }
         analysis_ids = {
-            entry.object_id
-            for entry in entries
-            if entry.data_type is StorageDataType.ANALYSES
+            entry.object_id for entry in entries if entry.data_type is StorageDataType.ANALYSES
         }
         artifact_ids = {
-            entry.object_id
-            for entry in entries
-            if entry.data_type is StorageDataType.ARTIFACTS
+            entry.object_id for entry in entries if entry.data_type is StorageDataType.ARTIFACTS
         }
 
         dataset_ids.update(
@@ -2364,11 +2318,7 @@ class AnalyticsStore:
                 analysis_ids,
             ),
         )
-        job_ids = {
-            entry.object_id
-            for entry in entries
-            if entry.data_type is StorageDataType.JOBS
-        }
+        job_ids = {entry.object_id for entry in entries if entry.data_type is StorageDataType.JOBS}
         job_ids.update(
             _select_strings(
                 connection,
@@ -2651,13 +2601,9 @@ def _plan_json(plan: _DeletionPlan) -> str:
         {
             "estimated_bytes": plan.estimated_bytes,
             "table_counts": [
-                {"rows": item.rows, "table": item.table}
-                for item in plan.table_counts
+                {"rows": item.rows, "table": item.table} for item in plan.table_counts
             ],
-            "targets": {
-                table: list(values)
-                for table, values in sorted(plan.targets.items())
-            },
+            "targets": {table: list(values) for table, values in sorted(plan.targets.items())},
         },
     )
 

@@ -42,7 +42,21 @@ _TIMESTAMP_PATTERN: Final = re.compile(
 class _ReceiptExecutor:
     def __init__(self) -> None:
         self.network_call_count = 0
+        self.attempt_count = 0
+        self.initial_attempt_count = 0
+        self.continuation_attempt_count = 0
+        self.retry_count = 0
         self.environment: str | None = None
+        self._initial_target: str | None = None
+        self._targets: set[str] = set()
+
+    @property
+    def distinct_target_count(self) -> int:
+        return len(self._targets)
+
+    @property
+    def continuation_call_count(self) -> int:
+        return max(0, self.distinct_target_count - 1)
 
     async def __call__(
         self,
@@ -50,6 +64,24 @@ class _ReceiptExecutor:
         request_target: str,
         params: Mapping[str, str],
     ) -> httpx2.Response:
+        target = _digest(
+            {
+                "operation_id": operation.operation_id,
+                "params": dict(params),
+                "request_target": request_target,
+            },
+        )
+        self.attempt_count += 1
+        if self._initial_target is None:
+            self._initial_target = target
+        if target in self._targets:
+            self.retry_count += 1
+        else:
+            self._targets.add(target)
+        if target == self._initial_target:
+            self.initial_attempt_count += 1
+        else:
+            self.continuation_attempt_count += 1
         outcome = await execute_registered_get(
             operation,
             request_target,
@@ -161,8 +193,8 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
         )
 
     page_receipts: list[dict[str, JsonValue]] = []
-    timestamps: list[str] = []
     for page in pages:
+        timestamps: list[str] = []
         for row in page.rows:
             _collect_timestamps(row, timestamps)
         page_receipts.append(
@@ -174,9 +206,15 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
                 "schema_fingerprint_sha256": _digest(
                     page.schema_comparison.model_dump(mode="json"),
                 ),
+                "timestamp_value_count": len(timestamps),
+                "timestamp_fingerprint_sha256": _digest(sorted(timestamps)),
             },
         )
     response_fingerprint = _digest(page_receipts)
+    timestamp_value_count = sum(
+        cast("int", page["timestamp_value_count"]) for page in page_receipts
+    )
+    timestamp_fingerprints = [page["timestamp_fingerprint_sha256"] for page in page_receipts]
     environment = executor.environment or "UNKNOWN"
     return {
         "status": "passed",
@@ -195,6 +233,12 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
         "environment": environment,
         "network_call_made": executor.network_call_count > 0,
         "network_call_count": executor.network_call_count,
+        "attempt_count": executor.attempt_count,
+        "initial_attempt_count": executor.initial_attempt_count,
+        "continuation_attempt_count": executor.continuation_attempt_count,
+        "retry_count": executor.retry_count,
+        "distinct_target_count": executor.distinct_target_count,
+        "successful_page_count": len(pages),
         "live_write_called": False,
         "order_or_subscription_created": False,
         "arbitrary_url_allowed": False,
@@ -211,13 +255,14 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
         "analytics_contract_sha256": source_contract_fingerprint(contract),
         "page_count": len(pages),
         "row_count": sum(page.row_count for page in pages),
-        "continuation_call_count": max(0, executor.network_call_count - 1),
+        "continuation_call_count": executor.continuation_call_count,
         "page_receipts": page_receipts,
         "source_revision_fingerprint_sha256": _digest(
-            [page.source_revision for page in pages],
+            [page["source_revision_sha256"] for page in page_receipts],
         ),
-        "timestamp_value_count": len(timestamps),
-        "timestamp_fingerprint_sha256": _digest(sorted(timestamps)),
+        "timestamp_value_count": timestamp_value_count,
+        "timestamp_fingerprint_sha256": _digest(timestamp_fingerprints),
+        "request_fingerprint_sha256": capture.request_fingerprints[contract_id],
     }
 
 
@@ -269,6 +314,12 @@ def _failure(
         "environment": environment,
         "network_call_made": executor.network_call_count > 0,
         "network_call_count": executor.network_call_count,
+        "attempt_count": executor.attempt_count,
+        "initial_attempt_count": executor.initial_attempt_count,
+        "continuation_attempt_count": executor.continuation_attempt_count,
+        "retry_count": executor.retry_count,
+        "distinct_target_count": executor.distinct_target_count,
+        "successful_page_count": 0,
         "live_write_called": False,
         "order_or_subscription_created": False,
         "response": None,
@@ -281,7 +332,7 @@ def _failure(
         ),
         "page_count": 0,
         "row_count": 0,
-        "continuation_call_count": 0,
+        "continuation_call_count": executor.continuation_call_count,
         "reason": _safe_reason(reason),
         "http_status": http_status,
     }

@@ -33,6 +33,7 @@ async def read_live_session_capabilities() -> ToolResult:
     return {
         "status": "passed",
         "tool_name": "saxo_get_session_capabilities",
+        "call_class": "live_read_succeeded",
         "requested_environment": "LIVE",
         "environment": "LIVE",
         "endpoint_path": SESSION_CAPABILITIES_PATH,

@@ -14,9 +14,11 @@ import saxo_bank_mcp.analytics_store as store_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_source_contracts import (
+    SourceCaptureEnvelope,
     SourceJsonValue,
     SourcePage,
     build_source_capture_context,
+    build_source_capture_envelope,
     source_contracts_by_id,
 )
 from saxo_bank_mcp.analytics_store import (
@@ -69,7 +71,7 @@ def test_store_bridge_supports_every_frozen_provider_source_kind() -> None:
     } <= store_module.supported_source_kinds()
 
 
-async def _provider_pages() -> tuple[SourcePage, ...]:
+async def _provider_capture() -> SourceCaptureEnvelope:
     requests: dict[str, Mapping[str, object]] = {
         "chart_v3": {"AssetType": "Stock", "Count": 2, "Uic": 1001},
         "transactions_v1": {},
@@ -96,14 +98,15 @@ async def _provider_pages() -> tuple[SourcePage, ...]:
                 )
             ],
         )
-    return tuple(pages)
+    return build_source_capture_envelope(capture, pages)
 
 
 @pytest.mark.anyio
 async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
     tmp_path: Path,
 ) -> None:
-    pages = await _provider_pages()
+    envelope = await _provider_capture()
+    pages = envelope.pages
     capture_revisions = {page.capture_revision for page in pages}
     native_revisions = {page.source_revision for page in pages}
 
@@ -116,8 +119,8 @@ async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
     try:
-        first = store.ingest_source_capture(pages)
-        replay = store.ingest_source_capture(pages)
+        first = store.ingest_source_capture(envelope)
+        replay = store.ingest_source_capture(envelope)
     finally:
         store.close()
 
@@ -153,25 +156,26 @@ async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("update", "reason"),
+    "update",
     [
-        ({"capture_revision": "capture:" + "f" * 32}, "capture revisions"),
-        ({"account_scope": "selected SIM account"}, "account scopes"),
-        ({"instrument_scope_sha256": "f" * 64}, "instrument scopes"),
-        ({"source_kind": "orders"}, "validated provider data"),
-        ({"page_fingerprint_sha256": "f" * 64}, "validated provider data"),
+        {"capture_revision": "capture:" + "f" * 32},
+        {"account_scope": "selected SIM account"},
+        {"instrument_scope_sha256": "f" * 64},
+        {"source_kind": "orders"},
+        {"page_fingerprint_sha256": "f" * 64},
     ],
 )
 async def test_store_bridge_refuses_mixed_or_tampered_pages(
     tmp_path: Path,
     update: dict[str, SourceJsonValue],
-    reason: str,
 ) -> None:
-    pages = list(await _provider_pages())
+    envelope = await _provider_capture()
+    pages = list(envelope.pages)
     pages[-1] = pages[-1].model_copy(update=update)
+    tampered = envelope.model_copy(update={"pages": tuple(pages)})
     store = AnalyticsStore.open(_config(tmp_path))
     try:
-        with pytest.raises(StoreValidationError, match=reason):
-            store.ingest_source_capture(pages)
+        with pytest.raises(StoreValidationError, match="capture envelope"):
+            store.ingest_source_capture(tampered)
     finally:
         store.close()

@@ -362,6 +362,7 @@ class SourceContract(BaseModel):
     response_envelope: SourceResponseEnvelope
     fields: tuple[SourceField, ...]
     stable_key_fields: tuple[str, ...] = ()
+    stable_key_policy: Literal["required_unique", "unkeyed_snapshot"]
     revision_fields: tuple[str, ...] = ()
     dependent_analysis_kinds: tuple[str, ...]
     pagination: SourcePagination | None
@@ -476,6 +477,13 @@ class SourceContract(BaseModel):
             raise PydanticCustomError(
                 "stable_key_field_missing",
                 "stable key field is not defined by the source contract",
+            )
+        if (self.stable_key_policy == "required_unique") != bool(
+            self.stable_key_fields,
+        ):
+            raise PydanticCustomError(
+                "stable_key_policy_invalid",
+                "stable key policy must explicitly match keyed or unkeyed rows",
             )
         if not set(self.revision_fields) <= set(field_names) | {"DataVersion"}:
             raise PydanticCustomError(
@@ -759,6 +767,60 @@ class SourcePage(BaseModel):
         return self
 
 
+class SourceCaptureEnvelope(BaseModel):
+    """Canonical authenticated binding between one capture and its source pages."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    capture: SourceCaptureContext
+    pages: tuple[SourcePage, ...]
+    capture_fingerprint_sha256: str
+
+    @field_validator("capture_fingerprint_sha256")
+    @classmethod
+    def validate_capture_fingerprint(cls, value: str) -> str:
+        if _SHA256_PATTERN.fullmatch(value) is None:
+            raise ValueError("source capture fingerprint must be lowercase SHA-256")
+        return value
+
+    @model_validator(mode="after")
+    def validate_capture_binding(self) -> Self:
+        if not self.pages:
+            raise PydanticCustomError(
+                "source_capture_pages_missing",
+                "source capture envelope requires at least one page",
+            )
+        contract_ids = {page.contract_id for page in self.pages}
+        if contract_ids != set(self.capture.request_fingerprints):
+            raise PydanticCustomError(
+                "source_capture_contract_mismatch",
+                "source capture pages do not match its exact request set",
+            )
+        for page in self.pages:
+            if (
+                page.capture_revision != self.capture.capture_revision
+                or page.source_timestamp != self.capture.captured_at
+                or page.account_scope != self.capture.account_scope
+                or page.instrument_scope_sha256 != self.capture.instrument_scope_sha256
+                or page.request_fingerprint_sha256
+                != self.capture.request_fingerprints.get(page.contract_id)
+            ):
+                raise PydanticCustomError(
+                    "source_capture_page_binding_mismatch",
+                    "source capture page metadata does not match its capture",
+                )
+        expected = _source_capture_envelope_fingerprint(
+            self.capture,
+            self.pages,
+        )
+        if self.capture_fingerprint_sha256 != expected:
+            raise PydanticCustomError(
+                "source_capture_fingerprint_mismatch",
+                "source capture envelope fingerprint does not match canonical data",
+            )
+        return self
+
+
 @dataclass(slots=True)
 class _ObservedSchema:
     structural_errors: set[str] = field(default_factory=set)
@@ -854,6 +916,40 @@ def build_source_capture_context(
         account_scope="selected SIM account" if has_account_scope else "aggregate",
         instrument_scope_sha256=_json_fingerprint(instrument_material),
         request_fingerprints=request_fingerprints,
+    )
+
+
+def build_source_capture_envelope(
+    capture: SourceCaptureContext,
+    pages: Sequence[SourcePage],
+) -> SourceCaptureEnvelope:
+    """Authenticate canonical provider pages against their exact capture context."""
+    source_pages = tuple(pages)
+    return SourceCaptureEnvelope(
+        capture=capture,
+        pages=source_pages,
+        capture_fingerprint_sha256=_source_capture_envelope_fingerprint(
+            capture,
+            source_pages,
+        ),
+    )
+
+
+def _source_capture_envelope_fingerprint(
+    capture: SourceCaptureContext,
+    pages: Sequence[SourcePage],
+) -> str:
+    return _json_fingerprint(
+        {
+            "capture": capture.model_dump(mode="json"),
+            "pages": [
+                page.model_dump(mode="json")
+                for page in sorted(
+                    pages,
+                    key=lambda item: (item.contract_id, item.page_number),
+                )
+            ],
+        },
     )
 
 

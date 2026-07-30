@@ -25,6 +25,7 @@ from saxo_bank_mcp.analytics_provider import (
     SourceRateLimitError,
     SourceRequestError,
     SourceSchemaDriftError,
+    SourceStableKeyError,
     SourceTransportError,
 )
 from saxo_bank_mcp.analytics_source_contracts import (
@@ -875,7 +876,7 @@ async def test_page_limit_stops_before_an_unbounded_followup() -> None:
 
 
 @pytest.mark.anyio
-async def test_out_of_order_and_revised_rows_are_preserved_without_collapse() -> None:
+async def test_revised_stable_key_across_pages_is_quarantined() -> None:
     next_link = "/hist/v1/transactions?$skiptoken=revised"
     first_payload = _SOURCE_OBJECT_ADAPTER.validate_json(
         _fixture_bytes("transactions_out_of_order.json")
@@ -901,15 +902,12 @@ async def test_out_of_order_and_revised_rows_are_preserved_without_collapse() ->
     )
     provider = _provider(executor)
 
-    pages = [page async for page in provider.fetch("transactions_v1", {})]
+    with pytest.raises(SourceStableKeyError):
+        _ = [page async for page in provider.fetch("transactions_v1", {})]
 
-    assert [row["TransactionId"] for row in pages[0].rows] == [
-        "synthetic-transaction-b",
-        "synthetic-transaction-a",
-    ]
-    assert pages[1].rows[0]["TransactionId"] == "synthetic-transaction-b"
-    assert pages[0].page_fingerprint_sha256 != pages[1].page_fingerprint_sha256
-    assert pages[0].source_revision == pages[1].source_revision
+    assert provider.quarantine_reason("portfolio_performance") == (
+        "source_stable_key_invalid:transactions_v1"
+    )
 
 
 @pytest.mark.anyio

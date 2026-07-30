@@ -68,23 +68,39 @@ def test_readiness_refusal_is_not_a_success_or_claimed_evidence() -> None:
 def test_ledger_proof_uses_explicit_environment_and_does_not_count_oauth_as_live() -> None:
     receipt = matrix_module._ledger_receipt(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         {
+            "status": "passed",
+            "tool_name": "saxo_get_safe_request_ledger",
+            "scope": "current_mcp_session",
+            "safe_fields_only": True,
             "ledger_complete": True,
             "negative_proof_available": True,
             "events_evicted": 0,
             "request_count": 2,
             "non_get_request_count": 0,
+            "unsafe_gateway_request_detected": False,
+            "order_placement_endpoint_called": False,
             "events": [
                 {
+                    "timestamp": "2026-07-30T12:00:00+00:00",
                     "phase": "attempted",
                     "host_role": "gateway",
                     "environment": "SIM",
                     "method": "GET",
+                    "path": "/openapi/port/v1/orders",
+                    "query_names": [],
+                    "query_present": False,
+                    "status": None,
                 },
                 {
+                    "timestamp": "2026-07-30T12:00:01+00:00",
                     "phase": "attempted",
                     "host_role": "oauth",
                     "environment": "LIVE",
                     "method": "GET",
+                    "path": "/token",
+                    "query_names": [],
+                    "query_present": False,
+                    "status": None,
                 },
             ],
         },
@@ -95,16 +111,27 @@ def test_ledger_proof_uses_explicit_environment_and_does_not_count_oauth_as_live
 
     unverified = matrix_module._ledger_receipt(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
         {
+            "status": "passed",
+            "tool_name": "saxo_get_safe_request_ledger",
+            "scope": "current_mcp_session",
+            "safe_fields_only": True,
             "ledger_complete": True,
             "negative_proof_available": True,
             "events_evicted": 0,
             "request_count": 1,
             "non_get_request_count": 0,
+            "unsafe_gateway_request_detected": False,
+            "order_placement_endpoint_called": False,
             "events": [
                 {
+                    "timestamp": "2026-07-30T12:00:00+00:00",
                     "phase": "attempted",
                     "host_role": "gateway",
                     "method": "GET",
+                    "path": "/openapi/port/v1/orders",
+                    "query_names": [],
+                    "query_present": False,
+                    "status": None,
                 },
             ],
         },

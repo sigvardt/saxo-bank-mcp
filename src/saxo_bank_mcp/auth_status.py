@@ -23,10 +23,16 @@ AUTH_STATUS_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
 
 
 class SaxoAuthStatus(TypedDict):
+    status: Literal["passed"]
+    tool_name: Literal["saxo_auth_status"]
+    call_class: Literal["local_status_succeeded"]
     requested_environment: EnvironmentName
     effective_read_environment: EffectiveReadEnvironment
     live_reads: bool
     live_writes: Literal[False]
+    network_call_made: Literal[False]
+    live_write_called: Literal[False]
+    order_or_subscription_created: Literal[False]
     sim_credentials_present: bool
     sim_credential_source: SimCredentialSource
     live_credentials_present: bool
@@ -65,10 +71,16 @@ class AuthStatusInputs:
 def build_auth_status(inputs: AuthStatusInputs) -> SaxoAuthStatus:
     blocking_reasons = _blocking_reasons(inputs)
     return {
+        "status": "passed",
+        "tool_name": "saxo_auth_status",
+        "call_class": "local_status_succeeded",
         "requested_environment": inputs.requested_environment,
         "effective_read_environment": inputs.effective_read_environment,
         "live_reads": inputs.effective_read_environment == "LIVE",
         "live_writes": False,
+        "network_call_made": False,
+        "live_write_called": False,
+        "order_or_subscription_created": False,
         "sim_credentials_present": inputs.sim_credentials_present,
         "sim_credential_source": inputs.sim_credential_source,
         "live_credentials_present": inputs.live_credentials_present,

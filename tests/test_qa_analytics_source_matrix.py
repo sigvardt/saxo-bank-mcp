@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import stat
@@ -90,6 +91,33 @@ def _record(
     state.calls.append((tool, arguments))
 
 
+def _digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+
+
+def _request_fingerprint(
+    contract_id: str,
+    path_template: str,
+    resolved_path: str,
+    params: dict[str, str],
+) -> str:
+    request: dict[str, object] = dict(params)
+    for template, resolved in zip(
+        path_template.strip("/").split("/"),
+        resolved_path.strip("/").split("/"),
+        strict=True,
+    ):
+        if template.startswith("{") and template.endswith("}"):
+            request[template[1:-1]] = resolved
+    return _digest({"contract_id": contract_id, "request": request})
+
+
 def _registry_rows() -> list[dict[str, JsonValue]]:
     paths = [contract.path_template for contract in source_contracts_by_id().values()]
     paths.extend(
@@ -128,6 +156,9 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
     async def saxo_auth_status() -> dict[str, JsonValue]:
         _record(state, "saxo_auth_status", {})
         return {
+            "status": "passed",
+            "tool_name": "saxo_auth_status",
+            "call_class": "local_status_succeeded",
             "requested_environment": "SIM",
             "effective_read_environment": "SIM",
             "live_reads": False,
@@ -137,22 +168,33 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
             "token_cache_expired": not state.auth_available,
             "token_cache_environment": "SIM",
             "blocking_reasons": [] if state.auth_available else ["token_cache_expired"],
+            "network_call_made": False,
+            "live_write_called": False,
+            "order_or_subscription_created": False,
         }
 
     async def saxo_get_session_capabilities() -> dict[str, JsonValue]:
         _record(state, "saxo_get_session_capabilities", {})
         return {
             "status": "passed" if state.session_available else "auth_required",
+            "tool_name": "saxo_get_session_capabilities",
             "environment": "SIM",
+            "call_class": "sim_read_succeeded",
             "network_call_made": state.session_available,
+            "live_write_called": False,
+            "order_or_subscription_created": False,
         }
 
     async def saxo_get_entitlements() -> dict[str, JsonValue]:
         _record(state, "saxo_get_entitlements", {})
         return {
             "status": "passed" if state.entitlements_available else "auth_required",
+            "tool_name": "saxo_get_entitlements",
             "environment": "SIM",
+            "call_class": "sim_read_succeeded",
             "network_call_made": state.entitlements_available,
+            "live_write_called": False,
+            "order_or_subscription_created": False,
         }
 
     async def saxo_list_registered_endpoints(
@@ -233,35 +275,61 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
             else 1
         )
         status = state.source_status
+        page_count = 2 if analytics_contract_id == "chart_v3" else 1
+        page_receipts: list[dict[str, JsonValue]] = [
+            {
+                "page_number": page_number,
+                "row_count": rows if page_number == 1 else 0,
+                "page_fingerprint_sha256": str(page_number) * 64,
+                "source_revision_sha256": "e" * 64,
+                "schema_fingerprint_sha256": "f" * 64,
+                "timestamp_value_count": rows if page_number == 1 else 0,
+                "timestamp_fingerprint_sha256": "9" * 64,
+            }
+            for page_number in range(1, page_count + 1)
+        ]
+        passed = status == "passed"
         return {
             "status": status,
+            "tool_name": "saxo_call_registered_endpoint",
+            "call_class": ("sim_read_succeeded" if passed else "sim_read_http_error"),
             "operation_id": operation.operation_id,
             "method": "GET",
             "path": operation.path_template,
             "environment": "SIM",
             "network_call_made": True,
-            "network_call_count": 2 if analytics_contract_id == "chart_v3" else 1,
+            "network_call_count": page_count if passed else 1,
+            "attempt_count": page_count if passed else 1,
+            "initial_attempt_count": 1,
+            "continuation_attempt_count": page_count - 1 if passed else 0,
+            "retry_count": 0,
+            "distinct_target_count": page_count if passed else 1,
+            "successful_page_count": page_count if passed else 0,
+            "live_write_called": False,
+            "order_or_subscription_created": False,
             "response_visibility": "analytics_contract_receipt",
             "response": None,
-            "response_fingerprint": "c" * 64,
+            "response_fingerprint": _digest(page_receipts) if passed else None,
             "response_fingerprint_scope": "analytics_contract_receipt",
             "analytics_contract_id": analytics_contract_id,
             "analytics_contract_sha256": source_contract_fingerprint(contract),
-            "page_count": 2 if analytics_contract_id == "chart_v3" else 1,
-            "row_count": rows,
-            "continuation_call_count": 1 if analytics_contract_id == "chart_v3" else 0,
-            "page_receipts": [
-                {
-                    "page_number": 1,
-                    "row_count": rows,
-                    "page_fingerprint_sha256": "d" * 64,
-                    "source_revision_sha256": "e" * 64,
-                    "schema_fingerprint_sha256": "f" * 64,
-                },
-            ],
-            "source_revision_fingerprint_sha256": "e" * 64,
-            "timestamp_value_count": rows,
-            "timestamp_fingerprint_sha256": "9" * 64,
+            "page_count": page_count if passed else 0,
+            "row_count": rows if passed else 0,
+            "continuation_call_count": page_count - 1 if passed else 0,
+            "page_receipts": page_receipts if passed else [],
+            "source_revision_fingerprint_sha256": (
+                _digest(["e" * 64] * page_count) if passed else _digest([])
+            ),
+            "timestamp_value_count": rows if passed else 0,
+            "timestamp_fingerprint_sha256": (
+                _digest(["9" * 64] * page_count) if passed else _digest([])
+            ),
+            "request_fingerprint_sha256": _request_fingerprint(
+                analytics_contract_id,
+                contract.path_template,
+                path,
+                params or {},
+            ),
             "http_status": 200,
             "reason": "" if status == "passed" else "source_http_error",
         }
@@ -275,11 +343,16 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
             state.ledger_start = len(state.calls)
             return {
                 "status": "cleared",
+                "tool_name": "saxo_get_safe_request_ledger",
+                "scope": "current_mcp_session",
+                "safe_fields_only": True,
                 "ledger_complete": True,
                 "events_evicted": 0,
                 "negative_proof_available": True,
                 "request_count": 0,
                 "non_get_request_count": 0,
+                "unsafe_gateway_request_detected": False,
+                "order_placement_endpoint_called": False,
                 "events": [],
             }
         source_calls = [
@@ -335,6 +408,9 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
             )
         return {
             "status": "passed",
+            "tool_name": "saxo_get_safe_request_ledger",
+            "scope": "current_mcp_session",
+            "safe_fields_only": True,
             "ledger_complete": True,
             "events_evicted": 0,
             "negative_proof_available": True,

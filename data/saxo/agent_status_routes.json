@@ -189,6 +189,10 @@
     ],
     "included": [
       {
+        "module": "src/saxo_bank_mcp/auth_status.py",
+        "reason": "Registered auth status tool builds its exact safe readiness receipt in this module."
+      },
+      {
         "module": "src/saxo_bank_mcp/analytics_source_receipt.py",
         "reason": "Registered read gateway analytics mode returns these server-validated receipt statuses."
       },
