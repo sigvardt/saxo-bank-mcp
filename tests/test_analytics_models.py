@@ -919,6 +919,33 @@ def test_public_evidence_allows_currency_word_collisions_without_financial_conte
     assert validate_public_evidence(output) is None
 
 
+def test_public_evidence_allows_financial_domain_prose_without_bound_money(
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = "The cost model won 123 tests."
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "Portfolio value: won 12345.67.",
+        "Balance is won 123.",
+    ],
+)
+def test_public_evidence_rejects_currency_name_amount_bound_to_financial_label(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+
 def test_public_evidence_allows_non_currency_uppercase_count_labels() -> None:
     payload = _refusal_payload()
     payload["reason"] = "SIM 123 rows were available."

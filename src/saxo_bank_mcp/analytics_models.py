@@ -172,10 +172,13 @@ _FINANCIAL_CONTEXT_PATTERN_TEXT: Final = r"""(?:
     |proceeds
     |profit
 )"""
+_FINANCIAL_LABEL_BINDING_PATTERN_TEXT: Final = (
+    r"(?:\s*[:=]\s*|\s+(?:is|was)\s+|\s+)"
+)
 _CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN: Final = re.compile(
     rf"""(?ix)
     \b{_FINANCIAL_CONTEXT_PATTERN_TEXT}\b
-    [^\n.!?]{{0,48}}
+    {_FINANCIAL_LABEL_BINDING_PATTERN_TEXT}
     \b(?:{_CURRENCY_NAME_PATTERN_TEXT})\b
     \s*{_MONEY_AMOUNT_PATTERN_TEXT}
     """,
