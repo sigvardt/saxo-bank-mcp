@@ -110,6 +110,17 @@ _AUTHORIZATION_PATTERN: Final = re.compile(
 _JWT_PATTERN: Final = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
 )
+_RAW_ACCOUNT_IDENTIFIER_PATTERN: Final = re.compile(
+    r"""(?ix)
+    (?<![A-Z0-9])
+    raw[\s_-]+account[\s_-]+identifier[\s_-]+
+    [A-Z0-9][A-Z0-9_-]{5,}
+    (?![A-Z0-9_-])
+    """,
+)
+_DELETION_PREVIEW_TOKEN_PATTERN: Final = re.compile(
+    r"(?<![A-Za-z0-9_])dp_[0-9a-f]{32}(?![A-Za-z0-9_])",
+)
 _URL_PATTERN: Final = re.compile(
     r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"]+",
 )
@@ -1014,6 +1025,8 @@ def _string_contains_forbidden_public_value(value: str) -> bool:
         for pattern in (
             _AUTHORIZATION_PATTERN,
             _JWT_PATTERN,
+            _RAW_ACCOUNT_IDENTIFIER_PATTERN,
+            _DELETION_PREVIEW_TOKEN_PATTERN,
             _URL_PATTERN,
             _LOCAL_PATH_PATTERN,
             _DIRECT_MONETARY_VALUE_PATTERN,

@@ -902,6 +902,86 @@ def test_public_evidence_rejects_safe_sentinel_prefix_smuggling(
 
 
 @pytest.mark.parametrize(
+    ("assignment", "forbidden_suffix"),
+    [
+        (
+            '"AccountId": "unavailable"',
+            "raw-account-identifier-7654321",
+        ),
+        (
+            "DeletionPreviewToken='redacted'",
+            "dp_0123456789abcdef0123456789abcdef",
+        ),
+    ],
+)
+@pytest.mark.parametrize("separator", [" ", ". ", "; ", "\n"])
+def test_public_evidence_rejects_forbidden_suffix_after_quoted_sentinel(
+    assignment: str,
+    forbidden_suffix: str,
+    separator: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = f"{assignment}{separator}{forbidden_suffix}"
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError, match="forbidden value class"):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "The result included raw-account-identifier-7654321.",
+        "The result included raw_account_identifier_7654321.",
+        "The result included raw account identifier 7654321.",
+        "The result included dp_0123456789abcdef0123456789abcdef.",
+    ],
+)
+def test_public_evidence_rejects_raw_account_and_deletion_tokens_anywhere(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError, match="forbidden value class"):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        '"AccountId": "unavailable". The source value was not returned.',
+        "DeletionPreviewToken='redacted'; No deletion preview value was returned.",
+    ],
+)
+def test_public_evidence_allows_quoted_sentinel_before_value_free_prose(
+    safe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = safe_text
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
+
+
+def test_public_evidence_allows_large_counts_and_dates_without_raw_labels() -> None:
+    payload = _refusal_payload()
+    payload["reason"] = "Rows available: 7654321. Source date: 2026-07-30."
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
+
+
+@pytest.mark.parametrize(
     "unsafe_text",
     [
         "ClientKey is synthetic_1234567890",
