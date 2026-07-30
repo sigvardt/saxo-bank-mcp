@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import re
-import secrets
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from types import MappingProxyType
 from typing import Annotated, Final, Literal, Self, cast
+from uuid import RFC_4122, UUID, uuid4
 
 from pydantic import (
     AfterValidator,
@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 from pydantic_core import PydanticCustomError
@@ -21,10 +22,8 @@ from pydantic_core import PydanticCustomError
 from saxo_bank_mcp.analytics_errors import AnalyticsPrivacyError
 
 _SCHEMA_VERSION: Final = "1"
-_HANDLE_RANDOM_BYTES: Final = 24
-_MIN_HANDLE_PAYLOAD_CHARACTERS: Final = 4
-_HANDLE_PAYLOAD_PATTERN: Final = re.compile(r"^[A-Za-z0-9_-]{32}$")
-_CURRENCY_UNITS: Final = frozenset({"currency", "currency_per_unit", "price"})
+_OPAQUE_HANDLE_UUID_VERSION: Final = 4
+_HANDLE_PAYLOAD_PATTERN: Final = re.compile(r"^[0-9a-f]{32}$")
 _PUBLIC_VISIBILITY_MODES: Final = frozenset(
     {
         "redacted_preview",
@@ -65,7 +64,7 @@ _SENSITIVE_ASSIGNMENT_PATTERN: Final = re.compile(
         |preview[\s_-]?token
         |disclaimer[\s_-]?token
     )\b
-    \s*(?:=|:|\bis\b)\s*
+    ["']?\s*(?:=|:)\s*
     ["']?[^\s,"'};]{3,}
     """,
 )
@@ -79,8 +78,23 @@ _URL_PATTERN: Final = re.compile(r"(?i)\b(?:https?|file)://[^\s<>'\"]+")
 _LOCAL_PATH_PATTERN: Final = re.compile(
     r"""(?ix)
     (?:
-        /(?:Users|Volumes|private|home|tmp|var/folders)/[^\s<>'"]*
-        |[A-Z]:\\(?:Users|Temp|Documents)\\[^\s<>'"]*
+        (?<![A-Z0-9._~:/-])/(?!/)[^\s<>'"]+
+        |(?<![A-Z0-9])[A-Z]:[\\/][^\s<>'"]+
+    )
+    """,
+)
+_MONETARY_VALUE_PATTERN: Final = re.compile(
+    r"""(?x)
+    (?:
+        (?<![A-Z])(?!UTC\b)[A-Z]{3}\s+
+        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?
+        |
+        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?\s*
+        (?<![A-Z])(?!UTC\b)[A-Z]{3}\b
+        |
+        [€£$¥₹]\s*[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?
+        |
+        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?\s*[€£$¥₹]
     )
     """,
 )
@@ -106,6 +120,15 @@ class MetricClass(StrEnum):
     MODEL_OUTPUT = "model_output"
     APPROXIMATION = "approximation"
     UNAVAILABLE = "unavailable"
+
+
+class ValueUnitClass(StrEnum):
+    MONETARY = "monetary"
+    RATIO = "ratio"
+    PERCENTAGE = "percentage"
+    COUNT = "count"
+    DURATION = "duration"
+    QUANTITY = "quantity"
 
 
 class VisibilityMode(StrEnum):
@@ -134,6 +157,30 @@ class HandleKind(StrEnum):
     ARTIFACT_ID = "artifact_id"
     JOB_ID = "job_id"
     DELETION_PREVIEW_TOKEN = "deletion_preview_token"  # noqa: S105
+
+
+_NON_MONETARY_UNITS: Final = MappingProxyType(
+    {
+        ValueUnitClass.RATIO: frozenset({"ratio"}),
+        ValueUnitClass.PERCENTAGE: frozenset(
+            {"percent", "percentage_points", "basis_points"}
+        ),
+        ValueUnitClass.COUNT: frozenset({"count"}),
+        ValueUnitClass.DURATION: frozenset(
+            {"seconds", "minutes", "hours", "days", "years"}
+        ),
+        ValueUnitClass.QUANTITY: frozenset({"shares", "contracts", "units"}),
+    }
+)
+_REQUIRED_PROOF_CHECKS: Final = frozenset(
+    {
+        "golden",
+        "property",
+        "independent_reference",
+        "saxo_reconciliation",
+        "sim_end_to_end",
+    }
+)
 
 
 _HANDLE_PREFIXES: Final = MappingProxyType(
@@ -196,6 +243,42 @@ type ProofProfileId = Annotated[
         pattern=r"^vp_[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
     ),
 ]
+type SourceRevision = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    ),
+]
+type Sha256Fingerprint = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[a-f0-9]{64}$"),
+]
+type EngineName = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^[a-z][a-z0-9_-]{0,127}$",
+    ),
+]
+type EngineVersion = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    ),
+]
+type CodeCommit = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[a-f0-9]{7,64}$"),
+]
+type ProofCheck = Literal[
+    "golden",
+    "property",
+    "independent_reference",
+    "saxo_reconciliation",
+    "sim_end_to_end",
+]
 
 
 def _require_handle(value: str, *, kind: HandleKind) -> str:
@@ -207,9 +290,15 @@ def _require_handle(value: str, *, kind: HandleKind) -> str:
             "analytics handle has the wrong kind",
         )
     payload = value[len(expected_prefix) :]
+    if _HANDLE_PAYLOAD_PATTERN.fullmatch(payload) is None:
+        raise PydanticCustomError(
+            "analytics_opaque_handle",
+            "analytics handle must be an opaque handle",
+        )
+    opaque_uuid = UUID(hex=payload)
     if (
-        _HANDLE_PAYLOAD_PATTERN.fullmatch(payload) is None
-        or len(set(payload)) < _MIN_HANDLE_PAYLOAD_CHARACTERS
+        opaque_uuid.version != _OPAQUE_HANDLE_UUID_VERSION
+        or opaque_uuid.variant != RFC_4122
     ):
         raise PydanticCustomError(
             "analytics_opaque_handle",
@@ -220,42 +309,42 @@ def _require_handle(value: str, *, kind: HandleKind) -> str:
 
 type InstrumentHandle = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^ih_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^ih_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.INSTRUMENT_HANDLE)),
 ]
 type UniverseId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^un_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^un_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.UNIVERSE_ID)),
 ]
 type DatasetId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^ds_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^ds_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.DATASET_ID)),
 ]
 type PortfolioSnapshotId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^ps_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^ps_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.PORTFOLIO_SNAPSHOT_ID)),
 ]
 type AnalysisId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^an_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^an_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.ANALYSIS_ID)),
 ]
 type ArtifactId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^ar_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^ar_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.ARTIFACT_ID)),
 ]
 type JobId = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^jb_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^jb_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.JOB_ID)),
 ]
 type DeletionPreviewToken = Annotated[
     str,
-    StringConstraints(strict=True, pattern=r"^dp_[A-Za-z0-9_-]{32}$"),
+    StringConstraints(strict=True, pattern=r"^dp_[0-9a-f]{32}$"),
     AfterValidator(partial(_require_handle, kind=HandleKind.DELETION_PREVIEW_TOKEN)),
 ]
 
@@ -265,6 +354,7 @@ class _StrictAnalyticsModel(BaseModel):
         extra="forbid",
         frozen=True,
         strict=True,
+        revalidate_instances="always",
         hide_input_in_errors=True,
     )
 
@@ -356,6 +446,7 @@ class MetricValue(_StrictAnalyticsModel):
             pattern=r"^[a-z][a-z0-9_/%.-]{0,63}$",
         ),
     ]
+    unit_class: ValueUnitClass
     currency: Annotated[
         str,
         StringConstraints(strict=True, pattern=r"^[A-Z]{3}$"),
@@ -366,11 +457,23 @@ class MetricValue(_StrictAnalyticsModel):
 
     @model_validator(mode="after")
     def _validate_numeric_claim(self) -> Self:
-        if self.unit in _CURRENCY_UNITS and self.currency is None:
+        if self.unit_class is ValueUnitClass.MONETARY and self.currency is None:
             raise PydanticCustomError(
                 "analytics_currency_required",
                 "currency is required for a money unit",
             )
+        if self.unit_class is not ValueUnitClass.MONETARY:
+            if self.currency is not None:
+                raise PydanticCustomError(
+                    "analytics_currency_forbidden",
+                    "currency is forbidden for a non-monetary unit class",
+                )
+            allowed_units = _NON_MONETARY_UNITS[self.unit_class]
+            if self.unit not in allowed_units:
+                raise PydanticCustomError(
+                    "analytics_unit_class_mismatch",
+                    "unit is not allowed for the selected unit class",
+                )
         if self.metric_class is MetricClass.UNAVAILABLE:
             raise PydanticCustomError(
                 "analytics_unavailable_value",
@@ -379,49 +482,68 @@ class MetricValue(_StrictAnalyticsModel):
         return self
 
 
+class ProofSourceBinding(_StrictAnalyticsModel):
+    source_scope: Literal["saxo_openapi"]
+    source_revision: SourceRevision
+    source_contract_sha256: Sha256Fingerprint
+
+
+class ProofEngineBinding(_StrictAnalyticsModel):
+    engine_name: EngineName
+    engine_version: EngineVersion
+    code_commit: CodeCommit
+
+
+class ActiveProofReceipt(_StrictAnalyticsModel):
+    state: Literal["active"]
+    analysis_kind: ContractName
+    schema_version: Literal["1"]
+    source_binding: ProofSourceBinding
+    engine_binding: ProofEngineBinding
+    proof_profile_id: ProofProfileId
+    checks_passed: tuple[ProofCheck, ...] = Field(min_length=5, max_length=5)
+
+    @field_validator("checks_passed", mode="before")
+    @classmethod
+    def _validate_required_checks(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise PydanticCustomError(
+                "analytics_proof_checks",
+                "active proof receipt requires the exact Task 3 proof checks",
+            )
+        supplied_checks = cast("list[object] | tuple[object, ...]", value)
+        if (
+            len(supplied_checks) != len(_REQUIRED_PROOF_CHECKS)
+            or any(check not in _REQUIRED_PROOF_CHECKS for check in supplied_checks)
+            or any(check not in supplied_checks for check in _REQUIRED_PROOF_CHECKS)
+        ):
+            raise PydanticCustomError(
+                "analytics_proof_checks",
+                "active proof receipt requires the exact Task 3 proof checks",
+            )
+        return tuple(supplied_checks)
+
+
 class AnalysisProvenance(_StrictAnalyticsModel):
     dataset_id: DatasetId
     source_scope: Literal["saxo_openapi"]
-    source_revision: Annotated[
-        str,
-        StringConstraints(
-            strict=True,
-            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-        ),
-    ]
+    source_revision: SourceRevision
+    source_contract_sha256: Sha256Fingerprint
     source_timestamp: UtcDateTime
-    proof_profile_ids: tuple[ProofProfileId, ...] = Field(min_length=1)
-    checks_passed: tuple[ContractName, ...] = Field(min_length=1)
-    engine_name: Annotated[
-        str,
-        StringConstraints(
-            strict=True,
-            pattern=r"^[a-z][a-z0-9_-]{0,127}$",
-        ),
-    ]
-    engine_version: Annotated[
-        str,
-        StringConstraints(
-            strict=True,
-            pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-        ),
-    ]
-    code_commit: Annotated[
-        str,
-        StringConstraints(strict=True, pattern=r"^[a-f0-9]{7,64}$"),
-    ]
+    proof_receipts: tuple[ActiveProofReceipt, ...] = Field(min_length=1)
+    engine_name: EngineName
+    engine_version: EngineVersion
+    code_commit: CodeCommit
 
     @model_validator(mode="after")
     def _validate_proof_lists(self) -> Self:
-        if len(set(self.proof_profile_ids)) != len(self.proof_profile_ids):
+        proof_profile_ids = tuple(
+            receipt.proof_profile_id for receipt in self.proof_receipts
+        )
+        if len(set(proof_profile_ids)) != len(proof_profile_ids):
             raise PydanticCustomError(
                 "analytics_duplicate_proof_profile",
                 "proof profile identifiers must be unique",
-            )
-        if len(set(self.checks_passed)) != len(self.checks_passed):
-            raise PydanticCustomError(
-                "analytics_duplicate_proof_check",
-                "proof checks must be unique",
             )
         return self
 
@@ -483,8 +605,7 @@ class AnalysisResult(_EvidenceAwareModel):
     replayable: bool
     next_actions: tuple[NonEmptyText, ...]
 
-    @model_validator(mode="after")
-    def _validate_verified_result(self) -> Self:
+    def _validate_request_binding(self) -> None:
         if self.analysis_kind != self.request.analysis_kind:
             raise PydanticCustomError(
                 "analytics_request_kind_mismatch",
@@ -495,6 +616,8 @@ class AnalysisResult(_EvidenceAwareModel):
                 "analytics_dataset_mismatch",
                 "request and provenance dataset handles must match",
             )
+
+    def _validate_timestamps(self) -> None:
         if self.valid_until <= self.as_of:
             raise PydanticCustomError(
                 "analytics_validity_range",
@@ -507,6 +630,8 @@ class AnalysisResult(_EvidenceAwareModel):
                 "analytics_future_source",
                 "source timestamps must not follow as_of",
             )
+
+    def _validate_verified_values(self) -> None:
         if self.data_quality.state is not QualityState.COMPLETE:
             raise PydanticCustomError(
                 "analytics_verified_quality",
@@ -520,7 +645,42 @@ class AnalysisResult(_EvidenceAwareModel):
                 "analytics_verified_metric_class",
                 "verified results cannot contain approximate or unavailable metrics",
             )
-        proof_profiles = set(self.provenance.proof_profile_ids)
+
+    def _validate_proof_receipt_bindings(self) -> None:
+        expected_source_binding = ProofSourceBinding(
+            source_scope=self.provenance.source_scope,
+            source_revision=self.provenance.source_revision,
+            source_contract_sha256=self.provenance.source_contract_sha256,
+        )
+        expected_engine_binding = ProofEngineBinding(
+            engine_name=self.provenance.engine_name,
+            engine_version=self.provenance.engine_version,
+            code_commit=self.provenance.code_commit,
+        )
+        for receipt in self.provenance.proof_receipts:
+            if receipt.analysis_kind != self.analysis_kind:
+                raise PydanticCustomError(
+                    "analytics_proof_analysis_kind",
+                    "proof receipt analysis kind must match the result",
+                )
+            if receipt.schema_version != self.schema_version:
+                raise PydanticCustomError(
+                    "analytics_proof_schema_version",
+                    "proof receipt schema version must match the result",
+                )
+            if receipt.source_binding != expected_source_binding:
+                raise PydanticCustomError(
+                    "analytics_proof_source_binding",
+                    "proof receipt source binding must match provenance",
+                )
+            if receipt.engine_binding != expected_engine_binding:
+                raise PydanticCustomError(
+                    "analytics_proof_engine_binding",
+                    "proof receipt engine binding must match provenance",
+                )
+        proof_profiles = {
+            receipt.proof_profile_id for receipt in self.provenance.proof_receipts
+        }
         if any(
             metric.proof_profile_id not in proof_profiles for metric in self.metrics
         ):
@@ -528,6 +688,13 @@ class AnalysisResult(_EvidenceAwareModel):
                 "analytics_metric_proof_profile",
                 "every verified metric requires a listed proof profile",
             )
+
+    @model_validator(mode="after")
+    def _validate_verified_result(self) -> Self:
+        self._validate_request_binding()
+        self._validate_timestamps()
+        self._validate_verified_values()
+        self._validate_proof_receipt_bindings()
         return self
 
 
@@ -645,7 +812,7 @@ type PublicEvidenceValue = (
 
 def new_safe_handle(kind: HandleKind) -> str:
     """Return a fresh opaque handle that exposes only its analytics kind."""
-    return f"{_HANDLE_PREFIXES[kind]}_{secrets.token_urlsafe(_HANDLE_RANDOM_BYTES)}"
+    return f"{_HANDLE_PREFIXES[kind]}_{uuid4().hex}"
 
 
 def validate_public_evidence(result: AnalysisOutput) -> None:
@@ -696,11 +863,13 @@ def _contains_forbidden_public_value(value: PublicEvidenceValue) -> bool:
             _JWT_PATTERN,
             _URL_PATTERN,
             _LOCAL_PATH_PATTERN,
+            _MONETARY_VALUE_PATTERN,
         )
     )
 
 
 __all__ = (
+    "ActiveProofReceipt",
     "AnalysisOutput",
     "AnalysisProvenance",
     "AnalysisRequest",
@@ -720,7 +889,10 @@ __all__ = (
     "MetricClass",
     "MetricValue",
     "PortfolioAnalysisRequest",
+    "ProofEngineBinding",
+    "ProofSourceBinding",
     "QualityState",
+    "ValueUnitClass",
     "VisibilityMode",
     "new_safe_handle",
     "validate_public_evidence",

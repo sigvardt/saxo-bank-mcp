@@ -1,50 +1,84 @@
 {
   "$defs": {
+    "ActiveProofReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "checks_passed": {
+          "items": {
+            "$ref": "#/$defs/ProofCheck"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "title": "Checks Passed",
+          "type": "array"
+        },
+        "engine_binding": {
+          "$ref": "#/$defs/ProofEngineBinding"
+        },
+        "proof_profile_id": {
+          "$ref": "#/$defs/ProofProfileId"
+        },
+        "schema_version": {
+          "const": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_binding": {
+          "$ref": "#/$defs/ProofSourceBinding"
+        },
+        "state": {
+          "const": "active",
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "analysis_kind",
+        "schema_version",
+        "source_binding",
+        "engine_binding",
+        "proof_profile_id",
+        "checks_passed"
+      ],
+      "title": "ActiveProofReceipt",
+      "type": "object"
+    },
     "AnalysisId": {
-      "pattern": "^an_[A-Za-z0-9_-]{32}$",
+      "pattern": "^an_[0-9a-f]{32}$",
       "type": "string"
     },
     "AnalysisProvenance": {
       "additionalProperties": false,
       "properties": {
-        "checks_passed": {
-          "items": {
-            "$ref": "#/$defs/ContractName"
-          },
-          "minItems": 1,
-          "title": "Checks Passed",
-          "type": "array"
-        },
         "code_commit": {
-          "pattern": "^[a-f0-9]{7,64}$",
-          "title": "Code Commit",
-          "type": "string"
+          "$ref": "#/$defs/CodeCommit"
         },
         "dataset_id": {
           "$ref": "#/$defs/DatasetId"
         },
         "engine_name": {
-          "pattern": "^[a-z][a-z0-9_-]{0,127}$",
-          "title": "Engine Name",
-          "type": "string"
+          "$ref": "#/$defs/EngineName"
         },
         "engine_version": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-          "title": "Engine Version",
-          "type": "string"
+          "$ref": "#/$defs/EngineVersion"
         },
-        "proof_profile_ids": {
+        "proof_receipts": {
           "items": {
-            "$ref": "#/$defs/ProofProfileId"
+            "$ref": "#/$defs/ActiveProofReceipt"
           },
           "minItems": 1,
-          "title": "Proof Profile Ids",
+          "title": "Proof Receipts",
           "type": "array"
         },
+        "source_contract_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
         "source_revision": {
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
-          "title": "Source Revision",
-          "type": "string"
+          "$ref": "#/$defs/SourceRevision"
         },
         "source_scope": {
           "const": "saxo_openapi",
@@ -59,9 +93,9 @@
         "dataset_id",
         "source_scope",
         "source_revision",
+        "source_contract_sha256",
         "source_timestamp",
-        "proof_profile_ids",
-        "checks_passed",
+        "proof_receipts",
         "engine_name",
         "engine_version",
         "code_commit"
@@ -419,7 +453,7 @@
       "type": "object"
     },
     "ArtifactId": {
-      "pattern": "^ar_[A-Za-z0-9_-]{32}$",
+      "pattern": "^ar_[0-9a-f]{32}$",
       "type": "string"
     },
     "ArtifactSummary": {
@@ -474,6 +508,10 @@
       ],
       "title": "ArtifactSummary",
       "type": "object"
+    },
+    "CodeCommit": {
+      "pattern": "^[a-f0-9]{7,64}$",
+      "type": "string"
     },
     "ContractName": {
       "maxLength": 128,
@@ -557,7 +595,7 @@
       "type": "object"
     },
     "DatasetId": {
-      "pattern": "^ds_[A-Za-z0-9_-]{32}$",
+      "pattern": "^ds_[0-9a-f]{32}$",
       "type": "string"
     },
     "DatasetSummary": {
@@ -615,6 +653,14 @@
       "title": "DatasetSummary",
       "type": "object"
     },
+    "EngineName": {
+      "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+      "type": "string"
+    },
+    "EngineVersion": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "type": "string"
+    },
     "InstrumentAnalysisRequest": {
       "additionalProperties": false,
       "properties": {
@@ -649,11 +695,11 @@
       "type": "object"
     },
     "InstrumentHandle": {
-      "pattern": "^ih_[A-Za-z0-9_-]{32}$",
+      "pattern": "^ih_[0-9a-f]{32}$",
       "type": "string"
     },
     "JobId": {
-      "pattern": "^jb_[A-Za-z0-9_-]{32}$",
+      "pattern": "^jb_[0-9a-f]{32}$",
       "type": "string"
     },
     "JobState": {
@@ -803,6 +849,9 @@
           "title": "Unit",
           "type": "string"
         },
+        "unit_class": {
+          "$ref": "#/$defs/ValueUnitClass"
+        },
         "value": {
           "title": "Value",
           "type": "number"
@@ -812,6 +861,7 @@
         "metric_id",
         "value",
         "unit",
+        "unit_class",
         "currency",
         "metric_class",
         "source_timestamp",
@@ -853,12 +903,66 @@
       "type": "object"
     },
     "PortfolioSnapshotId": {
-      "pattern": "^ps_[A-Za-z0-9_-]{32}$",
+      "pattern": "^ps_[0-9a-f]{32}$",
       "type": "string"
+    },
+    "ProofCheck": {
+      "enum": [
+        "golden",
+        "property",
+        "independent_reference",
+        "saxo_reconciliation",
+        "sim_end_to_end"
+      ],
+      "type": "string"
+    },
+    "ProofEngineBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "code_commit": {
+          "$ref": "#/$defs/CodeCommit"
+        },
+        "engine_name": {
+          "$ref": "#/$defs/EngineName"
+        },
+        "engine_version": {
+          "$ref": "#/$defs/EngineVersion"
+        }
+      },
+      "required": [
+        "engine_name",
+        "engine_version",
+        "code_commit"
+      ],
+      "title": "ProofEngineBinding",
+      "type": "object"
     },
     "ProofProfileId": {
       "pattern": "^vp_[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
       "type": "string"
+    },
+    "ProofSourceBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "source_contract_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
+        "source_revision": {
+          "$ref": "#/$defs/SourceRevision"
+        },
+        "source_scope": {
+          "const": "saxo_openapi",
+          "title": "Source Scope",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_scope",
+        "source_revision",
+        "source_contract_sha256"
+      ],
+      "title": "ProofSourceBinding",
+      "type": "object"
     },
     "QualityState": {
       "enum": [
@@ -876,8 +980,28 @@
       "minLength": 1,
       "type": "string"
     },
+    "Sha256Fingerprint": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "SourceRevision": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
     "UtcDateTime": {
       "format": "date-time",
+      "type": "string"
+    },
+    "ValueUnitClass": {
+      "enum": [
+        "monetary",
+        "ratio",
+        "percentage",
+        "count",
+        "duration",
+        "quantity"
+      ],
+      "title": "ValueUnitClass",
       "type": "string"
     },
     "VisibilityMode": {

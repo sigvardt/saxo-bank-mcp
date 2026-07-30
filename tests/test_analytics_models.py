@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import base64
 import json
 import re
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import RFC_4122, UUID
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp.analytics_errors import AnalyticsPrivacyError
 from saxo_bank_mcp.analytics_models import (
+    ActiveProofReceipt,
     AnalysisOutput,
     AnalysisProvenance,
     AnalysisRequest,
@@ -30,7 +31,10 @@ from saxo_bank_mcp.analytics_models import (
     MetricClass,
     MetricValue,
     PortfolioAnalysisRequest,
+    ProofEngineBinding,
+    ProofSourceBinding,
     QualityState,
+    ValueUnitClass,
     VisibilityMode,
     new_safe_handle,
     validate_public_evidence,
@@ -42,11 +46,19 @@ _SCHEMA_PATH = (
 _AS_OF = datetime(2026, 7, 30, 8, 0, tzinfo=UTC)
 _PROOF_PROFILE_ID = "vp_fixture_v1"
 _SOURCE_REVISION = "revision_fixture_v1"
+_SOURCE_CONTRACT_SHA256 = "c" * 64
 _COMMIT = "a" * 40
 _SHA256 = "b" * 64
+_REQUIRED_PROOF_CHECKS = (
+    "golden",
+    "property",
+    "independent_reference",
+    "saxo_reconciliation",
+    "sim_end_to_end",
+)
 _HANDLES_PER_KIND = 2
 _EXPECTED_HANDLE_COUNT = len(HandleKind) * _HANDLES_PER_KIND
-_HANDLE_RANDOM_BYTES = 24
+_UUID_VERSION = 4
 
 
 def _coverage(state: QualityState = QualityState.COMPLETE) -> DataCoverage:
@@ -79,6 +91,7 @@ def _metric(
         metric_id="total_return",
         value=0.125,
         unit="ratio",
+        unit_class=ValueUnitClass.RATIO,
         currency=None,
         metric_class=metric_class,
         source_timestamp=_AS_OF - timedelta(minutes=1),
@@ -87,17 +100,65 @@ def _metric(
 
 
 def _provenance(dataset_id: str) -> AnalysisProvenance:
-    return AnalysisProvenance(
-        dataset_id=dataset_id,
+    source_binding = ProofSourceBinding(
         source_scope="saxo_openapi",
         source_revision=_SOURCE_REVISION,
-        source_timestamp=_AS_OF - timedelta(minutes=1),
-        proof_profile_ids=(_PROOF_PROFILE_ID,),
-        checks_passed=("golden", "independent_reference", "sim_end_to_end"),
+        source_contract_sha256=_SOURCE_CONTRACT_SHA256,
+    )
+    engine_binding = ProofEngineBinding(
         engine_name="saxo-analytics",
         engine_version="1",
         code_commit=_COMMIT,
     )
+    return AnalysisProvenance(
+        dataset_id=dataset_id,
+        source_scope="saxo_openapi",
+        source_revision=_SOURCE_REVISION,
+        source_contract_sha256=_SOURCE_CONTRACT_SHA256,
+        source_timestamp=_AS_OF - timedelta(minutes=1),
+        proof_receipts=(
+            ActiveProofReceipt(
+                state="active",
+                analysis_kind="bounded_market_overview",
+                schema_version="1",
+                source_binding=source_binding,
+                engine_binding=engine_binding,
+                proof_profile_id=_PROOF_PROFILE_ID,
+                checks_passed=_REQUIRED_PROOF_CHECKS,
+            ),
+        ),
+        engine_name="saxo-analytics",
+        engine_version="1",
+        code_commit=_COMMIT,
+    )
+
+
+def _active_proof_receipt_payload() -> dict[str, Any]:
+    return {
+        "state": "active",
+        "analysis_kind": "bounded_market_overview",
+        "schema_version": "1",
+        "source_binding": {
+            "source_scope": "saxo_openapi",
+            "source_revision": _SOURCE_REVISION,
+            "source_contract_sha256": _SOURCE_CONTRACT_SHA256,
+        },
+        "engine_binding": {
+            "engine_name": "saxo-analytics",
+            "engine_version": "1",
+            "code_commit": _COMMIT,
+        },
+        "proof_profile_id": _PROOF_PROFILE_ID,
+        "checks_passed": _REQUIRED_PROOF_CHECKS,
+    }
+
+
+def _result_payload_with_active_proof_receipt() -> dict[str, Any]:
+    payload = _result().model_dump()
+    provenance = payload["provenance"]
+    provenance["source_contract_sha256"] = _SOURCE_CONTRACT_SHA256
+    provenance["proof_receipts"] = (_active_proof_receipt_payload(),)
+    return payload
 
 
 def _result(
@@ -154,6 +215,26 @@ def _refusal_payload() -> dict[str, Any]:
 
 def _refusal() -> AnalyticsRefusal:
     return AnalyticsRefusal.model_validate(_refusal_payload())
+
+
+def _degradation_payload() -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "status": AnalysisStatus.DEGRADED,
+        "tool_name": "saxo_analyze_market",
+        "analysis_kind": "bounded_market_overview",
+        "analysis_id": new_safe_handle(HandleKind.ANALYSIS_ID),
+        "dataset_id": new_safe_handle(HandleKind.DATASET_ID),
+        "visibility": VisibilityMode.PUBLIC_EVIDENCE,
+        "as_of": _AS_OF,
+        "reason_code": "partial_source_coverage",
+        "reason": "Only part of the requested source range is available.",
+        "quality": _quality(QualityState.PARTIAL),
+        "warnings": (),
+        "next_action": "Use the reported coverage or narrow the date range.",
+        "verifies": ("available source coverage",),
+        "does_not_verify": ("the missing source range",),
+    }
 
 
 @pytest.mark.parametrize(
@@ -278,7 +359,7 @@ def test_analysis_request_rejects_an_unknown_discriminator() -> None:
         TypeAdapter(AnalysisRequest).validate_python(payload)
 
 
-def test_safe_handles_use_kind_prefixes_and_random_192_bit_payloads() -> None:
+def test_safe_handles_use_kind_prefixes_and_random_uuid4_payloads() -> None:
     expected_prefixes = {
         HandleKind.INSTRUMENT_HANDLE: "ih",
         HandleKind.UNIVERSE_ID: "un",
@@ -300,17 +381,18 @@ def test_safe_handles_use_kind_prefixes_and_random_192_bit_payloads() -> None:
     for kind, pair in handles.items():
         for handle in pair:
             prefix, payload = handle.split("_", maxsplit=1)
-            decoded = base64.urlsafe_b64decode(payload + "==")
+            opaque_uuid = UUID(hex=payload)
             assert prefix == expected_prefixes[kind]
-            assert re.fullmatch(r"[A-Za-z0-9_-]{32}", payload)
-            assert len(decoded) == _HANDLE_RANDOM_BYTES
+            assert re.fullmatch(r"[0-9a-f]{32}", payload)
+            assert opaque_uuid.version == _UUID_VERSION
+            assert opaque_uuid.variant == RFC_4122
 
 
 def test_models_reject_predictable_or_wrong_kind_handles() -> None:
     predictable = "ds_" + ("a" * 32)
     wrong_kind = new_safe_handle(HandleKind.ANALYSIS_ID)
 
-    with pytest.raises(ValidationError, match="opaque handle"):
+    with pytest.raises(ValidationError):
         MarketAnalysisRequest(
             request_kind="market",
             analysis_kind="overview",
@@ -321,6 +403,17 @@ def test_models_reject_predictable_or_wrong_kind_handles() -> None:
             request_kind="market",
             analysis_kind="overview",
             dataset_id=wrong_kind,
+        )
+
+
+def test_models_reject_encoded_identifier_handle_payloads() -> None:
+    encoded_identifier = "ds_QWNjb3VudElkPTEyMzQ1Njc4OTAxMjM0"
+
+    with pytest.raises(ValidationError):
+        MarketAnalysisRequest(
+            request_kind="market",
+            analysis_kind="overview",
+            dataset_id=encoded_identifier,
         )
 
 
@@ -350,7 +443,14 @@ def test_utc_timestamps_round_trip_as_zulu_json() -> None:
 
 @pytest.mark.parametrize(
     "missing_field",
-    ["unit", "currency", "metric_class", "source_timestamp", "proof_profile_id"],
+    [
+        "unit",
+        "unit_class",
+        "currency",
+        "metric_class",
+        "source_timestamp",
+        "proof_profile_id",
+    ],
 )
 def test_material_numeric_claim_requires_explicit_typed_context(
     missing_field: str,
@@ -364,7 +464,11 @@ def test_material_numeric_claim_requires_explicit_typed_context(
 
 def test_money_claim_requires_an_iso_currency() -> None:
     payload = _metric().model_dump()
-    payload.update(unit="currency", currency=None)
+    payload.update(
+        unit="currency",
+        unit_class=ValueUnitClass.MONETARY,
+        currency=None,
+    )
 
     with pytest.raises(ValidationError, match="currency is required"):
         MetricValue.model_validate(payload)
@@ -376,6 +480,67 @@ def test_money_claim_requires_an_iso_currency() -> None:
     payload["currency"] = "USD"
     metric = MetricValue.model_validate(payload)
     assert metric.currency == "USD"
+
+
+def test_value_unit_class_protocol_values_are_exact_and_round_trip() -> None:
+    enum_type = ValueUnitClass
+    expected = {
+        "MONETARY": "monetary",
+        "RATIO": "ratio",
+        "PERCENTAGE": "percentage",
+        "COUNT": "count",
+        "DURATION": "duration",
+        "QUANTITY": "quantity",
+    }
+    adapter = TypeAdapter(enum_type)
+
+    assert {member.name: member.value for member in enum_type} == expected
+    for member in enum_type:
+        assert adapter.validate_json(adapter.dump_json(member)) is member
+
+
+def test_non_monetary_metric_requires_an_explicit_unit_class() -> None:
+    payload = _metric().model_dump()
+    del payload["unit_class"]
+
+    with pytest.raises(ValidationError):
+        MetricValue.model_validate(payload)
+
+    assert _metric().unit_class is ValueUnitClass.RATIO
+
+
+@pytest.mark.parametrize("unit", ["price_per_share", "cash_amount", "fee"])
+def test_monetary_unit_class_requires_currency_for_novel_unit_names(
+    unit: str,
+) -> None:
+    payload = _metric().model_dump()
+    payload.update(
+        unit=unit,
+        unit_class=ValueUnitClass.MONETARY,
+        currency=None,
+    )
+
+    with pytest.raises(ValidationError, match="currency is required"):
+        MetricValue.model_validate(payload)
+
+
+@pytest.mark.parametrize("unit", ["price_per_share", "cash_amount", "fee"])
+def test_non_monetary_unit_class_cannot_disguise_novel_money_units(
+    unit: str,
+) -> None:
+    payload = _metric().model_dump()
+    payload.update(unit=unit, unit_class=ValueUnitClass.RATIO, currency=None)
+
+    with pytest.raises(ValidationError, match="not allowed for the selected unit class"):
+        MetricValue.model_validate(payload)
+
+
+def test_non_currency_unit_class_rejects_currency() -> None:
+    payload = _metric().model_dump()
+    payload.update(unit_class=ValueUnitClass.RATIO, currency="USD")
+
+    with pytest.raises(ValidationError, match="currency is forbidden"):
+        MetricValue.model_validate(payload)
 
 
 @pytest.mark.parametrize("value", [True, float("inf"), float("nan")])
@@ -394,6 +559,107 @@ def test_verified_result_requires_source_bound_metric_proof() -> None:
     payload["metrics"][0]["proof_profile_id"] = "vp_unlisted_v1"
 
     with pytest.raises(ValidationError, match="proof profile"):
+        AnalysisResult.model_validate(payload)
+
+
+def test_verified_result_rejects_self_declared_fake_matching_proof() -> None:
+    payload = _result().model_dump()
+    provenance = payload["provenance"]
+    del provenance["proof_receipts"]
+    provenance["proof_profile_ids"] = (_PROOF_PROFILE_ID,)
+    provenance["checks_passed"] = ("golden", "made_up_check")
+
+    with pytest.raises(ValidationError):
+        AnalysisResult.model_validate(payload)
+
+
+def test_verified_result_accepts_exact_active_proof_receipt_binding() -> None:
+    payload = _result_payload_with_active_proof_receipt()
+
+    result = AnalysisResult.model_validate(payload)
+
+    assert result.provenance.proof_receipts[0].state == "active"
+
+
+def test_verified_result_requires_an_active_proof_receipt() -> None:
+    payload = _result_payload_with_active_proof_receipt()
+    del payload["provenance"]["proof_receipts"]
+
+    with pytest.raises(ValidationError, match="proof_receipts"):
+        AnalysisResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement", "message"),
+    [
+        (("state",), "inactive", "active"),
+        (("analysis_kind",), "different_analysis", "analysis kind"),
+        (("schema_version",), "2", "schema_version"),
+        (
+            ("source_binding", "source_revision"),
+            "different_revision",
+            "source binding",
+        ),
+        (
+            ("source_binding", "source_contract_sha256"),
+            "d" * 64,
+            "source binding",
+        ),
+        (("engine_binding", "engine_name"), "other-engine", "engine binding"),
+        (("engine_binding", "engine_version"), "2", "engine binding"),
+        (("engine_binding", "code_commit"), "e" * 40, "engine binding"),
+        (("proof_profile_id",), "vp_different_v1", "proof profile"),
+    ],
+)
+def test_verified_result_rejects_mismatched_active_proof_receipt_bindings(
+    path: tuple[str, ...],
+    replacement: str,
+    message: str,
+) -> None:
+    payload = _result_payload_with_active_proof_receipt()
+    target = payload["provenance"]["proof_receipts"][0]
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = replacement
+
+    with pytest.raises(ValidationError, match=message):
+        AnalysisResult.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "checks_passed",
+    [
+        ("golden", "property"),
+        (*_REQUIRED_PROOF_CHECKS, "made_up_check"),
+    ],
+)
+def test_active_proof_receipt_rejects_missing_or_made_up_checks(
+    checks_passed: tuple[str, ...],
+) -> None:
+    payload = _active_proof_receipt_payload()
+    payload["checks_passed"] = checks_passed
+
+    with pytest.raises(ValidationError, match="proof checks"):
+        ActiveProofReceipt.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("state", "inactive"),
+        ("checks_passed", ("golden", "made_up_check")),
+    ],
+)
+def test_verified_result_rejects_forged_proof_receipt_instances(
+    field_name: str,
+    replacement: object,
+) -> None:
+    payload = _result().model_dump()
+    receipt = ActiveProofReceipt.model_validate(_active_proof_receipt_payload())
+    forged_receipt = receipt.model_copy(update={field_name: replacement})
+    payload["provenance"]["proof_receipts"] = (forged_receipt,)
+
+    with pytest.raises(ValidationError):
         AnalysisResult.model_validate(payload)
 
 
@@ -453,21 +719,7 @@ def test_refusal_and_degradation_are_structurally_value_free(
         _refusal_payload()
         if model_type is AnalyticsRefusal
         else {
-            "schema_version": "1",
-            "status": AnalysisStatus.DEGRADED,
-            "tool_name": "saxo_analyze_market",
-            "analysis_kind": "bounded_market_overview",
-            "analysis_id": new_safe_handle(HandleKind.ANALYSIS_ID),
-            "dataset_id": new_safe_handle(HandleKind.DATASET_ID),
-            "visibility": VisibilityMode.PUBLIC_EVIDENCE,
-            "as_of": _AS_OF,
-            "reason_code": "partial_source_coverage",
-            "reason": "Only part of the requested source range is available.",
-            "quality": _quality(QualityState.PARTIAL),
-            "warnings": (),
-            "next_action": "Use the reported coverage or narrow the date range.",
-            "verifies": ("available source coverage",),
-            "does_not_verify": ("the missing source range",),
+            **_degradation_payload(),
         }
     )
     payload.update(extra_field)
@@ -486,6 +738,10 @@ def _unsafe_public_texts() -> tuple[str, ...]:
         "/" + "Users/example/private/result.json",
         "access_" + f"token={assignment_value}",
         "Display" + "Name=Example Person",
+        '{"ClientKey":"synthetic_1234567890"}',
+        "/srv/analytics/result.json",
+        "/etc/passwd",
+        r"C:\Work\result.json",
     )
 
 
@@ -517,15 +773,78 @@ def test_public_evidence_validator_rejects_models_built_without_validation(
     assert unsafe_text not in str(error.value)
 
 
-def test_public_evidence_allows_safe_ordinary_privacy_prose() -> None:
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        "The client key is unavailable.",
+        (
+            "Raw account IDs, client keys, order IDs, URLs, local paths, tokens, "
+            "and DisplayName are excluded from this evidence."
+        ),
+    ],
+)
+def test_public_evidence_allows_safe_ordinary_privacy_prose(safe_text: str) -> None:
     payload = _refusal_payload()
-    payload["reason"] = (
-        "Raw account IDs, client keys, order IDs, URLs, local paths, tokens, "
-        "and DisplayName are excluded from this evidence."
-    )
+    payload["reason"] = safe_text
     refusal = AnalyticsRefusal.model_validate(payload)
 
     assert validate_public_evidence(refusal) is None
+
+
+@pytest.mark.parametrize(
+    ("model_type", "field_name", "unsafe_text"),
+    [
+        (AnalyticsRefusal, "reason", "Portfolio value: USD 12345.67."),
+        (AnalyticsRefusal, "next_action", "Review EUR 999.00 before continuing."),
+        (AnalyticsRefusal, "warnings", "Estimated fee: $123.45."),
+        (AnalyticsDegradation, "reason", "Portfolio value: GBP 12345.67."),
+        (AnalyticsDegradation, "next_action", "Review DKK 999.00 before continuing."),
+        (AnalyticsDegradation, "warnings", "Estimated fee: €123.45."),
+    ],
+)
+def test_public_refusals_and_degradations_reject_monetary_text(
+    model_type: type[AnalyticsRefusal | AnalyticsDegradation],
+    field_name: str,
+    unsafe_text: str,
+) -> None:
+    payload = (
+        _refusal_payload()
+        if model_type is AnalyticsRefusal
+        else _degradation_payload()
+    )
+    if field_name == "warnings":
+        payload[field_name] = (
+            {
+                "code": "material_value",
+                "message": unsafe_text,
+                "quality_state": None,
+                "next_action": None,
+            },
+        )
+    else:
+        payload[field_name] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [AnalyticsRefusal, AnalyticsDegradation],
+)
+def test_public_value_free_counts_and_times_remain_allowed(
+    model_type: type[AnalyticsRefusal | AnalyticsDegradation],
+) -> None:
+    payload = (
+        _refusal_payload()
+        if model_type is AnalyticsRefusal
+        else _degradation_payload()
+    )
+    payload["reason"] = "Rows available: 123. Cutoff time: 12:30 UTC."
+
+    output = model_type.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
 
 
 @pytest.mark.parametrize(
@@ -615,21 +934,7 @@ def test_output_models_round_trip_through_the_shared_union() -> None:
         ),
         _refusal(),
         AnalyticsDegradation(
-            schema_version="1",
-            status=AnalysisStatus.DEGRADED,
-            tool_name="saxo_analyze_market",
-            analysis_kind="bounded_market_overview",
-            analysis_id=analysis_id,
-            dataset_id=dataset_id,
-            visibility=VisibilityMode.PUBLIC_EVIDENCE,
-            as_of=now,
-            reason_code="partial_source_coverage",
-            reason="Only part of the requested source range is available.",
-            quality=_quality(QualityState.PARTIAL),
-            warnings=(),
-            next_action="Use the reported coverage or narrow the date range.",
-            verifies=("available source coverage",),
-            does_not_verify=("the missing source range",),
+            **_degradation_payload(),
         ),
     )
     adapter = TypeAdapter(AnalysisOutput)
