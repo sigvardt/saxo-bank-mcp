@@ -136,24 +136,48 @@ _CURRENCY_NAMES: Final[frozenset[str]] = frozenset(
     shekel shekels shilling shillings sterling taka tenge won yen yuan zloty
     """.split()  # noqa: SIM905
 )
-_CURRENCY_TERM_PATTERN_TEXT: Final = "|".join(
-    sorted(_ISO_4217_CURRENCY_CODES | _CURRENCY_NAMES)
-)
+_CURRENCY_CODE_PATTERN_TEXT: Final = "|".join(sorted(_ISO_4217_CURRENCY_CODES))
+_CURRENCY_NAME_PATTERN_TEXT: Final = "|".join(sorted(_CURRENCY_NAMES))
 _MONEY_AMOUNT_PATTERN_TEXT: Final = (
     r"[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?"
 )
-_MONETARY_VALUE_PATTERN: Final = re.compile(
-    rf"""(?ix)
+_DIRECT_MONETARY_VALUE_PATTERN: Final = re.compile(
+    rf"""(?x)
     (?:
-        \b(?:{_CURRENCY_TERM_PATTERN_TEXT})\b\s*{_MONEY_AMOUNT_PATTERN_TEXT}
+        \b(?:{_CURRENCY_CODE_PATTERN_TEXT})\b\s*{_MONEY_AMOUNT_PATTERN_TEXT}
         |
         {_MONEY_AMOUNT_PATTERN_TEXT}\s*
-        \b(?:{_CURRENCY_TERM_PATTERN_TEXT})\b
+        \b(?:{_CURRENCY_CODE_PATTERN_TEXT})\b
+        |
+        {_MONEY_AMOUNT_PATTERN_TEXT}\s*
+        \b(?i:(?:{_CURRENCY_NAME_PATTERN_TEXT}))\b
         |
         [€£$¥₹]\s*{_MONEY_AMOUNT_PATTERN_TEXT}
         |
         {_MONEY_AMOUNT_PATTERN_TEXT}\s*[€£$¥₹]
     )
+    """,
+)
+_FINANCIAL_CONTEXT_PATTERN_TEXT: Final = r"""(?:
+    (?:account|cash|market|portfolio|position)\s+(?:balance|value)
+    |amount
+    |balance
+    |cost
+    |fee
+    |loss
+    |notional
+    |p&l
+    |pnl
+    |price
+    |proceeds
+    |profit
+)"""
+_CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN: Final = re.compile(
+    rf"""(?ix)
+    \b{_FINANCIAL_CONTEXT_PATTERN_TEXT}\b
+    [^\n.!?]{{0,48}}
+    \b(?:{_CURRENCY_NAME_PATTERN_TEXT})\b
+    \s*{_MONEY_AMOUNT_PATTERN_TEXT}
     """,
 )
 _RAW_ACCOUNT_SCOPE_PATTERNS: Final = (
@@ -918,7 +942,8 @@ def _string_contains_forbidden_public_value(value: str) -> bool:
             _JWT_PATTERN,
             _URL_PATTERN,
             _LOCAL_PATH_PATTERN,
-            _MONETARY_VALUE_PATTERN,
+            _DIRECT_MONETARY_VALUE_PATTERN,
+            _CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN,
         )
     ):
         return True

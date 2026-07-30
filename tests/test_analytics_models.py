@@ -884,6 +884,8 @@ def test_public_refusals_and_degradations_reject_monetary_text(
     [
         "Portfolio value: 12345.67 dollars.",
         "Portfolio value: dollars 12345.67.",
+        "Portfolio value: won 12345.67.",
+        "Portfolio value: 12345.67 WoN.",
         "Portfolio value: USD 12345.67.",
         "Portfolio value: 12345.67 USD.",
     ],
@@ -896,6 +898,25 @@ def test_public_evidence_rejects_currency_names_and_real_codes_on_either_side(
 
     with pytest.raises(ValidationError, match="forbidden value class"):
         AnalyticsRefusal.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        "All 123 rows were available.",
+        "Won 123 tests during validation.",
+        "Dollars 123 examples were listed.",
+    ],
+)
+def test_public_evidence_allows_currency_word_collisions_without_financial_context(
+    safe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = safe_text
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
 
 
 def test_public_evidence_allows_non_currency_uppercase_count_labels() -> None:
