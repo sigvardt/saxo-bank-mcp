@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic import TypeAdapter, ValidationError
@@ -145,18 +146,30 @@ def test_contract_model_rejects_non_read_or_unregistered_routes(
         SourceContract.model_validate(payload, strict=True)
 
 
-def test_additive_fields_and_omitted_optional_fields_are_compatible() -> None:
+def test_additive_fields_quarantine_dependent_analytics() -> None:
     chart = source_contracts_by_id()["chart_v3"]
 
-    comparison = compare_source_schema(chart, _fixture("chart_page_1.json"))
+    comparison = compare_source_schema(
+        chart,
+        {
+            "Data": [
+                {
+                    "CloseBid": 101.0,
+                    "NewChartField": "additive-field",
+                    "Time": "2026-07-29T08:00:00Z",
+                }
+            ],
+            "DataVersion": 7,
+        },
+    )
 
-    assert comparison.compatible is True
-    assert comparison.quarantined_analysis_kinds == ()
+    assert comparison.compatible is False
+    assert comparison.quarantined_analysis_kinds == chart.dependent_analysis_kinds
     assert "NewChartField" in comparison.additive_fields
     assert "AskVolume" in comparison.missing_optional_fields
 
 
-def test_unknown_enum_values_are_recorded_without_quarantine() -> None:
+def test_unknown_enum_values_quarantine_dependent_analytics() -> None:
     instruments = source_contracts_by_id()["reference_instruments_v1"]
 
     comparison = compare_source_schema(
@@ -164,11 +177,31 @@ def test_unknown_enum_values_are_recorded_without_quarantine() -> None:
         _fixture("reference_unknown_enum.json"),
     )
 
-    assert comparison.compatible is True
+    assert comparison.compatible is False
     assert comparison.unknown_enum_values == {
         "AssetType": ("FutureSaxoAssetType",),
     }
-    assert comparison.quarantined_analysis_kinds == ()
+    assert comparison.quarantined_analysis_kinds == instruments.dependent_analysis_kinds
+
+
+def test_unknown_enum_provenance_is_immutable_and_serializes_deterministically() -> None:
+    instruments = source_contracts_by_id()["reference_instruments_v1"]
+    comparison = compare_source_schema(
+        instruments,
+        _fixture("reference_unknown_enum.json"),
+    )
+
+    serialized_before = comparison.model_dump_json()
+    with pytest.raises(TypeError):
+        cast(
+            "dict[str, tuple[str, ...]]",
+            comparison.unknown_enum_values,
+        )["AssetType"] = ("InjectedAssetType",)
+
+    assert comparison.model_dump_json() == serialized_before
+    assert json.loads(serialized_before)["unknown_enum_values"] == {
+        "AssetType": ["FutureSaxoAssetType"],
+    }
 
 
 def test_omitted_optional_performance_fields_remain_compatible() -> None:

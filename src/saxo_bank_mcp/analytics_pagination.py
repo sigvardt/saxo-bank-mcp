@@ -124,7 +124,14 @@ def _returned_next_link(page: Mapping[str, object]) -> str | None:
 
 def _require_relative_link(link: str) -> None:
     parsed = urlparse(link)
-    if parsed.scheme or parsed.netloc or not link.startswith("/") or link.startswith("//"):
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.params
+        or parsed.fragment
+        or not link.startswith("/")
+        or link.startswith("//")
+    ):
         raise UnsafePaginationLinkError
     if not parsed.path or any(part in {".", ".."} for part in parsed.path.split("/")):
         raise UnsafePaginationLinkError

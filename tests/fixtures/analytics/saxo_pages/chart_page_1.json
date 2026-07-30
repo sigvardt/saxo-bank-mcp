@@ -4,7 +4,6 @@
       "CloseBid": 101.0,
       "HighBid": 102.0,
       "LowBid": 99.5,
-      "NewChartField": "additive-field",
       "OpenBid": 100.0,
       "PriceType": "Delayed",
       "Time": "2026-07-29T08:00:00Z",
@@ -12,5 +11,5 @@
     }
   ],
   "DataVersion": 7,
-  "__next": "/chart/v3/charts?AssetType=Stock&Uic=1001&$skiptoken=synthetic-page-2"
+  "__next": "/chart/v3/charts?AssetType=Stock&Count=2&Uic=1001&$skiptoken=synthetic-page-2"
 }

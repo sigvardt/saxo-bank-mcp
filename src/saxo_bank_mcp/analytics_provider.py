@@ -4,9 +4,10 @@ import asyncio
 import math
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Protocol, cast
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qsl, urlparse
 from uuid import uuid4
 
 import httpx2
@@ -48,6 +49,38 @@ _HTTP_RATE_LIMITED: Final = 429
 _MAX_PAGE_LIMIT: Final = 1_000
 _MAX_RETRY_ATTEMPTS: Final = 3
 _RETRYABLE_HTTP_STATUSES: Final = frozenset({408, 429, 500, 502, 503, 504})
+_RETRYABLE_REQUEST_ERROR_TYPES: Final = (
+    httpx2.ConnectTimeout,
+    httpx2.ReadTimeout,
+    httpx2.WriteTimeout,
+    httpx2.PoolTimeout,
+    httpx2.ConnectError,
+    httpx2.ReadError,
+    httpx2.WriteError,
+    httpx2.RemoteProtocolError,
+)
+_KNOWN_REQUEST_ERROR_TYPES: Final = (
+    httpx2.RequestError,
+    httpx2.TransportError,
+    httpx2.TimeoutException,
+    httpx2.ConnectTimeout,
+    httpx2.ReadTimeout,
+    httpx2.WriteTimeout,
+    httpx2.PoolTimeout,
+    httpx2.NetworkError,
+    httpx2.ConnectError,
+    httpx2.ReadError,
+    httpx2.WriteError,
+    httpx2.CloseError,
+    httpx2.ProtocolError,
+    httpx2.LocalProtocolError,
+    httpx2.RemoteProtocolError,
+    httpx2.ProxyError,
+    httpx2.UnsupportedProtocol,
+    httpx2.DecodingError,
+    httpx2.TooManyRedirects,
+    httpx2.SSEError,
+)
 _ENTITLEMENT_HTTP_STATUSES: Final = frozenset({403})
 _ENTITLEMENT_ERROR_CODES: Final = frozenset(
     {
@@ -77,7 +110,6 @@ _PAGINATION_CONTROL_QUERY_PARAMETERS: Final = frozenset(
         "$skip",
         "$skiptoken",
         "$top",
-        "Count",
     }
 )
 _SAFE_PATH_VALUE_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+-]{1,255}$")
@@ -91,6 +123,12 @@ _SOURCE_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAda
 )
 
 type Sleep = Callable[[float], Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class _SanitizedRequestFailure:
+    error_type: str
+    retryable: bool
 
 
 class RegisteredReadExecutor(Protocol):
@@ -238,6 +276,8 @@ class SourceSchemaDriftError(SourceProviderError):
         self.missing_required_fields = comparison.missing_required_fields
         self.null_required_fields = comparison.null_required_fields
         self.required_type_mismatches = comparison.required_type_mismatches
+        self.additive_fields = comparison.additive_fields
+        self.unknown_enum_fields = tuple(sorted(comparison.unknown_enum_values))
         self.quarantined_analysis_kinds = comparison.quarantined_analysis_kinds
 
 
@@ -306,26 +346,21 @@ class SaxoAnalyticsProvider:
         comparisons_by_identity: dict[int, SchemaComparison] = {id(first_page): first_comparison}
 
         async def fetch_next(next_link: str) -> Mapping[str, SourceJsonValue]:
-            if urlparse(next_link).path != initial_path:
-                self._quarantine_contract(contract, "source_pagination_drift")
-                raise SourceEndpointError(
-                    "source_pagination_path_changed",
-                    "returned pagination link changed the scoped source path",
-                    contract_id=contract.contract_id,
+            try:
+                next_operation, next_target, next_params = _registered_continuation_request(
+                    contract,
+                    initial_path,
+                    params,
+                    next_link,
                 )
-            if _pagination_changes_request_scope(next_link, params):
+            except SourceEndpointError:
                 self._quarantine_contract(contract, "source_pagination_drift")
-                raise SourceEndpointError(
-                    "source_pagination_query_changed",
-                    "returned pagination link changed the scoped source query",
-                    contract_id=contract.contract_id,
-                )
-            next_operation = _registered_operation(contract, next_link)
+                raise
             payload = await self._request_payload(
                 contract,
                 next_operation,
-                next_link,
-                {},
+                next_target,
+                next_params,
             )
             if (
                 "DataVersion" in contract.revision_fields
@@ -425,26 +460,25 @@ class SaxoAnalyticsProvider:
             if self._retry_attempts is None
             else min(contract.retry_attempts, self._retry_attempts)
         )
-        last_transport_error_type = "TransportError"
         for attempt in range(1, attempts + 1):
             try:
-                response = await self._request_executor(
+                outcome = await self._request_once(
                     operation,
                     request_target,
                     params,
                 )
             except SourceAccessError as error:
                 raise SourceAccessError(contract.contract_id, error.reason) from error
-            except httpx2.TransportError as error:
-                last_transport_error_type = type(error).__name__
-                if attempt == attempts:
-                    raise SourceTransportError(
-                        contract.contract_id,
-                        error_type=last_transport_error_type,
-                        attempts=attempt,
-                    ) from None
-                await self._sleep(_retry_delay(attempt))
-                continue
+            if isinstance(outcome, _SanitizedRequestFailure):
+                if outcome.retryable and attempt < attempts:
+                    await self._sleep(_retry_delay(attempt))
+                    continue
+                raise SourceTransportError(
+                    contract.contract_id,
+                    error_type=outcome.error_type,
+                    attempts=attempt,
+                )
+            response = outcome
             if _HTTP_SUCCESS_MIN <= response.status_code < _HTTP_SUCCESS_MAX:
                 return _parse_response_object(contract.contract_id, response.content)
             error_code = _validated_error_code_or_raise_access(
@@ -478,9 +512,27 @@ class SaxoAnalyticsProvider:
             )
         raise SourceTransportError(
             contract.contract_id,
-            error_type=last_transport_error_type,
+            error_type="TransportError",
             attempts=attempts,
         )
+
+    async def _request_once(
+        self,
+        operation: EndpointOperation,
+        request_target: str,
+        params: Mapping[str, str],
+    ) -> httpx2.Response | _SanitizedRequestFailure:
+        try:
+            return await self._request_executor(
+                operation,
+                request_target,
+                params,
+            )
+        except httpx2.RequestError as error:
+            return _SanitizedRequestFailure(
+                error_type=_sanitized_request_error_type(error),
+                retryable=isinstance(error, _RETRYABLE_REQUEST_ERROR_TYPES),
+            )
 
     @staticmethod
     async def _execute_registered_read(
@@ -623,21 +675,54 @@ def _registered_operation(
     return registered.operation
 
 
-def _pagination_changes_request_scope(
-    next_link: str,
+def _registered_continuation_request(
+    contract: SourceContract,
+    initial_path: str,
     initial_params: Mapping[str, str],
-) -> bool:
-    returned_params = parse_qs(
+    next_link: str,
+) -> tuple[EndpointOperation, str, dict[str, str]]:
+    parsed = urlparse(next_link)
+    if parsed.path != initial_path:
+        raise SourceEndpointError(
+            "source_pagination_path_changed",
+            "returned pagination link changed the scoped source path",
+            contract_id=contract.contract_id,
+        )
+    returned_pairs = parse_qsl(
         urlparse(next_link).query,
         keep_blank_values=True,
-        strict_parsing=False,
     )
-    return any(
-        parameter not in _PAGINATION_CONTROL_QUERY_PARAMETERS
-        and parameter in returned_params
-        and returned_params[parameter] != [initial_value]
-        for parameter, initial_value in initial_params.items()
-    )
+    returned_names = tuple(parameter for parameter, _value in returned_pairs)
+    initial_scope = {
+        parameter: value
+        for parameter, value in initial_params.items()
+        if parameter not in _PAGINATION_CONTROL_QUERY_PARAMETERS
+    }
+    returned_scope = {
+        parameter: value
+        for parameter, value in returned_pairs
+        if parameter not in _PAGINATION_CONTROL_QUERY_PARAMETERS
+    }
+    if len(returned_names) != len(set(returned_names)) or returned_scope != initial_scope:
+        raise SourceEndpointError(
+            "source_pagination_query_changed",
+            "returned pagination link changed the scoped source query",
+            contract_id=contract.contract_id,
+        )
+    next_params = dict(initial_scope)
+    for parameter, value in returned_pairs:
+        if parameter in _PAGINATION_CONTROL_QUERY_PARAMETERS:
+            next_params[parameter] = _query_parameter(value, contract.contract_id)
+    next_operation = _registered_operation(contract, initial_path)
+    return next_operation, initial_path, next_params
+
+
+def _sanitized_request_error_type(error: httpx2.RequestError) -> str:
+    error_type = type(error)
+    for known_type in _KNOWN_REQUEST_ERROR_TYPES:
+        if error_type is known_type:
+            return known_type.__name__
+    return "RequestError"
 
 
 def _parse_response_object(

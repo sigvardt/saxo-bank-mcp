@@ -71,7 +71,7 @@ def _fixture_response(name: str, *, status_code: int = 200) -> httpx2.Response:
 class FakeExecutor:
     def __init__(
         self,
-        outcomes: list[httpx2.Response | httpx2.TransportError | SourceAccessError],
+        outcomes: list[httpx2.Response | httpx2.RequestError | SourceAccessError],
     ) -> None:
         """Store deterministic outcomes for the injected transport boundary."""
         self._outcomes = outcomes
@@ -85,7 +85,7 @@ class FakeExecutor:
     ) -> httpx2.Response:
         self.calls.append((operation.operation_id, request_target, dict(params)))
         outcome = self._outcomes.pop(0)
-        if isinstance(outcome, httpx2.TransportError | SourceAccessError):
+        if isinstance(outcome, httpx2.RequestError | SourceAccessError):
             raise outcome
         return outcome
 
@@ -188,13 +188,18 @@ async def test_data_and_next_are_structural_and_returned_pagination_is_preserved
     assert [page.row_count for page in pages] == [1, 1]
     assert pages[0].rows[0]["Time"] == "2026-07-29T08:00:00Z"
     assert pages[0].next_link == (
-        "/chart/v3/charts?AssetType=Stock&Uic=1001&$skiptoken=synthetic-page-2"
+        "/chart/v3/charts?AssetType=Stock&Count=2&Uic=1001&$skiptoken=synthetic-page-2"
     )
     assert pages[1].next_link is None
     assert executor.calls[1] == (
         "get.chart.v3.charts",
-        "/chart/v3/charts?AssetType=Stock&Uic=1001&$skiptoken=synthetic-page-2",
-        {},
+        "/chart/v3/charts",
+        {
+            "$skiptoken": "synthetic-page-2",
+            "AssetType": "Stock",
+            "Count": "2",
+            "Uic": "1001",
+        },
     )
 
 
@@ -285,6 +290,187 @@ async def test_returned_pagination_cannot_change_an_explicit_query_scope() -> No
 
     assert len(executor.calls) == 1
     assert "instrument_risk" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "next_link",
+    [
+        "/chart/v3/charts?AssetType=Stock&$skiptoken=second",
+        ("/chart/v3/charts?AccountKey=added&AssetType=Stock&Uic=1001&$skiptoken=second"),
+        "/chart/v3/charts?AssetType=Stock&Uic=1001&Uic=1001&$skiptoken=second",
+    ],
+)
+async def test_returned_pagination_rejects_removed_added_or_duplicate_query_scope(
+    next_link: str,
+) -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "Time": "2026-07-29T08:00:00Z",
+                            "CloseBid": 101.0,
+                        }
+                    ],
+                    "DataVersion": 7,
+                    "__next": next_link,
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(SourceEndpointError, match="scoped source query"):
+        _ = [
+            page
+            async for page in provider.fetch(
+                "chart_v3",
+                {"AssetType": "Stock", "Uic": _SYNTHETIC_UIC},
+            )
+        ]
+
+    assert len(executor.calls) == 1
+    assert "instrument_risk" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+async def test_returned_pagination_cannot_remove_count_scope() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "Time": "2026-07-29T08:00:00Z",
+                            "CloseBid": 101.0,
+                        }
+                    ],
+                    "DataVersion": 7,
+                    "__next": ("/chart/v3/charts?AssetType=Stock&Uic=1001&$skiptoken=second"),
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(SourceEndpointError, match="scoped source query"):
+        _ = [
+            page
+            async for page in provider.fetch(
+                "chart_v3",
+                {"AssetType": "Stock", "Count": 2, "Uic": _SYNTHETIC_UIC},
+            )
+        ]
+
+    assert len(executor.calls) == 1
+    assert "instrument_risk" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+async def test_returned_pagination_fragment_is_rejected_before_transport() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "Time": "2026-07-29T08:00:00Z",
+                            "CloseBid": 101.0,
+                        }
+                    ],
+                    "DataVersion": 7,
+                    "__next": "/chart/v3/charts?$skiptoken=second#private-marker",
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(UnsafePaginationLinkError):
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    assert len(executor.calls) == 1
+    assert "instrument_risk" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+async def test_returned_pagination_path_parameters_are_rejected_before_transport() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "Time": "2026-07-29T08:00:00Z",
+                            "CloseBid": 101.0,
+                        }
+                    ],
+                    "DataVersion": 7,
+                    "__next": "/chart/v3/charts;private-marker?$skiptoken=second",
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(UnsafePaginationLinkError):
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    assert len(executor.calls) == 1
+    assert "instrument_risk" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+async def test_path_scoped_continuation_is_rebuilt_before_transport() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "BookingId": "synthetic-booking-a",
+                            "BookingDate": "2026-07-29T08:00:00Z",
+                        }
+                    ],
+                    "__next": ("/cs/v1/reports/bookings/client-a?$skiptoken=second"),
+                },
+            ),
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "BookingId": "synthetic-booking-b",
+                            "BookingDate": "2026-07-29T08:01:00Z",
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+    provider = _provider(executor)
+
+    pages = [
+        page
+        async for page in provider.fetch(
+            "bookings_v1",
+            {"ClientKey": "client-a"},
+        )
+    ]
+
+    assert [page.page_number for page in pages] == [1, 2]
+    assert executor.calls[1] == (
+        "get.cs.v1.reports.bookings.clientkey",
+        "/cs/v1/reports/bookings/client-a",
+        {"$skiptoken": "second"},
+    )
 
 
 @pytest.mark.anyio
@@ -655,7 +841,60 @@ async def test_transport_ambiguity_retries_only_the_proven_read_and_stays_saniti
     formatted = "".join(traceback.format_exception(caught.value))
     assert marker not in formatted
     assert "example.invalid" not in formatted
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert len(executor.calls) == _EXPECTED_THREE_ATTEMPTS
+
+
+@pytest.mark.anyio
+async def test_decoding_error_is_sanitized_without_retry_or_raw_context() -> None:
+    marker = "private-decoding-marker"
+    body_marker = "private-request-body"
+    failure = httpx2.DecodingError(
+        marker,
+        request=httpx2.Request(
+            "GET",
+            "https://example.invalid/private-path",
+            content=body_marker,
+        ),
+    )
+    executor = FakeExecutor([failure])
+    provider = _provider(executor, retry_attempts=3)
+
+    with pytest.raises(SourceTransportError) as caught:
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert caught.value.error_type == "DecodingError"
+    assert caught.value.attempts == 1
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert marker not in formatted
+    assert body_marker not in formatted
+    assert "example.invalid" not in formatted
+    assert len(executor.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_custom_request_error_type_name_is_not_retained() -> None:
+    marker = "PrivateRequestMarker"
+    private_request_error = type(marker, (httpx2.RequestError,), {})
+    failure = private_request_error(
+        "private-message",
+        request=httpx2.Request("GET", "https://example.invalid/private-path"),
+    )
+    executor = FakeExecutor([failure])
+    provider = _provider(executor, retry_attempts=3)
+
+    with pytest.raises(SourceTransportError) as caught:
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    formatted = "".join(traceback.format_exception(caught.value))
+    assert caught.value.error_type == "RequestError"
+    assert marker not in formatted
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert len(executor.calls) == 1
 
 
 @pytest.mark.anyio
@@ -686,22 +925,53 @@ async def test_required_schema_drift_quarantines_dependent_analysis_kinds() -> N
 
 
 @pytest.mark.anyio
-async def test_unknown_enum_value_is_yielded_and_does_not_quarantine() -> None:
+async def test_additive_field_is_refused_and_quarantines_dependent_analysis() -> None:
+    marker = "private-additive-marker"
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "CloseBid": 101.0,
+                            "NewChartField": marker,
+                            "Time": "2026-07-29T08:00:00Z",
+                        }
+                    ],
+                    "DataVersion": 7,
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(SourceSchemaDriftError) as caught:
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    assert caught.value.additive_fields == ("NewChartField",)
+    assert marker not in str(caught.value)
+    assert "instrument_risk" in provider.quarantined_analysis_kinds
+    assert len(executor.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_unknown_enum_value_is_refused_and_quarantines_dependents() -> None:
     executor = FakeExecutor([_fixture_response("reference_unknown_enum.json")])
     provider = _provider(executor)
 
-    pages = [
-        page
-        async for page in provider.fetch(
-            "reference_instruments_v1",
-            {"Keywords": "synthetic"},
-        )
-    ]
+    with pytest.raises(SourceSchemaDriftError) as caught:
+        _ = [
+            page
+            async for page in provider.fetch(
+                "reference_instruments_v1",
+                {"Keywords": "synthetic"},
+            )
+        ]
 
-    assert pages[0].schema_comparison.unknown_enum_values == {
-        "AssetType": ("FutureSaxoAssetType",),
-    }
-    assert provider.quarantined_analysis_kinds == ()
+    assert caught.value.unknown_enum_fields == ("AssetType",)
+    assert "instrument_resolution" in provider.quarantined_analysis_kinds
+    assert len(executor.calls) == 1
 
 
 @pytest.mark.anyio
@@ -737,10 +1007,19 @@ async def test_object_contract_becomes_one_source_row() -> None:
 
 
 @pytest.mark.anyio
-async def test_source_page_rows_are_deeply_immutable_after_fingerprinting() -> None:
-    payload = _SOURCE_OBJECT_ADAPTER.validate_json(_fixture_bytes("info_price_object.json"))
-    payload["NewArray"] = [{"Value": 1}]
-    executor = FakeExecutor([_json_response(200, payload)])
+async def test_source_page_rows_and_provenance_are_deeply_immutable() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "ExpiryDates": ["2026-09-18"],
+                    "OptionRootId": 17,
+                    "SpecificOptions": [{"Uic": 1001}],
+                },
+            )
+        ]
+    )
     provider = _provider(executor)
 
     page = next(
@@ -748,24 +1027,30 @@ async def test_source_page_rows_are_deeply_immutable_after_fingerprinting() -> N
             [
                 item
                 async for item in provider.fetch(
-                    "info_price_v1",
-                    {"AssetType": "Stock", "Uic": 1001},
+                    "options_chain_reference_v1",
+                    {"OptionRootId": 17},
                 )
             ]
         )
     )
 
+    serialized_before = page.model_dump_json()
+    fingerprint_before = page.page_fingerprint_sha256
     with pytest.raises(TypeError):
-        cast("dict[str, FrozenSourceJsonValue]", page.rows[0])["Uic"] = 2002
-    quote = page.rows[0]["Quote"]
-    assert isinstance(quote, Mapping)
-    with pytest.raises(TypeError):
-        cast("dict[str, SourceJsonValue]", quote)["Bid"] = 99.0
-    new_array = page.rows[0]["NewArray"]
-    assert isinstance(new_array, tuple)
-    nested = new_array[0]
+        cast("dict[str, FrozenSourceJsonValue]", page.rows[0])["OptionRootId"] = 18
+    specific_options = page.rows[0]["SpecificOptions"]
+    assert isinstance(specific_options, tuple)
+    nested = specific_options[0]
     assert isinstance(nested, Mapping)
     with pytest.raises(TypeError):
-        cast("dict[str, SourceJsonValue]", nested)["Value"] = 2
-    serialized = json.loads(page.model_dump_json())
-    assert serialized["rows"][0]["NewArray"] == [{"Value": 1}]
+        cast("dict[str, SourceJsonValue]", nested)["Uic"] = 2002
+    with pytest.raises(TypeError):
+        cast(
+            "dict[str, tuple[str, ...]]",
+            page.schema_comparison.unknown_enum_values,
+        )["AssetType"] = ("InjectedAssetType",)
+
+    assert page.model_dump_json() == serialized_before
+    assert page.page_fingerprint_sha256 == fingerprint_before
+    serialized = json.loads(serialized_before)
+    assert serialized["rows"][0]["SpecificOptions"] == [{"Uic": 1001}]

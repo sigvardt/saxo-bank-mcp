@@ -38,6 +38,7 @@ type FrozenSourceJsonValue = (
     | tuple[FrozenSourceJsonValue, ...]
     | Mapping[str, FrozenSourceJsonValue]
 )
+type FrozenUnknownEnumValues = Mapping[str, tuple[str, ...]]
 
 _REPOSITORY_CONTRACT_PATH: Final = (
     Path(__file__).resolve().parents[2] / "data/analytics/source_contracts.json"
@@ -274,7 +275,12 @@ class SourceContractCatalog(BaseModel):
 class SchemaComparison(BaseModel):
     """Value-free compatibility result for one Saxo response."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        validate_default=True,
+    )
 
     compatible: bool
     structural_errors: tuple[str, ...] = ()
@@ -285,8 +291,25 @@ class SchemaComparison(BaseModel):
     null_optional_fields: tuple[str, ...] = ()
     optional_type_mismatches: tuple[str, ...] = ()
     additive_fields: tuple[str, ...] = ()
-    unknown_enum_values: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    unknown_enum_values: FrozenUnknownEnumValues = Field(default_factory=dict)
     quarantined_analysis_kinds: tuple[str, ...] = ()
+
+    @field_validator("unknown_enum_values")
+    @classmethod
+    def freeze_unknown_enum_values(
+        cls,
+        value: FrozenUnknownEnumValues,
+    ) -> FrozenUnknownEnumValues:
+        return MappingProxyType(
+            {field_name: tuple(enum_values) for field_name, enum_values in sorted(value.items())}
+        )
+
+    @field_serializer("unknown_enum_values")
+    def serialize_unknown_enum_values(
+        self,
+        value: FrozenUnknownEnumValues,
+    ) -> dict[str, tuple[str, ...]]:
+        return dict(sorted(value.items()))
 
     @model_validator(mode="after")
     def validate_compatibility(self) -> Self:
@@ -296,6 +319,8 @@ class SchemaComparison(BaseModel):
                 self.missing_required_fields,
                 self.null_required_fields,
                 self.required_type_mismatches,
+                self.additive_fields,
+                self.unknown_enum_values,
             )
         )
         if self.compatible == has_breaking_drift:
@@ -711,6 +736,8 @@ def _comparison(
             observed.missing_required_fields,
             observed.null_required_fields,
             observed.required_type_mismatches,
+            observed.additive_fields,
+            observed.unknown_enum_values,
         )
     )
     return SchemaComparison(
