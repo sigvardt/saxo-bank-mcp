@@ -1,0 +1,916 @@
+{
+  "$defs": {
+    "AnalysisId": {
+      "pattern": "^an_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "AnalysisProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "checks_passed": {
+          "items": {
+            "$ref": "#/$defs/ContractName"
+          },
+          "minItems": 1,
+          "title": "Checks Passed",
+          "type": "array"
+        },
+        "code_commit": {
+          "pattern": "^[a-f0-9]{7,64}$",
+          "title": "Code Commit",
+          "type": "string"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "engine_name": {
+          "pattern": "^[a-z][a-z0-9_-]{0,127}$",
+          "title": "Engine Name",
+          "type": "string"
+        },
+        "engine_version": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+          "title": "Engine Version",
+          "type": "string"
+        },
+        "proof_profile_ids": {
+          "items": {
+            "$ref": "#/$defs/ProofProfileId"
+          },
+          "minItems": 1,
+          "title": "Proof Profile Ids",
+          "type": "array"
+        },
+        "source_revision": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+          "title": "Source Revision",
+          "type": "string"
+        },
+        "source_scope": {
+          "const": "saxo_openapi",
+          "title": "Source Scope",
+          "type": "string"
+        },
+        "source_timestamp": {
+          "$ref": "#/$defs/UtcDateTime"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "source_scope",
+        "source_revision",
+        "source_timestamp",
+        "proof_profile_ids",
+        "checks_passed",
+        "engine_name",
+        "engine_version",
+        "code_commit"
+      ],
+      "title": "AnalysisProvenance",
+      "type": "object"
+    },
+    "AnalysisRequest": {
+      "discriminator": {
+        "mapping": {
+          "instrument": "#/$defs/InstrumentAnalysisRequest",
+          "market": "#/$defs/MarketAnalysisRequest",
+          "portfolio": "#/$defs/PortfolioAnalysisRequest"
+        },
+        "propertyName": "request_kind"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/MarketAnalysisRequest"
+        },
+        {
+          "$ref": "#/$defs/InstrumentAnalysisRequest"
+        },
+        {
+          "$ref": "#/$defs/PortfolioAnalysisRequest"
+        }
+      ]
+    },
+    "AnalysisResult": {
+      "additionalProperties": false,
+      "properties": {
+        "account_scope": {
+          "$ref": "#/$defs/SafeAccountScope"
+        },
+        "analysis_id": {
+          "$ref": "#/$defs/AnalysisId"
+        },
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "assumptions": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "data_quality": {
+          "$ref": "#/$defs/DataQuality"
+        },
+        "does_not_verify": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Does Not Verify",
+          "type": "array"
+        },
+        "is_not_advice": {
+          "const": true,
+          "title": "Is Not Advice",
+          "type": "boolean"
+        },
+        "is_not_forecast": {
+          "title": "Is Not Forecast",
+          "type": "boolean"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricValue"
+          },
+          "minItems": 1,
+          "title": "Metrics",
+          "type": "array"
+        },
+        "model_distribution_only": {
+          "title": "Model Distribution Only",
+          "type": "boolean"
+        },
+        "next_actions": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Next Actions",
+          "type": "array"
+        },
+        "provenance": {
+          "$ref": "#/$defs/AnalysisProvenance"
+        },
+        "replayable": {
+          "title": "Replayable",
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/$defs/AnalysisRequest"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "const": "verified",
+          "default": "verified",
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_name": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "valid_until": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "verifies": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Verifies",
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/AnalysisWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "visibility",
+        "tool_name",
+        "analysis_id",
+        "analysis_kind",
+        "request",
+        "account_scope",
+        "as_of",
+        "valid_until",
+        "metrics",
+        "warnings",
+        "data_quality",
+        "provenance",
+        "assumptions",
+        "is_not_advice",
+        "is_not_forecast",
+        "model_distribution_only",
+        "verifies",
+        "does_not_verify",
+        "replayable",
+        "next_actions"
+      ],
+      "title": "AnalysisResult",
+      "type": "object"
+    },
+    "AnalysisWarning": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "message": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "next_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "quality_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QualityState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "AnalysisWarning",
+      "type": "object"
+    },
+    "AnalyticsDegradation": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_id": {
+          "$ref": "#/$defs/AnalysisId"
+        },
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "does_not_verify": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Does Not Verify",
+          "type": "array"
+        },
+        "next_action": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "quality": {
+          "$ref": "#/$defs/DataQuality"
+        },
+        "reason": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "const": "degraded",
+          "default": "degraded",
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_name": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "verifies": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Verifies",
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/AnalysisWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "visibility",
+        "tool_name",
+        "analysis_kind",
+        "analysis_id",
+        "dataset_id",
+        "as_of",
+        "reason_code",
+        "reason",
+        "quality",
+        "warnings",
+        "next_action",
+        "verifies",
+        "does_not_verify"
+      ],
+      "title": "AnalyticsDegradation",
+      "type": "object"
+    },
+    "AnalyticsRefusal": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "as_of": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "does_not_verify": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Does Not Verify",
+          "type": "array"
+        },
+        "next_action": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "reason": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "const": "refused",
+          "default": "refused",
+          "title": "Status",
+          "type": "string"
+        },
+        "tool_name": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "verifies": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyText"
+          },
+          "title": "Verifies",
+          "type": "array"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/AnalysisWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "visibility",
+        "tool_name",
+        "analysis_kind",
+        "as_of",
+        "reason_code",
+        "reason",
+        "next_action",
+        "warnings",
+        "verifies",
+        "does_not_verify"
+      ],
+      "title": "AnalyticsRefusal",
+      "type": "object"
+    },
+    "ArtifactId": {
+      "pattern": "^ar_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "ArtifactSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_id": {
+          "$ref": "#/$defs/AnalysisId"
+        },
+        "artifact_id": {
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "byte_count": {
+          "minimum": 0,
+          "title": "Byte Count",
+          "type": "integer"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "description": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "media_type": {
+          "pattern": "^[a-z0-9.+-]+/[a-z0-9.+-]+$",
+          "title": "Media Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        }
+      },
+      "required": [
+        "visibility",
+        "artifact_id",
+        "analysis_id",
+        "media_type",
+        "byte_count",
+        "sha256",
+        "created_at",
+        "description"
+      ],
+      "title": "ArtifactSummary",
+      "type": "object"
+    },
+    "ContractName": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]{0,127}$",
+      "type": "string"
+    },
+    "DataCoverage": {
+      "additionalProperties": false,
+      "properties": {
+        "end_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "expected_row_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Expected Row Count"
+        },
+        "missing_row_count": {
+          "minimum": 0,
+          "title": "Missing Row Count",
+          "type": "integer"
+        },
+        "row_count": {
+          "minimum": 0,
+          "title": "Row Count",
+          "type": "integer"
+        },
+        "start_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "state": {
+          "$ref": "#/$defs/QualityState"
+        }
+      },
+      "required": [
+        "state",
+        "start_at",
+        "end_at",
+        "row_count",
+        "expected_row_count",
+        "missing_row_count"
+      ],
+      "title": "DataCoverage",
+      "type": "object"
+    },
+    "DataQuality": {
+      "additionalProperties": false,
+      "properties": {
+        "checked_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DataCoverage"
+        },
+        "state": {
+          "$ref": "#/$defs/QualityState"
+        },
+        "warnings": {
+          "items": {
+            "$ref": "#/$defs/AnalysisWarning"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "state",
+        "coverage",
+        "checked_at",
+        "warnings"
+      ],
+      "title": "DataQuality",
+      "type": "object"
+    },
+    "DatasetId": {
+      "pattern": "^ds_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "DatasetSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "account_scope": {
+          "$ref": "#/$defs/SafeAccountScope"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DataCoverage"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "data_quality": {
+          "$ref": "#/$defs/DataQuality"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "fingerprint_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Fingerprint Sha256",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_revision": {
+          "$ref": "#/$defs/NonEmptyText"
+        },
+        "source_scope": {
+          "const": "saxo_openapi",
+          "title": "Source Scope",
+          "type": "string"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        }
+      },
+      "required": [
+        "visibility",
+        "dataset_id",
+        "account_scope",
+        "source_scope",
+        "source_revision",
+        "fingerprint_sha256",
+        "created_at",
+        "coverage",
+        "data_quality"
+      ],
+      "title": "DatasetSummary",
+      "type": "object"
+    },
+    "InstrumentAnalysisRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "instrument_handles": {
+          "items": {
+            "$ref": "#/$defs/InstrumentHandle"
+          },
+          "maxItems": 25,
+          "minItems": 1,
+          "title": "Instrument Handles",
+          "type": "array"
+        },
+        "request_kind": {
+          "const": "instrument",
+          "title": "Request Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis_kind",
+        "dataset_id",
+        "request_kind",
+        "instrument_handles"
+      ],
+      "title": "InstrumentAnalysisRequest",
+      "type": "object"
+    },
+    "InstrumentHandle": {
+      "pattern": "^ih_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "JobId": {
+      "pattern": "^jb_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "JobState": {
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "JobSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalysisId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifact_ids": {
+          "items": {
+            "$ref": "#/$defs/ArtifactId"
+          },
+          "title": "Artifact Ids",
+          "type": "array"
+        },
+        "created_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "job_id": {
+          "$ref": "#/$defs/JobId"
+        },
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_fingerprint": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Request Fingerprint",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/JobState"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "visibility": {
+          "$ref": "#/$defs/VisibilityMode"
+        }
+      },
+      "required": [
+        "visibility",
+        "job_id",
+        "state",
+        "request_fingerprint",
+        "created_at",
+        "updated_at",
+        "analysis_id",
+        "artifact_ids",
+        "message"
+      ],
+      "title": "JobSummary",
+      "type": "object"
+    },
+    "MarketAnalysisRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "request_kind": {
+          "const": "market",
+          "title": "Request Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis_kind",
+        "dataset_id",
+        "request_kind"
+      ],
+      "title": "MarketAnalysisRequest",
+      "type": "object"
+    },
+    "MetricClass": {
+      "enum": [
+        "broker_reported",
+        "calculated_verified",
+        "model_output",
+        "approximation",
+        "unavailable"
+      ],
+      "title": "MetricClass",
+      "type": "string"
+    },
+    "MetricValue": {
+      "additionalProperties": false,
+      "properties": {
+        "currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "metric_class": {
+          "$ref": "#/$defs/MetricClass"
+        },
+        "metric_id": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "proof_profile_id": {
+          "$ref": "#/$defs/ProofProfileId"
+        },
+        "source_timestamp": {
+          "$ref": "#/$defs/UtcDateTime"
+        },
+        "unit": {
+          "pattern": "^[a-z][a-z0-9_/%.-]{0,63}$",
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "metric_id",
+        "value",
+        "unit",
+        "currency",
+        "metric_class",
+        "source_timestamp",
+        "proof_profile_id"
+      ],
+      "title": "MetricValue",
+      "type": "object"
+    },
+    "NonEmptyText": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "PortfolioAnalysisRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "portfolio_snapshot_id": {
+          "$ref": "#/$defs/PortfolioSnapshotId"
+        },
+        "request_kind": {
+          "const": "portfolio",
+          "title": "Request Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis_kind",
+        "dataset_id",
+        "request_kind",
+        "portfolio_snapshot_id"
+      ],
+      "title": "PortfolioAnalysisRequest",
+      "type": "object"
+    },
+    "PortfolioSnapshotId": {
+      "pattern": "^ps_[A-Za-z0-9_-]{32}$",
+      "type": "string"
+    },
+    "ProofProfileId": {
+      "pattern": "^vp_[A-Za-z0-9][A-Za-z0-9._-]{2,127}$",
+      "type": "string"
+    },
+    "QualityState": {
+      "enum": [
+        "complete",
+        "partial",
+        "stale",
+        "missing",
+        "invalid"
+      ],
+      "title": "QualityState",
+      "type": "string"
+    },
+    "SafeAccountScope": {
+      "maxLength": 1000,
+      "minLength": 1,
+      "type": "string"
+    },
+    "UtcDateTime": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "VisibilityMode": {
+      "enum": [
+        "private_user_result",
+        "inline_private",
+        "local_resource_link",
+        "redacted_preview",
+        "fingerprint_only",
+        "public_evidence"
+      ],
+      "title": "VisibilityMode",
+      "type": "string"
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/AnalysisResult"
+    },
+    {
+      "$ref": "#/$defs/DatasetSummary"
+    },
+    {
+      "$ref": "#/$defs/ArtifactSummary"
+    },
+    {
+      "$ref": "#/$defs/JobSummary"
+    },
+    {
+      "$ref": "#/$defs/AnalyticsRefusal"
+    },
+    {
+      "$ref": "#/$defs/AnalyticsDegradation"
+    }
+  ]
+}
