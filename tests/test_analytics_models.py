@@ -955,6 +955,82 @@ def test_public_evidence_rejects_raw_account_and_deletion_tokens_anywhere(
 
 
 @pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "raw-account-identifier: 7654321",
+        "raw_account_identifier=7654321",
+        "raw account identifier: 7654321",
+    ],
+)
+def test_public_evidence_model_rejects_explicit_raw_account_identifier_assignments(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "raw-account-identifier: 7654321",
+        "raw_account_identifier=7654321",
+        "raw account identifier: 7654321",
+    ],
+)
+def test_public_evidence_validator_rejects_explicit_raw_account_identifier_assignments(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+    forged = AnalyticsRefusal.model_construct(**payload)
+
+    with pytest.raises(AnalyticsPrivacyError, match="forbidden value class"):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        (
+            '"AccountId": "unavailable". '
+            "The raw account identifier remains unavailable."
+        ),
+        "The raw account identifier format is documented without values.",
+    ],
+)
+def test_public_evidence_model_allows_raw_account_identifier_prose_without_values(
+    safe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = safe_text
+
+    AnalyticsRefusal.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    [
+        (
+            '"AccountId": "unavailable". '
+            "The raw account identifier remains unavailable."
+        ),
+        "The raw account identifier format is documented without values.",
+    ],
+)
+def test_public_evidence_validator_allows_raw_account_identifier_prose_without_values(
+    safe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = safe_text
+    forged = AnalyticsRefusal.model_construct(**payload)
+
+    assert validate_public_evidence(forged) is None
+
+
+@pytest.mark.parametrize(
     "safe_text",
     [
         '"AccountId": "unavailable". The source value was not returned.',

@@ -51,10 +51,15 @@ _SENSITIVE_FIELD_NAMES: Final = frozenset(
         "disclaimertoken",
         "authorization",
         "deletionpreviewtoken",
+        "rawaccountidentifier",
     },
 )
-_SENSITIVE_FIELD_PATTERN_TEXT: Final = r"""(?:
-    account[\s_-]?(?:id|key|number)
+_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT: Final = (
+    r"raw[\s_-]+account[\s_-]+identifier"
+)
+_SENSITIVE_FIELD_PATTERN_TEXT: Final = rf"""(?:
+    {_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT}
+    |account[\s_-]?(?:id|key|number)
     |client[\s_-]?(?:id|key)
     |order[\s_-]?ids?
     |display[\s_-]?name
@@ -110,11 +115,27 @@ _AUTHORIZATION_PATTERN: Final = re.compile(
 _JWT_PATTERN: Final = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
 )
-_RAW_ACCOUNT_IDENTIFIER_PATTERN: Final = re.compile(
-    r"""(?ix)
+_RAW_ACCOUNT_IDENTIFIER_TOKEN_ASSIGNMENT_PATTERN: Final = re.compile(
+    rf"""(?ix)
     (?<![A-Z0-9])
-    raw[\s_-]+account[\s_-]+identifier[\s_-]+
-    [A-Z0-9][A-Z0-9_-]{5,}
+    {_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT}
+    [-_]\s*
+    (?P<value>
+        ["'][^"'\r\n]*["']
+        |[A-Z0-9][A-Z0-9_-]*
+    )
+    (?![A-Z0-9_-])
+    """,
+)
+_RAW_ACCOUNT_IDENTIFIER_BARE_VALUE_PATTERN: Final = re.compile(
+    rf"""(?ix)
+    (?<![A-Z0-9])
+    {_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT}
+    \s+
+    (?P<value>
+        ["'][^"'\r\n]*["']
+        |[A-Z0-9][A-Z0-9_-]*
+    )
     (?![A-Z0-9_-])
     """,
 )
@@ -1019,13 +1040,27 @@ def _is_safe_sensitive_value(value: str) -> bool:
     return normalized in _SAFE_SENSITIVE_VALUE_SENTINELS
 
 
+def _contains_forbidden_raw_account_identifier_assignment(value: str) -> bool:
+    if any(
+        not _is_safe_sensitive_value(match.group("value"))
+        for match in _RAW_ACCOUNT_IDENTIFIER_TOKEN_ASSIGNMENT_PATTERN.finditer(
+            value
+        )
+    ):
+        return True
+    return any(
+        re.search(r"[0-9]", match.group("value")) is not None
+        and not _is_safe_sensitive_value(match.group("value"))
+        for match in _RAW_ACCOUNT_IDENTIFIER_BARE_VALUE_PATTERN.finditer(value)
+    )
+
+
 def _string_contains_forbidden_public_value(value: str) -> bool:
     if any(
         pattern.search(value) is not None
         for pattern in (
             _AUTHORIZATION_PATTERN,
             _JWT_PATTERN,
-            _RAW_ACCOUNT_IDENTIFIER_PATTERN,
             _DELETION_PREVIEW_TOKEN_PATTERN,
             _URL_PATTERN,
             _LOCAL_PATH_PATTERN,
@@ -1034,6 +1069,8 @@ def _string_contains_forbidden_public_value(value: str) -> bool:
             _PERCENTAGE_VALUE_PATTERN,
         )
     ):
+        return True
+    if _contains_forbidden_raw_account_identifier_assignment(value):
         return True
     if any(
         not _is_safe_sensitive_value(match.group("value"))
