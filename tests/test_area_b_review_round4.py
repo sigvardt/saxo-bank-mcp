@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -41,11 +42,33 @@ def _run_identity(
     prefix: Path | None = None,
     command: str = _IDENTITY_COMMAND,
 ) -> subprocess.CompletedProcess[str]:
-    python_path = str(site) if prefix is None else os.pathsep.join((str(prefix), str(site)))
+    clean_python_home = cwd.parent / "clean-python-home"
+    if not clean_python_home.exists():
+        shutil.copytree(
+            Path(sys.base_prefix),
+            clean_python_home,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+    dependency_site = Path(str(distribution("packaging").locate_file("")))
+    search_paths = (site, dependency_site) if prefix is None else (prefix, site, dependency_site)
+    python_path = os.pathsep.join(str(path) for path in search_paths)
+    prepared_command = (
+        "import sys, sysconfig\n"
+        "from pathlib import Path as _RuntimePath\n"
+        "sys.path[:] = [item for item in sys.path "
+        "if _RuntimePath(item).name != 'lib-dynload']\n"
+        "sys.path.append(str(sysconfig.get_config_var('DESTSHARED')))\n"
+        f"{command}"
+    )
     return subprocess.run(
-        (sys.executable, "-c", command),
+        (sys.executable, "-c", prepared_command),
         cwd=cwd,
-        env={**os.environ, "PYTHONPATH": python_path},
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONHOME": str(clean_python_home),
+            "PYTHONPATH": python_path,
+        },
         check=False,
         capture_output=True,
         text=True,
@@ -53,7 +76,8 @@ def _run_identity(
 
 
 def _copy_source_candidate(target: Path) -> None:
-    shutil.copytree(_ROOT / "src", target / "src")
+    ignore_python_cache = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+    shutil.copytree(_ROOT / "src", target / "src", ignore=ignore_python_cache)
     shutil.copytree(_ROOT / "data" / "analytics", target / "data" / "analytics")
     (target / "data" / "saxo").mkdir(parents=True)
     shutil.copyfile(
@@ -223,6 +247,171 @@ def test_candidate_identity_closes_startup_import_and_python_runtime(  # noqa: P
         assert project_roots() != initial_roots
     finally:
         sys.path.pop()
+
+
+def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(  # noqa: PLR0915
+    tmp_path: Path,
+) -> None:
+    source_copy = tmp_path / "source-copy"
+    _copy_source_candidate(source_copy)
+    source_site = source_copy / "src"
+    foreign_cwd = tmp_path / "foreign-cwd"
+    foreign_cwd.mkdir()
+    assert _run_identity(source_site, foreign_cwd).returncode == 0
+
+    source_cache = source_site / "saxo_bank_mcp" / "__pycache__"
+    source_cache.mkdir()
+    (source_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
+    assert _run_identity(source_site, foreign_cwd).returncode != 0
+    shutil.rmtree(source_cache)
+
+    startup_search = tmp_path / "startup-search"
+    startup_search.mkdir()
+    assert _run_identity(source_site, foreign_cwd, prefix=startup_search).returncode == 0
+    startup_cache = startup_search / "__pycache__"
+    startup_cache.mkdir()
+    (startup_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
+    assert _run_identity(source_site, foreign_cwd, prefix=startup_search).returncode != 0
+    shutil.rmtree(startup_cache)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    startup_symlink = startup_search / "unsealed-search-link"
+    startup_symlink.symlink_to(outside, target_is_directory=True)
+    assert _run_identity(source_site, foreign_cwd, prefix=startup_search).returncode != 0
+    startup_symlink.unlink()
+
+    runtime_tree = tmp_path / "runtime-tree"
+    runtime_tree.mkdir()
+    (runtime_tree / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    project_tree = getattr(matrix_module, "_runtime_tree_projection", None)
+    assert callable(project_tree)
+    for relative in (
+        Path("__pycache__/module.cpython-312.pyc"),
+        Path("module.pyc"),
+        Path("module.pyo"),
+    ):
+        cache_entry = runtime_tree / relative
+        cache_entry.parent.mkdir(parents=True, exist_ok=True)
+        cache_entry.write_bytes(b"unsealed-cache")
+        with pytest.raises(ValueError, match="cache"):
+            project_tree(runtime_tree)
+        cache_entry.unlink()
+        if cache_entry.parent != runtime_tree:
+            cache_entry.parent.rmdir()
+
+    uv = shutil.which("uv")
+    assert uv is not None
+    wheel_dir = tmp_path / "wheel"
+    build = subprocess.run(
+        (uv, "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
+        cwd=_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    wheel = next(wheel_dir.glob("*.whl"))
+    installed_site = tmp_path / "installed-site"
+    install = subprocess.run(
+        (
+            uv,
+            "pip",
+            "install",
+            "--offline",
+            "--no-deps",
+            "--target",
+            str(installed_site),
+            str(wheel),
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert install.returncode == 0, install.stderr
+    assert _run_identity(installed_site, foreign_cwd).returncode == 0
+
+    package_cache = installed_site / "saxo_bank_mcp" / "__pycache__"
+    package_cache.mkdir()
+    (package_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
+    assert _run_identity(installed_site, foreign_cwd).returncode != 0
+    shutil.rmtree(package_cache)
+
+    dependency_root = tmp_path / "dependency-root"
+    dependency_root.mkdir()
+    dependency_module = dependency_root / "dependency.py"
+    dependency_module.write_text("VALUE = 1\n", encoding="utf-8")
+    scan_import_root = getattr(matrix_module, "_scan_recorded_import_root", None)
+    assert callable(scan_import_root)
+    scan_import_root(
+        dependency_root,
+        allowed_files={dependency_module.resolve(strict=True)},
+        allowed_unsealed_files=set(),
+    )
+    dependency_cache = dependency_root / "__pycache__"
+    dependency_cache.mkdir()
+    (dependency_cache / "dependency.cpython-312.pyc").write_bytes(b"unsealed-cache")
+    with pytest.raises(ValueError, match="cache"):
+        scan_import_root(
+            dependency_root,
+            allowed_files={dependency_module.resolve(strict=True)},
+            allowed_unsealed_files=set(),
+        )
+
+
+def test_candidate_identity_seals_ordered_search_directories_during_verification(
+    tmp_path: Path,
+) -> None:
+    source_copy = tmp_path / "source-copy"
+    _copy_source_candidate(source_copy)
+    source_site = source_copy / "src"
+    foreign_cwd = tmp_path / "foreign-cwd"
+    foreign_cwd.mkdir()
+    assert _run_identity(source_site, foreign_cwd).returncode == 0
+
+    mutations: list[tuple[str, Path, str]] = []
+    for name in ("added", "removed", "reordered", "metadata"):
+        search_root = tmp_path / f"{name}-search-root"
+        search_root.mkdir()
+        if name == "metadata":
+            (search_root / "nested").mkdir()
+        late_root = tmp_path / f"{name}-late-root"
+        late_root.mkdir()
+        setup = f"sys.path.insert(0, {str(late_root)!r})" if name == "reordered" else "pass"
+        mutation = {
+            "added": f"sys.path.append({str(late_root)!r})",
+            "removed": f"sys.path.remove({str(search_root)!r})",
+            "reordered": (
+                f"first = sys.path.index({str(search_root)!r})\n"
+                f"    second = sys.path.index({str(late_root)!r})\n"
+                "    sys.path[first], sys.path[second] = sys.path[second], sys.path[first]"
+            ),
+            "metadata": (
+                f"Path({str(search_root)!r}, 'nested', 'late.pyc').write_bytes(b'unsealed-cache')"
+            ),
+        }[name]
+        command = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "import saxo_bank_mcp.qa_analytics_source_matrix as matrix\n"
+            f"{setup}\n"
+            "original = matrix._validate_import_execution_closure\n"
+            "def mutate(*args, **kwargs):\n"
+            "    result = original(*args, **kwargs)\n"
+            f"    {mutation}\n"
+            "    return result\n"
+            "matrix._validate_import_execution_closure = mutate\n"
+            "print(matrix.source_matrix_candidate_identity().candidate_identity_sha256)\n"
+        )
+        mutations.append((name, search_root, command))
+
+    for name, search_root, command in mutations:
+        result = _run_identity(
+            source_site,
+            foreign_cwd,
+            prefix=search_root,
+            command=command,
+        )
+        assert result.returncode != 0, (name, result.stdout, result.stderr)
 
 
 class _ReceiptClient:

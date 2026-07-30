@@ -75,9 +75,10 @@ _EXPECTED_INSTALLER: Final = "uv"
 _RUNTIME_ARTIFACT_SUFFIXES: Final = frozenset(
     {".py", ".pyi", ".so", ".dylib", ".dll", ".pyd"},
 )
-_IMPORTABLE_ARTIFACT_SUFFIXES: Final = _RUNTIME_ARTIFACT_SUFFIXES | {".pyc"}
+_PYTHON_BYTECODE_SUFFIXES: Final = frozenset({".pyc", ".pyo"})
+_IMPORTABLE_ARTIFACT_SUFFIXES: Final = _RUNTIME_ARTIFACT_SUFFIXES | _PYTHON_BYTECODE_SUFFIXES
 _RUNTIME_TREE_EXCLUDED_PARTS: Final = frozenset(
-    {"__pycache__", "dist-packages", "site-packages"},
+    {"dist-packages", "site-packages"},
 )
 _STARTUP_CONFIGURATION_NAMES: Final = frozenset(
     {"pyvenv.cfg", "sitecustomize.py", "usercustomize.py"},
@@ -2081,6 +2082,7 @@ def _enabled(value: str | None) -> bool:
 
 def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
     """Verify the complete source or installed distribution closure."""
+    initial_search_directories = _execution_search_directory_snapshot()
     source_mode = _CANDIDATE_SOURCE_PATH.is_file()
     if source_mode:
         text = _CANDIDATE_SOURCE_PATH.read_text(encoding="utf-8")
@@ -2147,11 +2149,14 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
         or identity_sha256 != manifest.candidate_identity_sha256
     ):
         raise ValueError("installed source matrix candidate identity mismatch")
-    return SourceMatrixCandidateIdentity(
+    identity = SourceMatrixCandidateIdentity(
         source_contract_catalog_sha256=catalog_sha256,
         harness_build_sha256=harness_sha256,
         candidate_identity_sha256=identity_sha256,
     )
+    if _execution_search_directory_snapshot() != initial_search_directories:
+        raise ValueError("source matrix execution search directories changed")
+    return identity
 
 
 def _validate_candidate_manifest_paths(
@@ -2203,9 +2208,8 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
     ]
     result: dict[str, str] = {}
     for path in sorted(set(selected)):
-        if path.is_symlink():
-            raise ValueError("source matrix source closure contains a symlink")
-        if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+        metadata = _validated_closure_entry_metadata(path, scope="source closure")
+        if not stat.S_ISREG(metadata.st_mode):
             continue
         relative = path.relative_to(repository_root).as_posix()
         if relative == "data/analytics/source_matrix_candidate.json":
@@ -2214,39 +2218,142 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
     return result
 
 
+def _validated_closure_entry_metadata(
+    path: Path,
+    *,
+    scope: str,
+    allowed_symlinks: frozenset[Path] = frozenset(),
+) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise ValueError(f"source matrix {scope} entry is unavailable") from error
+    if stat.S_ISLNK(metadata.st_mode) and path.absolute() not in allowed_symlinks:
+        raise ValueError(f"source matrix {scope} contains a symlink")
+    if path.name == "__pycache__" or path.suffix.casefold() in _PYTHON_BYTECODE_SUFFIXES:
+        raise ValueError(f"source matrix {scope} contains a Python cache entry")
+    return metadata
+
+
+def _validate_directory_entry_tree(
+    root: Path,
+    *,
+    scope: str,
+    allowed_symlinks: frozenset[Path] = frozenset(),
+) -> None:
+    root_metadata = _validated_closure_entry_metadata(root, scope=scope)
+    if not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError(f"source matrix {scope} is not a directory")
+    for path in sorted(root.rglob("*")):
+        _validated_closure_entry_metadata(
+            path,
+            scope=scope,
+            allowed_symlinks=allowed_symlinks,
+        )
+
+
+def _expected_interpreter_aliases(root: Path) -> frozenset[Path]:
+    """Allow only the conventional venv aliases for the running interpreter."""
+    executable = Path(sys.executable).absolute()
+    executable_root = executable.parent.resolve(strict=True)
+    try:
+        executable_root.relative_to(root)
+    except ValueError:
+        return frozenset()
+    target = executable.resolve(strict=True)
+    version_names = {
+        "python",
+        f"python{sys.version_info.major}",
+        f"python{sys.version_info.major}.{sys.version_info.minor}",
+    }
+    if executable.suffix:
+        version_names |= {f"{name}{executable.suffix}" for name in tuple(version_names)}
+    result: set[Path] = set()
+    for name in version_names | {executable.name}:
+        candidate = executable_root / name
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode) and candidate.resolve(strict=True) == target:
+            result.add(candidate.absolute())
+    return frozenset(result)
+
+
+def _execution_path_projection(raw_value: str) -> dict[str, JsonValue]:
+    raw_path = Path.cwd() if raw_value == "" else Path(raw_value)
+    path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
+    absolute = path.absolute()
+    result: dict[str, JsonValue] = {
+        "absolute_sha256": hashlib.sha256(os.fsencode(absolute)).hexdigest(),
+        "raw_sha256": hashlib.sha256(os.fsencode(raw_value)).hexdigest(),
+    }
+    try:
+        metadata = absolute.lstat()
+    except FileNotFoundError:
+        result["exists"] = False
+        return result
+    result.update(
+        {
+            "change_time_ns": metadata.st_ctime_ns,
+            "device": metadata.st_dev,
+            "exists": True,
+            "group": metadata.st_gid,
+            "inode": metadata.st_ino,
+            "link_count": metadata.st_nlink,
+            "mode": metadata.st_mode,
+            "modified_time_ns": metadata.st_mtime_ns,
+            "owner": metadata.st_uid,
+            "resolved_sha256": hashlib.sha256(
+                os.fsencode(absolute.resolve(strict=True)),
+            ).hexdigest(),
+            "size": metadata.st_size,
+            "symlink": stat.S_ISLNK(metadata.st_mode),
+        },
+    )
+    if stat.S_ISLNK(metadata.st_mode):
+        result["link_target_sha256"] = hashlib.sha256(
+            os.fsencode(absolute.readlink()),
+        ).hexdigest()
+    elif stat.S_ISDIR(metadata.st_mode):
+        directory_entries: list[dict[str, JsonValue]] = []
+        for entry in (absolute, *sorted(absolute.rglob("*"))):
+            entry_metadata = entry.lstat()
+            if not stat.S_ISDIR(entry_metadata.st_mode) and not stat.S_ISLNK(
+                entry_metadata.st_mode,
+            ):
+                continue
+            projected: dict[str, JsonValue] = {
+                "change_time_ns": entry_metadata.st_ctime_ns,
+                "device": entry_metadata.st_dev,
+                "group": entry_metadata.st_gid,
+                "inode": entry_metadata.st_ino,
+                "link_count": entry_metadata.st_nlink,
+                "mode": entry_metadata.st_mode,
+                "modified_time_ns": entry_metadata.st_mtime_ns,
+                "name_sha256": hashlib.sha256(
+                    os.fsencode(entry.relative_to(absolute)),
+                ).hexdigest(),
+                "owner": entry_metadata.st_uid,
+                "size": entry_metadata.st_size,
+            }
+            if stat.S_ISLNK(entry_metadata.st_mode):
+                projected["link_target_sha256"] = hashlib.sha256(
+                    os.fsencode(entry.readlink()),
+                ).hexdigest()
+            directory_entries.append(projected)
+        result["directory_entry_count"] = len(directory_entries)
+        result["directory_tree_sha256"] = _digest(directory_entries)
+    return result
+
+
+def _execution_search_directory_snapshot() -> tuple[dict[str, JsonValue], ...]:
+    """Capture ordered execution-search directories and stable metadata."""
+    return tuple(_execution_path_projection(value) for value in sys.path)
+
+
 def _execution_root_projection_sha256() -> str:
     """Seal import roots and import machinery without publishing private paths."""
-
-    def path_projection(raw_value: str) -> dict[str, JsonValue]:
-        raw_path = Path.cwd() if raw_value == "" else Path(raw_value)
-        path = raw_path if raw_path.is_absolute() else Path.cwd() / raw_path
-        absolute = path.absolute()
-        result: dict[str, JsonValue] = {
-            "absolute_sha256": hashlib.sha256(os.fsencode(absolute)).hexdigest(),
-            "raw_sha256": hashlib.sha256(os.fsencode(raw_value)).hexdigest(),
-        }
-        try:
-            metadata = absolute.lstat()
-        except FileNotFoundError:
-            result["exists"] = False
-            return result
-        result.update(
-            {
-                "device": metadata.st_dev,
-                "exists": True,
-                "inode": metadata.st_ino,
-                "mode": stat.S_IFMT(metadata.st_mode),
-                "resolved_sha256": hashlib.sha256(
-                    os.fsencode(absolute.resolve(strict=True)),
-                ).hexdigest(),
-                "symlink": stat.S_ISLNK(metadata.st_mode),
-            },
-        )
-        if stat.S_ISLNK(metadata.st_mode):
-            result["link_target_sha256"] = hashlib.sha256(
-                os.fsencode(absolute.readlink()),
-            ).hexdigest()
-        return result
 
     def hook_projection(item: object) -> dict[str, JsonValue]:
         return {
@@ -2257,7 +2364,7 @@ def _execution_root_projection_sha256() -> str:
 
     return _digest(
         {
-            "cwd": path_projection(os.fspath(Path.cwd())),
+            "cwd": _execution_path_projection(os.fspath(Path.cwd())),
             "executable_path_sha256": hashlib.sha256(os.fsencode(sys.executable)).hexdigest(),
             "base_executable_path_sha256": hashlib.sha256(
                 os.fsencode(str(getattr(sys, "_base_executable", sys.executable))),
@@ -2266,7 +2373,7 @@ def _execution_root_projection_sha256() -> str:
                 hashlib.sha256(os.fsencode(str(value))).hexdigest()
                 for value in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
             ],
-            "sys_path": [path_projection(value) for value in sys.path],
+            "sys_path": _execution_search_directory_snapshot(),
             "meta_path": [hook_projection(item) for item in sys.meta_path],
             "path_hooks": [hook_projection(item) for item in sys.path_hooks],
         },
@@ -2307,19 +2414,17 @@ def _runtime_linked_file_projection(path: Path) -> tuple[str, str]:
 
 
 def _runtime_tree_entries(root: Path) -> tuple[dict[str, str], set[Path]]:
-    if root.is_symlink():
-        raise ValueError("source matrix runtime tree root is a symlink")
-    if not root.is_dir():
+    root_metadata = _validated_closure_entry_metadata(root, scope="runtime tree")
+    if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError("source matrix runtime tree is unavailable")
     entries: dict[str, str] = {}
     paths: set[Path] = set()
     for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError("source matrix runtime tree contains a symlink")
+        metadata = _validated_closure_entry_metadata(path, scope="runtime tree")
         relative_path = path.relative_to(root)
         if any(part in _RUNTIME_TREE_EXCLUDED_PARTS for part in relative_path.parts):
             continue
-        if not path.is_file():
+        if not stat.S_ISREG(metadata.st_mode):
             continue
         relative = relative_path.as_posix()
         entries[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -2343,33 +2448,41 @@ def _import_search_roots() -> tuple[Path, ...]:
         path = raw if raw.is_absolute() else Path.cwd() / raw
         if not path.exists():
             continue
-        if path.is_symlink():
-            raise ValueError("source matrix import search root is a symlink")
+        metadata = _validated_closure_entry_metadata(path, scope="import search root")
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("source matrix file-based import root is unsupported")
         resolved = path.resolve(strict=True)
         if resolved in seen:
             continue
-        if not resolved.is_dir():
-            raise ValueError("source matrix file-based import root is unsupported")
         seen.add(resolved)
         roots.append(resolved)
     return tuple(roots)
 
 
-def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR0912
+def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR0912, PLR0915
     entries: list[dict[str, str]] = []
     observed: set[Path] = set()
     roots = _import_search_roots()
     for root in roots:
+        allowed_symlinks = _expected_interpreter_aliases(root)
+        _validate_directory_entry_tree(
+            root,
+            scope="startup search directory",
+            allowed_symlinks=allowed_symlinks,
+        )
         for child in sorted(root.iterdir()):
+            child_metadata = _validated_closure_entry_metadata(
+                child,
+                scope="startup search directory",
+                allowed_symlinks=allowed_symlinks,
+            )
             startup_package_name = child.name in {"sitecustomize", "usercustomize"}
             startup_file = child.name in _STARTUP_CONFIGURATION_NAMES or child.name.endswith(
                 _STARTUP_CONFIGURATION_SUFFIXES,
             )
             if not startup_package_name and not startup_file:
                 continue
-            if child.is_symlink():
-                raise ValueError("source matrix startup configuration is a symlink")
-            startup_package = startup_package_name and child.is_dir()
+            startup_package = startup_package_name and stat.S_ISDIR(child_metadata.st_mode)
             if not startup_package and not startup_file:
                 continue
             resolved = child.resolve(strict=True)
@@ -2379,7 +2492,7 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
             root_sha256 = hashlib.sha256(
                 os.fsencode(root.resolve(strict=True)),
             ).hexdigest()
-            if child.is_dir():
+            if stat.S_ISDIR(child_metadata.st_mode):
                 tree_sha256, file_count = _runtime_tree_projection(child)
                 entries.append(
                     {
@@ -2390,7 +2503,7 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
                         "type": "package",
                     },
                 )
-            elif child.is_file():
+            elif stat.S_ISREG(child_metadata.st_mode):
                 entries.append(
                     {
                         "file_count": "1",
@@ -2416,8 +2529,12 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
         for child in sorted(root.iterdir()):
             if not child.name.endswith("._pth"):
                 continue
-            if child.is_symlink():
-                raise ValueError("source matrix path configuration is a symlink")
+            child_metadata = _validated_closure_entry_metadata(
+                child,
+                scope="executable configuration directory",
+            )
+            if not stat.S_ISREG(child_metadata.st_mode):
+                raise ValueError("source matrix path configuration type is invalid")
             resolved = child.resolve(strict=True)
             if resolved in observed:
                 continue
@@ -2435,10 +2552,10 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
         Path(sys.prefix) / "pyvenv.cfg",
         Path(sys.executable).absolute().parent.parent / "pyvenv.cfg",
     ):
-        if not candidate.exists():
-            continue
         if candidate.is_symlink():
             raise ValueError("source matrix path configuration is a symlink")
+        if not candidate.exists():
+            continue
         resolved = candidate.resolve(strict=True)
         if resolved in observed:
             continue
@@ -2531,6 +2648,10 @@ def _dependency_distributions(  # noqa: C901, PLR0912, PLR0915
         root = distribution("saxo-bank-mcp")
     except PackageNotFoundError as error:
         raise ValueError("installed source matrix distribution is unavailable") from error
+    _validate_directory_entry_tree(
+        Path(str(root.locate_file(""))),
+        scope="dependency installation directory",
+    )
     selected: dict[str, set[str]] = {}
     pending: list[tuple[Distribution, set[str]]] = [(root, set())]
     processed: dict[str, set[str]] = {}
@@ -2581,16 +2702,20 @@ def _dependency_distributions(  # noqa: C901, PLR0912, PLR0915
             path = Path(str(dependency.locate_file(package_path)))
             if ".." in Path(relative).parts:
                 continue
+            metadata = _validated_closure_entry_metadata(
+                path,
+                scope=f"dependency {name}",
+            )
             if ".dist-info/" in relative and Path(relative).name in _INSTALLER_GENERATED_METADATA:
                 if Path(relative).name == "INSTALLER":
-                    if not path.is_file() or path.is_symlink():
+                    if not stat.S_ISREG(metadata.st_mode):
                         raise ValueError(f"source matrix dependency {name} installer is invalid")
                     normalized = path.read_text(encoding="utf-8").strip().casefold()
                     installer_metadata["INSTALLER"] = hashlib.sha256(
                         normalized.encode(),
                     ).hexdigest()
                 continue
-            if not _safe_artifact_path(relative) or not path.is_file() or path.is_symlink():
+            if not _safe_artifact_path(relative) or not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"source matrix dependency {name} file is invalid")
             file_map[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         if not file_map or installer_metadata.get("INSTALLER") is None:
@@ -2614,7 +2739,13 @@ def _root_installed_metadata_projection() -> dict[str, str]:
         ),
         None,
     )
-    if installer is None or not installer.is_file() or installer.is_symlink():
+    if installer is None:
+        raise ValueError("installed source matrix installer projection is unavailable")
+    metadata = _validated_closure_entry_metadata(
+        installer,
+        scope="installed package metadata",
+    )
+    if not stat.S_ISREG(metadata.st_mode):
         raise ValueError("installed source matrix installer projection is unavailable")
     normalized = installer.read_text(encoding="utf-8").strip().casefold()
     return {"INSTALLER": hashlib.sha256(normalized.encode()).hexdigest()}
@@ -2668,9 +2799,8 @@ def _add_import_projection(
         or not relative_path.parts
     ):
         return
-    if located.is_symlink():
-        raise ValueError("source matrix recorded import file is a symlink")
-    if not located.is_file():
+    metadata = _validated_closure_entry_metadata(located, scope="recorded import file")
+    if not stat.S_ISREG(metadata.st_mode):
         raise ValueError("source matrix recorded import file is unavailable")
     resolved = located.resolve(strict=True)
     allowed_files.add(resolved)
@@ -2692,15 +2822,17 @@ def _scan_recorded_import_root(
     allowed_files: set[Path],
     allowed_unsealed_files: set[Path],
 ) -> None:
-    if root.is_symlink():
-        raise ValueError("source matrix recorded import root is a symlink")
-    candidates = (root,) if root.is_file() else root.rglob("*")
+    root_metadata = _validated_closure_entry_metadata(root, scope="recorded import root")
+    if not stat.S_ISREG(root_metadata.st_mode) and not stat.S_ISDIR(root_metadata.st_mode):
+        raise ValueError("source matrix recorded import root type is invalid")
+    candidates = (root,) if stat.S_ISREG(root_metadata.st_mode) else root.rglob("*")
     for path in candidates:
-        if path.is_symlink():
-            raise ValueError("source matrix recorded import root contains a symlink")
-        if "__pycache__" in path.parts:
-            continue
-        if not path.is_file():
+        metadata = (
+            root_metadata
+            if path == root
+            else _validated_closure_entry_metadata(path, scope="recorded import root")
+        )
+        if not stat.S_ISREG(metadata.st_mode):
             continue
         resolved = path.resolve(strict=True)
         if resolved not in allowed_files and resolved not in allowed_unsealed_files:
@@ -2725,12 +2857,14 @@ def _module_candidates(root: Path, module_name: str) -> set[Path]:
 
 def _nonimportable_namespace_projection(root: Path) -> bool:
     """Allow inert editable-install data roots while rejecting executable shadows."""
-    if root.is_symlink() or not root.is_dir():
+    root_metadata = _validated_closure_entry_metadata(root, scope="namespace projection")
+    if not stat.S_ISDIR(root_metadata.st_mode):
         return False
     for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ValueError("source matrix namespace projection contains a symlink")
-        if path.is_file() and path.suffix.casefold() in _IMPORTABLE_ARTIFACT_SUFFIXES:
+        metadata = _validated_closure_entry_metadata(path, scope="namespace projection")
+        if stat.S_ISREG(metadata.st_mode) and path.suffix.casefold() in (
+            _IMPORTABLE_ARTIFACT_SUFFIXES
+        ):
             return False
     return True
 
@@ -2739,14 +2873,14 @@ def _source_package_projection(
     root: Path,
     expected: Mapping[str, str],
 ) -> tuple[bool, set[Path]]:
-    if root.is_symlink() or not root.is_dir():
+    root_metadata = _validated_closure_entry_metadata(root, scope="source projection")
+    if not stat.S_ISDIR(root_metadata.st_mode):
         return False, set()
     observed: dict[str, str] = {}
     paths: set[Path] = set()
     for path in sorted(root.rglob("*")):
-        if path.is_symlink():
-            raise ValueError("source matrix source projection contains a symlink")
-        if "__pycache__" in path.parts or path.suffix == ".pyc" or not path.is_file():
+        metadata = _validated_closure_entry_metadata(path, scope="source projection")
+        if not stat.S_ISREG(metadata.st_mode):
             continue
         relative = f"src/saxo_bank_mcp/{path.relative_to(root).as_posix()}"
         observed[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -2931,6 +3065,10 @@ def _installed_candidate_files(  # noqa: C901
     distribution_files = installed_distribution.files
     if distribution_files is None:
         raise ValueError("installed source matrix RECORD is unavailable")
+    _validate_directory_entry_tree(
+        Path(str(installed_distribution.locate_file(""))),
+        scope="installed package directory",
+    )
     excluded = set(exclusions)
     console_scripts = {
         entry_point.name: entry_point.value
@@ -2942,6 +3080,10 @@ def _installed_candidate_files(  # noqa: C901
     for package_path in distribution_files:
         name = str(package_path).replace(os.sep, "/")
         path = Path(str(installed_distribution.locate_file(package_path)))
+        metadata = _validated_closure_entry_metadata(
+            path,
+            scope="installed package",
+        )
         if _installer_entrypoint_projection(name, console_scripts):
             if not _installer_entrypoint_projection_valid(
                 path,
@@ -2954,11 +3096,11 @@ def _installed_candidate_files(  # noqa: C901
         if ".dist-info/" in name and Path(name).name in _INSTALLER_GENERATED_METADATA:
             continue
         if name in excluded:
-            if not path.is_file():
+            if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("installed source matrix exclusion is unavailable")
             observed_exclusions.add(name)
             continue
-        if not path.is_file() or path.is_symlink():
+        if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("installed source matrix file is unavailable")
         result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     if observed_exclusions != excluded:
@@ -2980,7 +3122,14 @@ def _installer_entrypoint_projection_valid(
     *,
     interpreter: Path | None = None,
 ) -> bool:
-    if not path.is_file() or path.is_symlink() or stat.S_IMODE(path.stat().st_mode) & 0o111 == 0:
+    try:
+        metadata = _validated_closure_entry_metadata(
+            path,
+            scope="installed console entry point",
+        )
+    except ValueError:
+        return False
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) & 0o111 == 0:
         return False
     target_parts = target.split(":")
     if (
