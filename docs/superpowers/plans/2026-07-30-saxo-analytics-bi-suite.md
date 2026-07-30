@@ -1,9 +1,8 @@
 # Saxo Analytics and BI Suite Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this
-> plan task by task. Do not use Codex subagents or Oracle. Use one persistent headless Grok CLI
-> session for implementation support and one separate persistent headless Grok CLI session for
-> independent review.
+> plan task by task. Use in-session Codex agents for implementation support and independent review.
+> Do not use Oracle or attempt Grok authentication.
 
 **Goal:** Build the complete on-demand Saxo analytics and BI suite described in
 `docs/analytics-bi-vision.md`, expose it through FastMCP for Codex and Claude, and prove every
@@ -18,14 +17,13 @@ existing precheck and approval kernel, but no analytics tool can place, modify, 
 
 **Tech Stack:** Python 3.12, FastMCP 3.4.2, Pydantic 2, HTTPX 2, DuckDB, NumPy, SciPy, Matplotlib,
 Plotly, pytest, Hypothesis, Ruff, BasedPyright, the existing Saxo SIM QA harness, Codex and Claude
-skill harnesses, and headless Grok CLI implementation and review sessions.
+skill harnesses, and in-session Codex implementation and review agents.
 
 ## Global Constraints
 
 - Start from `origin/main` in an isolated worktree. The current local `main` has unrelated source
   edits and must remain untouched.
-- Verify this plan and `docs/analytics-bi-vision.md` are present in the clean `origin/main`
-  worktree before implementation.
+- Copy this plan and `docs/analytics-bi-vision.md` into the worktree before implementation.
 - Use Saxo SIM credentials and SIM endpoints for all network activity in this plan.
 - Prove `environment=SIM` immediately before controlled activity. Refuse if the environment is LIVE
   or uncertain.
@@ -40,7 +38,7 @@ skill harnesses, and headless Grok CLI implementation and review sessions.
 - Collection is on demand inside the MCP call or a bounded MCP-owned job. No background collector
   or scheduler is in scope.
 - Private owner-only results may contain balances, holdings, costs, P&L, and money values. Public
-  evidence, logs, Grok bundles, tests, and agent-evaluation transcripts may contain only safe
+  evidence, logs, Codex-agent reports, tests, and agent-evaluation transcripts may contain only safe
   aliases, schemas, hashes, counts, and redacted summaries.
 - Retain source history, analyses, and artifacts indefinitely until explicit owner deletion. Never
   auto-delete data to satisfy a quota.
@@ -52,14 +50,14 @@ skill harnesses, and headless Grok CLI implementation and review sessions.
   only when its honest degradation or refusal contract is implemented and proved.
 - During development, run only the focused tests named by the current task, Ruff on changed files,
   and BasedPyright on changed modules.
-- Use the implementation Grok session serially for implementation tasks. Do not perform parallel
-  work while it runs. At the end of each main area, resume the separate review Grok session with
+- Use the implementation Codex agent serially for implementation tasks. Do not perform parallel
+  work while it runs. At the end of each main area, use a separate Codex review agent with
   the complete area diff and test evidence. Wait directly for each run; do not poll continuously.
 - Fix only reproducible safety, correctness, privacy, or agent-usability problems. Record style and
   future-scope suggestions without interrupting the loop.
 - Consolidate related fixes before freezing a candidate.
 - Final installation, full tests, full SIM matrices, dual-agent evaluations, artifact QA, privacy
-  scans, and final Grok review run once per stable candidate. If they find a real blocker,
+  scans, and final Codex review run once per stable candidate. If they find a real blocker,
   consolidate all fixes, create one new candidate, and repeat the final validation once.
 - Short progress updates state what is running, what passed or failed, whether source changed, and
   the single next step.
@@ -130,8 +128,8 @@ private values.
 
 **Files:**
 
-- Verify: `docs/analytics-bi-vision.md`
-- Verify: `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
+- Copy: `docs/analytics-bi-vision.md`
+- Copy: `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
 - Verify: `pyproject.toml`
 - Verify: `uv.lock`
 
@@ -142,18 +140,9 @@ private values.
   git worktree add ../saxo-bank-mcp-analytics -b feat/analytics-bi-suite origin/main
   ```
 
-  Expected: the new worktree starts at `origin/main`; the original worktree remains unchanged and
-  both planning documents are already tracked.
+  Expected: the new worktree starts at `origin/main`; the original worktree remains unchanged.
 
-- [ ] Verify the worktree is clean and both planning documents are present:
-
-  ```bash
-  git status --short
-  test -f docs/analytics-bi-vision.md
-  test -f docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md
-  ```
-
-  Expected: `git status --short` prints nothing and both file checks pass.
+- [ ] Copy the two planning documents into the new worktree and verify their hashes.
 
 - [ ] Install the locked baseline and run deterministic baseline gates:
 
@@ -168,9 +157,15 @@ private values.
 
   Expected: all baseline gates pass before analytics dependencies or source files are changed.
 
-- [ ] Start one persistent Grok implementation session and one separate persistent Grok review
-  session with `--single`, `--output-format json`, `--no-alt-screen`, `--no-subagents`, and the
-  analytics worktree as `--cwd`. Record only session IDs and redacted verdicts.
+- [ ] Use one in-session Codex agent for implementation support and a separate in-session Codex
+  agent for independent review. Record only task IDs and redacted verdicts.
+
+- [ ] Commit the approved plan and vision:
+
+  ```bash
+  git add docs/analytics-bi-vision.md docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md
+  git commit -m "docs: plan complete Saxo analytics suite"
+  ```
 
 ### Task 2: Lock dependencies and resource configuration
 
@@ -207,7 +202,7 @@ private values.
 
 - [ ] Run the focused tests, Ruff on `analytics_config.py`, and BasedPyright on the new module.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright. Fix only reproducible boundary, permission, or dependency
   problems.
 
@@ -255,10 +250,10 @@ private values.
 
 - [ ] Generate and check in `output_schema_v1.json`; test exact schema stability.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
-- [ ] Run the Area A review through the separate Grok session with the complete contracts and
+- [ ] Run the Area A review through the separate Codex review agent with the complete contracts and
   configuration diff. Fix reproducible blockers before committing the area.
 
 - [ ] Commit:
@@ -318,7 +313,7 @@ private values.
 
 - [ ] Verify failed migration leaves the previous fixture readable and its fingerprint unchanged.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -369,7 +364,7 @@ private values.
 
 - [ ] Quarantine dependent analysis kinds on source drift.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -407,7 +402,7 @@ private values.
 - [ ] Freeze observed source contracts and fixtures. Any contract change after this task requires
   focused source tests, not another full source matrix until the next stable candidate.
 
-- [ ] Run the Area B review through the separate Grok session on the complete data-foundation diff
+- [ ] Run the Area B review through the separate Codex review agent on the complete data-foundation diff
   and redacted source matrix. Its hard task is to identify a field or entitlement condition that
   could make an agent state an incorrect market or portfolio fact.
 
@@ -440,7 +435,7 @@ private values.
 - [ ] Implement resolution through Saxo reference endpoints and safe local handles. Saved universe
   operations are local-only and revision guarded.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -478,7 +473,7 @@ private values.
 
 - [ ] Fingerprint raw pages, normalized rows, source contract, entitlements, and correction state.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -518,7 +513,7 @@ private values.
 - [ ] Add immutable portfolio snapshots and invalidate dependent analyses after material source
   revisions.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -562,10 +557,10 @@ private values.
 - [ ] Generate a coverage matrix that fails when a production metric, analysis kind, artifact
   template, or source field has no active proof profile.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, the generated-catalog check, Ruff, and BasedPyright.
 
-- [ ] Run the Area C review through the separate Grok session with the complete ingestion,
+- [ ] Run the Area C review through the separate Codex review agent with the complete ingestion,
   provenance, replay, and quarantine diff. Fix reproducible blockers before committing the area.
 
 - [ ] Commit:
@@ -611,7 +606,7 @@ private values.
 - [ ] Add mutation checks for sign, denominator, annualization, date order, fee omission, FX
   direction, and off-by-one errors. Each seeded mutation must be killed by a named test.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused unit, property, and mutation tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -654,7 +649,7 @@ private values.
 
 - [ ] Cross-check price and indicator outputs against independent fixture calculations.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof-coverage generation, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -711,7 +706,7 @@ private values.
 - [ ] Refuse authoritative tax-lot or corporate-action claims when Saxo does not supply the
   required basis or entitlement.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof coverage, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -757,7 +752,7 @@ private values.
 
 - [ ] Cross-check eligible cost estimates with Saxo pre-trade cost illustration.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests including existing trade preview regression tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -796,7 +791,7 @@ private values.
 - [ ] Label probability results as model distributions, not predictions. Position sizing requires
   user-supplied risk budget and does not choose one.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof coverage, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -834,7 +829,7 @@ private values.
 - [ ] Return current-to-target deltas and stability diagnostics only. Never create an order or
   imply that the optimizer selected the user's objective or risk tolerance.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof coverage, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -874,7 +869,7 @@ private values.
 - [ ] Refuse unsupported American, path-dependent, rate-complex, or insufficient-source products
   with the exact capability limitation.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof coverage, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -913,10 +908,10 @@ private values.
 - [ ] Run ghost portfolios in SIM only. Reconcile every controlled order lifecycle and clean up.
   Backtesting becomes `verified` only after the equivalent ghost workflow passes.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, proof coverage, Ruff, and BasedPyright.
 
-- [ ] Run the Area D review through the separate Grok session on all deterministic engines. Hard
+- [ ] Run the Area D review through the separate Codex review agent on all deterministic engines. Hard
   tasks must include: compare 25 instruments over five years without making a market-wide claim;
   explain multi-account P&L and margin without identifiers; diagnose 20 SIM trades; model a
   combined equity/FX shock; detect unstable optimization; detect an option sign error; and find
@@ -965,7 +960,7 @@ private values.
 - [ ] Run visual QA at desktop and mobile widths for HTML, pixel checks for PNG, and exact value
   parity against structured results.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Use the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, BasedPyright, and visual checks with actual rendered artifacts.
 
 - [ ] Commit:
@@ -1008,10 +1003,10 @@ private values.
 
 - [ ] Prove all storage tools make zero Saxo network calls and zero broker writes.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Resume the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
-- [ ] Run the Area E review through the separate Grok session with actual artifacts, job recovery,
+- [ ] Run the Area E review through the separate Codex review agent with actual artifacts, job recovery,
   and deletion evidence. Fix reproducible blockers before committing the area.
 
 - [ ] Commit:
@@ -1056,7 +1051,7 @@ private values.
 - [ ] Generate the 60-tool catalog and fail CI if IDs, annotations, metadata, descriptions, and
   registrations diverge.
 
-- [ ] Resume the implementation Grok session for the task and wait. Inspect its changes, then run
+- [ ] Resume the implementation Codex agent for the task and wait. Inspect its changes, then run
   focused tests, Ruff, and BasedPyright.
 
 - [ ] Commit:
@@ -1104,8 +1099,8 @@ private values.
 - [ ] Generate catalogs and run focused static validators plus one focused local fixture-based dual
   evaluation.
 
-- [ ] Resume the implementation Grok session for the task and wait. Then run the Area F review
-  through the separate Grok session on the installed skills and complete FastMCP diff. The reviewer
+- [ ] Resume the implementation Codex agent for the task and wait. Then run the Area F review
+  through the separate Codex review agent on the installed skills and complete FastMCP diff. The reviewer
   must start from an ambiguous user question, discover capabilities, fetch data, calculate,
   render, explain, stop before trade execution, and identify any misleading instruction or missing
   recovery step.
@@ -1159,8 +1154,8 @@ private values.
 - [ ] Run only focused harness tests during development. Do not run the full matrix until Task 24
   freezes the candidate.
 
-- [ ] Resume the implementation Grok session for the task and wait. Then run the Area G harness
-  review through the separate Grok session over the complete proof design and seeded-fault cases.
+- [ ] Resume the implementation Codex agent for the task and wait. Then run the Area G harness
+  review through the separate Codex review agent over the complete proof design and seeded-fault cases.
 
 - [ ] Commit:
 
@@ -1184,7 +1179,7 @@ private values.
 - Update: `docs/analytics-bi-vision.md`
 - Create: `docs/analytics-bi-validation.md`
 
-- [ ] Consolidate all known reproducible blockers from focused tests and both Grok sessions before
+- [ ] Consolidate all known reproducible blockers from focused tests and both Codex agents before
   creating the candidate.
 
 - [ ] Run focused tests, Ruff, and BasedPyright after the last source change.
@@ -1224,7 +1219,7 @@ private values.
 - [ ] Run privacy, secret, identifier, private-value, path, URL, raw-payload, and publication scans
   once.
 
-- [ ] Resume the separate Grok review session once for a final review of the exact candidate and
+- [ ] Use the separate Codex review agent once for a final review of the exact candidate and
   redacted final evidence. Ask only for reproducible correctness, safety, privacy, or
   agent-usability blockers.
 
@@ -1234,7 +1229,7 @@ private values.
 
 - [ ] Create `docs/analytics-bi-validation.md` with candidate SHA, dependency-lock fingerprint,
   proof-profile coverage, 60-tool SIM result, per-analysis result, artifact QA result, dual-agent
-  result, cleanup and unchanged-state proof, privacy result, final Grok verdict, external Saxo
+  result, cleanup and unchanged-state proof, privacy result, final Codex verdict, external Saxo
   limitations, `live_events=0`, `live_mutation_calls=0`, and `purchase_occurred=false`.
 
 - [ ] Commit only the final validation document and safe evidence indexes. Push the feature branch
@@ -1255,7 +1250,7 @@ The implementation loop is complete only when all 24 tasks are checked and:
 - Cleanup succeeds and SIM account state is unchanged after controlled activity.
 - Public evidence contains no credentials, identifiers, private values, paths, raw URLs, or raw
   broker payloads.
-- The final independent Grok review finds no reproducible blocker.
+- The final independent Codex review finds no reproducible blocker.
 - No LIVE endpoint was called, no LIVE mutation occurred, and no purchase occurred.
 
 After this complete SIM result, LIVE read-only validation is a separate user-started phase. It is
