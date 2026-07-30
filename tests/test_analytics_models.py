@@ -777,6 +777,12 @@ def test_public_evidence_validator_rejects_models_built_without_validation(
     "safe_text",
     [
         "The client key is unavailable.",
+        "ClientKey is unavailable.",
+        '"ClientKey" is "unavailable".',
+        "The client_key is not available.",
+        "ClientKey is not_available.",
+        '"ClientKey" is "not-provided".',
+        "The local directory is unavailable.",
         (
             "Raw account IDs, client keys, order IDs, URLs, local paths, tokens, "
             "and DisplayName are excluded from this evidence."
@@ -789,6 +795,51 @@ def test_public_evidence_allows_safe_ordinary_privacy_prose(safe_text: str) -> N
     refusal = AnalyticsRefusal.model_validate(payload)
 
     assert validate_public_evidence(refusal) is None
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "ClientKey is synthetic_1234567890",
+        '"ClientKey" is "synthetic_1234567890"',
+        "client key is synthetic_1234567890",
+        "client_key is synthetic_1234567890",
+        "client-key is synthetic_1234567890",
+    ],
+)
+def test_public_evidence_rejects_identifier_like_is_assignments(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        r"\\server\share\result.json",
+        "~/analytics/result.json",
+    ],
+)
+def test_public_evidence_rejects_unc_and_home_relative_paths(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError):
+        validate_public_evidence(forged)
 
 
 @pytest.mark.parametrize(
@@ -826,6 +877,34 @@ def test_public_refusals_and_degradations_reject_monetary_text(
 
     with pytest.raises(ValidationError, match="forbidden value class"):
         model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "Portfolio value: 12345.67 dollars.",
+        "Portfolio value: dollars 12345.67.",
+        "Portfolio value: USD 12345.67.",
+        "Portfolio value: 12345.67 USD.",
+    ],
+)
+def test_public_evidence_rejects_currency_names_and_real_codes_on_either_side(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+
+def test_public_evidence_allows_non_currency_uppercase_count_labels() -> None:
+    payload = _refusal_payload()
+    payload["reason"] = "SIM 123 rows were available."
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
 
 
 @pytest.mark.parametrize(

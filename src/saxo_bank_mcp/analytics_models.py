@@ -52,21 +52,48 @@ _SENSITIVE_FIELD_NAMES: Final = frozenset(
         "deletionpreviewtoken",
     },
 )
+_SENSITIVE_FIELD_PATTERN_TEXT: Final = r"""(?:
+    account[\s_-]?(?:id|key|number)
+    |client[\s_-]?(?:id|key)
+    |order[\s_-]?ids?
+    |display[\s_-]?name
+    |access[\s_-]?token
+    |refresh[\s_-]?token
+    |preview[\s_-]?token
+    |disclaimer[\s_-]?token
+)"""
 _SENSITIVE_ASSIGNMENT_PATTERN: Final = re.compile(
-    r"""(?ix)
-    \b(?:
-        account[\s_-]?(?:id|key|number)
-        |client[\s_-]?(?:id|key)
-        |order[\s_-]?ids?
-        |display[\s_-]?name
-        |access[\s_-]?token
-        |refresh[\s_-]?token
-        |preview[\s_-]?token
-        |disclaimer[\s_-]?token
-    )\b
+    r"(?ix)\b"
+    + _SENSITIVE_FIELD_PATTERN_TEXT
+    + r"""\b
     ["']?\s*(?:=|:)\s*
     ["']?[^\s,"'};]{3,}
     """,
+)
+_SENSITIVE_IS_ASSIGNMENT_PATTERN: Final = re.compile(
+    r"(?ix)\b"
+    + _SENSITIVE_FIELD_PATTERN_TEXT
+    + r"""\b
+    ["']?\s+\bis\b\s+
+    ["']?(?P<value>[^\s,"'};]+)
+    """,
+)
+_IDENTIFIER_TOKEN_PATTERN: Final = re.compile(r"(?i)^[a-z0-9][a-z0-9._~+/=-]{7,}$")
+_IDENTIFIER_TOKEN_SIGNAL_PATTERN: Final = re.compile(r"[0-9_./+=-]")
+_LONG_IDENTIFIER_TOKEN_LENGTH: Final = 20
+_SAFE_SENSITIVE_VALUE_SENTINELS: Final = frozenset(
+    {
+        "excluded",
+        "none",
+        "not_applicable",
+        "not_available",
+        "not_provided",
+        "null",
+        "omitted",
+        "redacted",
+        "unavailable",
+        "unknown",
+    }
 )
 _AUTHORIZATION_PATTERN: Final = re.compile(
     r"(?i)\bauthorization\s*(?::|=)?\s*bearer\s+[A-Za-z0-9._~+/=-]{8,}",
@@ -80,21 +107,52 @@ _LOCAL_PATH_PATTERN: Final = re.compile(
     (?:
         (?<![A-Z0-9._~:/-])/(?!/)[^\s<>'"]+
         |(?<![A-Z0-9])[A-Z]:[\\/][^\s<>'"]+
+        |(?<![\\/])\\\\[A-Z0-9._$-]+[\\/][^\s<>'"]+
+        |(?<![A-Z0-9._~:/-])~/(?!/)[^\s<>'"]+
     )
     """,
 )
+_ISO_4217_CURRENCY_CODES: Final[frozenset[str]] = frozenset(
+    """
+    AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND
+    BOB BOV BRL BSD BTN BWP BYN BZD CAD CDF CHE CHF CHW CLF CLP CNY COP COU
+    CRC CUC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS
+    GIP GMD GNF GTQ GYD HKD HNL HTG HUF IDR ILS INR IQD IRR ISK JMD JOD JPY
+    KES KGS KHR KMF KPW KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA
+    MKD MMK MNT MOP MRU MUR MVR MWK MXN MXV MYR MZN NAD NGN NIO NOK NPR NZD
+    OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK
+    SGD SHP SLE SLL SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD
+    TWD TZS UAH UGX USD USN UYI UYU UYW UZS VED VES VND VUV WST XAF XAG XAU
+    XBA XBB XBC XBD XCD XCG XDR XOF XPD XPF XPT XSU XTS XUA XXX YER ZAR ZMW
+    ZWG ZWL
+    """.split()  # noqa: SIM905
+)
+_CURRENCY_NAMES: Final[frozenset[str]] = frozenset(
+    """
+    baht dinar dinars dirham dirhams dollar dollars dong euro euros forint
+    forints franc francs hryvnia hryvnias krona krone kroner kronor koruna
+    lei leu lev leva lira naira peso pesos pound pounds rand reais renminbi
+    rial rials ringgit riyal riyals rouble roubles ruble rubles rupee rupees
+    shekel shekels shilling shillings sterling taka tenge won yen yuan zloty
+    """.split()  # noqa: SIM905
+)
+_CURRENCY_TERM_PATTERN_TEXT: Final = "|".join(
+    sorted(_ISO_4217_CURRENCY_CODES | _CURRENCY_NAMES)
+)
+_MONEY_AMOUNT_PATTERN_TEXT: Final = (
+    r"[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?"
+)
 _MONETARY_VALUE_PATTERN: Final = re.compile(
-    r"""(?x)
+    rf"""(?ix)
     (?:
-        (?<![A-Z])(?!UTC\b)[A-Z]{3}\s+
-        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?
+        \b(?:{_CURRENCY_TERM_PATTERN_TEXT})\b\s*{_MONEY_AMOUNT_PATTERN_TEXT}
         |
-        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?\s*
-        (?<![A-Z])(?!UTC\b)[A-Z]{3}\b
+        {_MONEY_AMOUNT_PATTERN_TEXT}\s*
+        \b(?:{_CURRENCY_TERM_PATTERN_TEXT})\b
         |
-        [€£$¥₹]\s*[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?
+        [€£$¥₹]\s*{_MONEY_AMOUNT_PATTERN_TEXT}
         |
-        [-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?\s*[€£$¥₹]
+        {_MONEY_AMOUNT_PATTERN_TEXT}\s*[€£$¥₹]
     )
     """,
 )
@@ -838,6 +896,38 @@ def validate_public_evidence(result: AnalysisOutput) -> None:
         )
 
 
+def _looks_like_identifier_token(value: str) -> bool:
+    candidate = value.rstrip(".!?")
+    normalized = candidate.casefold().replace("-", "_")
+    if normalized in _SAFE_SENSITIVE_VALUE_SENTINELS:
+        return False
+    if _IDENTIFIER_TOKEN_PATTERN.fullmatch(candidate) is None:
+        return False
+    return (
+        len(candidate) >= _LONG_IDENTIFIER_TOKEN_LENGTH
+        or _IDENTIFIER_TOKEN_SIGNAL_PATTERN.search(candidate) is not None
+    )
+
+
+def _string_contains_forbidden_public_value(value: str) -> bool:
+    if any(
+        pattern.search(value) is not None
+        for pattern in (
+            _SENSITIVE_ASSIGNMENT_PATTERN,
+            _AUTHORIZATION_PATTERN,
+            _JWT_PATTERN,
+            _URL_PATTERN,
+            _LOCAL_PATH_PATTERN,
+            _MONETARY_VALUE_PATTERN,
+        )
+    ):
+        return True
+    return any(
+        _looks_like_identifier_token(match.group("value"))
+        for match in _SENSITIVE_IS_ASSIGNMENT_PATTERN.finditer(value)
+    )
+
+
 def _contains_forbidden_public_value(value: PublicEvidenceValue) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -853,18 +943,8 @@ def _contains_forbidden_public_value(value: PublicEvidenceValue) -> bool:
         return False
     if isinstance(value, list):
         return any(_contains_forbidden_public_value(child) for child in value)
-    if not isinstance(value, str):
-        return False
-    return any(
-        pattern.search(value) is not None
-        for pattern in (
-            _SENSITIVE_ASSIGNMENT_PATTERN,
-            _AUTHORIZATION_PATTERN,
-            _JWT_PATTERN,
-            _URL_PATTERN,
-            _LOCAL_PATH_PATTERN,
-            _MONETARY_VALUE_PATTERN,
-        )
+    return isinstance(value, str) and _string_contains_forbidden_public_value(
+        value
     )
 
 
