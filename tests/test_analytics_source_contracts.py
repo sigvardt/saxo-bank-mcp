@@ -137,6 +137,7 @@ def test_pagination_cursor_schemas_are_frozen_per_source_contract() -> None:
         for field in chart_pagination.cursor_fields
     ] == [("$skiptoken", "token", None, None)]
     assert chart_pagination.valid_combinations == (("$skiptoken",),)
+    assert chart_pagination.returned_combinations == (("$skiptoken",),)
 
     assert positions_pagination is not None
     assert [
@@ -149,6 +150,10 @@ def test_pagination_cursor_schemas_are_frozen_per_source_contract() -> None:
     assert positions_pagination.valid_combinations == (
         ("$skip",),
         ("$top",),
+        ("$skip", "$top"),
+    )
+    assert positions_pagination.returned_combinations == (
+        ("$skip",),
         ("$skip", "$top"),
     )
 
@@ -219,6 +224,65 @@ def test_response_contract_closes_envelope_objects_and_list_items() -> None:
         "Strike",
         "Uic",
     }
+
+
+def test_balance_contract_accepts_complete_known_account_money_state_shape() -> None:
+    balance = source_contracts_by_id()["balances_v1"]
+    comparison = compare_source_schema(
+        balance,
+        {
+            "CashAvailableForTrading": 100.0,
+            "CashBalance": 100.0,
+            "CashBlocked": 1.0,
+            "CashBlockedFromWithdrawal": 2.0,
+            "Currency": "EUR",
+            "FinancingAccruals": 3.0,
+            "FundsAvailableForSettlement": 97.0,
+            "FundsReservedForSettlement": 4.0,
+            "MarginAvailableForTrading": 95.0,
+            "SpendingPower": 90.0,
+            "SpendingPowerDetail": {
+                "Current": 90.0,
+                "Maximum": 110.0,
+            },
+            "TotalValue": 120.0,
+            "TransactionsNotBooked": 5.0,
+            "TransactionsNotBookedDetail": {
+                "Accrual": 1.0,
+                "AdditionalTransactionCost": 1.0,
+                "BondValue": 1.0,
+                "CashDeposit": 1.0,
+                "CashReservation": 1.0,
+                "CashWithdrawal": 1.0,
+                "CertificatesValue": 1.0,
+                "Commission": 1.0,
+                "ExchangeFee": 1.0,
+                "ExternalCharges": 1.0,
+                "FundsReservedByOrder": 1.0,
+                "IpoSubscriptionFee": 1.0,
+                "LeveragedKnockOutProductsValue": 1.0,
+                "MutualFundValue": 1.0,
+                "OptionPremium": 1.0,
+                "ShareValue": 1.0,
+                "StampDuty": 1.0,
+                "WarrantPremium": 1.0,
+            },
+            "VariationMarginCashBalance": 6.0,
+        },
+    )
+
+    assert comparison.compatible is True
+    assert comparison.additive_fields == ()
+    spending_power_detail = next(
+        field for field in balance.fields if field.name == "SpendingPowerDetail"
+    )
+    transactions_detail = next(
+        field for field in balance.fields if field.name == "TransactionsNotBookedDetail"
+    )
+    assert spending_power_detail.object_mode is not None
+    assert spending_power_detail.object_mode.value == "closed"
+    assert transactions_detail.object_mode is not None
+    assert transactions_detail.object_mode.value == "closed"
 
 
 @pytest.mark.parametrize(
@@ -426,6 +490,72 @@ def test_structural_response_drift_is_fail_closed(
     assert comparison.compatible is False
     assert expected_error in comparison.structural_errors
     assert comparison.quarantined_analysis_kinds == chart.dependent_analysis_kinds
+
+
+@pytest.mark.parametrize(
+    "contract_id",
+    [
+        "bookings_v1",
+        "chart_v3",
+        "closed_positions_history_v1",
+        "corporate_action_events_v2",
+        "corporate_action_holdings_v2",
+        "exposure_instruments_v1",
+        "info_prices_list_v1",
+        "orders_v1",
+        "performance_timeseries_v4",
+        "positions_v1",
+        "reference_instrument_details_v1",
+        "reference_instruments_v1",
+        "transactions_v1",
+    ],
+)
+def test_optional_collection_metadata_accepts_explicit_null(
+    contract_id: str,
+) -> None:
+    contract = source_contracts_by_id()[contract_id]
+    metadata_names = tuple(
+        field.name for field in contract.response_envelope.structural_fields if not field.required
+    )
+    payload: dict[str, object] = {
+        "Data": [],
+        **dict.fromkeys(metadata_names),
+    }
+    if contract_id == "chart_v3":
+        payload["DataVersion"] = 7
+
+    comparison = compare_source_schema(contract, payload)
+
+    assert comparison.compatible is True
+    assert comparison.null_optional_fields == tuple(sorted(metadata_names))
+    assert comparison.structural_errors == ()
+
+
+def test_optional_collection_metadata_distinguishes_missing_from_wrong_type() -> None:
+    chart = source_contracts_by_id()["chart_v3"]
+    missing = compare_source_schema(
+        chart,
+        {"Data": [], "DataVersion": 7},
+    )
+
+    assert missing.compatible is True
+    assert missing.structural_errors == ()
+    wrong_metadata: tuple[tuple[str, object], ...] = (
+        ("MaxRows", "many"),
+        ("__count", {}),
+        ("__next", 42),
+    )
+    for field_name, wrong_value in wrong_metadata:
+        comparison = compare_source_schema(
+            chart,
+            {
+                "Data": [],
+                "DataVersion": 7,
+                field_name: wrong_value,
+            },
+        )
+        assert comparison.compatible is False
+        assert f"envelope_field_type_mismatch:{field_name}" in comparison.structural_errors
 
 
 def test_optional_null_and_type_variation_does_not_hide_required_data() -> None:

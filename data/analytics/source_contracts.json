@@ -87,6 +87,11 @@
           [
             "$skiptoken"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skiptoken"
+          ]
         ]
       },
       "path_parameters": [],
@@ -107,14 +112,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -227,6 +235,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -242,14 +259,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -367,6 +387,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -382,14 +411,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -745,14 +777,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -893,14 +928,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -938,6 +976,236 @@
           "name": "CashBalance",
           "nullable": false,
           "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Currency",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CashAvailableForTrading",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CashBlocked",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CashBlockedFromWithdrawal",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "FinancingAccruals",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "FundsAvailableForSettlement",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "FundsReservedForSettlement",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "SpendingPower",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "SpendingPowerDetail",
+          "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Current",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Maximum",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            }
+          ],
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "TransactionsNotBooked",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TransactionsNotBookedDetail",
+          "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Accrual",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "AdditionalTransactionCost",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "BondValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CashDeposit",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CashReservation",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CashWithdrawal",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CertificatesValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Commission",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ExchangeFee",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ExternalCharges",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "FundsReservedByOrder",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "IpoSubscriptionFee",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "LeveragedKnockOutProductsValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "MutualFundValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "OptionPremium",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ShareValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "StampDuty",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "WarrantPremium",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            }
+          ],
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "VariationMarginCashBalance",
+          "nullable": true,
+          "required": false,
           "value_type": "number"
         },
         {
@@ -1100,6 +1368,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -1115,14 +1392,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1207,6 +1487,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -1222,14 +1511,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1339,6 +1631,22 @@
             "$skiptoken",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skiptoken"
+          ],
+          [
+            "$skip",
+            "$top"
+          ],
+          [
+            "$skiptoken",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -1354,14 +1662,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1468,6 +1779,22 @@
             "$skiptoken",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skiptoken"
+          ],
+          [
+            "$skip",
+            "$top"
+          ],
+          [
+            "$skiptoken",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [
@@ -1485,14 +1812,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1621,6 +1951,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [
@@ -1640,14 +1979,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1721,14 +2063,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -1912,6 +2257,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -1927,14 +2281,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]
@@ -2032,6 +2389,15 @@
             "$skip",
             "$top"
           ]
+        ],
+        "returned_combinations": [
+          [
+            "$skip"
+          ],
+          [
+            "$skip",
+            "$top"
+          ]
         ]
       },
       "path_parameters": [],
@@ -2047,14 +2413,17 @@
           },
           {
             "name": "MaxRows",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__count",
+            "nullable": true,
             "value_type": "integer"
           },
           {
             "name": "__next",
+            "nullable": true,
             "value_type": "string"
           }
         ]

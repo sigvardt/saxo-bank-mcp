@@ -120,12 +120,63 @@ _SOURCE_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAda
 )
 
 type Sleep = Callable[[float], Awaitable[None]]
+type _CursorValue = int | str
+type _CursorState = tuple[tuple[str, _CursorValue], ...]
 
 
 @dataclass(frozen=True, slots=True)
 class _SanitizedRequestFailure:
     error_type: str
     retryable: bool
+
+
+@dataclass(slots=True)
+class _PaginationProgress:
+    contract: SourceContract
+    seen_states: set[_CursorState]
+    seen_tokens: set[str]
+    last_skip: int | None
+
+    @classmethod
+    def from_initial(
+        cls,
+        contract: SourceContract,
+        initial_state: _CursorState,
+    ) -> _PaginationProgress:
+        initial_values = dict(initial_state)
+        initial_token = initial_values.get("$skiptoken")
+        initial_skip = initial_values.get("$skip")
+        has_offset_cursor = contract.pagination is not None and any(
+            field.name == "$skip" for field in contract.pagination.cursor_fields
+        )
+        return cls(
+            contract=contract,
+            seen_states={initial_state},
+            seen_tokens={initial_token} if isinstance(initial_token, str) else set(),
+            last_skip=(
+                initial_skip if isinstance(initial_skip, int) else 0 if has_offset_cursor else None
+            ),
+        )
+
+    def accept_returned(self, state: _CursorState) -> None:
+        values = dict(state)
+        returned_skip = values.get("$skip")
+        returned_token = values.get("$skiptoken")
+        if (
+            state in self.seen_states
+            or (
+                isinstance(returned_skip, int)
+                and self.last_skip is not None
+                and returned_skip <= self.last_skip
+            )
+            or (isinstance(returned_token, str) and returned_token in self.seen_tokens)
+        ):
+            raise _pagination_cursor_error(self.contract)
+        self.seen_states.add(state)
+        if isinstance(returned_skip, int):
+            self.last_skip = returned_skip
+        if isinstance(returned_token, str):
+            self.seen_tokens.add(returned_token)
 
 
 class RegisteredReadExecutor(Protocol):
@@ -328,7 +379,11 @@ class SaxoAnalyticsProvider:
                 "unknown_source_contract",
                 "source request names an unknown frozen contract",
             )
-        request_target, params = _contract_request(contract, request)
+        request_target, params, initial_cursor_state = _contract_request(contract, request)
+        pagination_progress = _PaginationProgress.from_initial(
+            contract,
+            initial_cursor_state,
+        )
         operation = _registered_operation(contract, request_target)
         first_page = await self._request_payload(
             contract,
@@ -349,6 +404,7 @@ class SaxoAnalyticsProvider:
                     initial_path,
                     params,
                     next_link,
+                    pagination_progress,
                 )
             except SourceEndpointError:
                 self._quarantine_contract(contract, "source_pagination_drift")
@@ -559,7 +615,7 @@ class SaxoAnalyticsProvider:
 def _contract_request(
     contract: SourceContract,
     request: Mapping[str, object],
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], _CursorState]:
     if any(str(key).casefold() in _BLOCKED_ROUTING_KEYS for key in request):
         raise SourceRequestError(
             "caller_routing_rejected",
@@ -586,12 +642,33 @@ def _contract_request(
     for parameter in contract.path_parameters:
         value = _path_parameter(request[parameter], contract.contract_id)
         request_target = request_target.replace(f"{{{parameter}}}", value)
-    params = {
-        parameter: _query_parameter(request[parameter], contract.contract_id)
-        for parameter in contract.query_parameters
-        if parameter in request
-    }
-    return request_target, params
+    declared_cursor_names = (
+        frozenset(field.name for field in contract.pagination.cursor_fields)
+        if contract.pagination is not None
+        else frozenset[str]()
+    )
+    params: dict[str, str] = {}
+    for parameter in contract.query_parameters:
+        if parameter not in request:
+            continue
+        try:
+            params[parameter] = _query_parameter(
+                request[parameter],
+                contract.contract_id,
+            )
+        except SourceRequestError:
+            if parameter in declared_cursor_names:
+                raise _initial_pagination_cursor_error(contract) from None
+            raise
+    initial_cursors = tuple(
+        (parameter, value)
+        for parameter, value in params.items()
+        if parameter in declared_cursor_names
+    )
+    initial_cursor_state = (
+        _validate_initial_cursors(contract, initial_cursors) if initial_cursors else ()
+    )
+    return request_target, params, initial_cursor_state
 
 
 def _path_parameter(value: object, contract_id: str) -> str:
@@ -677,6 +754,7 @@ def _registered_continuation_request(
     initial_path: str,
     initial_params: Mapping[str, str],
     next_link: str,
+    pagination_progress: _PaginationProgress,
 ) -> tuple[EndpointOperation, str, dict[str, str]]:
     parsed = urlparse(next_link)
     if parsed.path != initial_path:
@@ -698,7 +776,8 @@ def _registered_continuation_request(
     returned_cursors = tuple(
         (parameter, value) for parameter, value in returned_pairs if parameter.startswith("$")
     )
-    _validate_returned_cursors(contract, returned_cursors)
+    returned_cursor_state = _validate_returned_cursors(contract, returned_cursors)
+    pagination_progress.accept_returned(returned_cursor_state)
     declared_cursor_names: frozenset[str] = (
         frozenset(field.name for field in contract.pagination.cursor_fields)
         if contract.pagination is not None
@@ -728,22 +807,62 @@ def _registered_continuation_request(
 def _validate_returned_cursors(
     contract: SourceContract,
     cursor_pairs: tuple[tuple[str, str], ...],
-) -> None:
+) -> _CursorState:
+    return _validate_cursor_pairs(
+        contract,
+        cursor_pairs,
+        returned=True,
+    )
+
+
+def _validate_initial_cursors(
+    contract: SourceContract,
+    cursor_pairs: tuple[tuple[str, str], ...],
+) -> _CursorState:
+    return _validate_cursor_pairs(
+        contract,
+        cursor_pairs,
+        returned=False,
+    )
+
+
+def _validate_cursor_pairs(
+    contract: SourceContract,
+    cursor_pairs: tuple[tuple[str, str], ...],
+    *,
+    returned: bool,
+) -> _CursorState:
     pagination = contract.pagination
     if pagination is None:
-        raise _pagination_cursor_error(contract)
+        raise _cursor_error(contract, returned=returned)
     fields_by_name = {field.name: field for field in pagination.cursor_fields}
     cursor_names = tuple(parameter for parameter, _value in cursor_pairs)
-    if any(parameter not in fields_by_name for parameter in cursor_names):
-        raise _pagination_cursor_error(contract)
-    returned_combination = tuple(
+    if len(cursor_names) != len(set(cursor_names)) or any(
+        parameter not in fields_by_name for parameter in cursor_names
+    ):
+        raise _cursor_error(contract, returned=returned)
+    cursor_combination = tuple(
         field.name for field in pagination.cursor_fields if field.name in cursor_names
     )
-    if returned_combination not in pagination.valid_combinations:
-        raise _pagination_cursor_error(contract)
+    allowed_combinations = (
+        pagination.returned_combinations if returned else pagination.valid_combinations
+    )
+    if cursor_combination not in allowed_combinations:
+        raise _cursor_error(contract, returned=returned)
     for parameter, value in cursor_pairs:
         if not _valid_cursor_value(fields_by_name[parameter], value):
-            raise _pagination_cursor_error(contract)
+            raise _cursor_error(contract, returned=returned)
+    values_by_name = dict(cursor_pairs)
+    return tuple(
+        (
+            field.name,
+            int(values_by_name[field.name])
+            if field.value_type is SourceCursorValueType.INTEGER
+            else values_by_name[field.name],
+        )
+        for field in pagination.cursor_fields
+        if field.name in values_by_name
+    )
 
 
 def _valid_cursor_value(field: SourceCursorField, value: str) -> bool:
@@ -770,6 +889,24 @@ def _pagination_cursor_error(contract: SourceContract) -> SourceEndpointError:
         "returned pagination cursor does not match its frozen source contract",
         contract_id=contract.contract_id,
     )
+
+
+def _initial_pagination_cursor_error(contract: SourceContract) -> SourceRequestError:
+    return SourceRequestError(
+        "invalid_source_pagination_cursor",
+        "source request pagination cursor does not match its frozen contract",
+        contract_id=contract.contract_id,
+    )
+
+
+def _cursor_error(
+    contract: SourceContract,
+    *,
+    returned: bool,
+) -> SourceEndpointError | SourceRequestError:
+    if returned:
+        return _pagination_cursor_error(contract)
+    return _initial_pagination_cursor_error(contract)
 
 
 def _sanitized_request_error_type(error: httpx2.RequestError) -> str:

@@ -138,12 +138,13 @@ class SourceCursorField(BaseModel):
 
 
 class SourcePagination(BaseModel):
-    """Allowed returned cursor fields and exact valid combinations."""
+    """Allowed cursor fields and exact caller/returned combinations."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     cursor_fields: tuple[SourceCursorField, ...]
     valid_combinations: tuple[tuple[str, ...], ...]
+    returned_combinations: tuple[tuple[str, ...], ...]
 
     @model_validator(mode="after")
     def validate_cursor_contract(self) -> Self:
@@ -153,24 +154,25 @@ class SourcePagination(BaseModel):
                 "pagination_cursor_fields_invalid",
                 "pagination cursor fields must be non-empty and unique",
             )
-        combinations = tuple(tuple(combination) for combination in self.valid_combinations)
-        if not combinations or len(set(combinations)) != len(combinations):
-            raise PydanticCustomError(
-                "pagination_cursor_combinations_invalid",
-                "pagination cursor combinations must be non-empty and unique",
-            )
         field_order = {name: index for index, name in enumerate(field_names)}
-        for combination in combinations:
-            if (
-                not combination
-                or len(set(combination)) != len(combination)
-                or any(name not in field_order for name in combination)
-                or tuple(sorted(combination, key=field_order.__getitem__)) != combination
-            ):
+        for combinations in (self.valid_combinations, self.returned_combinations):
+            if not combinations or len(set(combinations)) != len(combinations):
                 raise PydanticCustomError(
-                    "pagination_cursor_combination_invalid",
-                    "pagination cursor combination must use declared fields in declaration order",
+                    "pagination_cursor_combinations_invalid",
+                    "pagination cursor combinations must be non-empty and unique",
                 )
+            for combination in combinations:
+                if (
+                    not combination
+                    or len(set(combination)) != len(combination)
+                    or any(name not in field_order for name in combination)
+                    or tuple(sorted(combination, key=field_order.__getitem__)) != combination
+                ):
+                    raise PydanticCustomError(
+                        "pagination_cursor_combination_invalid",
+                        "pagination cursor combination must use declared fields "
+                        "in declaration order",
+                    )
         return self
 
 

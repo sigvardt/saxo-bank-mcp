@@ -212,6 +212,35 @@ async def test_data_and_next_are_structural_and_returned_pagination_is_preserved
 
 
 @pytest.mark.anyio
+async def test_null_returned_next_link_completes_without_quarantine() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "CloseBid": 101.0,
+                            "Time": "2026-07-29T08:00:00Z",
+                        }
+                    ],
+                    "DataVersion": 7,
+                    "__next": None,
+                },
+            )
+        ]
+    )
+    provider = _provider(executor)
+
+    pages = [page async for page in provider.fetch("chart_v3", {})]
+
+    assert [page.page_number for page in pages] == [1]
+    assert pages[0].next_link is None
+    assert len(executor.calls) == 1
+    assert provider.quarantined_analysis_kinds == ()
+
+
+@pytest.mark.anyio
 async def test_absolute_returned_pagination_link_is_never_followed() -> None:
     first = _json_response(
         200,
@@ -483,8 +512,53 @@ async def test_path_scoped_continuation_is_rebuilt_before_transport() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    ("contract_id", "request_values"),
+    [
+        ("positions_v1", {"$skip": -1}),
+        ("positions_v1", {"$skip": 1.5}),
+        ("positions_v1", {"$top": 1_001}),
+        (
+            "bookings_v1",
+            {
+                "$skip": 1,
+                "$skiptoken": "opaque",
+                "ClientKey": "client-a",
+            },
+        ),
+        (
+            "bookings_v1",
+            {
+                "$skiptoken": "",
+                "ClientKey": "client-a",
+            },
+        ),
+    ],
+)
+async def test_initial_caller_cursors_use_the_frozen_pagination_schema_before_transport(
+    contract_id: str,
+    request_values: Mapping[str, object],
+) -> None:
+    executor = FakeExecutor([_json_response(200, {"Data": []})])
+    provider = _provider(executor)
+
+    with pytest.raises(SourceRequestError) as caught:
+        _ = [page async for page in provider.fetch(contract_id, request_values)]
+
+    assert caught.value.code == "invalid_source_pagination_cursor"
+    assert executor.calls == []
+    assert provider.quarantined_analysis_kinds == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     ("contract_id", "next_link", "payload", "quarantined_kind"),
     [
+        (
+            "positions_v1",
+            "/port/v1/positions?$top=100",
+            _POSITION_CURSOR_PAYLOAD,
+            "portfolio_exposure",
+        ),
         (
             "positions_v1",
             "/port/v1/positions?$top=999999999",
@@ -564,6 +638,121 @@ async def test_returned_pagination_rejects_invalid_cursor_schema_before_transpor
     assert caught.value.code == "source_pagination_cursor_invalid"
     assert len(executor.calls) == 1
     assert quarantined_kind in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("initial_skip", "returned_skip"),
+    [
+        (10, 10),
+        (10, 9),
+        (0, 0),
+    ],
+)
+async def test_returned_offset_cursor_must_advance_from_the_initial_caller_cursor(
+    initial_skip: int,
+    returned_skip: int,
+) -> None:
+    first_payload = dict(_POSITION_CURSOR_PAYLOAD)
+    first_payload["__next"] = f"/port/v1/positions?$skip={returned_skip}&$top=100"
+    executor = FakeExecutor([_json_response(200, first_payload)])
+    provider = _provider(executor)
+
+    with pytest.raises(SourceEndpointError) as caught:
+        _ = [
+            page
+            async for page in provider.fetch(
+                "positions_v1",
+                {"$skip": initial_skip, "$top": 100},
+            )
+        ]
+
+    assert caught.value.code == "source_pagination_cursor_invalid"
+    assert len(executor.calls) == 1
+    assert "portfolio_exposure" in provider.quarantined_analysis_kinds
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("contract_id", "initial_request", "first_link", "second_link", "payloads"),
+    [
+        (
+            "positions_v1",
+            {"$skip": 0, "$top": 100},
+            "/port/v1/positions?$skip=1&$top=100",
+            "/port/v1/positions?$top=100&$skip=1",
+            (
+                {
+                    "Data": [
+                        {
+                            "PositionBase": {"Amount": 1},
+                            "PositionId": "synthetic-position-a",
+                        }
+                    ]
+                },
+                {
+                    "Data": [
+                        {
+                            "PositionBase": {"Amount": 2},
+                            "PositionId": "synthetic-position-b",
+                        }
+                    ]
+                },
+            ),
+        ),
+        (
+            "chart_v3",
+            {},
+            "/chart/v3/charts?$skiptoken=opaque",
+            "/chart/v3/charts?$skiptoken=%6Fpaque",
+            (
+                {
+                    "Data": [
+                        {
+                            "CloseBid": 101.0,
+                            "Time": "2026-07-29T08:00:00Z",
+                        }
+                    ],
+                    "DataVersion": 7,
+                },
+                {
+                    "Data": [
+                        {
+                            "CloseBid": 102.0,
+                            "Time": "2026-07-29T08:01:00Z",
+                        }
+                    ],
+                    "DataVersion": 7,
+                },
+            ),
+        ),
+    ],
+)
+async def test_semantically_identical_returned_cursor_is_rejected_before_transport(
+    contract_id: str,
+    initial_request: Mapping[str, object],
+    first_link: str,
+    second_link: str,
+    payloads: tuple[Mapping[str, Any], Mapping[str, Any]],
+) -> None:
+    first_payload = dict(payloads[0])
+    first_payload["__next"] = first_link
+    second_payload = dict(payloads[1])
+    second_payload["__next"] = second_link
+    executor = FakeExecutor(
+        [
+            _json_response(200, first_payload),
+            _json_response(200, second_payload),
+        ]
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(SourceEndpointError) as caught:
+        _ = [page async for page in provider.fetch(contract_id, initial_request)]
+
+    assert caught.value.code == "source_pagination_cursor_invalid"
+    assert len(executor.calls) == _EXPECTED_TWO_ATTEMPTS
+    assert provider.quarantined_analysis_kinds
 
 
 @pytest.mark.anyio

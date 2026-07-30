@@ -10,17 +10,40 @@ import httpx2
 import pytest
 from fastmcp import Client
 
+from saxo_bank_mcp.analytics_source_contracts import (
+    compare_source_schema,
+    source_contracts_by_id,
+)
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.server import mcp
 from saxo_bank_mcp.token_cache import save_token_cache
 
 EXPECTED_SHA256_LENGTH = 64
 RAW_BALANCE = 123456.78
+_BALANCE_RESPONSE_FIXTURE = {
+    "CashAvailableForTrading": RAW_BALANCE,
+    "CashBalance": RAW_BALANCE,
+    "Currency": "EUR",
+    "FundsAvailableForSettlement": RAW_BALANCE,
+    "FundsReservedForSettlement": 0,
+    "TransactionsNotBooked": 0,
+}
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def test_analytics_balance_contract_accepts_registered_read_fixture() -> None:
+    comparison = compare_source_schema(
+        source_contracts_by_id()["balances_v1"],
+        _BALANCE_RESPONSE_FIXTURE,
+    )
+
+    assert comparison.compatible is True
+    assert comparison.additive_fields == ()
+    assert comparison.structural_errors == ()
 
 
 @pytest.mark.anyio
@@ -119,14 +142,7 @@ class _BalanceLiveClient:
         assert headers["Authorization"] == "Bearer live-access-token"
         return httpx2.Response(
             200,
-            json={
-                "CashAvailableForTrading": RAW_BALANCE,
-                "CashBalance": RAW_BALANCE,
-                "Currency": "EUR",
-                "FundsAvailableForSettlement": RAW_BALANCE,
-                "FundsReservedForSettlement": 0,
-                "TransactionsNotBooked": 0,
-            },
+            json=_BALANCE_RESPONSE_FIXTURE,
             request=httpx2.Request(
                 "GET",
                 "https://gateway.saxobank.com/openapi/port/v1/balances/me",
