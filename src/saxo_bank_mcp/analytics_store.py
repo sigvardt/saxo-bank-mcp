@@ -1078,12 +1078,24 @@ class AnalyticsStore:
                     "rows": cast("list[SourceJsonValue]", rows),
                     "source_native_revision": page.source_revision,
                 }
+                provider_identity_sha256 = _fingerprint(
+                    _canonical_json(
+                        {
+                            "account_scope": page.account_scope,
+                            "capture_revision": page.capture_revision,
+                            "contract_id": page.contract_id,
+                            "contract_sha256": page.contract_sha256,
+                            "instrument_scope_sha256": page.instrument_scope_sha256,
+                            "page_number": page.page_number,
+                            "request_fingerprint_sha256": (page.request_fingerprint_sha256),
+                            "source_native_revision": page.source_revision,
+                        },
+                    ),
+                )
                 stored_pages.append(
                     self.put_source_page(
                         source_kind=page.source_kind,
-                        page_key=(
-                            f"{page.contract_id}:{page.page_number}:{page.page_fingerprint_sha256}"
-                        ),
+                        page_key=f"{page.contract_id}:{page.page_number}:{provider_identity_sha256}",
                         source_revision=page.capture_revision,
                         source_native_revision=page.source_revision,
                         contract_name=page.contract_id,

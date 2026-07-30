@@ -241,9 +241,18 @@ def test_readiness_requires_exact_safe_sim_receipts() -> None:
         "tool_name": "saxo_get_session_capabilities",
         "environment": "SIM",
         "call_class": "sim_read_succeeded",
+        "endpoint_path": "/root/v1/sessions/capabilities",
+        "token_refreshed": False,
+        "token": {},
+        "token_refresh_supported": False,
+        "scope_used": False,
         "network_call_made": True,
         "live_write_called": False,
         "order_or_subscription_created": False,
+        "capabilities": {},
+        "next_action": "use current capability fields only",
+        "verifies": [],
+        "does_not_verify": [],
     }
     validator = getattr(matrix_module, "_network_read_receipt_status", None)
     assert validator is not None

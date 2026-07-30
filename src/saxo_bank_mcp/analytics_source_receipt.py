@@ -153,6 +153,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             "source_entitlement_unavailable",
             executor,
             http_status=error.http_status,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
     except SourceRateLimitError:
         return _failure(
@@ -161,6 +162,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             "source_rate_limited",
             executor,
             http_status=429,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
     except SourceHttpError as error:
         return _failure(
@@ -169,6 +171,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             "source_http_error",
             executor,
             http_status=error.http_status,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
     except SourceSchemaDriftError:
         return _failure(
@@ -176,6 +179,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             contract_id,
             "source_schema_drift",
             executor,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
     except SourceAccessError:
         return _failure(
@@ -183,6 +187,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             contract_id,
             "source_access_unavailable",
             executor,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
     except SourceProviderError as error:
         return _failure(
@@ -190,6 +195,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
             contract_id,
             error.code,
             executor,
+            request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )
 
     page_receipts: list[dict[str, JsonValue]] = []
@@ -288,13 +294,14 @@ def _contract_request(
     return request
 
 
-def _failure(
+def _failure(  # noqa: PLR0913
     operation: EndpointOperation,
     contract_id: str,
     reason: str,
     executor: _ReceiptExecutor,
     *,
     http_status: int | None = None,
+    request_fingerprint_sha256: str | None = None,
 ) -> dict[str, JsonValue]:
     environment = executor.environment or "UNKNOWN"
     contract = source_contracts_by_id().get(contract_id)
@@ -303,12 +310,17 @@ def _failure(
         "tool_name": "saxo_call_registered_endpoint",
         "call_class": (
             "live_read_http_error"
+            if environment == "LIVE" and http_status is not None
+            else "live_read_refused"
             if environment == "LIVE"
             else "sim_read_http_error"
+            if environment == "SIM" and http_status is not None
+            else "sim_read_refused"
             if environment == "SIM"
             else "registered_read_refused"
         ),
         "operation_id": operation.operation_id,
+        "service_group": operation.service_group,
         "method": "GET",
         "path": operation.path_template,
         "environment": environment,
@@ -322,6 +334,11 @@ def _failure(
         "successful_page_count": 0,
         "live_write_called": False,
         "order_or_subscription_created": False,
+        "arbitrary_url_allowed": False,
+        "live_write": False,
+        "live_access": environment == "LIVE",
+        "auth_exercised": operation.auth_requirement != "none",
+        "trading_ready": False,
         "response": None,
         "response_visibility": "analytics_contract_receipt",
         "response_fingerprint": None,
@@ -335,6 +352,7 @@ def _failure(
         "continuation_call_count": executor.continuation_call_count,
         "reason": _safe_reason(reason),
         "http_status": http_status,
+        "request_fingerprint_sha256": request_fingerprint_sha256,
     }
 
 

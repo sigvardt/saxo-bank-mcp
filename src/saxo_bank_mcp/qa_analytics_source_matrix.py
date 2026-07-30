@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
+import platform
 import pwd
 import re
+import stat
+import sys
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from importlib.metadata import PackageNotFoundError, distribution
+from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
 from typing import Final, Literal, cast
@@ -18,6 +23,8 @@ from uuid import uuid4
 import anyio
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
@@ -42,11 +49,69 @@ _REGISTRY_PAGE_SIZE: Final = 100
 _HTTP_STATUS_MIN: Final = 100
 _HTTP_STATUS_MAX: Final = 599
 _HTTP_STATUS_OK: Final = 200
+_HTTP_STATUS_REDIRECT_MIN: Final = 300
+_OWNER_DIRECTORY_MODE: Final = 0o700
+_OWNER_FILE_MODE: Final = 0o600
+_OWNER_COMMON_WRITE_MASK: Final = 0o022
+_EXACT_DIRECTORY_COMPONENT_INDEX: Final = 2
 _SELF_REFERENCE_EXCLUSION_COUNT: Final = 2
 _ENTRYPOINT_TARGET_PART_COUNT: Final = 2
 _INSTALLER_GENERATED_METADATA: Final = frozenset(
     {"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"},
 )
+_EXPECTED_INSTALLER: Final = "uv"
+_RUNTIME_ARTIFACT_SUFFIXES: Final = frozenset(
+    {".py", ".pyi", ".so", ".dylib", ".dll", ".pyd"},
+)
+_SOURCE_RUNNERS: Final = (
+    "scripts/generate_analytics_source_matrix_candidate.py",
+    "scripts/run_analytics_source_matrix.py",
+)
+_SOURCE_RECEIPT_COMMON_FIELDS: Final = frozenset(
+    {
+        "status",
+        "tool_name",
+        "call_class",
+        "operation_id",
+        "service_group",
+        "method",
+        "path",
+        "environment",
+        "network_call_made",
+        "network_call_count",
+        "attempt_count",
+        "initial_attempt_count",
+        "continuation_attempt_count",
+        "retry_count",
+        "distinct_target_count",
+        "successful_page_count",
+        "live_write_called",
+        "order_or_subscription_created",
+        "arbitrary_url_allowed",
+        "live_write",
+        "live_access",
+        "auth_exercised",
+        "trading_ready",
+        "http_status",
+        "response",
+        "response_visibility",
+        "response_fingerprint",
+        "response_fingerprint_scope",
+        "analytics_contract_id",
+        "analytics_contract_sha256",
+        "page_count",
+        "row_count",
+        "continuation_call_count",
+        "request_fingerprint_sha256",
+    },
+)
+_SOURCE_SUCCESS_FIELDS: Final = _SOURCE_RECEIPT_COMMON_FIELDS | {
+    "page_receipts",
+    "source_revision_fingerprint_sha256",
+    "timestamp_value_count",
+    "timestamp_fingerprint_sha256",
+}
+_SOURCE_FAILURE_FIELDS: Final = _SOURCE_RECEIPT_COMMON_FIELDS | {"reason"}
 _STATE_PATHS: Final = (
     "/port/v1/orders/me",
     "/port/v1/positions/me",
@@ -111,13 +176,36 @@ class SourceMatrixCandidateIdentity(BaseModel):
     candidate_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class _RuntimeIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    implementation: str
+    cache_tag: str
+    python_version: str
+    platform: str
+    executable_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class _DependencyDistribution(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    version: str
+    files: Mapping[str, str]
+    installer_metadata: Mapping[str, str]
+
+
 class _SourceMatrixCandidateManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal["2"]
+    schema_version: Literal["3"]
     source_contract_catalog_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_files: Mapping[str, str]
     installed_files: Mapping[str, str]
+    dependency_distributions: Mapping[str, _DependencyDistribution]
+    runtime_identity: _RuntimeIdentity
+    installed_metadata_projection: Mapping[str, str]
+    console_scripts: Mapping[str, str]
+    source_wheel_projection_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_exclusions: tuple[str, ...]
     installed_exclusions: tuple[str, ...]
     source_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -187,6 +275,87 @@ class _SourcePageProof(BaseModel):
     schema_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     timestamp_value_count: int = Field(ge=0)
     timestamp_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class _AuthStatusReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["passed"]
+    tool_name: Literal["saxo_auth_status"]
+    call_class: Literal["local_status_succeeded"]
+    requested_environment: Literal["SIM", "LIVE"]
+    effective_read_environment: Literal["SIM", "LIVE", "LIVE_READ_DISABLED"]
+    live_reads: bool
+    live_writes: Literal[False]
+    network_call_made: Literal[False]
+    live_write_called: Literal[False]
+    order_or_subscription_created: Literal[False]
+    sim_credentials_present: bool
+    sim_credential_source: Literal["file", "env", "missing"]
+    live_credentials_present: bool
+    sim_redirect_uri_present: bool
+    pending_pkce_authorization_present: bool
+    token_cache_present: bool
+    token_cache_readable: bool
+    token_cache_expired: bool | None
+    token_cache_refresh_supported: bool | None
+    token_cache_environment: Literal["SIM", "LIVE"] | None
+    scope_used: Literal[False]
+    verifies: list[str]
+    does_not_verify: list[str]
+    blocking_reasons: list[str]
+    next_action: str
+
+
+class _SessionCapabilitiesReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["passed"]
+    tool_name: Literal["saxo_get_session_capabilities"]
+    call_class: Literal["sim_read_succeeded"]
+    environment: Literal["SIM"]
+    endpoint_path: Literal["/root/v1/sessions/capabilities"]
+    token_refreshed: bool
+    token: dict[str, JsonValue]
+    token_refresh_supported: bool
+    scope_used: Literal[False]
+    network_call_made: Literal[True]
+    live_write_called: Literal[False]
+    order_or_subscription_created: Literal[False]
+    capabilities: dict[str, JsonValue]
+    next_action: str
+    verifies: list[str]
+    does_not_verify: list[str]
+
+
+class _EntitlementSummaryReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    exchange_count: int = Field(ge=0)
+    max_rows: int = Field(ge=0)
+    response_count: int = Field(ge=0)
+    has_next_page: bool
+    possibly_truncated: bool
+
+
+class _EntitlementsReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["passed"]
+    tool_name: Literal["saxo_get_entitlements"]
+    call_class: Literal["sim_read_succeeded"]
+    environment: Literal["SIM"]
+    endpoint_path: Literal["/port/v1/users/me/entitlements"]
+    entitlement_field_set: Literal["Default"]
+    token_refreshed: bool
+    network_call_made: Literal[True]
+    live_write_called: Literal[False]
+    order_or_subscription_created: Literal[False]
+    entitlement_summary: _EntitlementSummaryReceipt
+    exchange_ids: list[str]
+    entitlement_bucket_counts: dict[str, int]
+    verifies: list[str]
+    does_not_verify: list[str]
 
 
 class CleanupReceipt(BaseModel):
@@ -520,7 +689,7 @@ def _execute_analytics_source_matrix_once(  # noqa: PLR0913
             source_matrix_candidate_identity() if candidate_identity is None else candidate_identity
         )
         selected_state_root = (
-            _source_matrix_state_root() if state_root is None else state_root.resolve(strict=False)
+            _source_matrix_state_root() if state_root is None else state_root.absolute()
         )
     except (OSError, ValidationError, ValueError):
         return 1
@@ -540,7 +709,14 @@ def _execute_analytics_source_matrix_once(  # noqa: PLR0913
 
     def claim() -> bool:
         nonlocal claimed
-        claimed = _claim_candidate_guard(guard, identity)
+        claimed = (
+            _claim_candidate_guard_at_owner(
+                Path(pwd.getpwuid(os.getuid()).pw_dir),
+                identity,
+            )
+            if state_root is None
+            else _claim_candidate_guard(guard, identity)
+        )
         return claimed
 
     async def run() -> AnalyticsSourceMatrixReceipt:
@@ -568,7 +744,7 @@ def _execute_analytics_source_matrix_once(  # noqa: PLR0913
 
 def candidate_guard_path(state_root: Path, candidate_identity_sha256: str) -> Path:
     _require_sha256(candidate_identity_sha256)
-    root = state_root.resolve(strict=False)
+    root = state_root.absolute()
     return root / "qa" / "analytics-source-matrix" / candidate_identity_sha256 / "claimed.json"
 
 
@@ -684,17 +860,33 @@ async def _run_provider_source(
     status = _safe_status(payload)
     page_proofs = _source_page_proofs(payload.get("page_receipts"))
     expected_request_fingerprint = _request_fingerprint(contract, request)
+    expected_fields: frozenset[str] = (
+        _SOURCE_SUCCESS_FIELDS
+        if status == "passed"
+        else _SOURCE_FAILURE_FIELDS
+        if status in {"http_error", "refused"}
+        else frozenset[str]()
+    )
+    schema_valid = frozenset(payload) == expected_fields
     common_valid = (
-        operation is not None
+        schema_valid
+        and operation is not None
         and payload.get("tool_name") == "saxo_call_registered_endpoint"
         and payload.get("operation_id") == contract.operation_id
+        and payload.get("service_group") == operation.service_group
         and payload.get("method") == "GET"
         and payload.get("path") == contract.path_template
         and payload.get("environment") == "SIM"
         and payload.get("live_write_called") is False
         and payload.get("order_or_subscription_created") is False
+        and payload.get("arbitrary_url_allowed") is False
+        and payload.get("live_write") is False
+        and payload.get("live_access") is False
+        and payload.get("auth_exercised") is (operation.auth_requirement != "none")
+        and payload.get("trading_ready") is False
         and payload.get("analytics_contract_id") == contract.contract_id
         and payload.get("analytics_contract_sha256") == source_contract_fingerprint(contract)
+        and payload.get("request_fingerprint_sha256") == expected_request_fingerprint
         and payload.get("response") is None
         and payload.get("response_visibility") == "analytics_contract_receipt"
         and payload.get("response_fingerprint_scope") == "analytics_contract_receipt"
@@ -712,7 +904,8 @@ async def _run_provider_source(
     failure_valid = (
         common_valid
         and status in {"http_error", "refused"}
-        and payload.get("call_class") in {"sim_read_http_error", "sim_read_refused"}
+        and payload.get("call_class")
+        == ("sim_read_http_error" if status == "http_error" else "sim_read_refused")
         and _source_failure_proof_valid(payload)
     )
     raw_reason = payload.get("reason")
@@ -851,6 +1044,7 @@ def _source_success_proof_valid(
         and attempt_count == initial_attempt_count + continuation_attempt_count
         and network_count == attempt_count
         and initial_attempt_count >= 1
+        and continuation_attempt_count >= continuation_count
         and retry_count == attempt_count - distinct_target_count
         and payload.get("network_call_made") is True
         and payload.get("request_fingerprint_sha256") == expected_request_fingerprint
@@ -890,10 +1084,24 @@ def _source_failure_proof_valid(payload: Mapping[str, JsonValue]) -> bool:
         and network_count <= attempt_count
         and retry_count == max(0, attempt_count - distinct_target_count)
         and continuation_count == max(0, distinct_target_count - 1)
+        and initial_attempt_count >= (1 if distinct_target_count else 0)
+        and continuation_attempt_count >= continuation_count
         and payload.get("network_call_made") is (network_count > 0)
         and _safe_count(payload.get("page_count")) == 0
         and _safe_count(payload.get("row_count")) == 0
         and _safe_count(payload.get("successful_page_count")) == 0
+        and (
+            (
+                payload.get("status") == "http_error"
+                and isinstance(payload.get("http_status"), int)
+                and not isinstance(payload.get("http_status"), bool)
+                and not _HTTP_STATUS_OK
+                <= cast("int", payload.get("http_status"))
+                < _HTTP_STATUS_REDIRECT_MIN
+            )
+            or (payload.get("status") == "refused" and payload.get("http_status") is None)
+        )
+        and payload.get("response_fingerprint") is None
     )
 
 
@@ -1488,34 +1696,26 @@ def _safe_status(payload: Mapping[str, JsonValue]) -> str:
 
 
 def _auth_receipt_status(payload: Mapping[str, JsonValue]) -> str:
+    try:
+        receipt = _AuthStatusReceipt.model_validate(payload, strict=True)
+    except ValidationError:
+        return "unavailable"
     if (
-        payload.get("status") == "passed"
-        and payload.get("tool_name") == "saxo_auth_status"
-        and payload.get("call_class") == "local_status_succeeded"
-        and payload.get("requested_environment") == "SIM"
-        and payload.get("effective_read_environment") == "SIM"
-        and payload.get("live_reads") is False
-        and payload.get("live_writes") is False
-        and payload.get("network_call_made") is False
-        and payload.get("live_write_called") is False
-        and payload.get("order_or_subscription_created") is False
-        and payload.get("token_cache_present") is True
-        and payload.get("token_cache_readable") is True
-        and payload.get("token_cache_expired") is False
-        and payload.get("token_cache_environment") == "SIM"
-        and payload.get("blocking_reasons") == []
+        receipt.requested_environment == "SIM"
+        and receipt.effective_read_environment == "SIM"
+        and receipt.live_reads is False
+        and receipt.token_cache_present is True
+        and receipt.token_cache_readable is True
+        and receipt.token_cache_expired is False
+        and receipt.token_cache_environment == "SIM"  # noqa: S105
+        and receipt.blocking_reasons == []
     ):
         return "ready"
-    blocking_reasons = payload.get("blocking_reasons")
     if (
-        payload.get("token_cache_present") is False
-        or payload.get("token_cache_readable") is False
-        or payload.get("token_cache_expired") is True
-        or (
-            isinstance(blocking_reasons, Sequence)
-            and not isinstance(blocking_reasons, str)
-            and bool(blocking_reasons)
-        )
+        receipt.token_cache_present is False
+        or receipt.token_cache_readable is False
+        or receipt.token_cache_expired is True
+        or bool(receipt.blocking_reasons)
     ):
         return "auth_required"
     return "unavailable"
@@ -1526,17 +1726,23 @@ def _network_read_receipt_status(
     tool_name: str,
 ) -> str:
     if (
-        payload.get("status") == "passed"
-        and payload.get("tool_name") == tool_name
-        and payload.get("environment") == "SIM"
-        and payload.get("call_class") == "sim_read_succeeded"
-        and payload.get("network_call_made") is True
-        and payload.get("live_write_called") is False
-        and payload.get("order_or_subscription_created") is False
+        payload.get("network_call_made") is not True
+        or payload.get("live_write_called") is not False
+        or payload.get("order_or_subscription_created") is not False
     ):
+        return "unverified"
+    model: type[BaseModel] | None = {
+        "saxo_get_session_capabilities": _SessionCapabilitiesReceipt,
+        "saxo_get_entitlements": _EntitlementsReceipt,
+    }.get(tool_name)
+    if model is None:
+        return "unverified"
+    try:
+        model.model_validate(payload, strict=True)
+    except ValidationError:
+        return "unverified"
+    else:
         return "passed"
-    status = _safe_status(payload)
-    return "unverified" if status == "passed" else status
 
 
 def _safe_source_reason(reason: str) -> str:
@@ -1607,16 +1813,30 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
     expected_files = dict(manifest.source_files) if source_mode else dict(manifest.installed_files)
     if actual_files != expected_files:
         raise ValueError("source matrix candidate artifact closure mismatch")
+    if _runtime_identity() != manifest.runtime_identity:
+        raise ValueError("source matrix runtime identity mismatch")
+    if _dependency_distributions() != dict(manifest.dependency_distributions):
+        raise ValueError("source matrix dependency closure mismatch")
+    if not source_mode:
+        _validate_installed_execution_closure(manifest)
     catalog_sha256 = source_contract_catalog_sha256()
     source_build_sha256 = _digest(dict(manifest.source_files))
     installed_build_sha256 = _digest(dict(manifest.installed_files))
     harness_sha256 = _digest(
         {
+            "console_scripts": dict(manifest.console_scripts),
+            "dependency_distributions": {
+                name: item.model_dump(mode="json")
+                for name, item in manifest.dependency_distributions.items()
+            },
             "installed_build_sha256": installed_build_sha256,
             "installed_exclusions": manifest.installed_exclusions,
+            "installed_metadata_projection": dict(manifest.installed_metadata_projection),
+            "runtime_identity": manifest.runtime_identity.model_dump(mode="json"),
             "schema_version": manifest.schema_version,
             "source_build_sha256": source_build_sha256,
             "source_exclusions": manifest.source_exclusions,
+            "source_wheel_projection_sha256": manifest.source_wheel_projection_sha256,
         },
     )
     identity_sha256 = _digest(
@@ -1662,6 +1882,18 @@ def _validate_candidate_manifest_paths(
         raise ValueError("source matrix source closure includes an exclusion")
     if set(manifest.installed_files) & set(manifest.installed_exclusions):
         raise ValueError("source matrix installed closure includes an exclusion")
+    if (
+        not manifest.dependency_distributions
+        or any(
+            canonicalize_name(name) != name or not item.version or not item.files
+            for name, item in manifest.dependency_distributions.items()
+        )
+        or set(manifest.installed_metadata_projection) != {"INSTALLER"}
+        or manifest.installed_metadata_projection["INSTALLER"]
+        != hashlib.sha256(_EXPECTED_INSTALLER.encode()).hexdigest()
+        or not manifest.console_scripts
+    ):
+        raise ValueError("source matrix installed execution projection is invalid")
 
 
 def _source_candidate_files(repository_root: Path) -> dict[str, str]:
@@ -1671,6 +1903,7 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
         repository_root / "uv.lock",
         repository_root / "data" / "analytics" / "source_contracts.json",
         repository_root / "data" / "saxo" / "openapi_inventory.json",
+        *(repository_root / runner for runner in _SOURCE_RUNNERS),
         *(repository_root / "data" / "analytics" / "migrations").rglob("*"),
         *source_package.rglob("*"),
     ]
@@ -1688,6 +1921,214 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
             continue
         result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
+
+
+def _runtime_identity() -> _RuntimeIdentity:
+    executable = Path(sys.executable)
+    if not executable.is_file():
+        raise ValueError("source matrix interpreter is unavailable")
+    cache_tag = sys.implementation.cache_tag
+    if not cache_tag:
+        raise ValueError("source matrix interpreter cache tag is unavailable")
+    return _RuntimeIdentity(
+        implementation=sys.implementation.name,
+        cache_tag=cache_tag,
+        python_version=platform.python_version(),
+        platform=platform.platform(),
+        executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+    )
+
+
+def _dependency_distributions(  # noqa: C901, PLR0912, PLR0915
+) -> dict[str, _DependencyDistribution]:
+    """Seal the recursively selected runtime dependency distributions."""
+    try:
+        root = distribution("saxo-bank-mcp")
+    except PackageNotFoundError as error:
+        raise ValueError("installed source matrix distribution is unavailable") from error
+    selected: dict[str, set[str]] = {}
+    pending: list[tuple[Distribution, set[str]]] = [(root, set())]
+    processed: dict[str, set[str]] = {}
+    while pending:
+        current, extras = pending.pop()
+        raw_name = current.metadata["Name"]
+        current_name = canonicalize_name(raw_name)
+        selected.setdefault(current_name, set()).update(extras)
+        previous = processed.get(current_name)
+        if previous is not None and extras <= previous:
+            continue
+        already = processed.setdefault(current_name, set())
+        already.update(extras)
+        for raw_requirement in current.requires or ():
+            requirement = Requirement(raw_requirement)
+            marker = requirement.marker
+            if marker is None:
+                marker_matches = True
+            else:
+                marker_matches = marker.evaluate({"extra": ""}) or any(
+                    marker.evaluate({"extra": extra}) for extra in selected[current_name]
+                )
+            if not marker_matches:
+                continue
+            dependency_name = canonicalize_name(requirement.name)
+            try:
+                dependency = distribution(dependency_name)
+            except PackageNotFoundError as error:
+                raise ValueError(
+                    f"source matrix dependency {dependency_name} is unavailable",
+                ) from error
+            new_extras = set(requirement.extras)
+            known_extras = selected.setdefault(dependency_name, set())
+            if dependency_name not in processed or not new_extras <= known_extras:
+                known_extras.update(new_extras)
+                pending.append((dependency, set(known_extras)))
+    selected.pop("saxo-bank-mcp", None)
+    result: dict[str, _DependencyDistribution] = {}
+    for name in sorted(selected):
+        dependency = distribution(name)
+        dependency_files = dependency.files
+        if dependency_files is None:
+            raise ValueError(f"source matrix dependency {name} has no RECORD")
+        file_map: dict[str, str] = {}
+        installer_metadata: dict[str, str] = {}
+        for package_path in dependency_files:
+            relative = str(package_path).replace(os.sep, "/")
+            path = Path(str(dependency.locate_file(package_path)))
+            if ".." in Path(relative).parts:
+                continue
+            if ".dist-info/" in relative and Path(relative).name in _INSTALLER_GENERATED_METADATA:
+                if Path(relative).name == "INSTALLER":
+                    if not path.is_file() or path.is_symlink():
+                        raise ValueError(f"source matrix dependency {name} installer is invalid")
+                    normalized = path.read_text(encoding="utf-8").strip().casefold()
+                    installer_metadata["INSTALLER"] = hashlib.sha256(
+                        normalized.encode(),
+                    ).hexdigest()
+                continue
+            if not _safe_artifact_path(relative) or not path.is_file() or path.is_symlink():
+                raise ValueError(f"source matrix dependency {name} file is invalid")
+            file_map[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        if not file_map or installer_metadata.get("INSTALLER") is None:
+            raise ValueError(f"source matrix dependency {name} projection is incomplete")
+        result[name] = _DependencyDistribution(
+            version=dependency.version,
+            files=dict(sorted(file_map.items())),
+            installer_metadata=installer_metadata,
+        )
+    return result
+
+
+def _root_installed_metadata_projection() -> dict[str, str]:
+    installed_distribution = distribution("saxo-bank-mcp")
+    distribution_files = installed_distribution.files or ()
+    installer = next(
+        (
+            Path(str(installed_distribution.locate_file(item)))
+            for item in distribution_files
+            if str(item).replace(os.sep, "/").endswith(".dist-info/INSTALLER")
+        ),
+        None,
+    )
+    if installer is None or not installer.is_file() or installer.is_symlink():
+        raise ValueError("installed source matrix installer projection is unavailable")
+    normalized = installer.read_text(encoding="utf-8").strip().casefold()
+    return {"INSTALLER": hashlib.sha256(normalized.encode()).hexdigest()}
+
+
+def _validate_installed_execution_closure(
+    manifest: _SourceMatrixCandidateManifest,
+) -> None:
+    if _root_installed_metadata_projection() != dict(
+        manifest.installed_metadata_projection,
+    ):
+        raise ValueError("installed source matrix metadata projection mismatch")
+    installed_distribution = distribution("saxo-bank-mcp")
+    actual_console_scripts = {
+        entry_point.name: entry_point.value
+        for entry_point in installed_distribution.entry_points
+        if entry_point.group == "console_scripts"
+    }
+    if actual_console_scripts != dict(manifest.console_scripts):
+        raise ValueError("installed source matrix entry point projection mismatch")
+    distribution_files = installed_distribution.files or ()
+    wrappers = {
+        Path(str(installed_distribution.locate_file(item))).name: Path(
+            str(installed_distribution.locate_file(item)),
+        )
+        for item in distribution_files
+        if _installer_entrypoint_projection(str(item), actual_console_scripts)
+    }
+    if set(wrappers) != set(actual_console_scripts) or any(
+        not _installer_entrypoint_projection_valid(
+            wrappers[name],
+            target,
+            interpreter=Path(sys.executable),
+        )
+        for name, target in actual_console_scripts.items()
+    ):
+        raise ValueError("installed console entry point projection is invalid")
+    _reject_unrecorded_or_shadowed_imports(
+        installed_distribution,
+        manifest.dependency_distributions,
+    )
+
+
+def _reject_unrecorded_or_shadowed_imports(  # noqa: C901, PLR0912
+    installed_distribution: Distribution,
+    dependencies: Mapping[str, _DependencyDistribution],
+) -> None:
+    distributions: dict[str, Distribution] = {
+        "saxo-bank-mcp": installed_distribution,
+        **{name: distribution(name) for name in dependencies},
+    }
+    recorded_paths: set[Path] = set()
+    import_roots: dict[str, set[Path]] = {}
+    for dependency in distributions.values():
+        for item in dependency.files or ():
+            relative = str(item).replace(os.sep, "/")
+            if ".." in Path(relative).parts or ".dist-info/" in relative:
+                continue
+            located = Path(str(dependency.locate_file(item)))
+            recorded_paths.add(located.resolve(strict=False))
+            first = Path(relative).parts[0]
+            module_name = first.removesuffix(".py")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", module_name) is None:
+                continue
+            import_roots.setdefault(module_name, set()).add(
+                (
+                    located
+                    if len(Path(relative).parts) == 1
+                    else located.parents[len(Path(relative).parts) - 2]
+                ).resolve(strict=False),
+            )
+    scanned_roots: set[Path] = set()
+    for roots in import_roots.values():
+        for root in roots:
+            if root in scanned_roots:
+                continue
+            scanned_roots.add(root)
+            candidates = (root,) if root.is_file() else root.rglob("*")
+            for path in candidates:
+                if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                    continue
+                if path.is_symlink() or path.resolve(strict=False) not in recorded_paths:
+                    raise ValueError("unrecorded importable artifact is present")
+    for module_name, roots in import_roots.items():
+        spec = importlib.util.find_spec(module_name)
+        if spec is None:
+            raise ValueError(f"recorded import root {module_name} is unavailable")
+        origins: set[Path] = set()
+        if isinstance(spec.origin, str) and spec.origin not in {"built-in", "frozen"}:
+            origins.add(Path(spec.origin).resolve(strict=False))
+        if spec.submodule_search_locations is not None:
+            origins.update(
+                Path(item).resolve(strict=False) for item in spec.submodule_search_locations
+            )
+        if origins and any(
+            not any(origin == root or origin.is_relative_to(root) for root in roots)
+            for origin in origins
+        ):
+            raise ValueError(f"import root {module_name} is shadowed")
 
 
 def _installed_candidate_files(  # noqa: C901
@@ -1743,7 +2184,12 @@ def _installer_entrypoint_projection(
     return path.name in console_scripts and "bin" in path.parts and value not in console_scripts
 
 
-def _installer_entrypoint_projection_valid(path: Path, target: str) -> bool:
+def _installer_entrypoint_projection_valid(
+    path: Path,
+    target: str,
+    *,
+    interpreter: Path | None = None,
+) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
     target_parts = target.split(":")
@@ -1769,7 +2215,13 @@ def _installer_entrypoint_projection_valid(path: Path, target: str) -> bool:
         "        sys.argv[0] = sys.argv[0][:-4]\n"
         f"    sys.exit({callable_name}())\n"
     )
-    return first_line.startswith("#!/") and body == expected_body
+    expected_interpreter = Path(sys.executable) if interpreter is None else interpreter
+    shebang_interpreter = Path(first_line.removeprefix("#!"))
+    return (
+        first_line.startswith("#!/")
+        and shebang_interpreter.resolve(strict=True) == expected_interpreter.resolve(strict=True)
+        and body == expected_body
+    )
 
 
 def _safe_artifact_path(value: str) -> bool:
@@ -1786,7 +2238,186 @@ def _source_matrix_state_root(*, owner_home: Path | None = None) -> Path:
     selected_home = Path(pwd.getpwuid(os.getuid()).pw_dir) if owner_home is None else owner_home
     if not selected_home.is_absolute():
         raise ValueError("source matrix owner home must be absolute")
-    return (selected_home / ".local" / "state" / "saxo-bank-mcp").resolve(strict=False)
+    return selected_home / ".local" / "state" / "saxo-bank-mcp"
+
+
+def _validated_directory(
+    descriptor: int,
+    *,
+    exact_mode: bool,
+) -> os.stat_result:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise ValueError("source matrix directory type is invalid")
+    if metadata.st_uid != os.getuid():
+        raise ValueError("source matrix directory owner is invalid")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if (exact_mode and mode != _OWNER_DIRECTORY_MODE) or (
+        not exact_mode and mode & _OWNER_COMMON_WRITE_MASK
+    ):
+        raise ValueError("source matrix directory mode is invalid")
+    return metadata
+
+
+def _open_owner_directory(owner_home: Path) -> int:
+    if not owner_home.is_absolute():
+        raise ValueError("source matrix owner home must be absolute")
+    with suppress(FileExistsError):
+        owner_home.mkdir(mode=_OWNER_DIRECTORY_MODE)
+    try:
+        descriptor = os.open(
+            owner_home,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as error:
+        raise ValueError("source matrix owner directory is invalid") from error
+    try:
+        _validated_directory(descriptor, exact_mode=False)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_or_create_directory_at(
+    parent: int,
+    name: str,
+    *,
+    exact_mode: bool,
+) -> int:
+    with suppress(FileExistsError):
+        os.mkdir(name, mode=_OWNER_DIRECTORY_MODE, dir_fd=parent)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent,
+        )
+    except OSError as error:
+        raise ValueError("source matrix directory component is invalid") from error
+    try:
+        _validated_directory(descriptor, exact_mode=exact_mode)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_guard_parent(
+    owner_home: Path,
+    candidate_identity_sha256: str,
+) -> tuple[int, os.stat_result]:
+    _require_sha256(candidate_identity_sha256)
+    descriptor = _open_owner_directory(owner_home)
+    try:
+        for index, name in enumerate(
+            (
+                ".local",
+                "state",
+                "saxo-bank-mcp",
+                "qa",
+                "analytics-source-matrix",
+                candidate_identity_sha256,
+            ),
+        ):
+            child = _open_or_create_directory_at(
+                descriptor,
+                name,
+                exact_mode=index >= _EXACT_DIRECTORY_COMPONENT_INDEX,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, _validated_directory(descriptor, exact_mode=True)
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _claim_candidate_guard_at_owner(
+    owner_home: Path,
+    identity: SourceMatrixCandidateIdentity,
+) -> bool:
+    """Atomically claim the canonical owner guard through held directory FDs."""
+    parent, parent_metadata = _open_guard_parent(
+        owner_home,
+        identity.candidate_identity_sha256,
+    )
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                "claimed.json",
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                _OWNER_FILE_MODE,
+                dir_fd=parent,
+            )
+            created = True
+        except FileExistsError:
+            existing = os.open(
+                "claimed.json",
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=parent,
+            )
+            try:
+                metadata = os.fstat(existing)
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
+                ):
+                    raise ValueError("source matrix guard owner or mode is invalid")
+            finally:
+                os.close(existing)
+            return False
+        try:
+            os.fchmod(descriptor, _OWNER_FILE_MODE)
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
+            ):
+                raise ValueError("source matrix guard owner or mode is invalid")
+            payload = (
+                json.dumps(
+                    {
+                        **identity.model_dump(mode="json"),
+                        "claimed": True,
+                    },
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            written = os.write(descriptor, payload)
+            if written != len(payload):
+                raise ValueError("source matrix guard write was incomplete")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(parent)
+        current_parent, current_metadata = _open_guard_parent(
+            owner_home,
+            identity.candidate_identity_sha256,
+        )
+        try:
+            if (
+                current_metadata.st_dev != parent_metadata.st_dev
+                or current_metadata.st_ino != parent_metadata.st_ino
+            ):
+                raise ValueError("source matrix guard parent changed during claim")
+        finally:
+            os.close(current_parent)
+        return True  # noqa: TRY300
+    except Exception:
+        if created:
+            try:
+                os.unlink("claimed.json", dir_fd=parent)
+                os.fsync(parent)
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(parent)
 
 
 def _prepare_owner_only_directory(path: Path) -> None:
