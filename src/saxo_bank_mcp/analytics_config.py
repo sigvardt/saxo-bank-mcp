@@ -4,7 +4,7 @@ import os
 import stat
 from collections.abc import Mapping
 from pathlib import Path
-from typing import ClassVar, Final
+from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -29,17 +29,28 @@ class AnalyticsLimits(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    sync_instruments: ClassVar[int] = 25
-    sync_rows: ClassVar[int] = 50_000
-    job_instruments: ClassVar[int] = 100
-    job_rows: ClassVar[int] = 5_000_000
-    response_rows: ClassVar[int] = 500
-    concurrent_jobs: ClassVar[int] = 4
-    artifact_bytes: ClassVar[int] = 25 * _MIB
-    store_quota_bytes: int = Field(default=_DEFAULT_STORE_QUOTA_GIB * _GIB, gt=0)
+    sync_instruments: int = Field(default=25, frozen=True)
+    sync_rows: int = Field(default=50_000, frozen=True)
+    job_instruments: int = Field(default=100, frozen=True)
+    job_rows: int = Field(default=5_000_000, frozen=True)
+    response_rows: int = Field(default=500, frozen=True)
+    concurrent_jobs: int = Field(default=4, frozen=True)
+    artifact_bytes: int = Field(default=25 * _MIB, frozen=True)
+    store_quota_bytes: int = Field(default=_DEFAULT_STORE_QUOTA_GIB * _GIB, gt=0, frozen=True)
 
     @model_validator(mode="after")
     def _validate_public_quota(self) -> AnalyticsLimits:
+        fixed_values = (
+            (self.sync_instruments, 25),
+            (self.sync_rows, 50_000),
+            (self.job_instruments, 100),
+            (self.job_rows, 5_000_000),
+            (self.response_rows, 500),
+            (self.concurrent_jobs, 4),
+            (self.artifact_bytes, 25 * _MIB),
+        )
+        if any(actual != expected for actual, expected in fixed_values):
+            raise ValueError("analytics request limits are fixed")
         if self.store_quota_bytes != _DEFAULT_STORE_QUOTA_GIB * _GIB:
             raise ValueError("analytics store quota must be loaded from configuration")
         return self

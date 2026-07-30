@@ -19,6 +19,8 @@ _JOB_INSTRUMENTS = 100
 _JOB_ROWS = 5_000_000
 _RESPONSE_ROWS = 500
 _CONCURRENT_JOBS = 4
+_ARTIFACT_BYTES = 25 * 1024 * 1024
+_DEFAULT_QUOTA_BYTES = 50 * 1024 * 1024 * 1024
 _OWNER_DIRECTORY_MODE = 0o700
 _OWNER_FILE_MODE = 0o600
 
@@ -40,8 +42,8 @@ def test_config_has_fixed_request_limits_and_refuses_over_quota(tmp_path: Path) 
     assert config.limits.job_rows == _JOB_ROWS
     assert config.limits.response_rows == _RESPONSE_ROWS
     assert config.limits.concurrent_jobs == _CONCURRENT_JOBS
-    assert config.limits.artifact_bytes == _SYNC_INSTRUMENTS * 1024 * 1024
-    assert config.limits.store_quota_bytes == 50 * 1024 * 1024 * 1024
+    assert config.limits.artifact_bytes == _ARTIFACT_BYTES
+    assert config.limits.store_quota_bytes == _DEFAULT_QUOTA_BYTES
     assert config.limits.can_accept_ingestion(config.limits.store_quota_bytes - 1, 1)
     assert not config.limits.can_accept_ingestion(config.limits.store_quota_bytes - 1, 2)
 
@@ -49,6 +51,38 @@ def test_config_has_fixed_request_limits_and_refuses_over_quota(tmp_path: Path) 
 def test_public_limits_construction_rejects_changed_fixed_limits_and_quota() -> None:
     with pytest.raises(ValidationError):
         AnalyticsLimits(sync_rows=1, artifact_bytes=1, store_quota_bytes=1)
+
+
+def test_fixed_limit_instance_mutation_is_rejected() -> None:
+    limits = AnalyticsLimits()
+
+    with pytest.raises(ValidationError):
+        limits.sync_rows = 1
+
+
+def test_fixed_limit_class_reassignment_cannot_change_new_instance_values() -> None:
+    AnalyticsLimits.sync_rows = 1
+    try:
+        assert AnalyticsLimits().sync_rows == _SYNC_ROWS
+    finally:
+        del AnalyticsLimits.sync_rows
+
+
+def test_limits_model_dump_contains_every_fixed_limit_and_bounded_quota(tmp_path: Path) -> None:
+    dumped = load_analytics_config(
+        _env(tmp_path / "state", SAXO_MCP_ANALYTICS_STORE_QUOTA_GIB="75"),
+    ).limits.model_dump()
+
+    assert dumped == {
+        "sync_instruments": _SYNC_INSTRUMENTS,
+        "sync_rows": _SYNC_ROWS,
+        "job_instruments": _JOB_INSTRUMENTS,
+        "job_rows": _JOB_ROWS,
+        "response_rows": _RESPONSE_ROWS,
+        "concurrent_jobs": _CONCURRENT_JOBS,
+        "artifact_bytes": _ARTIFACT_BYTES,
+        "store_quota_bytes": 75 * 1024 * 1024 * 1024,
+    }
 
 
 def test_config_creates_owner_only_directories_and_files(tmp_path: Path) -> None:
