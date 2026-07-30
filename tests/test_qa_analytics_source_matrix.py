@@ -192,16 +192,34 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
             "call_class": "sim_read_succeeded",
             "endpoint_path": "/root/v1/sessions/capabilities",
             "token_refreshed": False,
-            "token": {},
+            "token": {
+                "has_access_token": True,
+                "has_refresh_token": False,
+                "has_code_verifier": False,
+                "environment": "SIM",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "is_expired": False,
+            },
             "token_refresh_supported": False,
             "scope_used": False,
             "network_call_made": state.session_available,
             "live_write_called": False,
             "order_or_subscription_created": False,
-            "capabilities": {},
+            "capabilities": {
+                "AuthenticationLevel": "Strong",
+                "DataLevel": "Full",
+                "TradeLevel": "None",
+            },
             "next_action": "use current capability fields only",
-            "verifies": [],
-            "does_not_verify": [],
+            "verifies": [
+                "cached SIM bearer token can read current session capability fields",
+            ],
+            "does_not_verify": [
+                "order placement safety",
+                "instrument/account suitability",
+                "real-money approval",
+                "live endpoint access",
+            ],
         }
 
     async def saxo_get_entitlements() -> dict[str, JsonValue]:
@@ -225,9 +243,24 @@ def _matrix_server(state: FakeMatrixState) -> FastMCP:  # noqa: C901
                 "possibly_truncated": False,
             },
             "exchange_ids": [],
-            "entitlement_bucket_counts": {},
-            "verifies": [],
-            "does_not_verify": [],
+            "entitlement_bucket_counts": {
+                "DelayedFullBook": 0,
+                "DelayedGreeks": 0,
+                "Greeks": 0,
+                "RealTimeFullBook": 0,
+                "RealTimeTopOfBook": 0,
+            },
+            "verifies": [
+                "cached SIM bearer token can read current market-data entitlement summary",
+            ],
+            "does_not_verify": [
+                "price availability for a specific instrument",
+                "quote recency or real-time price delivery for any instrument",
+                "order placement safety",
+                "instrument/account suitability",
+                "real-money approval",
+                "live endpoint access",
+            ],
         }
 
     async def saxo_list_registered_endpoints(
@@ -490,6 +523,10 @@ async def test_matrix_claims_after_readiness_and_uses_safe_receipts_for_all_sour
         _record(state, "__claim__", {})
         return True
 
+    def validate() -> bool:
+        _record(state, "__validate__", {})
+        return True
+
     receipt = await run_analytics_source_matrix(
         _matrix_server(state),
         env=_sim_env(),
@@ -497,6 +534,7 @@ async def test_matrix_claims_after_readiness_and_uses_safe_receipts_for_all_sour
         candidate_identity=_identity(),
         captured_at=CAPTURED_AT,
         claim_source_execution=claim,
+        validate_source_execution=validate,
     )
 
     assert receipt.status == "passed"
@@ -508,16 +546,44 @@ async def test_matrix_claims_after_readiness_and_uses_safe_receipts_for_all_sour
     claim_index = next(
         index for index, (tool, _arguments) in enumerate(state.calls) if tool == "__claim__"
     )
+    validation_index = next(
+        index for index, (tool, _arguments) in enumerate(state.calls) if tool == "__validate__"
+    )
     first_source_index = next(
         index
         for index, (tool, _arguments) in enumerate(state.calls)
         if tool == "saxo_call_registered_endpoint"
     )
-    assert claim_index < first_source_index
+    assert validation_index < claim_index < first_source_index
     assert all(
         arguments["response_mode"] != "redacted_body"
         for tool, arguments in state.calls
         if tool == "saxo_call_registered_endpoint"
+    )
+
+    changed_state = FakeMatrixState()
+    changed_claims = 0
+
+    def changed_claim() -> bool:
+        nonlocal changed_claims
+        changed_claims += 1
+        return True
+
+    changed_receipt = await run_analytics_source_matrix(
+        _matrix_server(changed_state),
+        env=_sim_env(),
+        fixtures=_fixtures(),
+        candidate_identity=_identity(),
+        captured_at=CAPTURED_AT,
+        claim_source_execution=changed_claim,
+        validate_source_execution=lambda: False,
+    )
+    assert changed_receipt.status == "refused"
+    assert changed_receipt.reason == "candidate_execution_closure_changed"
+    assert changed_receipt.source_execution_claimed is False
+    assert changed_claims == 0
+    assert not any(
+        tool == "saxo_call_registered_endpoint" for tool, _arguments in changed_state.calls
     )
 
 

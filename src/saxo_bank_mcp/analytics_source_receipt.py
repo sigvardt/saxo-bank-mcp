@@ -185,7 +185,11 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
         return _failure(
             registered.operation,
             contract_id,
-            "source_access_unavailable",
+            (
+                "source_access_unavailable_after_network"
+                if executor.network_call_count > 0
+                else "source_access_unavailable"
+            ),
             executor,
             request_fingerprint_sha256=capture.request_fingerprints[contract_id],
         )

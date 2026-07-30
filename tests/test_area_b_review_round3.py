@@ -153,7 +153,7 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
     )
     assert generation.returncode == 0, generation.stderr
     manifest = json.loads(generated.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "3"
+    assert manifest["schema_version"] == "4"
     assert manifest["runtime_identity"]["implementation"] == sys.implementation.name
     assert manifest["runtime_identity"]["executable_sha256"]
     assert "pydantic" in manifest["dependency_distributions"]
@@ -370,19 +370,37 @@ def _valid_network_read_receipt(tool_name: str) -> dict[str, JsonValue]:
         "network_call_made": True,
         "live_write_called": False,
         "order_or_subscription_created": False,
-        "verifies": [],
-        "does_not_verify": [],
     }
     if tool_name == "saxo_get_session_capabilities":
         return {
             **common,
             "endpoint_path": "/root/v1/sessions/capabilities",
             "token_refreshed": False,
-            "token": {},
+            "token": {
+                "has_access_token": True,
+                "has_refresh_token": False,
+                "has_code_verifier": False,
+                "environment": "SIM",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "is_expired": False,
+            },
             "token_refresh_supported": False,
             "scope_used": False,
-            "capabilities": {},
+            "capabilities": {
+                "AuthenticationLevel": "Strong",
+                "DataLevel": "Full",
+                "TradeLevel": "None",
+            },
             "next_action": "use current capability fields only",
+            "verifies": [
+                "cached SIM bearer token can read current session capability fields",
+            ],
+            "does_not_verify": [
+                "order placement safety",
+                "instrument/account suitability",
+                "real-money approval",
+                "live endpoint access",
+            ],
         }
     return {
         **common,
@@ -397,7 +415,24 @@ def _valid_network_read_receipt(tool_name: str) -> dict[str, JsonValue]:
             "possibly_truncated": False,
         },
         "exchange_ids": [],
-        "entitlement_bucket_counts": {},
+        "entitlement_bucket_counts": {
+            "DelayedFullBook": 0,
+            "DelayedGreeks": 0,
+            "Greeks": 0,
+            "RealTimeFullBook": 0,
+            "RealTimeTopOfBook": 0,
+        },
+        "verifies": [
+            "cached SIM bearer token can read current market-data entitlement summary",
+        ],
+        "does_not_verify": [
+            "price availability for a specific instrument",
+            "quote recency or real-time price delivery for any instrument",
+            "order placement safety",
+            "instrument/account suitability",
+            "real-money approval",
+            "live endpoint access",
+        ],
     }
 
 
