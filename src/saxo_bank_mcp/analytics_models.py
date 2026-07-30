@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -59,6 +60,7 @@ _SENSITIVE_FIELD_PATTERN_TEXT: Final = r"""(?:
     |display[\s_-]?name
     |access[\s_-]?token
     |refresh[\s_-]?token
+    |deletion[\s_-]?preview[\s_-]?token
     |preview[\s_-]?token
     |disclaimer[\s_-]?token
 )"""
@@ -67,7 +69,7 @@ _SENSITIVE_ASSIGNMENT_PATTERN: Final = re.compile(
     + _SENSITIVE_FIELD_PATTERN_TEXT
     + r"""\b
     ["']?\s*(?:=|:)\s*
-    ["']?[^\s,"'};]{3,}
+    ["']?(?P<value>[^\s,"'};]{3,})
     """,
 )
 _SENSITIVE_IS_ASSIGNMENT_PATTERN: Final = re.compile(
@@ -76,6 +78,12 @@ _SENSITIVE_IS_ASSIGNMENT_PATTERN: Final = re.compile(
     + r"""\b
     ["']?\s+\bis\b\s+
     ["']?(?P<value>[^\s,"'};]+)
+    """,
+)
+_DISPLAY_NAME_IS_ASSIGNMENT_PATTERN: Final = re.compile(
+    r"""(?ix)\bdisplay[\s_-]?name\b
+    ["']?\s+\bis\b\s+
+    ["']?(?P<value>[^\r\n.;]+)
     """,
 )
 _IDENTIFIER_TOKEN_PATTERN: Final = re.compile(r"(?i)^[a-z0-9][a-z0-9._~+/=-]{7,}$")
@@ -101,7 +109,9 @@ _AUTHORIZATION_PATTERN: Final = re.compile(
 _JWT_PATTERN: Final = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
 )
-_URL_PATTERN: Final = re.compile(r"(?i)\b(?:https?|file)://[^\s<>'\"]+")
+_URL_PATTERN: Final = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>'\"]+",
+)
 _LOCAL_PATH_PATTERN: Final = re.compile(
     r"""(?ix)
     (?:
@@ -183,13 +193,21 @@ _CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN: Final = re.compile(
     \s*{_MONEY_AMOUNT_PATTERN_TEXT}
     """,
 )
-_RAW_ACCOUNT_SCOPE_PATTERNS: Final = (
-    re.compile(r"^[0-9]{6,}$"),
-    re.compile(
-        r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
-    ),
-    re.compile(r"(?i)^account[_-][A-Za-z0-9_-]{8,}$"),
+_PERCENTAGE_VALUE_PATTERN: Final = re.compile(
+    r"""(?ix)
+    (?<![A-Z0-9])
+    [-+]?(?:\d+(?:[.,]\d+)?)
+    \s*(?:%|\bpercent(?:age)?(?:\s+points?)?\b)
+    """,
 )
+_AGGREGATE_ACCOUNT_SCOPES: Final = frozenset(
+    {
+        "aggregate",
+        "selected SIM account",
+    },
+)
+_ACCOUNT_ALIAS_PATTERN_TEXT: Final = r"^aa_[0-9a-f]{32}$"
+_ACCOUNT_ALIAS_PATTERN: Final = re.compile(_ACCOUNT_ALIAS_PATTERN_TEXT)
 
 
 class AnalysisStatus(StrEnum):
@@ -299,18 +317,39 @@ type NonEmptyText = Annotated[
 
 
 def _require_safe_account_scope(value: str) -> str:
-    if any(pattern.fullmatch(value) is not None for pattern in _RAW_ACCOUNT_SCOPE_PATTERNS):
-        raise PydanticCustomError(
-            "analytics_safe_account_alias",
-            "account scope must use a safe account alias",
-        )
-    return value
+    if value in _AGGREGATE_ACCOUNT_SCOPES:
+        return value
+    if _ACCOUNT_ALIAS_PATTERN.fullmatch(value) is not None:
+        opaque_uuid = UUID(hex=value.removeprefix("aa_"))
+        if (
+            opaque_uuid.version == _OPAQUE_HANDLE_UUID_VERSION
+            and opaque_uuid.variant == RFC_4122
+        ):
+            return value
+    raise PydanticCustomError(
+        "analytics_safe_account_alias",
+        "account scope must use a safe account alias or aggregate",
+    )
 
 
 type SafeAccountScope = Annotated[
     str,
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=1_000),
     AfterValidator(_require_safe_account_scope),
+    WithJsonSchema(
+        {
+            "anyOf": [
+                {
+                    "enum": sorted(_AGGREGATE_ACCOUNT_SCOPES),
+                    "type": "string",
+                },
+                {
+                    "pattern": _ACCOUNT_ALIAS_PATTERN_TEXT,
+                    "type": "string",
+                },
+            ],
+        },
+    ),
 ]
 type ContractName = Annotated[
     str,
@@ -363,6 +402,28 @@ type ProofCheck = Literal[
     "independent_reference",
     "saxo_reconciliation",
     "sim_end_to_end",
+]
+
+
+def _require_iso_4217_currency(value: str) -> str:
+    if value not in _ISO_4217_CURRENCY_CODES:
+        raise PydanticCustomError(
+            "analytics_iso_4217_currency",
+            "currency must be a supported ISO 4217 code",
+        )
+    return value
+
+
+type IsoCurrencyCode = Annotated[
+    str,
+    StringConstraints(strict=True, pattern=r"^[A-Z]{3}$"),
+    AfterValidator(_require_iso_4217_currency),
+    WithJsonSchema(
+        {
+            "enum": sorted(_ISO_4217_CURRENCY_CODES),
+            "type": "string",
+        },
+    ),
 ]
 
 
@@ -532,10 +593,7 @@ class MetricValue(_StrictAnalyticsModel):
         ),
     ]
     unit_class: ValueUnitClass
-    currency: Annotated[
-        str,
-        StringConstraints(strict=True, pattern=r"^[A-Z]{3}$"),
-    ] | None
+    currency: IsoCurrencyCode | None
     metric_class: MetricClass
     source_timestamp: UtcDateTime
     proof_profile_id: ProofProfileId
@@ -586,7 +644,11 @@ class ActiveProofReceipt(_StrictAnalyticsModel):
     source_binding: ProofSourceBinding
     engine_binding: ProofEngineBinding
     proof_profile_id: ProofProfileId
-    checks_passed: tuple[ProofCheck, ...] = Field(min_length=5, max_length=5)
+    checks_passed: tuple[ProofCheck, ...] = Field(
+        min_length=5,
+        max_length=5,
+        json_schema_extra={"uniqueItems": True},
+    )
 
     @field_validator("checks_passed", mode="before")
     @classmethod
@@ -715,6 +777,11 @@ class AnalysisResult(_EvidenceAwareModel):
                 "analytics_future_source",
                 "source timestamps must not follow as_of",
             )
+        if self.data_quality.coverage.end_at > self.as_of:
+            raise PydanticCustomError(
+                "analytics_future_coverage",
+                "source coverage must not end after as_of",
+            )
 
     def _validate_verified_values(self) -> None:
         if self.data_quality.state is not QualityState.COMPLETE:
@@ -788,7 +855,7 @@ class DatasetSummary(_EvidenceAwareModel):
     dataset_id: DatasetId
     account_scope: SafeAccountScope
     source_scope: Literal["saxo_openapi"]
-    source_revision: NonEmptyText
+    source_revision: SourceRevision
     fingerprint_sha256: Annotated[
         str,
         StringConstraints(strict=True, pattern=r"^[a-f0-9]{64}$"),
@@ -796,6 +863,15 @@ class DatasetSummary(_EvidenceAwareModel):
     created_at: UtcDateTime
     coverage: DataCoverage
     data_quality: DataQuality
+
+    @model_validator(mode="after")
+    def _validate_coverage_contract(self) -> Self:
+        if self.coverage != self.data_quality.coverage:
+            raise PydanticCustomError(
+                "analytics_dataset_coverage",
+                "dataset coverage must match data-quality coverage",
+            )
+        return self
 
 
 class ArtifactSummary(_EvidenceAwareModel):
@@ -923,10 +999,15 @@ def validate_public_evidence(result: AnalysisOutput) -> None:
         )
 
 
+def _is_safe_sensitive_value(value: str) -> bool:
+    candidate = value.strip().strip("\"'").rstrip(".!?")
+    normalized = re.sub(r"\s+", "_", candidate.casefold().replace("-", "_"))
+    return normalized in _SAFE_SENSITIVE_VALUE_SENTINELS
+
+
 def _looks_like_identifier_token(value: str) -> bool:
     candidate = value.rstrip(".!?")
-    normalized = candidate.casefold().replace("-", "_")
-    if normalized in _SAFE_SENSITIVE_VALUE_SENTINELS:
+    if _is_safe_sensitive_value(candidate):
         return False
     if _IDENTIFIER_TOKEN_PATTERN.fullmatch(candidate) is None:
         return False
@@ -940,14 +1021,24 @@ def _string_contains_forbidden_public_value(value: str) -> bool:
     if any(
         pattern.search(value) is not None
         for pattern in (
-            _SENSITIVE_ASSIGNMENT_PATTERN,
             _AUTHORIZATION_PATTERN,
             _JWT_PATTERN,
             _URL_PATTERN,
             _LOCAL_PATH_PATTERN,
             _DIRECT_MONETARY_VALUE_PATTERN,
             _CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN,
+            _PERCENTAGE_VALUE_PATTERN,
         )
+    ):
+        return True
+    if any(
+        not _is_safe_sensitive_value(match.group("value"))
+        for match in _SENSITIVE_ASSIGNMENT_PATTERN.finditer(value)
+    ):
+        return True
+    if any(
+        not _is_safe_sensitive_value(match.group("value"))
+        for match in _DISPLAY_NAME_IS_ASSIGNMENT_PATTERN.finditer(value)
     ):
         return True
     return any(

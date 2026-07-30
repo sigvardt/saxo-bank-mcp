@@ -59,6 +59,7 @@ _REQUIRED_PROOF_CHECKS = (
 _HANDLES_PER_KIND = 2
 _EXPECTED_HANDLE_COUNT = len(HandleKind) * _HANDLES_PER_KIND
 _UUID_VERSION = 4
+_ACCOUNT_ALIAS = "aa_00000000000040008000000000000000"
 
 
 def _coverage(state: QualityState = QualityState.COMPLETE) -> DataCoverage:
@@ -482,6 +483,33 @@ def test_money_claim_requires_an_iso_currency() -> None:
     assert metric.currency == "USD"
 
 
+def test_money_claim_rejects_unknown_iso_currency_code() -> None:
+    payload = _metric().model_dump()
+    payload.update(
+        unit="currency",
+        unit_class=ValueUnitClass.MONETARY,
+        currency="ZZZ",
+    )
+
+    with pytest.raises(ValidationError, match="ISO 4217"):
+        MetricValue.model_validate(payload)
+
+
+def test_money_claim_schema_publishes_closed_iso_currency_codes() -> None:
+    schema = TypeAdapter(MetricValue).json_schema()
+    currency_schema = schema["properties"]["currency"]
+    currency_reference = next(
+        branch["$ref"]
+        for branch in currency_schema["anyOf"]
+        if "$ref" in branch
+    )
+    currency_definition = currency_reference.rsplit("/", maxsplit=1)[-1]
+    published_codes = schema["$defs"][currency_definition]["enum"]
+
+    assert "USD" in published_codes
+    assert "ZZZ" not in published_codes
+
+
 def test_value_unit_class_protocol_values_are_exact_and_round_trip() -> None:
     enum_type = ValueUnitClass
     expected = {
@@ -631,6 +659,13 @@ def test_verified_result_rejects_mismatched_active_proof_receipt_bindings(
     [
         ("golden", "property"),
         (*_REQUIRED_PROOF_CHECKS, "made_up_check"),
+        (
+            "golden",
+            "property",
+            "independent_reference",
+            "saxo_reconciliation",
+            "golden",
+        ),
     ],
 )
 def test_active_proof_receipt_rejects_missing_or_made_up_checks(
@@ -641,6 +676,19 @@ def test_active_proof_receipt_rejects_missing_or_made_up_checks(
 
     with pytest.raises(ValidationError, match="proof checks"):
         ActiveProofReceipt.model_validate(payload)
+
+
+def test_active_proof_receipt_schema_closes_and_deduplicates_checks() -> None:
+    schema = TypeAdapter(ActiveProofReceipt).json_schema()
+    checks_schema = schema["properties"]["checks_passed"]
+    proof_check_definition = checks_schema["items"]["$ref"].rsplit("/", maxsplit=1)[-1]
+
+    assert checks_schema["minItems"] == len(_REQUIRED_PROOF_CHECKS)
+    assert checks_schema["maxItems"] == len(_REQUIRED_PROOF_CHECKS)
+    assert checks_schema["uniqueItems"] is True
+    assert schema["$defs"][proof_check_definition]["enum"] == list(
+        _REQUIRED_PROOF_CHECKS,
+    )
 
 
 @pytest.mark.parametrize(
@@ -701,6 +749,14 @@ def test_verified_result_rejects_incomplete_coverage_hidden_by_quality_state() -
     coverage["missing_row_count"] = 2
 
     with pytest.raises(ValidationError, match="complete quality"):
+        AnalysisResult.model_validate(payload)
+
+
+def test_verified_result_rejects_coverage_ending_after_as_of() -> None:
+    payload = _result().model_dump()
+    payload["data_quality"]["coverage"]["end_at"] = _AS_OF + timedelta(seconds=1)
+
+    with pytest.raises(ValidationError, match="coverage"):
         AnalysisResult.model_validate(payload)
 
 
@@ -779,6 +835,8 @@ def test_public_evidence_validator_rejects_models_built_without_validation(
         "The client key is unavailable.",
         "ClientKey is unavailable.",
         '"ClientKey" is "unavailable".',
+        "AccountId: unavailable.",
+        "ClientKey=redacted",
         "The client_key is not available.",
         "ClientKey is not_available.",
         '"ClientKey" is "not-provided".',
@@ -818,6 +876,29 @@ def test_public_evidence_rejects_identifier_like_is_assignments(
 
     forged = AnalyticsRefusal.model_construct(**payload)
     with pytest.raises(AnalyticsPrivacyError):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "DisplayName is Jane Doe",
+        "DeletionPreviewToken=dp_0123456789abcdef0123456789abcdef",
+        "ftp://internal.example/private/result.json",
+        "custom+private://internal.example/private/result.json",
+    ],
+)
+def test_public_evidence_rejects_named_private_value_probes(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError, match="forbidden value class"):
         validate_public_evidence(forged)
 
 
@@ -874,6 +955,24 @@ def test_public_refusals_and_degradations_reject_monetary_text(
         )
     else:
         payload[field_name] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        model_type.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    [AnalyticsRefusal, AnalyticsDegradation],
+)
+def test_public_refusals_and_degradations_reject_financial_percentages(
+    model_type: type[AnalyticsRefusal | AnalyticsDegradation],
+) -> None:
+    payload = (
+        _refusal_payload()
+        if model_type is AnalyticsRefusal
+        else _degradation_payload()
+    )
+    payload["reason"] = "Portfolio return: 12.5%."
 
     with pytest.raises(ValidationError, match="forbidden value class"):
         model_type.model_validate(payload)
@@ -980,6 +1079,8 @@ def test_public_value_free_counts_and_times_remain_allowed(
         "123456789012",
         "00000000-0000-4000-8000-000000000000",
         "account_" + ("x" * 20),
+        "raw-account-identifier-7654321",
+        "aa_00000000000010008000000000000000",
     ],
 )
 def test_public_dataset_summary_rejects_raw_account_scope(raw_scope: str) -> None:
@@ -995,6 +1096,83 @@ def test_public_dataset_summary_rejects_raw_account_scope(raw_scope: str) -> Non
             created_at=_AS_OF,
             coverage=_coverage(),
             data_quality=_quality(),
+        )
+
+
+@pytest.mark.parametrize(
+    "account_scope",
+    ["aggregate", "selected SIM account", _ACCOUNT_ALIAS],
+)
+def test_account_scope_accepts_closed_aggregate_or_uuid4_alias(
+    account_scope: str,
+) -> None:
+    summary = DatasetSummary(
+        schema_version="1",
+        dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+        visibility=VisibilityMode.FINGERPRINT_ONLY,
+        account_scope=account_scope,
+        source_scope="saxo_openapi",
+        source_revision=_SOURCE_REVISION,
+        fingerprint_sha256=_SHA256,
+        created_at=_AS_OF,
+        coverage=_coverage(),
+        data_quality=_quality(),
+    )
+
+    assert summary.account_scope == account_scope
+
+
+def test_account_scope_schema_exposes_only_aggregate_or_opaque_alias() -> None:
+    schema = TypeAdapter(DatasetSummary).json_schema()
+    account_scope_reference = schema["properties"]["account_scope"]["$ref"]
+    account_scope_definition = account_scope_reference.rsplit("/", maxsplit=1)[-1]
+
+    assert schema["$defs"][account_scope_definition] == {
+        "anyOf": [
+            {
+                "enum": ["aggregate", "selected SIM account"],
+                "type": "string",
+            },
+            {
+                "pattern": r"^aa_[0-9a-f]{32}$",
+                "type": "string",
+            },
+        ],
+    }
+
+
+def test_dataset_summary_uses_validated_source_revision_contract() -> None:
+    with pytest.raises(ValidationError):
+        DatasetSummary(
+            schema_version="1",
+            dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+            visibility=VisibilityMode.FINGERPRINT_ONLY,
+            account_scope="aggregate",
+            source_scope="saxo_openapi",
+            source_revision="revision with spaces",
+            fingerprint_sha256=_SHA256,
+            created_at=_AS_OF,
+            coverage=_coverage(),
+            data_quality=_quality(),
+        )
+
+
+def test_dataset_summary_rejects_mismatched_coverage_contracts() -> None:
+    quality_payload = _quality().model_dump()
+    quality_payload["coverage"]["start_at"] = _AS_OF - timedelta(days=1)
+
+    with pytest.raises(ValidationError, match="coverage"):
+        DatasetSummary(
+            schema_version="1",
+            dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+            visibility=VisibilityMode.FINGERPRINT_ONLY,
+            account_scope="aggregate",
+            source_scope="saxo_openapi",
+            source_revision=_SOURCE_REVISION,
+            fingerprint_sha256=_SHA256,
+            created_at=_AS_OF,
+            coverage=_coverage(),
+            data_quality=DataQuality.model_validate(quality_payload),
         )
 
 

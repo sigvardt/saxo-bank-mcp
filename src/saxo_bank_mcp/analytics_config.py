@@ -27,7 +27,12 @@ class AnalyticsConfigError(ValueError):
 class AnalyticsLimits(BaseModel):
     """Fixed analytics request limits and the configured storage quota."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        revalidate_instances="always",
+    )
 
     sync_instruments: int = Field(default=25, frozen=True)
     sync_rows: int = Field(default=50_000, frozen=True)
@@ -36,10 +41,15 @@ class AnalyticsLimits(BaseModel):
     response_rows: int = Field(default=500, frozen=True)
     concurrent_jobs: int = Field(default=4, frozen=True)
     artifact_bytes: int = Field(default=25 * _MIB, frozen=True)
-    store_quota_bytes: int = Field(default=_DEFAULT_STORE_QUOTA_GIB * _GIB, gt=0, frozen=True)
+    store_quota_bytes: int = Field(
+        default=_DEFAULT_STORE_QUOTA_GIB * _GIB,
+        ge=_GIB,
+        le=_MAX_STORE_QUOTA_GIB * _GIB,
+        frozen=True,
+    )
 
     @model_validator(mode="after")
-    def _validate_public_quota(self) -> AnalyticsLimits:
+    def _validate_fixed_limits(self) -> AnalyticsLimits:
         fixed_values = (
             (self.sync_instruments, 25),
             (self.sync_rows, 50_000),
@@ -51,8 +61,6 @@ class AnalyticsLimits(BaseModel):
         )
         if any(actual != expected for actual, expected in fixed_values):
             raise ValueError("analytics request limits are fixed")
-        if self.store_quota_bytes != _DEFAULT_STORE_QUOTA_GIB * _GIB:
-            raise ValueError("analytics store quota must be loaded from configuration")
         return self
 
     def can_accept_ingestion(self, current_bytes: int, incoming_bytes: int) -> bool:
@@ -68,18 +76,44 @@ class AnalyticsLimits(BaseModel):
 class AnalyticsPaths(BaseModel):
     """Owner-only locations used by the local analytics runtime."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        revalidate_instances="always",
+    )
 
     state_root: Path
     analytics_root: Path
     artifacts_dir: Path
     store_path: Path
 
+    @model_validator(mode="after")
+    def _validate_containment(self) -> AnalyticsPaths:
+        if not self.state_root.is_absolute():
+            raise ValueError("analytics state root must be absolute")
+        resolved_state_root = self.state_root.resolve(strict=False)
+        for child in (self.analytics_root, self.artifacts_dir, self.store_path):
+            if not child.is_absolute():
+                raise ValueError("analytics child paths must be absolute")
+            resolved_child = child.resolve(strict=False)
+            if (
+                resolved_child == resolved_state_root
+                or not resolved_child.is_relative_to(resolved_state_root)
+            ):
+                raise ValueError("analytics path escapes Saxo state root")
+        return self
+
 
 class AnalyticsConfig(BaseModel):
     """Immutable analytics runtime configuration."""
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        revalidate_instances="always",
+    )
 
     limits: AnalyticsLimits
     paths: AnalyticsPaths
@@ -99,7 +133,7 @@ def load_analytics_config(env: Mapping[str, str]) -> AnalyticsConfig:
     store_path = _path_under_state_root(resolved_state_root, analytics_root / _STORE_FILE)
     store_path = prepare_owner_only_path(store_path)
 
-    return AnalyticsConfig.model_construct(
+    return AnalyticsConfig(
         limits=_configured_limits(_store_quota_bytes(env)),
         paths=AnalyticsPaths(
             state_root=resolved_state_root,
@@ -133,8 +167,12 @@ def prepare_owner_only_path(path: Path) -> Path:
 
 def _saxo_state_root(env: Mapping[str, str]) -> Path:
     configured = env.get("XDG_STATE_HOME", "").strip()
-    state_home = Path(configured) if configured else Path.home() / ".local" / "state"
-    return state_home.expanduser() / _APP_STATE_DIR
+    if not configured:
+        return Path.home() / ".local" / "state" / _APP_STATE_DIR
+    state_home = Path(configured).expanduser()
+    if not state_home.is_absolute():
+        raise AnalyticsConfigError("XDG_STATE_HOME must be absolute")
+    return state_home / _APP_STATE_DIR
 
 
 def _store_quota_bytes(env: Mapping[str, str]) -> int:
@@ -151,7 +189,7 @@ def _store_quota_bytes(env: Mapping[str, str]) -> int:
 
 
 def _configured_limits(store_quota_bytes: int) -> AnalyticsLimits:
-    return AnalyticsLimits.model_construct(store_quota_bytes=store_quota_bytes)
+    return AnalyticsLimits(store_quota_bytes=store_quota_bytes)
 
 
 def _path_under_state_root(state_root: Path, path: Path) -> Path:
