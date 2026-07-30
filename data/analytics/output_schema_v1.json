@@ -1171,7 +1171,7 @@
           "type": "string"
         },
         {
-          "pattern": "^aa_[0-9a-f]{32}$",
+          "pattern": "^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$",
           "type": "string"
         }
       ]

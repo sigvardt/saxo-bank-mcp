@@ -8,6 +8,7 @@ from typing import Any
 from uuid import RFC_4122, UUID
 
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp.analytics_errors import AnalyticsPrivacyError
@@ -856,6 +857,51 @@ def test_public_evidence_allows_safe_ordinary_privacy_prose(safe_text: str) -> N
 
 
 @pytest.mark.parametrize(
+    "safe_text",
+    [
+        "AccountId: unavailable.",
+        '"AccountId": "unavailable".',
+        "ClientKey=redacted",
+        "'ClientKey'='redacted'!",
+    ],
+)
+def test_public_evidence_allows_only_exact_safe_assignment_sentinels(
+    safe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = safe_text
+
+    output = AnalyticsRefusal.model_validate(payload)
+
+    assert validate_public_evidence(output) is None
+
+
+@pytest.mark.parametrize(
+    "unsafe_text",
+    [
+        "AccountId: unavailable raw-account-identifier-7654321",
+        '"AccountId": "unavailable raw-account-identifier-7654321"',
+        "AccountId is unavailable raw-account-identifier-7654321",
+        "DeletionPreviewToken=redacted dp_0123456789abcdef0123456789abcdef",
+        "'DeletionPreviewToken'='redacted dp_0123456789abcdef0123456789abcdef'",
+        '"DeletionPreviewToken" is "redacted dp_0123456789abcdef0123456789abcdef"',
+    ],
+)
+def test_public_evidence_rejects_safe_sentinel_prefix_smuggling(
+    unsafe_text: str,
+) -> None:
+    payload = _refusal_payload()
+    payload["reason"] = unsafe_text
+
+    with pytest.raises(ValidationError, match="forbidden value class"):
+        AnalyticsRefusal.model_validate(payload)
+
+    forged = AnalyticsRefusal.model_construct(**payload)
+    with pytest.raises(AnalyticsPrivacyError, match="forbidden value class"):
+        validate_public_evidence(forged)
+
+
+@pytest.mark.parametrize(
     "unsafe_text",
     [
         "ClientKey is synthetic_1234567890",
@@ -1081,6 +1127,7 @@ def test_public_value_free_counts_and_times_remain_allowed(
         "account_" + ("x" * 20),
         "raw-account-identifier-7654321",
         "aa_00000000000010008000000000000000",
+        "aa_00000000000040007000000000000000",
     ],
 )
 def test_public_dataset_summary_rejects_raw_account_scope(raw_scope: str) -> None:
@@ -1134,11 +1181,22 @@ def test_account_scope_schema_exposes_only_aggregate_or_opaque_alias() -> None:
                 "type": "string",
             },
             {
-                "pattern": r"^aa_[0-9a-f]{32}$",
+                "pattern": r"^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$",
                 "type": "string",
             },
         ],
     }
+
+
+def test_account_scope_schema_rejects_non_uuid4_aliases_under_draft_2020_12() -> None:
+    schema = TypeAdapter(DatasetSummary).json_schema()
+    account_scope_reference = schema["properties"]["account_scope"]["$ref"]
+    account_scope_definition = account_scope_reference.rsplit("/", maxsplit=1)[-1]
+    validator = Draft202012Validator(schema["$defs"][account_scope_definition])
+
+    assert validator.is_valid(_ACCOUNT_ALIAS)
+    assert not validator.is_valid("aa_00000000000010008000000000000000")
+    assert not validator.is_valid("aa_00000000000040007000000000000000")
 
 
 def test_dataset_summary_uses_validated_source_revision_contract() -> None:

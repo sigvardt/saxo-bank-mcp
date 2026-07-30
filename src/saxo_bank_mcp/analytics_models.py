@@ -64,21 +64,25 @@ _SENSITIVE_FIELD_PATTERN_TEXT: Final = r"""(?:
     |preview[\s_-]?token
     |disclaimer[\s_-]?token
 )"""
+_SENSITIVE_ASSIGNMENT_RHS_PATTERN_TEXT: Final = r"""(?P<value>
+    ["'][^"'\r\n]*["']
+    |[^\r\n;.!?]+
+)"""
 _SENSITIVE_ASSIGNMENT_PATTERN: Final = re.compile(
     r"(?ix)\b"
     + _SENSITIVE_FIELD_PATTERN_TEXT
     + r"""\b
     ["']?\s*(?:=|:)\s*
-    ["']?(?P<value>[^\s,"'};]{3,})
-    """,
+    """
+    + _SENSITIVE_ASSIGNMENT_RHS_PATTERN_TEXT,
 )
 _SENSITIVE_IS_ASSIGNMENT_PATTERN: Final = re.compile(
     r"(?ix)\b"
     + _SENSITIVE_FIELD_PATTERN_TEXT
     + r"""\b
     ["']?\s+\bis\b\s+
-    ["']?(?P<value>[^\s,"'};]+)
-    """,
+    """
+    + _SENSITIVE_ASSIGNMENT_RHS_PATTERN_TEXT,
 )
 _DISPLAY_NAME_IS_ASSIGNMENT_PATTERN: Final = re.compile(
     r"""(?ix)\bdisplay[\s_-]?name\b
@@ -86,9 +90,6 @@ _DISPLAY_NAME_IS_ASSIGNMENT_PATTERN: Final = re.compile(
     ["']?(?P<value>[^\r\n.;]+)
     """,
 )
-_IDENTIFIER_TOKEN_PATTERN: Final = re.compile(r"(?i)^[a-z0-9][a-z0-9._~+/=-]{7,}$")
-_IDENTIFIER_TOKEN_SIGNAL_PATTERN: Final = re.compile(r"[0-9_./+=-]")
-_LONG_IDENTIFIER_TOKEN_LENGTH: Final = 20
 _SAFE_SENSITIVE_VALUE_SENTINELS: Final = frozenset(
     {
         "excluded",
@@ -206,7 +207,9 @@ _AGGREGATE_ACCOUNT_SCOPES: Final = frozenset(
         "selected SIM account",
     },
 )
-_ACCOUNT_ALIAS_PATTERN_TEXT: Final = r"^aa_[0-9a-f]{32}$"
+_ACCOUNT_ALIAS_PATTERN_TEXT: Final = (
+    r"^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+)
 _ACCOUNT_ALIAS_PATTERN: Final = re.compile(_ACCOUNT_ALIAS_PATTERN_TEXT)
 
 
@@ -1005,18 +1008,6 @@ def _is_safe_sensitive_value(value: str) -> bool:
     return normalized in _SAFE_SENSITIVE_VALUE_SENTINELS
 
 
-def _looks_like_identifier_token(value: str) -> bool:
-    candidate = value.rstrip(".!?")
-    if _is_safe_sensitive_value(candidate):
-        return False
-    if _IDENTIFIER_TOKEN_PATTERN.fullmatch(candidate) is None:
-        return False
-    return (
-        len(candidate) >= _LONG_IDENTIFIER_TOKEN_LENGTH
-        or _IDENTIFIER_TOKEN_SIGNAL_PATTERN.search(candidate) is not None
-    )
-
-
 def _string_contains_forbidden_public_value(value: str) -> bool:
     if any(
         pattern.search(value) is not None
@@ -1042,7 +1033,7 @@ def _string_contains_forbidden_public_value(value: str) -> bool:
     ):
         return True
     return any(
-        _looks_like_identifier_token(match.group("value"))
+        not _is_safe_sensitive_value(match.group("value"))
         for match in _SENSITIVE_IS_ASSIGNMENT_PATTERN.finditer(value)
     )
 
