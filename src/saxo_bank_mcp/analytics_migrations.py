@@ -18,7 +18,8 @@ import duckdb
 
 from saxo_bank_mcp.analytics_config import prepare_owner_only_path
 
-LATEST_SCHEMA_VERSION: Final = 1
+LATEST_SCHEMA_VERSION: Final = 2
+_SOURCE_PAGE_IDENTITY_SCHEMA_VERSION: Final = 2
 _SOURCE_MIGRATIONS_DIR: Final = (
     Path(__file__).resolve().parents[2] / "data" / "analytics" / "migrations"
 )
@@ -57,7 +58,13 @@ def _connect_database(path: Path, *, read_only: bool) -> duckdb.DuckDBPyConnecti
 
 
 def _read_migration(version: int) -> str:
-    filename = f"{version:04d}_initial.sql"
+    filename = {
+        1: "0001_initial.sql",
+        2: "0002_source_page_identity.sql",
+    }.get(version)
+    if filename is None:
+        msg = f"schema migration {version} is not installed"
+        raise MigrationError(msg)
     resource = files("saxo_bank_mcp").joinpath(_MIGRATION_RESOURCE_DIR, filename)
     if resource.is_file():
         return resource.read_text(encoding="utf-8")
@@ -71,6 +78,8 @@ def _read_migration(version: int) -> str:
 def _migration_name(version: int) -> str:
     if version == 1:
         return "initial"
+    if version == _SOURCE_PAGE_IDENTITY_SCHEMA_VERSION:
+        return "source_page_identity"
     msg = f"schema migration {version} is not installed"
     raise MigrationError(msg)
 

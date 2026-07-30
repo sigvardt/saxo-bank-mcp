@@ -574,6 +574,7 @@ def test_optional_null_and_type_variation_does_not_hide_required_data() -> None:
 
     comparison = compare_source_schema(chart, payload)
 
-    assert comparison.compatible is True
+    assert comparison.compatible is False
     assert comparison.null_optional_fields == ("Volume",)
     assert comparison.optional_type_mismatches == ("PriceType",)
+    assert comparison.quarantined_analysis_kinds == chart.dependent_analysis_kinds

@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+
+import duckdb
+import httpx2
+import pytest
+from pydantic import ValidationError
+
+import saxo_bank_mcp.analytics_store as store_module
+from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
+from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_source_contracts import (
+    SourceJsonValue,
+    SourcePage,
+    build_source_capture_context,
+    source_contracts_by_id,
+)
+from saxo_bank_mcp.analytics_store import (
+    AnalyticsStore,
+    StoreValidationError,
+)
+from saxo_bank_mcp.endpoint_registry import EndpointOperation
+
+_FIXTURE_ROOT = Path(__file__).parent / "fixtures/analytics/saxo_pages"
+_CAPTURED_AT = datetime(2026, 7, 30, 12, tzinfo=UTC)
+_EXPECTED_NATIVE_REVISION_COUNT = 2
+_EXPECTED_PAGE_COUNT = 3
+
+
+class _Executor:
+    def __init__(self, payloads: list[bytes]) -> None:
+        self.payloads = payloads
+
+    async def __call__(
+        self,
+        operation: EndpointOperation,
+        request_target: str,
+        params: Mapping[str, str],
+    ) -> httpx2.Response:
+        _ = operation, request_target, params
+        return httpx2.Response(
+            200,
+            content=self.payloads.pop(0),
+            request=httpx2.Request("GET", "https://registered.invalid"),
+        )
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+def _config(tmp_path: Path) -> AnalyticsConfig:
+    return load_analytics_config(
+        {
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "SAXO_MCP_ANALYTICS_STORE_QUOTA_GIB": "1",
+        },
+    )
+
+
+def test_store_bridge_supports_every_frozen_provider_source_kind() -> None:
+    assert {
+        contract.source_kind for contract in source_contracts_by_id().values()
+    } <= store_module.supported_source_kinds()
+
+
+async def _provider_pages() -> tuple[SourcePage, ...]:
+    requests: dict[str, Mapping[str, object]] = {
+        "chart_v3": {"AssetType": "Stock", "Count": 2, "Uic": 1001},
+        "transactions_v1": {},
+    }
+    capture = build_source_capture_context(requests, captured_at=_CAPTURED_AT)
+    provider = SaxoAnalyticsProvider(
+        request_executor=_Executor(
+            [
+                (_FIXTURE_ROOT / "chart_page_1.json").read_bytes(),
+                (_FIXTURE_ROOT / "chart_page_2.json").read_bytes(),
+                (_FIXTURE_ROOT / "transactions_out_of_order.json").read_bytes(),
+            ],
+        ),
+    )
+    pages: list[SourcePage] = []
+    for contract_id, request in requests.items():
+        pages.extend(
+            [
+                page
+                async for page in provider.fetch(
+                    contract_id,
+                    request,
+                    capture=capture,
+                )
+            ],
+        )
+    return tuple(pages)
+
+
+@pytest.mark.anyio
+async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
+    tmp_path: Path,
+) -> None:
+    pages = await _provider_pages()
+    capture_revisions = {page.capture_revision for page in pages}
+    native_revisions = {page.source_revision for page in pages}
+
+    assert len(pages) == _EXPECTED_PAGE_COUNT
+    assert len(capture_revisions) == 1
+    assert len(native_revisions) == _EXPECTED_NATIVE_REVISION_COUNT
+    with pytest.raises(ValidationError):
+        pages[0].row_count = 99
+
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        first = store.ingest_source_capture(pages)
+        replay = store.ingest_source_capture(pages)
+    finally:
+        store.close()
+
+    assert first.dataset.dataset_id == replay.dataset.dataset_id
+    assert [page.page_id for page in first.pages] == [page.page_id for page in replay.pages]
+    assert first.dataset.source_revision == pages[0].capture_revision
+    assert {page.source_native_revision for page in first.pages} == native_revisions
+    assert {page.source_kind for page in first.pages} == {"chart", "transactions"}
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        stored_rows = connection.execute(
+            """
+            SELECT c.contract_name, p.payload_json
+            FROM source_pages AS p
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            ORDER BY c.contract_name, p.page_key
+            """,
+        ).fetchall()
+    finally:
+        connection.close()
+    expected_rows = {
+        (page.contract_id, page.page_number): page.model_dump(mode="json")["rows"] for page in pages
+    }
+    actual_rows = {
+        (str(contract_id), int(json.loads(str(payload))["page_number"])): json.loads(
+            str(payload),
+        )["rows"]
+        for contract_id, payload in stored_rows
+    }
+    assert actual_rows == expected_rows
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("update", "reason"),
+    [
+        ({"capture_revision": "capture:" + "f" * 32}, "capture revisions"),
+        ({"account_scope": "selected SIM account"}, "account scopes"),
+        ({"instrument_scope_sha256": "f" * 64}, "instrument scopes"),
+        ({"source_kind": "orders"}, "validated provider data"),
+        ({"page_fingerprint_sha256": "f" * 64}, "validated provider data"),
+    ],
+)
+async def test_store_bridge_refuses_mixed_or_tampered_pages(
+    tmp_path: Path,
+    update: dict[str, SourceJsonValue],
+    reason: str,
+) -> None:
+    pages = list(await _provider_pages())
+    pages[-1] = pages[-1].model_copy(update=update)
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        with pytest.raises(StoreValidationError, match=reason):
+            store.ingest_source_capture(pages)
+    finally:
+        store.close()

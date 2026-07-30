@@ -7,7 +7,11 @@ from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.endpoint_registry import RegisteredEndpoint
 
 type ReadLeaf = str | int | bool | None
-type ReadResponseMode = Literal["redacted_body", "fingerprint_only"]
+type ReadResponseMode = Literal[
+    "redacted_body",
+    "fingerprint_only",
+    "analytics_contract_receipt",
+]
 type ReadObject = dict[str, ReadLeaf]
 type ReadToolValue = (
     ReadLeaf | list[str] | ReadObject | dict[str, int] | dict[str, bool] | list[ReadObject]

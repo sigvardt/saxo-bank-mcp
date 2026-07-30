@@ -135,6 +135,7 @@ async def test_safe_request_ledger_proves_precheck_without_exposing_request_data
     assert len(events) == EXPECTED_EVENT_COUNT
     assert set(events[0]) == {
         "host_role",
+        "environment",
         "method",
         "path",
         "phase",

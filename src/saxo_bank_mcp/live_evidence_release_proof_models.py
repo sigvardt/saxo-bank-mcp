@@ -14,7 +14,12 @@ from saxo_bank_mcp.live_precheck_proof_audit import (
     transport_boundary_allows_proof,
     transport_boundary_matches,
 )
-from saxo_bank_mcp.request_ledger import HostRole, RequestLedgerEvent, RequestPhase
+from saxo_bank_mcp.request_ledger import (
+    HostRole,
+    RequestEnvironment,
+    RequestLedgerEvent,
+    RequestPhase,
+)
 from saxo_bank_mcp.transport_boundary import TransportBoundaryEvent
 
 
@@ -26,6 +31,7 @@ class ProofTraceEvent(StrictReleaseModel):
     timestamp: str = Field(min_length=1)
     phase: RequestPhase
     host_role: HostRole
+    environment: RequestEnvironment = "UNKNOWN"
     method: str = Field(min_length=1)
     path: str = Field(min_length=1)
     query_names: list[str]
@@ -42,13 +48,16 @@ class ProofTraceEvent(StrictReleaseModel):
             query_names=tuple(self.query_names),
             query_present=self.query_present,
             status=self.status,
+            environment=self.environment,
         )
 
     def safe_event(self) -> SafeLedgerEvent:
         return SafeLedgerEvent(**self.model_dump())
 
     def boundary_event(self) -> TransportBoundaryEvent:
-        return TransportBoundaryEvent(**self.model_dump())
+        return TransportBoundaryEvent(
+            **self.model_dump(exclude={"environment"}),
+        )
 
 
 class ProofSecretScan(StrictReleaseModel):

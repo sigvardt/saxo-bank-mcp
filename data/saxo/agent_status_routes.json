@@ -189,6 +189,10 @@
     ],
     "included": [
       {
+        "module": "src/saxo_bank_mcp/analytics_source_receipt.py",
+        "reason": "Registered read gateway analytics mode returns these server-validated receipt statuses."
+      },
+      {
         "module": "src/saxo_bank_mcp/fastmcp_logging_safety.py",
         "reason": "FastMCP validation and unknown-tool wrappers return agent-visible ToolResult statuses."
       },

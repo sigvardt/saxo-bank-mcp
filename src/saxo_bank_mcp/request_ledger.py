@@ -12,6 +12,7 @@ import httpx2
 
 type RequestPhase = Literal["attempted", "completed"]
 type HostRole = Literal["gateway", "oauth", "other"]
+type RequestEnvironment = Literal["SIM", "LIVE", "UNKNOWN"]
 
 _SAFE_METHODS: Final = frozenset({"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"})
 _GATEWAY_HOSTS: Final = frozenset({"gateway.saxobank.com"})
@@ -84,6 +85,7 @@ class RequestLedgerEvent:
     query_names: tuple[str, ...]
     query_present: bool
     status: int | None
+    environment: RequestEnvironment = "UNKNOWN"
 
 
 class RequestLedgerEventJson(TypedDict):
@@ -95,6 +97,7 @@ class RequestLedgerEventJson(TypedDict):
     query_names: list[str]
     query_present: bool
     status: int | None
+    environment: RequestEnvironment
 
 
 class RequestLedgerAlreadyActiveError(RuntimeError):
@@ -199,6 +202,7 @@ def safe_request_events(events: list[RequestLedgerEvent]) -> list[RequestLedgerE
             "query_names": list(event.query_names),
             "query_present": event.query_present,
             "status": event.status,
+            "environment": event.environment,
         }
         for event in events
     ]
@@ -224,6 +228,7 @@ def _record(request: httpx2.Request, *, phase: RequestPhase, status: int | None)
         query_names=safe_query_names(request),
         query_present=bool(request.url.query),
         status=status,
+        environment=_request_environment(request.url.host, request.url.path),
     )
     _REGISTRY.append(event)
     scoped = _SCOPED_BUFFER.get()
@@ -237,6 +242,19 @@ def _host_role(host: str | None) -> HostRole:
     if host in _OAUTH_HOSTS:
         return "oauth"
     return "other"
+
+
+def _request_environment(
+    host: str | None,
+    path: str,
+) -> RequestEnvironment:
+    if host == "gateway.saxobank.com":
+        return "SIM" if path.startswith("/sim/openapi/") else "LIVE"
+    if host == "sim.logonvalidation.net":
+        return "SIM"
+    if host == "live.logonvalidation.net":
+        return "LIVE"
+    return "UNKNOWN"
 
 
 def _safe_path(path: str) -> str:

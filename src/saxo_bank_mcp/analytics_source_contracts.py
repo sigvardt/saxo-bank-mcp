@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from functools import cache
 from importlib.resources import files
@@ -13,6 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Literal, Self, cast
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -52,6 +53,13 @@ _FIELD_PATH_PATTERN: Final = re.compile(
 _QUERY_NAME_PATTERN: Final = re.compile(r"^\$?[A-Za-z][A-Za-z0-9]*$")
 _PATH_PLACEHOLDER_PATTERN: Final = re.compile(r"\{([A-Za-z][A-Za-z0-9]*)\}")
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
+_CAPTURE_REVISION_PATTERN: Final = re.compile(r"^capture:[a-f0-9]{32}$")
+_ACCOUNT_SELECTOR_NAMES: Final = frozenset(
+    {"AccountKey", "AccountKeys", "ClientKey"},
+)
+_INSTRUMENT_SELECTOR_NAMES: Final = frozenset(
+    {"AssetType", "AssetTypes", "OptionRootId", "Uic", "Uics"},
+)
 
 
 class SourceValueType(StrEnum):
@@ -543,6 +551,7 @@ class SchemaComparison(BaseModel):
                 self.missing_required_fields,
                 self.null_required_fields,
                 self.required_type_mismatches,
+                self.optional_type_mismatches,
                 self.additive_fields,
                 self.unknown_enum_values,
             )
@@ -565,6 +574,60 @@ class SchemaComparison(BaseModel):
         return self
 
 
+class SourceCaptureContext(BaseModel):
+    """One immutable provider capture shared by every contract and page."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    capture_revision: str
+    captured_at: datetime
+    account_scope: Literal["aggregate", "selected SIM account"]
+    instrument_scope_sha256: str
+    request_fingerprints: Mapping[str, str]
+
+    @field_validator("capture_revision")
+    @classmethod
+    def validate_capture_revision(cls, value: str) -> str:
+        if _CAPTURE_REVISION_PATTERN.fullmatch(value) is None:
+            raise ValueError("source capture revision is invalid")
+        return value
+
+    @field_validator("captured_at")
+    @classmethod
+    def validate_captured_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("source capture timestamp must use UTC")
+        return value
+
+    @field_validator("instrument_scope_sha256")
+    @classmethod
+    def validate_instrument_scope(cls, value: str) -> str:
+        if _SHA256_PATTERN.fullmatch(value) is None:
+            raise ValueError("instrument scope must be lowercase SHA-256")
+        return value
+
+    @field_validator("request_fingerprints")
+    @classmethod
+    def freeze_request_fingerprints(
+        cls,
+        value: Mapping[str, str],
+    ) -> Mapping[str, str]:
+        if not value or any(
+            _SAFE_NAME_PATTERN.fullmatch(contract_id) is None
+            or _SHA256_PATTERN.fullmatch(fingerprint) is None
+            for contract_id, fingerprint in value.items()
+        ):
+            raise ValueError("source capture request fingerprints are invalid")
+        return MappingProxyType(dict(sorted(value.items())))
+
+    @field_serializer("request_fingerprints")
+    def serialize_request_fingerprints(
+        self,
+        value: Mapping[str, str],
+    ) -> dict[str, str]:
+        return dict(value)
+
+
 class SourcePage(BaseModel):
     """One validated source page with preserved row and pagination order."""
 
@@ -572,6 +635,13 @@ class SourcePage(BaseModel):
 
     contract_id: str
     operation_id: str
+    contract_sha256: str
+    source_kind: str
+    capture_revision: str
+    source_timestamp: datetime
+    account_scope: Literal["aggregate", "selected SIM account"]
+    instrument_scope_sha256: str
+    request_fingerprint_sha256: str
     page_number: int = Field(ge=1)
     rows: tuple[Mapping[str, FrozenSourceJsonValue], ...]
     row_count: int = Field(ge=0)
@@ -586,6 +656,38 @@ class SourcePage(BaseModel):
     def validate_contract_id(cls, value: str) -> str:
         if _SAFE_NAME_PATTERN.fullmatch(value) is None:
             raise ValueError("source page contract ID is invalid")
+        return value
+
+    @field_validator("source_kind")
+    @classmethod
+    def validate_source_kind(cls, value: str) -> str:
+        if _SAFE_NAME_PATTERN.fullmatch(value) is None:
+            raise ValueError("source page kind is invalid")
+        return value
+
+    @field_validator(
+        "contract_sha256",
+        "instrument_scope_sha256",
+        "request_fingerprint_sha256",
+    )
+    @classmethod
+    def validate_source_fingerprint(cls, value: str) -> str:
+        if _SHA256_PATTERN.fullmatch(value) is None:
+            raise ValueError("source page fingerprint must be lowercase SHA-256")
+        return value
+
+    @field_validator("capture_revision")
+    @classmethod
+    def validate_capture_revision(cls, value: str) -> str:
+        if _CAPTURE_REVISION_PATTERN.fullmatch(value) is None:
+            raise ValueError("source page capture revision is invalid")
+        return value
+
+    @field_validator("source_timestamp")
+    @classmethod
+    def validate_source_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("source page timestamp must use UTC")
         return value
 
     @field_validator("next_link")
@@ -643,6 +745,17 @@ class SourcePage(BaseModel):
                 "source_page_schema_quarantined",
                 "source page cannot contain quarantined schema data",
             )
+        contract = source_contracts_by_id().get(self.contract_id)
+        if (
+            contract is None
+            or self.operation_id != contract.operation_id
+            or self.source_kind != contract.source_kind
+            or self.contract_sha256 != source_contract_fingerprint(contract)
+        ):
+            raise PydanticCustomError(
+                "source_page_contract_mismatch",
+                "source page metadata does not match its frozen contract",
+            )
         return self
 
 
@@ -682,12 +795,109 @@ def _read_source_contract_catalog(path: Path | None) -> str:
     return _REPOSITORY_CONTRACT_PATH.read_text(encoding="utf-8")
 
 
+def source_contract_catalog_sha256(path: Path | None = None) -> str:
+    """Fingerprint the exact installed or explicitly selected contract catalog."""
+    return hashlib.sha256(_read_source_contract_catalog(path).encode()).hexdigest()
+
+
+def source_contract_fingerprint(contract: SourceContract) -> str:
+    """Fingerprint one complete frozen contract without retaining source values."""
+    material = json.dumps(
+        contract.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
 @cache
 def source_contracts_by_id() -> Mapping[str, SourceContract]:
     """Return immutable source contracts keyed by their opaque local ID."""
     return MappingProxyType(
         {contract.contract_id: contract for contract in load_source_contract_catalog().contracts}
     )
+
+
+def build_source_capture_context(
+    requests: Mapping[str, Mapping[str, object]],
+    *,
+    captured_at: datetime | None = None,
+) -> SourceCaptureContext:
+    """Bind a value-free capture identity to an exact frozen request set."""
+    contracts = source_contracts_by_id()
+    if not requests or any(contract_id not in contracts for contract_id in requests):
+        raise ValueError("source capture names an unknown contract")
+    capture_time = captured_at or datetime.now(UTC)
+    if capture_time.tzinfo is None or capture_time.utcoffset() != timedelta(0):
+        raise ValueError("source capture timestamp must use UTC")
+    request_fingerprints = {
+        contract_id: _source_request_fingerprint(contract_id, request)
+        for contract_id, request in sorted(requests.items())
+    }
+    has_account_scope = any(
+        key in _ACCOUNT_SELECTOR_NAMES and _selector_present(value)
+        for request in requests.values()
+        for key, value in request.items()
+    )
+    instrument_material = {
+        contract_id: {
+            key: value
+            for key, value in sorted(request.items())
+            if key in _INSTRUMENT_SELECTOR_NAMES
+        }
+        for contract_id, request in sorted(requests.items())
+    }
+    return SourceCaptureContext(
+        capture_revision=f"capture:{uuid4().hex}",
+        captured_at=capture_time,
+        account_scope="selected SIM account" if has_account_scope else "aggregate",
+        instrument_scope_sha256=_json_fingerprint(instrument_material),
+        request_fingerprints=request_fingerprints,
+    )
+
+
+def source_capture_request_fingerprint(
+    capture: SourceCaptureContext,
+    contract_id: str,
+    request: Mapping[str, object],
+) -> str:
+    """Validate that a provider request belongs to its immutable capture."""
+    fingerprint = _source_request_fingerprint(contract_id, request)
+    if capture.request_fingerprints.get(contract_id) != fingerprint:
+        raise ValueError("source request does not belong to the capture")
+    return fingerprint
+
+
+def _source_request_fingerprint(
+    contract_id: str,
+    request: Mapping[str, object],
+) -> str:
+    return _json_fingerprint(
+        {
+            "contract_id": contract_id,
+            "request": dict(request),
+        },
+    )
+
+
+def _json_fingerprint(value: object) -> str:
+    material = json.dumps(
+        value,
+        allow_nan=False,
+        default=str,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _selector_present(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, Sequence) and not isinstance(value, str):
+        return len(cast("Sequence[object]", value)) > 0
+    return value is not None
 
 
 def compare_source_schema(
@@ -1078,6 +1288,7 @@ def _comparison(
             observed.missing_required_fields,
             observed.null_required_fields,
             observed.required_type_mismatches,
+            observed.optional_type_mismatches,
             observed.additive_fields,
             observed.unknown_enum_values,
         )

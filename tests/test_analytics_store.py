@@ -631,8 +631,9 @@ def test_clean_wheel_contains_and_loads_the_fixed_migration_catalog(
     assert build.returncode == 0, build.stderr
     wheel = next(wheel_dir.glob("*.whl"))
     with zipfile.ZipFile(wheel) as archive:
+        assert "saxo_bank_mcp/_analytics_migrations/0001_initial.sql" in archive.namelist()
         assert (
-            "saxo_bank_mcp/_analytics_migrations/0001_initial.sql"
+            "saxo_bank_mcp/_analytics_migrations/0002_source_page_identity.sql"
             in archive.namelist()
         )
 
@@ -667,7 +668,7 @@ def test_migration_from_v0_creates_an_owner_only_backup(tmp_path: Path) -> None:
     shutil.copyfile(_FIXTURE, target)
 
     result = migrate_store(target, LATEST_SCHEMA_VERSION)
-    backups = tuple(tmp_path.glob("store.before-v1.*.duckdb"))
+    backups = tuple(tmp_path.glob(f"store.before-v{LATEST_SCHEMA_VERSION}.*.duckdb"))
 
     assert result.from_version == 0
     assert result.to_version == LATEST_SCHEMA_VERSION
@@ -707,6 +708,48 @@ def test_failed_migration_keeps_v0_byte_identical_and_readable(
             ).fetchone()
             == (0,)
         )
+
+
+def test_failed_v2_migration_keeps_historical_v1_byte_identical_and_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "store.duckdb"
+    connection = duckdb.connect(str(target))
+    try:
+        connection.execute(
+            Path("data/analytics/migrations/0001_initial.sql").read_text(
+                encoding="utf-8",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (1, 'initial', ?, current_timestamp)",
+            ("0" * 64,),
+        )
+        connection.execute("INSERT INTO analytics_schema VALUES (TRUE, 1)")
+    finally:
+        connection.close()
+    target.chmod(_OWNER_FILE_MODE)
+    before = _sha256(target)
+    original_reader = migrations._read_migration  # noqa: SLF001
+
+    def broken_migration(version: int) -> str:
+        sql = original_reader(version)
+        return f"{sql}\nSELECT * FROM absent;"
+
+    monkeypatch.setattr(migrations, "_read_migration", broken_migration)
+
+    with pytest.raises(MigrationError, match="migration 2 failed"):
+        migrate_store(target, LATEST_SCHEMA_VERSION)
+
+    assert _sha256(target) == before
+    with duckdb.connect(str(target), read_only=True) as readable:
+        assert readable.execute("SELECT version FROM analytics_schema").fetchone() == (1,)
+        columns = {
+            str(row[1]) for row in readable.execute("PRAGMA table_info('source_pages')").fetchall()
+        }
+    assert "logical_key_sha256" not in columns
+    assert "fingerprint_sha256" not in columns
 
 
 def test_migration_rejects_unknown_target_without_changing_fixture(tmp_path: Path) -> None:

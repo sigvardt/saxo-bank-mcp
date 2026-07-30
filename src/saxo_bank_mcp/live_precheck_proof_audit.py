@@ -137,6 +137,7 @@ def exposed_ledger_events(report: SafeLedgerReport) -> list[RequestLedgerEvent]:
             query_names=event.query_names,
             query_present=event.query_present,
             status=event.status,
+            environment=event.environment,
         )
         for event in report.events
     ]

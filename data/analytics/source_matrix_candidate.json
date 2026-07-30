@@ -1,0 +1,14 @@
+{
+  "candidate_identity_sha256": "1681f7c79888d3f32a82156b1280b1e0795377d7599938a97c71342d7d891cea",
+  "harness_build_sha256": "af015fea53974f486eeac7ebf03af180f096eb4a5eeb39ca0b7a29d8cce5f308",
+  "harness_files": {
+    "analytics_provider.py": "a1a59d0e8ba60348ae3fdbab28a00fc63a42a913653c1af19221cc2ab155a2ff",
+    "analytics_source_contracts.py": "ac8bc7dbfe4aefc991b57de7e90b40614270dcf3b85839affa0ad39e743bcaa5",
+    "analytics_source_receipt.py": "03a67330d5a438748ffad33520edfa2f1f1117d9bc7a237f25ae7fc39e0a5273",
+    "qa_analytics_source_matrix.py": "defffd48bafe37e8caa6fe5f9135d3a4d07181a9939ea9f7780593bc5027deda",
+    "read_tools.py": "f470ed133cfa10fab1004b6c327c311e4a1f878524d50d2936773f56814858ac",
+    "registered_read_execution.py": "284c02c6e92fdc198806ec49b08003710c3a91c9b6e7b1f9a9fe37ace3b9a63e"
+  },
+  "schema_version": "1",
+  "source_contract_catalog_sha256": "9072757f2e307456f03963a9b6920bf097493fb9f819a6bb35db4acef951c1fd"
+}

@@ -69,10 +69,9 @@ CREATE TABLE source_pages (
     ingested_at TIMESTAMPTZ NOT NULL,
     row_count UBIGINT NOT NULL,
     byte_count UBIGINT NOT NULL,
-    logical_key_sha256 VARCHAR NOT NULL UNIQUE CHECK (length(logical_key_sha256) = 64),
-    fingerprint_sha256 VARCHAR NOT NULL CHECK (length(fingerprint_sha256) = 64),
     payload_sha256 VARCHAR NOT NULL CHECK (length(payload_sha256) = 64),
-    payload_json VARCHAR NOT NULL
+    payload_json VARCHAR NOT NULL,
+    UNIQUE (source_kind, page_key, source_revision, payload_sha256)
 );
 
 CREATE TABLE price_bars (

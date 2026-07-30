@@ -1209,6 +1209,36 @@ async def test_required_schema_drift_quarantines_dependent_analysis_kinds() -> N
 
 
 @pytest.mark.anyio
+async def test_present_optional_wrong_type_quarantines_before_page_yield() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                {
+                    "Data": [
+                        {
+                            "Time": "2026-07-29T08:00:00Z",
+                            "CloseBid": 101.0,
+                            "OpenBid": {"wrong": "type"},
+                        },
+                    ],
+                    "DataVersion": 7,
+                },
+            ),
+        ],
+    )
+    provider = _provider(executor)
+
+    with pytest.raises(SourceSchemaDriftError):
+        _ = [page async for page in provider.fetch("chart_v3", {})]
+
+    assert len(executor.calls) == 1
+    assert {"instrument_price_return", "instrument_risk"} <= set(
+        provider.quarantined_analysis_kinds,
+    )
+
+
+@pytest.mark.anyio
 async def test_additive_field_is_refused_and_quarantines_dependent_analysis() -> None:
     marker = "private-additive-marker"
     executor = FakeExecutor(

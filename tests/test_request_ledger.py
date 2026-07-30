@@ -82,7 +82,10 @@ async def test_capture_records_completed_gateway_and_oauth_requests_without_secr
         "query_names",
         "query_present",
         "status",
+        "environment",
     }
+    assert events[0].environment == "LIVE"
+    assert events[2].environment == "LIVE"
     assert events[0].query_present is True
     assert events[0].query_names == ("{redacted}",)
     assert events[2].query_present is False

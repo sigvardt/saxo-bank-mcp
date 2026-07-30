@@ -22,6 +22,7 @@ saxo-bank-sim-login = "saxo_bank_mcp.sim_login:main"
 saxo-bank-live-precheck-proof = "saxo_bank_mcp.live_precheck_proof:main"
 saxo-bank-live-session-keeper = "saxo_bank_mcp.live_session_keeper:main"
 saxo-bank-bind-live-evidence = "saxo_bank_mcp.live_evidence_bundle:main"
+saxo-bank-analytics-source-matrix = "saxo_bank_mcp.qa_analytics_source_matrix:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,6 +34,7 @@ packages = ["src/saxo_bank_mcp"]
 [tool.hatch.build.targets.wheel.force-include]
 "data/analytics/migrations" = "saxo_bank_mcp/_analytics_migrations"
 "data/analytics/source_contracts.json" = "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json"
+"data/analytics/source_matrix_candidate.json" = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
 "data/saxo/openapi_inventory.json" = "saxo_bank_mcp/_endpoint_registry/openapi_inventory.json"
 
 [dependency-groups]

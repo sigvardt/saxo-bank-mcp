@@ -11,6 +11,7 @@ class SafeLedgerEvent(BaseModel):
     timestamp: str = Field(min_length=1)
     phase: Literal["attempted", "completed"]
     host_role: Literal["gateway", "oauth", "other"]
+    environment: Literal["SIM", "LIVE", "UNKNOWN"]
     method: str = Field(min_length=1)
     path: str = Field(min_length=1)
     query_names: tuple[str, ...] = Field(strict=False)

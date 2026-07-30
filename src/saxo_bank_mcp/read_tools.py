@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Final
+from typing import Final, cast
 
-import httpx2
 from fastmcp.tools import ToolResult
 
+from saxo_bank_mcp.analytics_source_receipt import analytics_contract_receipt
 from saxo_bank_mcp.endpoint_registry import (
     RegisteredEndpoint,
     find_registered_endpoint,
@@ -15,12 +15,10 @@ from saxo_bank_mcp.endpoint_registry import (
 from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.live_token_refresh import live_token_for_tool
 from saxo_bank_mcp.read_fingerprints import is_balance_operation, response_fingerprint
-from saxo_bank_mcp.read_tool_execution import execution_context, read_headers
 from saxo_bank_mcp.read_tool_results import (
     call_class,
     denied,
     invalid_response,
-    network_error,
     response_body,
     tool_result,
 )
@@ -29,12 +27,16 @@ from saxo_bank_mcp.read_tool_types import (
     READINESS_PREREQUISITES,
     REGISTERED_CALL_TOOL_DESCRIPTION,
     EndpointPreflightResult,
-    ReadExecutionContext,
     ReadLeaf,
     ReadObject,
     ReadResponseMode,
     ReadToolResult,
     ReadToolValue,
+)
+from saxo_bank_mcp.registered_read_execution import (
+    RegisteredReadClientFactory,
+    RegisteredReadResponse,
+    execute_registered_get,
 )
 
 __all__ = [
@@ -52,18 +54,22 @@ HTTP_SUCCESS_MIN: Final = 200
 HTTP_SUCCESS_MAX: Final = 300
 
 
-async def saxo_call_registered_endpoint(
+async def saxo_call_registered_endpoint(  # noqa: PLR0911
     method: str,
     path: str,
     params: Mapping[str, str] | None = None,
     response_mode: ReadResponseMode = "redacted_body",
+    analytics_contract_id: str | None = None,
 ) -> ToolResult:
     preflight = _registered_endpoint_or_refusal(method, path)
     if not isinstance(preflight, RegisteredEndpoint):
         return tool_result(preflight)
     registered = preflight
     operation = registered.operation
-    if is_balance_operation(operation.operation_id) and response_mode != "fingerprint_only":
+    if is_balance_operation(operation.operation_id) and response_mode not in {
+        "fingerprint_only",
+        "analytics_contract_receipt",
+    }:
         return tool_result(
             denied(
                 method,
@@ -72,23 +78,42 @@ async def saxo_call_registered_endpoint(
                 operation=operation,
             ),
         )
-    context_or_result = await execution_context(
+    if response_mode == "analytics_contract_receipt":
+        if analytics_contract_id is None:
+            return tool_result(
+                denied(
+                    method,
+                    path,
+                    "analytics_contract_id_required",
+                    operation=operation,
+                ),
+            )
+        receipt = await analytics_contract_receipt(
+            registered,
+            contract_id=analytics_contract_id,
+            params={} if params is None else params,
+        )
+        return tool_result(cast("ReadToolResult", receipt))
+    if analytics_contract_id is not None:
+        return tool_result(
+            denied(
+                method,
+                path,
+                "analytics_contract_mode_required",
+                operation=operation,
+            ),
+        )
+    outcome = await execute_registered_get(
         operation,
+        registered.resolved_path,
+        {} if params is None else params,
+        client_factory=cast("RegisteredReadClientFactory", create_async_client),
         live_token_loader=live_token_for_tool,
     )
-    if not isinstance(context_or_result, ReadExecutionContext):
-        return tool_result({**context_or_result, "live_write": False})
-    context = context_or_result
-    headers = read_headers(context.token)
-    try:
-        async with create_async_client(base_url=context.rest_base_url) as client:
-            response = await client.get(
-                registered.resolved_path.lstrip("/"),
-                params={} if params is None else dict(params),
-                headers=headers,
-            )
-    except httpx2.HTTPError as error:
-        return tool_result(network_error(operation, context.environment, type(error).__name__))
+    if not isinstance(outcome, RegisteredReadResponse):
+        return tool_result(outcome)
+    context = outcome.context
+    response = outcome.response
     ok = HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX
     try:
         fingerprint, fingerprint_scope = response_fingerprint(

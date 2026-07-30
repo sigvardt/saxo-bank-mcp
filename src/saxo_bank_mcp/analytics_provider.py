@@ -22,14 +22,18 @@ from saxo_bank_mcp.analytics_pagination import (
 )
 from saxo_bank_mcp.analytics_source_contracts import (
     SchemaComparison,
+    SourceCaptureContext,
     SourceContract,
     SourceCursorField,
     SourceCursorValueType,
     SourceJsonValue,
     SourcePage,
     SourceResponseShape,
+    build_source_capture_context,
     compare_source_schema,
     freeze_source_rows,
+    source_capture_request_fingerprint,
+    source_contract_fingerprint,
     source_contracts_by_id,
     source_page_fingerprint,
 )
@@ -39,8 +43,11 @@ from saxo_bank_mcp.endpoint_registry import (
 )
 from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.live_token_refresh import live_token_for_tool
-from saxo_bank_mcp.read_tool_execution import execution_context, read_headers
-from saxo_bank_mcp.read_tool_types import ReadExecutionContext
+from saxo_bank_mcp.registered_read_execution import (
+    RegisteredReadClientFactory,
+    RegisteredReadResponse,
+    execute_registered_get,
+)
 from saxo_bank_mcp.saxo_http_error_info import validated_saxo_error_code
 from saxo_bank_mcp.strict_json import StrictJsonError, parse_json_value
 
@@ -122,6 +129,11 @@ _SOURCE_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAda
 type Sleep = Callable[[float], Awaitable[None]]
 type _CursorValue = int | str
 type _CursorState = tuple[tuple[str, _CursorValue], ...]
+
+
+def _create_provider_client(*, base_url: str) -> httpx2.AsyncClient:
+    """Leave transport retries to the provider's bounded retry policy."""
+    return create_async_client(base_url=base_url, retries=0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +383,8 @@ class SaxoAnalyticsProvider:
         self,
         contract_id: str,
         request: Mapping[str, object],
+        *,
+        capture: SourceCaptureContext | None = None,
     ) -> AsyncIterator[SourcePage]:
         """Fetch all bounded pages for one frozen source contract."""
         contract = self._contracts.get(contract_id)
@@ -379,6 +393,14 @@ class SaxoAnalyticsProvider:
                 "unknown_source_contract",
                 "source request names an unknown frozen contract",
             )
+        capture_context = (
+            build_source_capture_context({contract_id: request}) if capture is None else capture
+        )
+        request_fingerprint = source_capture_request_fingerprint(
+            capture_context,
+            contract_id,
+            request,
+        )
         request_target, params, initial_cursor_state = _contract_request(contract, request)
         pagination_progress = _PaginationProgress.from_initial(
             contract,
@@ -456,6 +478,13 @@ class SaxoAnalyticsProvider:
                 yield SourcePage(
                     contract_id=contract.contract_id,
                     operation_id=contract.operation_id,
+                    contract_sha256=source_contract_fingerprint(contract),
+                    source_kind=contract.source_kind,
+                    capture_revision=capture_context.capture_revision,
+                    source_timestamp=capture_context.captured_at,
+                    account_scope=capture_context.account_scope,
+                    instrument_scope_sha256=capture_context.instrument_scope_sha256,
+                    request_fingerprint_sha256=request_fingerprint,
                     page_number=page_number,
                     rows=frozen_rows,
                     row_count=len(rows),
@@ -593,23 +622,21 @@ class SaxoAnalyticsProvider:
         request_target: str,
         params: Mapping[str, str],
     ) -> httpx2.Response:
-        context_or_result = await execution_context(
+        outcome = await execute_registered_get(
             operation,
+            request_target,
+            params,
+            client_factory=cast("RegisteredReadClientFactory", _create_provider_client),
             live_token_loader=live_token_for_tool,
         )
-        if not isinstance(context_or_result, ReadExecutionContext):
-            raw_reason = context_or_result.get("reason")
+        if not isinstance(outcome, RegisteredReadResponse):
+            raw_reason = outcome.get("reason")
             reason = raw_reason if isinstance(raw_reason, str) else "access_unavailable"
+            if outcome.get("status") == "network_error":
+                request = httpx2.Request("GET", "https://registered.invalid")
+                raise httpx2.ReadError("registered_read_failed", request=request)
             raise SourceAccessError(operation.operation_id, reason)
-        async with create_async_client(
-            base_url=context_or_result.rest_base_url,
-            retries=0,
-        ) as client:
-            return await client.get(
-                request_target.lstrip("/"),
-                params=dict(params),
-                headers=read_headers(context_or_result.token),
-            )
+        return outcome.response
 
 
 def _contract_request(

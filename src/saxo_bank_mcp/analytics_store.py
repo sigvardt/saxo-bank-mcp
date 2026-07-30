@@ -36,6 +36,13 @@ from saxo_bank_mcp.analytics_models import (
     QualityState,
     new_safe_handle,
 )
+from saxo_bank_mcp.analytics_source_contracts import (
+    SourceJsonValue,
+    SourcePage,
+    source_contract_fingerprint,
+    source_contracts_by_id,
+    source_page_fingerprint,
+)
 
 _OWNER_FILE_MODE: Final = 0o600
 _OPAQUE_UUID_VERSION: Final = 4
@@ -66,12 +73,29 @@ _SOURCE_KINDS: Final = frozenset(
         "bookings",
         "closed_positions",
         "costs",
+        "balances",
+        "chart",
+        "corporate_actions",
+        "exposure",
+        "info_prices",
         "option_snapshots",
+        "options_chain",
+        "orders",
+        "performance",
+        "positions",
         "price_bars",
         "quotes",
+        "reference_instruments",
         "transactions",
     },
 )
+
+
+def supported_source_kinds() -> frozenset[str]:
+    """Return the immutable source kinds accepted by the store bridge."""
+    return _SOURCE_KINDS
+
+
 _DELETION_COLUMNS: Final = {
     "account_snapshots": "snapshot_id",
     "analyses": "analysis_id",
@@ -376,6 +400,8 @@ class StoredSourcePage:
     source_kind: str
     page_key: str
     source_revision: str
+    source_native_revision: str
+    instrument_scope_sha256: str | None
     fingerprint_sha256: str
     row_count: int
     byte_count: int
@@ -393,6 +419,14 @@ class StoredDataset:
     row_count: int
     byte_count: int
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class StoredSourceCapture:
+    """Stored pages and deterministic dataset for one provider capture."""
+
+    pages: tuple[StoredSourcePage, ...]
+    dataset: StoredDataset
 
 
 @dataclass(frozen=True, slots=True)
@@ -572,6 +606,22 @@ def _canonical_json(value: object) -> str:
 
 def _fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _capture_dataset_id(
+    capture_revision: str,
+    page_ids: Sequence[str],
+) -> str:
+    material = _canonical_json(
+        {
+            "capture_revision": capture_revision,
+            "page_ids": sorted(page_ids),
+        },
+    )
+    raw = bytearray(hashlib.sha256(material.encode()).digest()[:16])
+    raw[6] = (raw[6] & 0x0F) | 0x40
+    raw[8] = (raw[8] & 0x3F) | 0x80
+    return f"ds_{UUID(bytes=bytes(raw)).hex}"
 
 
 def _require_datetime(value: object) -> datetime:
@@ -835,7 +885,7 @@ class AnalyticsStore:
         )
         return cls._revision(connection)
 
-    def put_source_page(  # noqa: PLR0913
+    def put_source_page(  # noqa: C901, PLR0913
         self,
         *,
         source_kind: str,
@@ -848,6 +898,8 @@ class AnalyticsStore:
         source_timestamp: datetime,
         account_scope: str | None,
         instrument_handle: str | None,
+        source_native_revision: str | None = None,
+        instrument_scope_sha256: str | None = None,
     ) -> StoredSourcePage:
         """Store one immutable Saxo page and make duplicate retries a no-op."""
         if source_kind not in _SOURCE_KINDS:
@@ -855,6 +907,10 @@ class AnalyticsStore:
         if _PAGE_KEY_PATTERN.fullmatch(page_key) is None:
             raise StoreValidationError("source page key is invalid")
         _validate_source_revision(source_revision)
+        native_revision = (
+            source_revision if source_native_revision is None else source_native_revision
+        )
+        _validate_source_revision(native_revision)
         if _SAFE_NAME_PATTERN.fullmatch(contract_name) is None:
             raise StoreValidationError("source contract name is invalid")
         _validate_sha256(contract_sha256)
@@ -865,6 +921,8 @@ class AnalyticsStore:
             _validate_account_scope(account_scope)
         if instrument_handle is not None:
             _validate_handle(instrument_handle, "ih")
+        if instrument_scope_sha256 is not None:
+            _validate_sha256(instrument_scope_sha256)
 
         payload_json = _canonical_json(dict(payload))
         payload_sha256 = _fingerprint(payload_json)
@@ -873,6 +931,7 @@ class AnalyticsStore:
                 {
                     "account_scope": account_scope,
                     "instrument_handle": instrument_handle,
+                    "instrument_scope_sha256": instrument_scope_sha256,
                     "page_key": page_key,
                     "source_kind": source_kind,
                     "source_revision": source_revision,
@@ -885,11 +944,13 @@ class AnalyticsStore:
                 "contract_name": contract_name,
                 "contract_sha256": contract_sha256,
                 "instrument_handle": instrument_handle,
+                "instrument_scope_sha256": instrument_scope_sha256,
                 "page_key": page_key,
                 "payload_sha256": payload_sha256,
                 "row_count": row_count,
                 "source_kind": source_kind,
                 "source_revision": source_revision,
+                "source_native_revision": native_revision,
                 "source_timestamp": source_timestamp.isoformat(),
             },
         )
@@ -933,9 +994,11 @@ class AnalyticsStore:
                     source_kind,
                     page_key,
                     source_revision,
+                    source_native_revision,
                     contract_id,
                     account_scope,
                     instrument_handle,
+                    instrument_scope_sha256,
                     source_timestamp,
                     ingested_at,
                     row_count,
@@ -945,16 +1008,18 @@ class AnalyticsStore:
                     payload_sha256,
                     payload_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     page_id,
                     source_kind,
                     page_key,
                     source_revision,
+                    native_revision,
                     contract_id,
                     account_scope,
                     instrument_handle,
+                    instrument_scope_sha256,
                     source_timestamp,
                     now,
                     row_count,
@@ -970,6 +1035,109 @@ class AnalyticsStore:
             if stored is None:
                 raise StoreError("stored source page cannot be read back")
             return stored
+
+    def ingest_source_capture(  # noqa: C901
+        self,
+        pages: Sequence[SourcePage],
+    ) -> StoredSourceCapture:
+        """Persist one exact, validated provider capture and derive its dataset."""
+        source_pages = tuple(pages)
+        if not source_pages:
+            raise StoreValidationError("source capture requires at least one page")
+        capture_revisions = {page.capture_revision for page in source_pages}
+        account_scopes = {page.account_scope for page in source_pages}
+        instrument_scopes = {page.instrument_scope_sha256 for page in source_pages}
+        source_timestamps = {page.source_timestamp for page in source_pages}
+        if len(capture_revisions) != 1:
+            raise StoreValidationError("source capture mixes capture revisions")
+        if len(account_scopes) != 1:
+            raise StoreValidationError("source capture mixes account scopes")
+        if len(instrument_scopes) != 1:
+            raise StoreValidationError("source capture mixes instrument scopes")
+        if len(source_timestamps) != 1:
+            raise StoreValidationError("source capture mixes capture timestamps")
+
+        page_keys = {(page.contract_id, page.page_number) for page in source_pages}
+        if len(page_keys) != len(source_pages):
+            raise StoreValidationError("source capture repeats a contract page")
+        for contract_id in {page.contract_id for page in source_pages}:
+            contract_pages = sorted(
+                (page for page in source_pages if page.contract_id == contract_id),
+                key=lambda page: page.page_number,
+            )
+            if [page.page_number for page in contract_pages] != list(
+                range(1, len(contract_pages) + 1),
+            ):
+                raise StoreValidationError("source capture page numbering is not contiguous")
+            if len({page.source_revision for page in contract_pages}) != 1:
+                raise StoreValidationError("source contract changes revision within a capture")
+
+        stored_pages: list[StoredSourcePage] = []
+        with self.transaction():
+            for page in sorted(
+                source_pages,
+                key=lambda item: (item.contract_id, item.page_number),
+            ):
+                contract = source_contracts_by_id().get(page.contract_id)
+                serialized = page.model_dump(mode="json")
+                rows = serialized.get("rows")
+                if (
+                    contract is None
+                    or page.operation_id != contract.operation_id
+                    or page.source_kind != contract.source_kind
+                    or page.contract_sha256 != source_contract_fingerprint(contract)
+                    or not page.schema_comparison.compatible
+                    or not isinstance(rows, list)
+                    or source_page_fingerprint(cast("list[Mapping[str, object]]", rows))
+                    != page.page_fingerprint_sha256
+                ):
+                    raise StoreValidationError("source page does not match validated provider data")
+                payload: dict[str, SourceJsonValue] = {
+                    "contract_id": page.contract_id,
+                    "data_version": page.data_version,
+                    "page_fingerprint_sha256": page.page_fingerprint_sha256,
+                    "page_number": page.page_number,
+                    "request_fingerprint_sha256": page.request_fingerprint_sha256,
+                    "rows": cast("list[SourceJsonValue]", rows),
+                    "source_native_revision": page.source_revision,
+                }
+                stored_pages.append(
+                    self.put_source_page(
+                        source_kind=page.source_kind,
+                        page_key=(
+                            f"{page.contract_id}:{page.page_number}:{page.page_fingerprint_sha256}"
+                        ),
+                        source_revision=page.capture_revision,
+                        source_native_revision=page.source_revision,
+                        contract_name=page.contract_id,
+                        contract_sha256=page.contract_sha256,
+                        payload=payload,
+                        row_count=page.row_count,
+                        source_timestamp=page.source_timestamp,
+                        account_scope=page.account_scope,
+                        instrument_handle=None,
+                        instrument_scope_sha256=page.instrument_scope_sha256,
+                    ),
+                )
+            capture_revision = next(iter(capture_revisions))
+            account_scope = next(iter(account_scopes))
+            captured_at = next(iter(source_timestamps))
+            dataset_id = _capture_dataset_id(
+                capture_revision,
+                tuple(page.page_id for page in stored_pages),
+            )
+            dataset = self.create_dataset(
+                dataset_id=dataset_id,
+                account_scope=account_scope,
+                source_scope="saxo_openapi",
+                source_revision=capture_revision,
+                source_page_ids=tuple(page.page_id for page in stored_pages),
+                created_at=captured_at,
+                coverage_start=captured_at,
+                coverage_end=captured_at,
+                quality_state=QualityState.COMPLETE,
+            )
+        return StoredSourceCapture(pages=tuple(stored_pages), dataset=dataset)
 
     @staticmethod
     def _require_instrument_reference(
@@ -1015,6 +1183,8 @@ class AnalyticsStore:
                 source_kind,
                 page_key,
                 source_revision,
+                source_native_revision,
+                instrument_scope_sha256,
                 fingerprint_sha256,
                 row_count,
                 byte_count,
@@ -1032,11 +1202,13 @@ class AnalyticsStore:
             source_kind=_require_str(row[1]),
             page_key=_require_str(row[2]),
             source_revision=_require_str(row[3]),
-            fingerprint_sha256=_require_str(row[4]),
-            row_count=_require_int(row[5]),
-            byte_count=_require_int(row[6]),
-            source_timestamp=_require_datetime(row[7]),
-            ingested_at=_require_datetime(row[8]),
+            source_native_revision=_require_str(row[4]),
+            instrument_scope_sha256=_optional_str(row[5]),
+            fingerprint_sha256=_require_str(row[6]),
+            row_count=_require_int(row[7]),
+            byte_count=_require_int(row[8]),
+            source_timestamp=_require_datetime(row[9]),
+            ingested_at=_require_datetime(row[10]),
         )
 
     @staticmethod
@@ -2541,6 +2713,8 @@ __all__ = (
     "StoredArtifact",
     "StoredDataset",
     "StoredSnapshot",
+    "StoredSourceCapture",
     "StoredSourcePage",
     "TableCount",
+    "supported_source_kinds",
 )
