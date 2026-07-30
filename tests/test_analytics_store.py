@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import multiprocessing
+import os
 import shutil
 import stat
+import subprocess
+import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +21,12 @@ import pytest
 
 import saxo_bank_mcp.analytics_migrations as migrations
 import saxo_bank_mcp.analytics_store as store_module
-from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
+from saxo_bank_mcp.analytics_config import (
+    AnalyticsConfig,
+    AnalyticsPaths,
+    load_analytics_config,
+    prepare_owner_only_path,
+)
 from saxo_bank_mcp.analytics_migrations import (
     LATEST_SCHEMA_VERSION,
     MigrationError,
@@ -32,9 +41,11 @@ from saxo_bank_mcp.analytics_models import (
     DataCoverage,
     DataQuality,
     HandleKind,
+    InstrumentAnalysisRequest,
     MarketAnalysisRequest,
     MetricClass,
     MetricValue,
+    PortfolioAnalysisRequest,
     ProofEngineBinding,
     ProofSourceBinding,
     QualityState,
@@ -50,7 +61,9 @@ from saxo_bank_mcp.analytics_store import (
     StorageScope,
     StoreBusyError,
     StoreConflictError,
+    StoreNotFoundError,
     StoreQuotaError,
+    StoreValidationError,
 )
 
 _OWNER_FILE_MODE = 0o600
@@ -58,6 +71,7 @@ _SCHEMA_SHA256 = "a" * 64
 _CODE_COMMIT = "b" * 40
 _PROOF_PROFILE = "vp_store-proof"
 _SOURCE_AT = datetime(2026, 7, 30, 8, tzinfo=UTC)
+_PROJECT_ROOT = Path(__file__).parents[1]
 _FIXTURE = Path(__file__).parent / "fixtures" / "analytics" / "store_v0.duckdb"
 _REQUIRED_TABLES = {
     "account_snapshots",
@@ -109,24 +123,29 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     )
 
 
-def _source_page(
+def _source_page(  # noqa: PLR0913
     store: AnalyticsStore,
     *,
+    source_kind: str = "price_bars",
     page_key: str = "bars-page-1",
     source_revision: str = "rev-1",
     payload: dict[str, object] | None = None,
+    row_count: int = 1,
+    source_timestamp: datetime = _SOURCE_AT,
+    account_scope: str = "aggregate",
+    instrument_handle: str | None = None,
 ) -> store_module.StoredSourcePage:
     return store.put_source_page(
-        source_kind="price_bars",
+        source_kind=source_kind,
         page_key=page_key,
         source_revision=source_revision,
-        contract_name="price_bars_page",
+        contract_name=f"{source_kind}_page",
         contract_sha256=_SCHEMA_SHA256,
         payload=payload or {"row_count": 1, "schema": "redacted_bar_page"},
-        row_count=1,
-        source_timestamp=_SOURCE_AT,
-        account_scope="aggregate",
-        instrument_handle=None,
+        row_count=row_count,
+        source_timestamp=source_timestamp,
+        account_scope=account_scope,
+        instrument_handle=instrument_handle,
     )
 
 
@@ -135,12 +154,14 @@ def _dataset(
     page_id: str,
     *,
     dataset_id: str | None = None,
+    account_scope: str = "aggregate",
+    source_revision: str = "rev-1",
 ) -> store_module.StoredDataset:
     return store.create_dataset(
         dataset_id=dataset_id or new_safe_handle(HandleKind.DATASET_ID),
-        account_scope="aggregate",
+        account_scope=account_scope,
         source_scope="saxo_openapi",
-        source_revision="rev-1",
+        source_revision=source_revision,
         source_page_ids=(page_id,),
         created_at=_SOURCE_AT + timedelta(minutes=1),
         coverage_start=_SOURCE_AT,
@@ -149,7 +170,18 @@ def _dataset(
     )
 
 
-def _analysis_result(dataset_id: str, analysis_id: str) -> AnalysisResult:
+def _analysis_result(  # noqa: PLR0913
+    dataset_id: str,
+    analysis_id: str,
+    *,
+    account_scope: str = "aggregate",
+    source_revision: str = "rev-1",
+    source_contract_sha256: str = _SCHEMA_SHA256,
+    request: MarketAnalysisRequest
+    | InstrumentAnalysisRequest
+    | PortfolioAnalysisRequest
+    | None = None,
+) -> AnalysisResult:
     coverage = DataCoverage(
         state=QualityState.COMPLETE,
         start_at=_SOURCE_AT,
@@ -160,8 +192,8 @@ def _analysis_result(dataset_id: str, analysis_id: str) -> AnalysisResult:
     )
     source_binding = ProofSourceBinding(
         source_scope="saxo_openapi",
-        source_revision="rev-1",
-        source_contract_sha256=_SCHEMA_SHA256,
+        source_revision=source_revision,
+        source_contract_sha256=source_contract_sha256,
     )
     engine_binding = ProofEngineBinding(
         engine_name="store_test_engine",
@@ -188,12 +220,13 @@ def _analysis_result(dataset_id: str, analysis_id: str) -> AnalysisResult:
         tool_name="saxo_analyze_market",
         analysis_id=analysis_id,
         analysis_kind="row_count",
-        request=MarketAnalysisRequest(
+        request=request
+        or MarketAnalysisRequest(
             request_kind="market",
             analysis_kind="row_count",
             dataset_id=dataset_id,
         ),
-        account_scope="aggregate",
+        account_scope=account_scope,
         as_of=_SOURCE_AT + timedelta(minutes=2),
         valid_until=_SOURCE_AT + timedelta(minutes=7),
         metrics=(
@@ -218,8 +251,8 @@ def _analysis_result(dataset_id: str, analysis_id: str) -> AnalysisResult:
         provenance=AnalysisProvenance(
             dataset_id=dataset_id,
             source_scope="saxo_openapi",
-            source_revision="rev-1",
-            source_contract_sha256=_SCHEMA_SHA256,
+            source_revision=source_revision,
+            source_contract_sha256=source_contract_sha256,
             source_timestamp=_SOURCE_AT,
             proof_receipts=(receipt,),
             engine_name="store_test_engine",
@@ -274,6 +307,140 @@ def _seed_dependency_chain(
     return page, dataset, analysis, artifact
 
 
+def _seed_normalized_scope(
+    store: AnalyticsStore,
+    data_type: StorageDataType,
+) -> str:
+    if data_type is StorageDataType.JOBS:
+        job_id = new_safe_handle(HandleKind.JOB_ID)
+        with store._write_connection() as connection:  # noqa: SLF001
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    job_id,
+                    state,
+                    request_fingerprint,
+                    created_at,
+                    updated_at,
+                    analysis_id,
+                    message,
+                    request_json
+                )
+                VALUES (?, 'queued', ?, ?, ?, NULL, NULL, '{}')
+                """,
+                (job_id, "f" * 64, _SOURCE_AT, _SOURCE_AT),
+            )
+            store._bump_revision(connection)  # noqa: SLF001
+        return job_id
+
+    instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    with store._write_connection() as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO safe_instruments (
+                instrument_handle,
+                asset_type,
+                safe_label,
+                source_revision,
+                source_timestamp,
+                fingerprint_sha256,
+                metadata_json
+            )
+            VALUES (?, 'Stock', 'Synthetic instrument', 'rev-1', ?, ?, '{}')
+            """,
+            (instrument_handle, _SOURCE_AT, "e" * 64),
+        )
+        store._bump_revision(connection)  # noqa: SLF001
+    page = _source_page(
+        store,
+        source_kind=data_type.value,
+        page_key=f"{data_type.value}-page-1",
+        instrument_handle=instrument_handle,
+    )
+    with store._write_connection() as connection:  # noqa: SLF001
+        if data_type is StorageDataType.PRICE_BARS:
+            connection.execute(
+                """
+                INSERT INTO price_bars
+                VALUES (?, ?, 'rev-1', ?, '1m', 1, 2, 0.5, 1.5, 10, 'DKK', FALSE)
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT),
+            )
+        elif data_type is StorageDataType.QUOTES:
+            connection.execute(
+                """
+                INSERT INTO quotes
+                VALUES ('quote-1', ?, ?, 'rev-1', ?, 1, 2, 1.5, 'DKK', ?)
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT, "f" * 64),
+            )
+        elif data_type is StorageDataType.OPTION_SNAPSHOTS:
+            connection.execute(
+                """
+                INSERT INTO option_snapshots
+                VALUES (
+                    'option-1', ?, ?, ?, 'rev-1', ?, DATE '2026-12-31',
+                    100, 'DKK', 'call', ?, '{}'
+                )
+                """,
+                (
+                    page.page_id,
+                    instrument_handle,
+                    instrument_handle,
+                    _SOURCE_AT,
+                    "f" * 64,
+                ),
+            )
+        elif data_type is StorageDataType.TRANSACTIONS:
+            connection.execute(
+                """
+                INSERT INTO transactions
+                VALUES (
+                    'transaction-1', ?, 'aggregate', ?, 'rev-1', ?,
+                    10, 'DKK', ?, '{}'
+                )
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT, "f" * 64),
+            )
+        elif data_type is StorageDataType.BOOKINGS:
+            connection.execute(
+                """
+                INSERT INTO bookings
+                VALUES (
+                    'booking-1', ?, 'aggregate', ?, 'rev-1', ?,
+                    10, 'DKK', ?, '{}'
+                )
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT, "f" * 64),
+            )
+        elif data_type is StorageDataType.CLOSED_POSITIONS:
+            connection.execute(
+                """
+                INSERT INTO closed_positions
+                VALUES (
+                    'closed-position-1', ?, 'aggregate', ?, 'rev-1', ?,
+                    10, 'DKK', ?, '{}'
+                )
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT, "f" * 64),
+            )
+        elif data_type is StorageDataType.COSTS:
+            connection.execute(
+                """
+                INSERT INTO costs
+                VALUES (
+                    'cost-1', ?, 'aggregate', ?, 'rev-1', ?,
+                    10, 'DKK', ?, '{}'
+                )
+                """,
+                (page.page_id, instrument_handle, _SOURCE_AT, "f" * 64),
+            )
+        else:
+            raise AssertionError(f"unsupported normalized test scope: {data_type}")
+        store._bump_revision(connection)  # noqa: SLF001
+    return page.page_id
+
+
 def _all_local_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
@@ -297,6 +464,20 @@ def _abort_transaction(store: AnalyticsStore) -> None:
     with store.transaction():
         _source_page(store)
         raise RuntimeError("abort")
+
+
+def _write_two_quota_pages_in_one_transaction(store: AnalyticsStore) -> None:
+    with store.transaction():
+        _source_page(
+            store,
+            page_key="bars-page-2",
+            payload={"data": "x" * 8_000},
+        )
+        _source_page(
+            store,
+            page_key="bars-page-3",
+            payload={"data": "y" * 8_000},
+        )
 
 
 def test_open_creates_the_normalized_schema_and_owner_only_database(tmp_path: Path) -> None:
@@ -334,6 +515,60 @@ def test_v0_fixture_contains_only_schema_metadata_and_no_private_rows() -> None:
 
     assert names == {"analytics_schema"}
     assert rows == [(True, 0)]
+
+
+def test_clean_wheel_contains_and_loads_the_fixed_migration_catalog(
+    tmp_path: Path,
+) -> None:
+    wheel_dir = tmp_path / "wheel"
+    uv_path = shutil.which("uv")
+    assert uv_path is not None
+    build = subprocess.run(
+        [
+            uv_path,
+            "build",
+            "--offline",
+            "--wheel",
+            "--out-dir",
+            str(wheel_dir),
+        ],
+        cwd=_PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert build.returncode == 0, build.stderr
+    wheel = next(wheel_dir.glob("*.whl"))
+    with zipfile.ZipFile(wheel) as archive:
+        assert (
+            "saxo_bank_mcp/_analytics_migrations/0001_initial.sql"
+            in archive.namelist()
+        )
+
+    isolated_state = tmp_path / "isolated-state"
+    script = """
+import sys
+from saxo_bank_mcp.analytics_config import load_analytics_config
+from saxo_bank_mcp.analytics_store import AnalyticsStore
+
+config = load_analytics_config({"XDG_STATE_HOME": sys.argv[1]})
+store = AnalyticsStore.open(config)
+store.close()
+print(config.paths.store_path.is_file())
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(wheel)
+    opened = subprocess.run(
+        [sys.executable, "-c", script, str(isolated_state)],
+        cwd=tmp_path,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert opened.returncode == 0, opened.stderr
+    assert opened.stdout.strip() == "True"
 
 
 def test_migration_from_v0_creates_an_owner_only_backup(tmp_path: Path) -> None:
@@ -441,6 +676,30 @@ def test_migration_cannot_bypass_the_store_writer_lock(tmp_path: Path) -> None:
         store.close()
 
 
+def test_noncanonical_contained_store_path_uses_the_same_writer_lock(
+    tmp_path: Path,
+) -> None:
+    default = _config(tmp_path)
+    alternate_store = prepare_owner_only_path(
+        default.paths.state_root / "alternate" / "custom.duckdb",
+    )
+    config = AnalyticsConfig(
+        limits=default.limits,
+        paths=AnalyticsPaths(
+            state_root=default.paths.state_root,
+            analytics_root=default.paths.analytics_root,
+            artifacts_dir=default.paths.artifacts_dir,
+            store_path=alternate_store,
+        ),
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        with store.transaction(), pytest.raises(MigrationError, match="writer lock"):
+            migrate_store(config.paths.store_path, LATEST_SCHEMA_VERSION)
+    finally:
+        store.close()
+
+
 def test_reads_use_a_connection_separate_from_the_uncommitted_writer(tmp_path: Path) -> None:
     store = AnalyticsStore.open(_config(tmp_path))
     try:
@@ -502,6 +761,122 @@ def test_duplicate_page_retry_is_idempotent_without_losing_revisions(tmp_path: P
         store.close()
 
 
+def test_identical_payloads_in_distinct_account_scopes_do_not_collapse(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        aggregate = _source_page(store, account_scope="aggregate")
+        selected = _source_page(store, account_scope="selected SIM account")
+
+        assert aggregate.page_id != selected.page_id
+        assert aggregate.fingerprint_sha256 != selected.fingerprint_sha256
+        assert {
+            entry.account_scope
+            for entry in store.list_storage(
+                StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
+            )
+        } == {"aggregate", "selected SIM account"}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "row_count", "source_timestamp"),
+    [
+        ({"schema": "changed"}, 1, _SOURCE_AT),
+        ({"schema": "redacted_bar_page"}, 2, _SOURCE_AT),
+        ({"schema": "redacted_bar_page"}, 1, _SOURCE_AT + timedelta(seconds=1)),
+    ],
+)
+def test_source_page_logical_revision_rejects_conflicting_material(
+    tmp_path: Path,
+    payload: dict[str, object],
+    row_count: int,
+    source_timestamp: datetime,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        _source_page(
+            store,
+            payload={"schema": "redacted_bar_page"},
+        )
+
+        with pytest.raises(StoreConflictError, match="source page"):
+            _source_page(
+                store,
+                payload=payload,
+                row_count=row_count,
+                source_timestamp=source_timestamp,
+            )
+    finally:
+        store.close()
+
+
+def test_source_page_rejects_a_missing_instrument_reference(tmp_path: Path) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        with pytest.raises(StoreNotFoundError, match="instrument"):
+            _source_page(
+                store,
+                instrument_handle=new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
+            )
+
+        assert store.list_storage(StorageScope()) == ()
+    finally:
+        store.close()
+
+
+def test_dataset_rejects_a_missing_source_contract(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        page = _source_page(store)
+        with store_module._connect_store_database(  # noqa: SLF001
+            config.paths.store_path,
+            read_only=False,
+        ) as connection:
+            connection.execute("DELETE FROM source_contracts")
+
+        with pytest.raises(StoreNotFoundError, match="source contract"):
+            _dataset(store, page.page_id)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("page_account_scope", "page_revision", "dataset_account_scope", "dataset_revision"),
+    [
+        ("selected SIM account", "rev-1", "aggregate", "rev-1"),
+        ("aggregate", "rev-1", "aggregate", "rev-2"),
+    ],
+)
+def test_dataset_rejects_source_page_binding_mismatches(
+    tmp_path: Path,
+    page_account_scope: str,
+    page_revision: str,
+    dataset_account_scope: str,
+    dataset_revision: str,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(
+            store,
+            account_scope=page_account_scope,
+            source_revision=page_revision,
+        )
+
+        with pytest.raises(StoreValidationError, match="dataset"):
+            _dataset(
+                store,
+                page.page_id,
+                account_scope=dataset_account_scope,
+                source_revision=dataset_revision,
+            )
+    finally:
+        store.close()
+
+
 def test_snapshot_retry_is_idempotent_and_conflicting_reuse_is_rejected(
     tmp_path: Path,
 ) -> None:
@@ -544,6 +919,170 @@ def test_snapshot_retry_is_idempotent_and_conflicting_reuse_is_rejected(
         store.close()
 
 
+@pytest.mark.parametrize(
+    ("account_scope", "source_revision"),
+    [
+        ("selected SIM account", "rev-1"),
+        ("aggregate", "rev-2"),
+    ],
+)
+def test_snapshot_rejects_dataset_binding_mismatches(
+    tmp_path: Path,
+    account_scope: str,
+    source_revision: str,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(store)
+        dataset = _dataset(store, page.page_id)
+
+        with pytest.raises(StoreValidationError, match="snapshot"):
+            store.create_snapshot(
+                snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
+                dataset_id=dataset.dataset_id,
+                snapshot_kind="portfolio",
+                account_scope=account_scope,
+                source_revision=source_revision,
+                as_of=_SOURCE_AT,
+                payload={"schema": "redacted_snapshot"},
+            )
+    finally:
+        store.close()
+
+
+def test_analysis_rejects_a_missing_dataset_reference(tmp_path: Path) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        result = _analysis_result(
+            new_safe_handle(HandleKind.DATASET_ID),
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+        )
+
+        with pytest.raises(StoreNotFoundError, match="dataset"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
+def test_instrument_analysis_rejects_a_missing_instrument_reference(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(store)
+        dataset = _dataset(store, page.page_id)
+        request = InstrumentAnalysisRequest(
+            request_kind="instrument",
+            analysis_kind="row_count",
+            dataset_id=dataset.dataset_id,
+            instrument_handles=(new_safe_handle(HandleKind.INSTRUMENT_HANDLE),),
+        )
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            request=request,
+        )
+
+        with pytest.raises(StoreNotFoundError, match="instrument"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
+def test_portfolio_analysis_rejects_a_missing_snapshot_reference(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(store)
+        dataset = _dataset(store, page.page_id)
+        request = PortfolioAnalysisRequest(
+            request_kind="portfolio",
+            analysis_kind="row_count",
+            dataset_id=dataset.dataset_id,
+            portfolio_snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
+        )
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            request=request,
+        )
+
+        with pytest.raises(StoreNotFoundError, match="snapshot"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("account_scope", "source_revision", "source_contract_sha256"),
+    [
+        ("selected SIM account", "rev-1", _SCHEMA_SHA256),
+        ("aggregate", "rev-2", _SCHEMA_SHA256),
+        ("aggregate", "rev-1", "d" * 64),
+    ],
+)
+def test_analysis_rejects_dataset_binding_mismatches(
+    tmp_path: Path,
+    account_scope: str,
+    source_revision: str,
+    source_contract_sha256: str,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(store)
+        dataset = _dataset(store, page.page_id)
+        result = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            account_scope=account_scope,
+            source_revision=source_revision,
+            source_contract_sha256=source_contract_sha256,
+        )
+
+        with pytest.raises(StoreValidationError, match="analysis"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
+def test_portfolio_analysis_rejects_a_snapshot_from_another_dataset(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        first_page = _source_page(store)
+        second_page = _source_page(store, page_key="bars-page-2")
+        first_dataset = _dataset(store, first_page.page_id)
+        second_dataset = _dataset(store, second_page.page_id)
+        snapshot_id = new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID)
+        store.create_snapshot(
+            snapshot_id=snapshot_id,
+            dataset_id=first_dataset.dataset_id,
+            snapshot_kind="portfolio",
+            account_scope="aggregate",
+            source_revision="rev-1",
+            as_of=_SOURCE_AT,
+            payload={"schema": "redacted_snapshot"},
+        )
+        request = PortfolioAnalysisRequest(
+            request_kind="portfolio",
+            analysis_kind="row_count",
+            dataset_id=second_dataset.dataset_id,
+            portfolio_snapshot_id=snapshot_id,
+        )
+        result = _analysis_result(
+            second_dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+            request=request,
+        )
+
+        with pytest.raises(StoreValidationError, match="snapshot"):
+            store.put_analysis(result)
+    finally:
+        store.close()
+
+
 def test_quota_refusal_preserves_all_existing_data(tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
@@ -566,6 +1105,109 @@ def test_quota_refusal_preserves_all_existing_data(tmp_path: Path) -> None:
         )
         assert tuple(entry.object_id for entry in entries) == (existing.page_id,)
         assert sparse.exists()
+    finally:
+        store.close()
+
+
+def test_transaction_reserves_cumulative_quota_and_rolls_back_all_writes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        existing = _source_page(store)
+        sparse = config.paths.artifacts_dir / "reserved.bin"
+        sparse.touch(mode=_OWNER_FILE_MODE)
+        current_bytes = _all_local_bytes(config.paths.analytics_root)
+        with sparse.open("r+b") as reserved:
+            reserved.truncate(config.limits.store_quota_bytes - current_bytes - 12_000)
+        sparse.chmod(_OWNER_FILE_MODE)
+
+        with pytest.raises(StoreQuotaError, match="quota"):
+            _write_two_quota_pages_in_one_transaction(store)
+
+        entries = store.list_storage(
+            StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
+        )
+        assert tuple(entry.object_id for entry in entries) == (existing.page_id,)
+        assert sparse.exists()
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "data_type",
+    [
+        StorageDataType.PRICE_BARS,
+        StorageDataType.QUOTES,
+        StorageDataType.OPTION_SNAPSHOTS,
+        StorageDataType.TRANSACTIONS,
+        StorageDataType.BOOKINGS,
+        StorageDataType.CLOSED_POSITIONS,
+        StorageDataType.COSTS,
+        StorageDataType.JOBS,
+    ],
+)
+def test_normalized_storage_scopes_list_value_free_summaries(
+    tmp_path: Path,
+    data_type: StorageDataType,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        object_id = _seed_normalized_scope(store, data_type)
+
+        entries = store.list_storage(StorageScope(data_types=(data_type,)))
+
+        assert len(entries) == 1
+        assert entries[0].data_type is data_type
+        assert entries[0].object_id == object_id
+        assert entries[0].row_count == 1
+        dumped = repr(entries[0])
+        assert "payload" not in dumped
+        assert "request_json" not in dumped
+        assert "amount_value" not in dumped
+        assert "path" not in dumped
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "data_type",
+    [
+        StorageDataType.PRICE_BARS,
+        StorageDataType.QUOTES,
+        StorageDataType.OPTION_SNAPSHOTS,
+        StorageDataType.TRANSACTIONS,
+        StorageDataType.BOOKINGS,
+        StorageDataType.CLOSED_POSITIONS,
+        StorageDataType.COSTS,
+        StorageDataType.JOBS,
+    ],
+)
+def test_normalized_storage_scopes_preview_and_delete_the_direct_closure(
+    tmp_path: Path,
+    data_type: StorageDataType,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        _seed_normalized_scope(store, data_type)
+
+        preview = store.preview_delete(StorageScope(data_types=(data_type,)))
+
+        expected_tables = (
+            {data_type.value}
+            if data_type is StorageDataType.JOBS
+            else {data_type.value, "source_pages"}
+        )
+        assert {item.table for item in preview.table_counts} == expected_tables
+        assert all(item.rows == 1 for item in preview.table_counts)
+        receipt = store.delete_previewed(preview.token)
+        assert receipt.table_counts == preview.table_counts
+        assert store.list_storage(StorageScope(data_types=(data_type,))) == ()
+        dumped = repr(receipt)
+        assert "token" not in dumped
+        assert "payload" not in dumped
+        assert "value" not in dumped
     finally:
         store.close()
 

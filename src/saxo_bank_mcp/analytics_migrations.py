@@ -8,6 +8,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
 from types import MappingProxyType
 from typing import Final
@@ -18,9 +19,10 @@ import duckdb
 from saxo_bank_mcp.analytics_config import prepare_owner_only_path
 
 LATEST_SCHEMA_VERSION: Final = 1
-_MIGRATIONS_DIR: Final = (
+_SOURCE_MIGRATIONS_DIR: Final = (
     Path(__file__).resolve().parents[2] / "data" / "analytics" / "migrations"
 )
+_MIGRATION_RESOURCE_DIR: Final = "_analytics_migrations"
 _CONNECTION_CONFIG: Final = MappingProxyType(
     {
         "allow_unsigned_extensions": "false",
@@ -55,7 +57,11 @@ def _connect_database(path: Path, *, read_only: bool) -> duckdb.DuckDBPyConnecti
 
 
 def _read_migration(version: int) -> str:
-    migration_path = _MIGRATIONS_DIR / f"{version:04d}_initial.sql"
+    filename = f"{version:04d}_initial.sql"
+    resource = files("saxo_bank_mcp").joinpath(_MIGRATION_RESOURCE_DIR, filename)
+    if resource.is_file():
+        return resource.read_text(encoding="utf-8")
+    migration_path = _SOURCE_MIGRATIONS_DIR / filename
     if not migration_path.is_file():
         msg = f"schema migration {version} is not installed"
         raise MigrationError(msg)
@@ -67,6 +73,12 @@ def _migration_name(version: int) -> str:
         return "initial"
     msg = f"schema migration {version} is not installed"
     raise MigrationError(msg)
+
+
+def store_writer_lock_path(store_path: Path) -> Path:
+    """Derive one canonical lock beside the exact database it protects."""
+    resolved_store = store_path.resolve(strict=False)
+    return resolved_store.with_name(f".{resolved_store.name}.write.lock")
 
 
 def _create_v0_database(path: Path) -> None:
@@ -250,7 +262,7 @@ def migrate_store(path: Path, target_version: int) -> MigrationResult:
         )
         raise MigrationError(msg)
 
-    lock_path = prepare_owner_only_path(path.parent / "analytics.write.lock")
+    lock_path = prepare_owner_only_path(store_writer_lock_path(path))
     flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags)
     locked = False
@@ -272,4 +284,5 @@ __all__ = (
     "MigrationError",
     "MigrationResult",
     "migrate_store",
+    "store_writer_lock_path",
 )

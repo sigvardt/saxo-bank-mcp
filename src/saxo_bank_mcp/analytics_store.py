@@ -25,11 +25,14 @@ from saxo_bank_mcp.analytics_config import (
 from saxo_bank_mcp.analytics_migrations import (
     LATEST_SCHEMA_VERSION,
     migrate_store,
+    store_writer_lock_path,
 )
 from saxo_bank_mcp.analytics_models import (
     AnalysisResult,
     ArtifactSummary,
     HandleKind,
+    InstrumentAnalysisRequest,
+    PortfolioAnalysisRequest,
     QualityState,
     new_safe_handle,
 )
@@ -183,6 +186,129 @@ class StorageDataType(StrEnum):
     ARTIFACTS = "artifacts"
     JOBS = "jobs"
     DELETION_RECEIPTS = "deletion_receipts"
+
+
+_SOURCE_PAGE_BACKED_DATA_TYPES: Final = frozenset(
+    {
+        StorageDataType.SOURCE_PAGES,
+        StorageDataType.PRICE_BARS,
+        StorageDataType.QUOTES,
+        StorageDataType.OPTION_SNAPSHOTS,
+        StorageDataType.TRANSACTIONS,
+        StorageDataType.BOOKINGS,
+        StorageDataType.CLOSED_POSITIONS,
+        StorageDataType.COSTS,
+    },
+)
+_NORMALIZED_PAGE_QUERIES: Final[Mapping[StorageDataType, str]] = MappingProxyType(
+    {
+        StorageDataType.PRICE_BARS: """
+            SELECT
+                p.page_id,
+                p.account_scope,
+                b.instrument_handle,
+                b.source_revision,
+                epoch_us(min(b.bar_time)),
+                epoch_us(max(b.bar_time)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM price_bars AS b
+            JOIN source_pages AS p ON p.page_id = b.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.QUOTES: """
+            SELECT
+                p.page_id,
+                p.account_scope,
+                q.instrument_handle,
+                q.source_revision,
+                epoch_us(min(q.captured_at)),
+                epoch_us(max(q.captured_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM quotes AS q
+            JOIN source_pages AS p ON p.page_id = q.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.OPTION_SNAPSHOTS: """
+            SELECT
+                p.page_id,
+                p.account_scope,
+                o.instrument_handle,
+                o.source_revision,
+                epoch_us(min(o.captured_at)),
+                epoch_us(max(o.captured_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM option_snapshots AS o
+            JOIN source_pages AS p ON p.page_id = o.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.TRANSACTIONS: """
+            SELECT
+                p.page_id,
+                t.account_scope,
+                t.instrument_handle,
+                t.source_revision,
+                epoch_us(min(t.effective_at)),
+                epoch_us(max(t.effective_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM transactions AS t
+            JOIN source_pages AS p ON p.page_id = t.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.BOOKINGS: """
+            SELECT
+                p.page_id,
+                b.account_scope,
+                b.instrument_handle,
+                b.source_revision,
+                epoch_us(min(b.booked_at)),
+                epoch_us(max(b.booked_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM bookings AS b
+            JOIN source_pages AS p ON p.page_id = b.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.CLOSED_POSITIONS: """
+            SELECT
+                p.page_id,
+                c.account_scope,
+                c.instrument_handle,
+                c.source_revision,
+                epoch_us(min(c.closed_at)),
+                epoch_us(max(c.closed_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM closed_positions AS c
+            JOIN source_pages AS p ON p.page_id = c.page_id
+            GROUP BY ALL
+        """,
+        StorageDataType.COSTS: """
+            SELECT
+                p.page_id,
+                c.account_scope,
+                c.instrument_handle,
+                c.source_revision,
+                epoch_us(min(c.effective_at)),
+                epoch_us(max(c.effective_at)),
+                count(*),
+                p.byte_count,
+                p.fingerprint_sha256
+            FROM costs AS c
+            JOIN source_pages AS p ON p.page_id = c.page_id
+            GROUP BY ALL
+        """,
+    },
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +484,13 @@ class _DeletionPlan:
     estimated_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DatasetBinding:
+    account_scope: str
+    source_scope: str
+    source_revision: str
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -486,6 +619,7 @@ class AnalyticsStore:
         self._active_writer: duckdb.DuckDBPyConnection | None = None
         self._transaction_owner: int | None = None
         self._transaction_depth = 0
+        self._transaction_reserved_bytes = 0
         self._closed = False
 
     @classmethod
@@ -495,7 +629,7 @@ class AnalyticsStore:
         migrate_store(validated.paths.store_path, LATEST_SCHEMA_VERSION)
         validated.paths.store_path.chmod(_OWNER_FILE_MODE)
         lock_path = prepare_owner_only_path(
-            validated.paths.analytics_root / "analytics.write.lock",
+            store_writer_lock_path(validated.paths.store_path),
         )
         flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags)
@@ -538,6 +672,7 @@ class AnalyticsStore:
                 self._active_writer = writer
                 self._transaction_owner = owner
                 self._transaction_depth = 1
+                self._transaction_reserved_bytes = 0
                 try:
                     yield self
                 except BaseException:
@@ -550,6 +685,7 @@ class AnalyticsStore:
                     self._active_writer = None
                     self._transaction_owner = None
                     self._transaction_depth = 0
+                    self._transaction_reserved_bytes = 0
             finally:
                 writer.close()
 
@@ -621,13 +757,20 @@ class AnalyticsStore:
         )
 
     def _ensure_capacity(self, incoming_bytes: int) -> None:
+        reserved_bytes = (
+            self._transaction_reserved_bytes
+            if self._transaction_owner == get_ident()
+            else 0
+        )
         if not self._config.limits.can_accept_ingestion(
             self._current_storage_bytes(),
-            incoming_bytes,
+            reserved_bytes + incoming_bytes,
         ):
             raise StoreQuotaError(
                 "analytics store quota refuses the write without deleting data",
             )
+        if self._transaction_owner == get_ident():
+            self._transaction_reserved_bytes += incoming_bytes
 
     @staticmethod
     def _revision(connection: duckdb.DuckDBPyConnection) -> int:
@@ -678,13 +821,29 @@ class AnalyticsStore:
 
         payload_json = _canonical_json(dict(payload))
         payload_sha256 = _fingerprint(payload_json)
+        logical_key_sha256 = _fingerprint(
+            _canonical_json(
+                {
+                    "account_scope": account_scope,
+                    "instrument_handle": instrument_handle,
+                    "page_key": page_key,
+                    "source_kind": source_kind,
+                    "source_revision": source_revision,
+                },
+            ),
+        )
         material_json = _canonical_json(
             {
+                "account_scope": account_scope,
+                "contract_name": contract_name,
                 "contract_sha256": contract_sha256,
+                "instrument_handle": instrument_handle,
                 "page_key": page_key,
                 "payload_sha256": payload_sha256,
+                "row_count": row_count,
                 "source_kind": source_kind,
                 "source_revision": source_revision,
+                "source_timestamp": source_timestamp.isoformat(),
             },
         )
         fingerprint_sha256 = _fingerprint(material_json)
@@ -693,8 +852,16 @@ class AnalyticsStore:
         byte_count = len(payload_json.encode())
 
         with self._write_connection() as connection:
-            existing = self._source_page_by_id(connection, page_id)
+            self._require_instrument_reference(connection, instrument_handle)
+            existing = self._source_page_by_logical_key(
+                connection,
+                logical_key_sha256,
+            )
             if existing is not None:
+                if existing.fingerprint_sha256 != fingerprint_sha256:
+                    raise StoreConflictError(
+                        "source page logical revision identifies different material",
+                    )
                 return existing
             self._ensure_capacity(byte_count)
             now = _utc_now()
@@ -726,10 +893,12 @@ class AnalyticsStore:
                     ingested_at,
                     row_count,
                     byte_count,
+                    logical_key_sha256,
+                    fingerprint_sha256,
                     payload_sha256,
                     payload_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     page_id,
@@ -743,6 +912,8 @@ class AnalyticsStore:
                     now,
                     row_count,
                     byte_count,
+                    logical_key_sha256,
+                    fingerprint_sha256,
                     payload_sha256,
                     payload_json,
                 ),
@@ -752,6 +923,38 @@ class AnalyticsStore:
             if stored is None:
                 raise StoreError("stored source page cannot be read back")
             return stored
+
+    @staticmethod
+    def _require_instrument_reference(
+        connection: duckdb.DuckDBPyConnection,
+        instrument_handle: str | None,
+    ) -> None:
+        if instrument_handle is None:
+            return
+        row = connection.execute(
+            "SELECT count(*) FROM safe_instruments WHERE instrument_handle = ?",
+            (instrument_handle,),
+        ).fetchone()
+        if row is None:
+            raise StoreError("instrument reference count is missing")
+        if _require_int(row[0]) != 1:
+            raise StoreNotFoundError("source page instrument does not exist")
+
+    @staticmethod
+    def _source_page_by_logical_key(
+        connection: duckdb.DuckDBPyConnection,
+        logical_key_sha256: str,
+    ) -> StoredSourcePage | None:
+        row = connection.execute(
+            "SELECT page_id FROM source_pages WHERE logical_key_sha256 = ?",
+            (logical_key_sha256,),
+        ).fetchone()
+        if row is None:
+            return None
+        return AnalyticsStore._source_page_by_id(
+            connection,
+            _require_str(row[0]),
+        )
 
     @staticmethod
     def _source_page_by_id(
@@ -765,7 +968,7 @@ class AnalyticsStore:
                 source_kind,
                 page_key,
                 source_revision,
-                payload_sha256,
+                fingerprint_sha256,
                 row_count,
                 byte_count,
                 epoch_us(source_timestamp),
@@ -788,6 +991,57 @@ class AnalyticsStore:
             source_timestamp=_require_datetime(row[7]),
             ingested_at=_require_datetime(row[8]),
         )
+
+    @staticmethod
+    def _validated_dataset_source_rows(
+        connection: duckdb.DuckDBPyConnection,
+        page_ids: Sequence[str],
+        account_scope: str,
+        source_revision: str,
+    ) -> list[tuple[object, ...]]:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT
+                    p.page_id,
+                    p.fingerprint_sha256,
+                    p.row_count,
+                    p.byte_count,
+                    p.account_scope,
+                    p.source_revision,
+                    c.contract_sha256,
+                    p.instrument_handle,
+                    i.instrument_handle
+                FROM source_pages AS p
+                LEFT JOIN source_contracts AS c ON c.contract_id = p.contract_id
+                LEFT JOIN safe_instruments AS i
+                    ON i.instrument_handle = p.instrument_handle
+                WHERE p.page_id = ANY(?)
+                ORDER BY p.page_id
+                """,
+                (list(page_ids),),
+            ).fetchall(),
+        )
+        if len(rows) != len(page_ids):
+            raise StoreNotFoundError("dataset references an absent source page")
+        if any(row[6] is None for row in rows):
+            raise StoreNotFoundError("dataset source contract does not exist")
+        if any(row[7] is not None and row[8] is None for row in rows):
+            raise StoreNotFoundError("dataset instrument does not exist")
+        if any(
+            (page_scope := _optional_str(row[4])) is not None
+            and page_scope != account_scope
+            for row in rows
+        ):
+            raise StoreValidationError(
+                "dataset account scope does not match its source pages",
+            )
+        if any(_require_str(row[5]) != source_revision for row in rows):
+            raise StoreValidationError(
+                "dataset source revision does not match its source pages",
+            )
+        return rows
 
     def create_dataset(  # noqa: PLR0913
         self,
@@ -820,20 +1074,12 @@ class AnalyticsStore:
             raise StoreValidationError("dataset source page identifier is invalid")
 
         with self._write_connection() as connection:
-            rows = cast(
-                "list[tuple[object, ...]]",
-                connection.execute(
-                    """
-                    SELECT page_id, payload_sha256, row_count, byte_count
-                    FROM source_pages
-                    WHERE page_id = ANY(?)
-                    ORDER BY page_id
-                    """,
-                    (list(page_ids),),
-                ).fetchall(),
+            rows = self._validated_dataset_source_rows(
+                connection,
+                page_ids,
+                account_scope,
+                source_revision,
             )
-            if len(rows) != len(page_ids):
-                raise StoreNotFoundError("dataset references an absent source page")
             row_count = sum(_require_int(row[2]) for row in rows)
             byte_count = sum(_require_int(row[3]) for row in rows)
             material_json = _canonical_json(
@@ -844,7 +1090,8 @@ class AnalyticsStore:
                     "pages": [
                         {
                             "page_id": _require_str(row[0]),
-                            "payload_sha256": _require_str(row[1]),
+                            "page_fingerprint_sha256": _require_str(row[1]),
+                            "source_contract_sha256": _require_str(row[6]),
                         }
                         for row in rows
                     ],
@@ -935,6 +1182,47 @@ class AnalyticsStore:
             created_at=_require_datetime(row[5]),
         )
 
+    @staticmethod
+    def _dataset_binding(
+        connection: duckdb.DuckDBPyConnection,
+        dataset_id: str,
+    ) -> _DatasetBinding | None:
+        row = connection.execute(
+            """
+            SELECT account_scope, source_scope, source_revision
+            FROM datasets
+            WHERE dataset_id = ?
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return _DatasetBinding(
+            account_scope=_require_str(row[0]),
+            source_scope=_require_str(row[1]),
+            source_revision=_require_str(row[2]),
+        )
+
+    @staticmethod
+    def _dataset_contracts(
+        connection: duckdb.DuckDBPyConnection,
+        dataset_id: str,
+    ) -> frozenset[str]:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT DISTINCT c.contract_sha256
+                FROM dataset_source_pages AS d
+                JOIN source_pages AS p ON p.page_id = d.page_id
+                JOIN source_contracts AS c ON c.contract_id = p.contract_id
+                WHERE d.dataset_id = ?
+                """,
+                (dataset_id,),
+            ).fetchall(),
+        )
+        return frozenset(_require_str(row[0]) for row in rows)
+
     def create_snapshot(  # noqa: PLR0913
         self,
         *,
@@ -976,8 +1264,17 @@ class AnalyticsStore:
                         "snapshot handle already identifies different content",
                     )
                 return existing
-            if self._dataset_by_id(connection, dataset_id) is None:
+            dataset_binding = self._dataset_binding(connection, dataset_id)
+            if dataset_binding is None:
                 raise StoreNotFoundError("snapshot dataset does not exist")
+            if dataset_binding.account_scope != account_scope:
+                raise StoreValidationError(
+                    "snapshot account scope does not match its dataset",
+                )
+            if dataset_binding.source_revision != source_revision:
+                raise StoreValidationError(
+                    "snapshot source revision does not match its dataset",
+                )
             self._ensure_capacity(byte_count)
             connection.execute(
                 """
@@ -1043,11 +1340,13 @@ class AnalyticsStore:
 
     def put_analysis(self, result: AnalysisResult) -> StoredAnalysis:
         """Persist one strict analysis plus normalized metrics and proof receipts."""
+        result = AnalysisResult.model_validate(result)
         result_json = _canonical_json(result.model_dump(mode="json"))
         fingerprint_sha256 = _fingerprint(result_json)
         byte_count = len(result_json.encode())
         created_at = _utc_now()
         with self._write_connection() as connection:
+            self._validate_analysis_references(connection, result)
             existing = self._analysis_by_id(connection, result.analysis_id)
             if existing is not None:
                 if existing.fingerprint_sha256 != fingerprint_sha256:
@@ -1055,8 +1354,6 @@ class AnalyticsStore:
                         "analysis handle already identifies different content",
                     )
                 return existing
-            if self._dataset_by_id(connection, result.provenance.dataset_id) is None:
-                raise StoreNotFoundError("analysis dataset does not exist")
             self._ensure_capacity(byte_count)
             connection.execute(
                 """
@@ -1148,6 +1445,88 @@ class AnalyticsStore:
             if stored is None:
                 raise StoreError("stored analysis cannot be read back")
             return stored
+
+    def _validate_analysis_references(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        result: AnalysisResult,
+    ) -> None:
+        dataset_id = result.provenance.dataset_id
+        dataset_binding = self._dataset_binding(connection, dataset_id)
+        if dataset_binding is None:
+            raise StoreNotFoundError("analysis dataset does not exist")
+        if (
+            dataset_binding.account_scope != result.account_scope
+            or dataset_binding.source_scope != result.provenance.source_scope
+            or dataset_binding.source_revision != result.provenance.source_revision
+        ):
+            raise StoreValidationError(
+                "analysis provenance does not match its dataset",
+            )
+        contracts = self._dataset_contracts(connection, dataset_id)
+        if not contracts:
+            raise StoreNotFoundError("analysis dataset source contract does not exist")
+        if result.provenance.source_contract_sha256 not in contracts:
+            raise StoreValidationError(
+                "analysis source contract does not match its dataset",
+            )
+        request = result.request
+        if isinstance(request, InstrumentAnalysisRequest):
+            self._validate_analysis_instruments(
+                connection,
+                dataset_id,
+                request.instrument_handles,
+            )
+        elif isinstance(request, PortfolioAnalysisRequest):
+            snapshot = self._snapshot_by_id(
+                connection,
+                request.portfolio_snapshot_id,
+            )
+            if snapshot is None:
+                raise StoreNotFoundError("analysis snapshot does not exist")
+            if snapshot.dataset_id != dataset_id:
+                raise StoreValidationError(
+                    "analysis snapshot does not belong to its dataset",
+                )
+
+    @staticmethod
+    def _validate_analysis_instruments(
+        connection: duckdb.DuckDBPyConnection,
+        dataset_id: str,
+        instrument_handles: Sequence[str],
+    ) -> None:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT instrument_handle
+                FROM safe_instruments
+                WHERE instrument_handle = ANY(?)
+                """,
+                (list(instrument_handles),),
+            ).fetchall(),
+        )
+        existing = {_require_str(row[0]) for row in rows}
+        requested = set(instrument_handles)
+        if existing != requested:
+            raise StoreNotFoundError("analysis instrument does not exist")
+        dataset_rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT DISTINCT p.instrument_handle
+                FROM dataset_source_pages AS d
+                JOIN source_pages AS p ON p.page_id = d.page_id
+                WHERE d.dataset_id = ? AND p.instrument_handle IS NOT NULL
+                """,
+                (dataset_id,),
+            ).fetchall(),
+        )
+        dataset_instruments = {_require_str(row[0]) for row in dataset_rows}
+        if not requested.issubset(dataset_instruments):
+            raise StoreValidationError(
+                "analysis instruments do not belong to its dataset",
+            )
 
     @staticmethod
     def _analysis_by_id(
@@ -1265,10 +1644,12 @@ class AnalyticsStore:
     ) -> tuple[StorageEntry, ...]:
         entries = [
             *self._source_page_entries(connection),
+            *self._normalized_page_entries(connection),
             *self._dataset_entries(connection),
             *self._snapshot_entries(connection),
             *self._analysis_entries(connection),
             *self._artifact_entries(connection),
+            *self._job_entries(connection),
         ]
         if StorageDataType.DELETION_RECEIPTS in scope.data_types:
             entries.extend(self._deletion_receipt_entries(connection))
@@ -1299,7 +1680,7 @@ class AnalyticsStore:
                     epoch_us(source_timestamp),
                     row_count,
                     byte_count,
-                    payload_sha256
+                    fingerprint_sha256
                 FROM source_pages
                 """,
             ).fetchall(),
@@ -1319,6 +1700,33 @@ class AnalyticsStore:
             )
             for row in rows
         ]
+
+    @staticmethod
+    def _normalized_page_entries(
+        connection: duckdb.DuckDBPyConnection,
+    ) -> list[StorageEntry]:
+        entries: list[StorageEntry] = []
+        for data_type, query in _NORMALIZED_PAGE_QUERIES.items():
+            rows = cast(
+                "list[tuple[object, ...]]",
+                connection.execute(query).fetchall(),
+            )
+            entries.extend(
+                StorageEntry(
+                    data_type=data_type,
+                    object_id=_require_str(row[0]),
+                    account_scope=_optional_str(row[1]),
+                    instrument_handle=_optional_str(row[2]),
+                    source_revision=_require_str(row[3]),
+                    start_at=_require_datetime(row[4]),
+                    end_at=_require_datetime(row[5]),
+                    row_count=_require_int(row[6]),
+                    byte_count=_require_int(row[7]),
+                    fingerprint_sha256=_require_str(row[8]),
+                )
+                for row in rows
+            )
+        return entries
 
     @staticmethod
     def _dataset_entries(
@@ -1462,6 +1870,39 @@ class AnalyticsStore:
                 row_count=1,
                 byte_count=_require_int(row[4]),
                 fingerprint_sha256=_require_str(row[5]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _job_entries(
+        connection: duckdb.DuckDBPyConnection,
+    ) -> list[StorageEntry]:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT
+                    job_id,
+                    epoch_us(created_at),
+                    epoch_us(updated_at),
+                    request_fingerprint
+                FROM jobs
+                """,
+            ).fetchall(),
+        )
+        return [
+            StorageEntry(
+                data_type=StorageDataType.JOBS,
+                object_id=_require_str(row[0]),
+                account_scope=None,
+                instrument_handle=None,
+                source_revision=None,
+                start_at=_require_datetime(row[1]),
+                end_at=_require_datetime(row[2]),
+                row_count=1,
+                byte_count=0,
+                fingerprint_sha256=_require_str(row[3]),
             )
             for row in rows
         ]
@@ -1615,7 +2056,7 @@ class AnalyticsStore:
         source_page_ids = {
             entry.object_id
             for entry in entries
-            if entry.data_type is StorageDataType.SOURCE_PAGES
+            if entry.data_type in _SOURCE_PAGE_BACKED_DATA_TYPES
         }
         dataset_ids = {
             entry.object_id
@@ -1670,11 +2111,18 @@ class AnalyticsStore:
                 analysis_ids,
             ),
         )
-        job_ids = _select_strings(
-            connection,
-            "SELECT job_id FROM jobs",
-            "analysis_id",
-            analysis_ids,
+        job_ids = {
+            entry.object_id
+            for entry in entries
+            if entry.data_type is StorageDataType.JOBS
+        }
+        job_ids.update(
+            _select_strings(
+                connection,
+                "SELECT job_id FROM jobs",
+                "analysis_id",
+                analysis_ids,
+            ),
         )
 
         raw_targets: dict[str, set[str]] = {
