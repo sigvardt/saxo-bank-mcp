@@ -1,0 +1,10 @@
+{
+  "Data": [
+    {
+      "AssetType": "FutureSaxoAssetType",
+      "Description": "Synthetic instrument fixture",
+      "Identifier": 1001,
+      "Symbol": "FIXTURE"
+    }
+  ]
+}

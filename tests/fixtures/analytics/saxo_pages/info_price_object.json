@@ -1,0 +1,14 @@
+{
+  "AssetType": "Stock",
+  "PriceInfo": {
+    "High": 102.0,
+    "Low": 99.5
+  },
+  "PriceTypeAsk": "Delayed",
+  "PriceTypeBid": "Delayed",
+  "Quote": {
+    "Ask": 101.2,
+    "Bid": 101.0
+  },
+  "Uic": 1001
+}

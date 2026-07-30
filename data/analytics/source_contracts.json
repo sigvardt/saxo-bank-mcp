@@ -1,0 +1,1168 @@
+{
+  "contracts": [
+    {
+      "contract_id": "chart_v3",
+      "dependent_analysis_kinds": [
+        "instrument_price_return",
+        "instrument_risk",
+        "technical_indicators",
+        "session_cockpit"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Time",
+          "nullable": false,
+          "required": true,
+          "value_type": "timestamp"
+        },
+        {
+          "enum_values": [],
+          "name": "CloseBid",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "OpenBid",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "HighBid",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "LowBid",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Volume",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AskVolume",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [
+            "Delayed",
+            "Indicative",
+            "NoAccess",
+            "RealTime"
+          ],
+          "name": "PriceType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.chart.v3.charts",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/chart/v3/charts",
+      "query_parameters": [
+        "AccountKey",
+        "AssetType",
+        "ChartSampleFieldSet",
+        "Count",
+        "FieldGroups",
+        "Horizon",
+        "Mode",
+        "Time",
+        "Uic"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [
+        "DataVersion"
+      ],
+      "schema_version": "1",
+      "source_kind": "chart",
+      "stable_key_fields": [
+        "Time"
+      ]
+    },
+    {
+      "contract_id": "reference_instruments_v1",
+      "dependent_analysis_kinds": [
+        "instrument_resolution",
+        "instrument_dossier"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Identifier",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [
+            "Bond",
+            "CfdOnEtc",
+            "CfdOnEtf",
+            "CfdOnIndex",
+            "CfdOnStock",
+            "ContractFutures",
+            "Etc",
+            "Etf",
+            "FxForwards",
+            "FxSpot",
+            "Stock",
+            "StockIndex",
+            "StockOption"
+          ],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Description",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Symbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ExchangeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.ref.v1.instruments",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/ref/v1/instruments",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountKey",
+        "AssetTypes",
+        "CanParticipateInMultiLegOrder",
+        "Class",
+        "ExchangeId",
+        "IncludeNonTradable",
+        "Keywords",
+        "Tags",
+        "Uics"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "reference_instruments",
+      "stable_key_fields": [
+        "Identifier",
+        "AssetType"
+      ]
+    },
+    {
+      "contract_id": "reference_instrument_details_v1",
+      "dependent_analysis_kinds": [
+        "instrument_resolution",
+        "instrument_dossier",
+        "trading_conditions"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CurrencyCode",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Exchange",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.ref.v1.instruments.details",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/ref/v1/instruments/details",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountKey",
+        "AssetTypes",
+        "FieldGroups",
+        "Tags",
+        "Uics"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "reference_instruments",
+      "stable_key_fields": [
+        "Uic",
+        "AssetType"
+      ]
+    },
+    {
+      "contract_id": "options_chain_reference_v1",
+      "dependent_analysis_kinds": [
+        "option_chain",
+        "derivatives_model"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "OptionRootId",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "ExpiryDates",
+          "nullable": false,
+          "required": true,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "SpecificOptions",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.ref.v1.instruments.contractoptionspaces.optionrootid",
+      "page_limit": 1,
+      "path_parameters": [
+        "OptionRootId"
+      ],
+      "path_template": "/ref/v1/instruments/contractoptionspaces/{OptionRootId}",
+      "query_parameters": [
+        "CanParticipateInMultiLegOrder",
+        "ClientKey",
+        "ExpiryDates",
+        "OptionSpaceSegment",
+        "TradingStatus",
+        "UnderlyingUic"
+      ],
+      "response_shape": "object",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "options_chain",
+      "stable_key_fields": [
+        "OptionRootId"
+      ]
+    },
+    {
+      "contract_id": "info_price_v1",
+      "dependent_analysis_kinds": [
+        "instrument_quote",
+        "session_cockpit",
+        "pretrade_impact"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Quote",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceInfo",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceTypeBid",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceTypeAsk",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.trade.v1.infoprices",
+      "page_limit": 1,
+      "path_parameters": [],
+      "path_template": "/trade/v1/infoprices",
+      "query_parameters": [
+        "AccountKey",
+        "Amount",
+        "AmountType",
+        "AssetType",
+        "FieldGroups",
+        "ForwardDate",
+        "ForwardDateFarLeg",
+        "ForwardDateNearLeg",
+        "OrderAskPrice",
+        "OrderBidPrice",
+        "QuoteCurrency",
+        "ToOpenClose",
+        "Uic"
+      ],
+      "response_shape": "object",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "info_prices",
+      "stable_key_fields": [
+        "Uic",
+        "AssetType"
+      ]
+    },
+    {
+      "contract_id": "info_prices_list_v1",
+      "dependent_analysis_kinds": [
+        "instrument_quote",
+        "market_comparison",
+        "session_cockpit"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Quote",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.trade.v1.infoprices.list",
+      "page_limit": 1,
+      "path_parameters": [],
+      "path_template": "/trade/v1/infoprices/list",
+      "query_parameters": [
+        "AccountKey",
+        "Amount",
+        "AmountType",
+        "AssetType",
+        "FieldGroups",
+        "ForwardDate",
+        "ForwardDateFarLeg",
+        "ForwardDateNearLeg",
+        "OrderAskPrice",
+        "OrderBidPrice",
+        "QuoteCurrency",
+        "ToOpenClose",
+        "Uics"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "info_prices",
+      "stable_key_fields": [
+        "Uic",
+        "AssetType"
+      ]
+    },
+    {
+      "contract_id": "performance_summary_v4",
+      "dependent_analysis_kinds": [
+        "portfolio_overview",
+        "portfolio_performance",
+        "portfolio_attribution"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "AccountValue",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TimeWeightedReturn",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalCashBalance",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.hist.v4.performance.summary",
+      "page_limit": 1,
+      "path_parameters": [],
+      "path_template": "/hist/v4/performance/summary",
+      "query_parameters": [
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "FieldGroups",
+        "FromDate",
+        "MockDataId",
+        "StandardPeriod",
+        "ToDate"
+      ],
+      "response_shape": "object",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "performance",
+      "stable_key_fields": []
+    },
+    {
+      "contract_id": "performance_timeseries_v4",
+      "dependent_analysis_kinds": [
+        "portfolio_performance",
+        "portfolio_risk",
+        "portfolio_attribution"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Date",
+          "nullable": false,
+          "required": true,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "EndOfDayBalance",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TimeWeightedReturn",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Benchmark",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.hist.v4.performance.timeseries",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/hist/v4/performance/timeseries",
+      "query_parameters": [
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "FieldGroups",
+        "FromDate",
+        "IsSdcClient",
+        "MockDataId",
+        "StandardPeriod",
+        "ToDate"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "performance",
+      "stable_key_fields": [
+        "Date"
+      ]
+    },
+    {
+      "contract_id": "balances_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_overview",
+        "portfolio_margin",
+        "cash_and_settlement"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "CashBalance",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginAvailableForTrading",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.port.v1.balances",
+      "page_limit": 1,
+      "path_parameters": [],
+      "path_template": "/port/v1/balances",
+      "query_parameters": [
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "FieldGroups"
+      ],
+      "response_shape": "object",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "balances",
+      "stable_key_fields": []
+    },
+    {
+      "contract_id": "positions_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_overview",
+        "portfolio_exposure",
+        "portfolio_risk",
+        "session_cockpit"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "PositionId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "PositionBase",
+          "nullable": false,
+          "required": true,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "PositionView",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.port.v1.positions",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/port/v1/positions",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "FieldGroups",
+        "NetPositionId",
+        "PositionId",
+        "StrategyGroupingEnabled",
+        "WatchlistId"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "positions",
+      "stable_key_fields": [
+        "PositionId"
+      ]
+    },
+    {
+      "contract_id": "orders_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_overview",
+        "session_cockpit",
+        "cash_and_settlement"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "OrderId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Status",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.port.v1.orders",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/port/v1/orders",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "FieldGroups",
+        "OrderId",
+        "Status",
+        "WatchlistId"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "orders",
+      "stable_key_fields": [
+        "OrderId"
+      ]
+    },
+    {
+      "contract_id": "transactions_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_performance",
+        "portfolio_attribution",
+        "cost_xray",
+        "trading_mirror"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "TransactionId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ExecutionTime",
+          "nullable": false,
+          "required": true,
+          "value_type": "timestamp"
+        },
+        {
+          "enum_values": [
+            "CashTransfer",
+            "CorporateAction",
+            "Fee",
+            "Trade"
+          ],
+          "name": "TransactionType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.hist.v1.transactions",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/hist/v1/transactions",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKeys",
+        "AssetTypes",
+        "BookingId",
+        "ClientKey",
+        "CorporateActionId",
+        "Events",
+        "FromDate",
+        "FundingSubType",
+        "ToDate",
+        "ToOpenOrClose",
+        "TradeId",
+        "TransactionType",
+        "Uics"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [
+        "ExecutionTime"
+      ],
+      "schema_version": "1",
+      "source_kind": "transactions",
+      "stable_key_fields": [
+        "TransactionId"
+      ]
+    },
+    {
+      "contract_id": "bookings_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_performance",
+        "portfolio_attribution",
+        "cost_xray",
+        "cash_and_settlement"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "BookingId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "BookingDate",
+          "nullable": false,
+          "required": true,
+          "value_type": "timestamp"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.cs.v1.reports.bookings.clientkey",
+      "page_limit": 100,
+      "path_parameters": [
+        "ClientKey"
+      ],
+      "path_template": "/cs/v1/reports/bookings/{ClientKey}",
+      "query_parameters": [
+        "$skip",
+        "$skiptoken",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey",
+        "FilterType",
+        "FilterValue",
+        "FromDate",
+        "MockDataId",
+        "ToDate"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [
+        "BookingDate"
+      ],
+      "schema_version": "1",
+      "source_kind": "bookings",
+      "stable_key_fields": [
+        "BookingId"
+      ]
+    },
+    {
+      "contract_id": "closed_positions_history_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_performance",
+        "cost_xray",
+        "trading_mirror",
+        "execution_quality"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "ClosedPositionId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ClosingPosition",
+          "nullable": false,
+          "required": true,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "ClosedPosition",
+          "nullable": true,
+          "required": false,
+          "value_type": "object"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.cs.v1.reports.closedpositions.clientkey.fromdate.todate",
+      "page_limit": 100,
+      "path_parameters": [
+        "ClientKey",
+        "FromDate",
+        "ToDate"
+      ],
+      "path_template": "/cs/v1/reports/closedPositions/{ClientKey}/{FromDate}/{ToDate}",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "closed_positions",
+      "stable_key_fields": [
+        "ClosedPositionId"
+      ]
+    },
+    {
+      "contract_id": "exposure_instruments_v1",
+      "dependent_analysis_kinds": [
+        "portfolio_exposure",
+        "portfolio_risk",
+        "portfolio_scenario"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Currency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.port.v1.exposure.instruments",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/port/v1/exposure/instruments",
+      "query_parameters": [
+        "AccountGroupKey",
+        "AccountKey",
+        "AssetType",
+        "ClientKey",
+        "ExpiryDate",
+        "LowerBarrier",
+        "PutCall",
+        "StrategyGroupingEnabled",
+        "Strike",
+        "Uic",
+        "UpperBarrier",
+        "ValueDate"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "exposure",
+      "stable_key_fields": [
+        "Uic",
+        "AssetType"
+      ]
+    },
+    {
+      "contract_id": "costs_v1",
+      "dependent_analysis_kinds": [
+        "cost_xray",
+        "pretrade_impact",
+        "position_sizing"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "Cost",
+          "nullable": false,
+          "required": true,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "Currency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "HoldingPeriodInDays",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.cs.v1.tradingconditions.cost.accountkey.uic.assettype",
+      "page_limit": 1,
+      "path_parameters": [
+        "AccountKey",
+        "Uic",
+        "AssetType"
+      ],
+      "path_template": "/cs/v1/tradingconditions/cost/{AccountKey}/{Uic}/{AssetType}",
+      "query_parameters": [
+        "Amount",
+        "ApplyCostsZeroFloor",
+        "FieldGroups",
+        "HoldingPeriodInDays",
+        "Price",
+        "TradeContext"
+      ],
+      "response_shape": "object",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "costs",
+      "stable_key_fields": []
+    },
+    {
+      "contract_id": "corporate_action_events_v2",
+      "dependent_analysis_kinds": [
+        "corporate_action_center",
+        "income_calendar",
+        "portfolio_attribution"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "EventId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [
+            "CashDividend",
+            "Merger",
+            "RightsIssue",
+            "StockDividend",
+            "StockSplit"
+          ],
+          "name": "EventType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ExDate",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "PayDate",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.ca.v2.events",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/ca/v2/events",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey",
+        "AssetTypes",
+        "ClientKey",
+        "CorporateActionTypes",
+        "ElectionStatuses",
+        "EventStates",
+        "EventStatus",
+        "EventTypes",
+        "FromDeadlineDate",
+        "FromExDate",
+        "FromPayDate",
+        "FromRecordDate",
+        "IncludeLapsedEvents",
+        "IncludeSubAccounts",
+        "Keywords",
+        "SortColumn",
+        "SortType",
+        "ToDeadlineDate",
+        "ToExDate",
+        "ToPayDate",
+        "ToRecordDate"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "corporate_actions",
+      "stable_key_fields": [
+        "EventId"
+      ]
+    },
+    {
+      "contract_id": "corporate_action_holdings_v2",
+      "dependent_analysis_kinds": [
+        "corporate_action_center",
+        "income_calendar"
+      ],
+      "fields": [
+        {
+          "enum_values": [],
+          "name": "EventId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        }
+      ],
+      "method": "GET",
+      "operation_id": "get.ca.v2.holdings",
+      "page_limit": 100,
+      "path_parameters": [],
+      "path_template": "/ca/v2/holdings",
+      "query_parameters": [
+        "$skip",
+        "$top",
+        "AccountGroupKey",
+        "AccountKey",
+        "ClientKey",
+        "EventId",
+        "IncludeSubAccounts",
+        "ManagementTypes",
+        "ModelIds"
+      ],
+      "response_shape": "data_array",
+      "retry_attempts": 3,
+      "revision_fields": [],
+      "schema_version": "1",
+      "source_kind": "corporate_actions",
+      "stable_key_fields": [
+        "EventId",
+        "Uic"
+      ]
+    }
+  ],
+  "schema_version": "1"
+}

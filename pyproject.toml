@@ -32,6 +32,8 @@ packages = ["src/saxo_bank_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "data/analytics/migrations" = "saxo_bank_mcp/_analytics_migrations"
+"data/analytics/source_contracts.json" = "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json"
+"data/saxo/openapi_inventory.json" = "saxo_bank_mcp/_endpoint_registry/openapi_inventory.json"
 
 [dependency-groups]
 dev = [

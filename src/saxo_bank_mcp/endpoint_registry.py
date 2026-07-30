@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cache
+from importlib.resources import files
 from pathlib import Path
 from typing import Final, Literal
 from urllib.parse import urlparse
@@ -36,6 +37,8 @@ EXPECTED_SERVICE_GROUP_COUNTS: Final[dict[str, int]] = {
     "Value Add": 7,
 }
 _DEFAULT_INVENTORY = Path(__file__).resolve().parents[2] / "data/saxo/openapi_inventory.json"
+_INVENTORY_RESOURCE_DIR: Final = "_endpoint_registry"
+_INVENTORY_RESOURCE_NAME: Final = "openapi_inventory.json"
 
 
 class EndpointOperation(BaseModel):
@@ -84,8 +87,18 @@ def load_inventory(path: Path | None = None) -> EndpointInventory:
 @cache
 def _load_default_inventory() -> EndpointInventory:
     return TypeAdapter(EndpointInventory).validate_json(
-        _DEFAULT_INVENTORY.read_text(encoding="utf-8"),
+        _read_default_inventory(),
     )
+
+
+def _read_default_inventory() -> str:
+    resource = files("saxo_bank_mcp").joinpath(
+        _INVENTORY_RESOURCE_DIR,
+        _INVENTORY_RESOURCE_NAME,
+    )
+    if resource.is_file():
+        return resource.read_text(encoding="utf-8")
+    return _DEFAULT_INVENTORY.read_text(encoding="utf-8")
 
 
 def validate_inventory(inventory: EndpointInventory) -> dict[str, JsonValue]:

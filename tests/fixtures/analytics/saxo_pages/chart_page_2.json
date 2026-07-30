@@ -1,0 +1,14 @@
+{
+  "Data": [
+    {
+      "CloseBid": 102.0,
+      "HighBid": 103.0,
+      "LowBid": 100.5,
+      "OpenBid": 101.0,
+      "PriceType": "Delayed",
+      "Time": "2026-07-29T08:01:00Z",
+      "Volume": 130
+    }
+  ],
+  "DataVersion": 7
+}

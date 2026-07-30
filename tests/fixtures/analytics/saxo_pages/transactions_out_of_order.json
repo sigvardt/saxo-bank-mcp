@@ -1,0 +1,16 @@
+{
+  "Data": [
+    {
+      "Amount": 10.0,
+      "ExecutionTime": "2026-07-29T08:01:00Z",
+      "TransactionId": "synthetic-transaction-b",
+      "TransactionType": "Trade"
+    },
+    {
+      "Amount": 9.0,
+      "ExecutionTime": "2026-07-29T08:00:00Z",
+      "TransactionId": "synthetic-transaction-a",
+      "TransactionType": "Trade"
+    }
+  ]
+}
