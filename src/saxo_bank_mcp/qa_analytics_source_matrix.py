@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Final, Literal, Self, cast
 from uuid import uuid4
 
+import anyio
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -40,10 +41,22 @@ from saxo_bank_mcp.analytics_source_process import (
     ChildConfigurationError,
     MatrixCallPolicy,
     MatrixSession,
+    OneShotProcessSession,
+    ProcessMatrixSession,
+    ProcessSessionError,
+    ProcessSessionFacts,
     RegisteredCallProfile,
+    build_child_launch_config,
 )
 from saxo_bank_mcp.analytics_source_runtime import (
+    CandidateRuntimeError,
+    CandidateRuntimeSeal,
+    ExternalRunLayout,
     SourceMatrixCandidateIdentity,
+    close_candidate_runtime_seal,
+    open_candidate_runtime_seal,
+    prepare_child_run_paths,
+    revalidate_candidate_runtime,
     source_matrix_candidate_identity,
 )
 from saxo_bank_mcp.endpoint_registry import EndpointOperation, find_registered_operation
@@ -56,9 +69,11 @@ _runtime_tree_projection = _source_runtime._runtime_tree_projection  # pyright: 
 _runtime_identity = _source_runtime._runtime_identity  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 _dependency_distributions = _source_runtime._dependency_distributions  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 _installed_candidate_files = _source_runtime._installed_candidate_files  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+_remove_empty_directories = _source_runtime._remove_empty_directories  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _SOURCE_COUNT: Final = 18
+_CHILD_TOOL_COUNT: Final = 6
 _SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
     "chart_v3",
     "reference_instruments_v1",
@@ -152,6 +167,19 @@ _REDUCIBLE_SOURCE_FIXTURES: Final = {
     "closed_positions_history_v1": "fixture_client_key_unavailable",
     "costs_v1": "fixture_account_key_unavailable",
 }
+_PRIVATE_CHILD_ENV_KEYS: Final = frozenset(
+    {
+        "SAXO_MCP_SIM_APP_KEY",
+        "SAXO_MCP_SIM_CLIENT_ID",
+        "SAXO_MCP_SIM_CREDENTIAL_FILE",
+        "SAXO_MCP_SIM_REDIRECT_URI",
+        "SAXO_MCP_SIM_AUTH_URL",
+        "SAXO_MCP_SIM_TOKEN_URL",
+        "SAXO_MCP_TOKEN_CACHE_PATH",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    },
+)
 _POST_NETWORK_ACCESS_REASON: Final = "source_access_unavailable_after_network"
 _POST_NETWORK_REFUSAL_REASONS: Final = frozenset(
     {
@@ -211,10 +239,6 @@ type PaginationState = Literal[
     "refused",
 ]
 type HistoryState = Literal["present", "absent", "unverified"]
-
-
-class _ExecutionClosureChangedError(RuntimeError):
-    """Internal value-free signal that the claimed execution closure changed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +576,34 @@ class PrivacyReceipt(BaseModel):
     raw_private_values_retained: Literal[False] = False
 
 
+class ProcessBoundaryReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    transport: Literal["stdio"] = "stdio"
+    child_process_distinct: Literal[True] = True
+    process_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    stdio_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    child_spawn_count: Literal[1] = 1
+    mcp_session_count: Literal[1] = 1
+    mcp_initialize_count: Literal[1] = 1
+    tool_list_count: Literal[1] = 1
+    tool_count: Literal[6] = 6
+    tool_ids_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reconnect_count: Literal[0] = 0
+    restart_count: Literal[0] = 0
+    child_exit_code: Literal[0] = 0
+    stdout_protocol_only: Literal[True] = True
+    stderr_published: Literal[False] = False
+
+
+type PostclaimFailureReason = Literal[
+    "candidate_static_runtime_changed",
+    "child_process_failed",
+    "matrix_execution_failed",
+    "evidence_secret_scan_failed",
+]
+
+
 class SourcePlanExclusion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
@@ -599,6 +651,11 @@ class ClaimedMatrixDraft(BaseModel):
     live_events: int = Field(ge=0)
     live_mutation_calls: Literal[0] = 0
     errors: tuple[str, ...]
+
+
+class AnalyticsSourceMatrixReceipt(ClaimedMatrixDraft):
+    process_boundary: ProcessBoundaryReceipt
+    privacy: PrivacyReceipt
 
 
 type MatrixProtocolOutcome = PreclaimRefusal | ClaimedMatrixDraft
@@ -886,9 +943,386 @@ def execute_analytics_source_matrix_once(
     *,
     fixtures: SourceMatrixFixtures | None = None,
 ) -> int:
-    """Fail closed until Task 5 wires the prepared protocol to one child process."""
-    del fixtures
-    return 1
+    """Run one installed, process-bound source matrix and publish immutable evidence."""
+    try:
+        return anyio.run(
+            _execute_official_source_matrix,
+            fixtures or SourceMatrixFixtures(),
+        )
+    except Exception:  # noqa: BLE001 - the official CLI emits no private traceback
+        return 1
+
+
+def process_boundary_receipt(
+    facts: ProcessSessionFacts,
+    candidate_identity: SourceMatrixCandidateIdentity,
+) -> ProcessBoundaryReceipt:
+    """Reduce successful private process facts to two irreversible identities."""
+    exact_counts = all(
+        type(value) is int and value == expected
+        for value, expected in (
+            (facts.child_spawn_count, 1),
+            (facts.mcp_session_count, 1),
+            (facts.mcp_initialize_count, 1),
+            (facts.tool_list_count, 1),
+            (facts.reconnect_count, 0),
+            (facts.restart_count, 0),
+        )
+    )
+    listed_names = facts.listed_tool_names
+    if type(listed_names) is not tuple or any(type(name) is not str for name in listed_names):
+        raise ValueError("process boundary facts are invalid")
+    tool_ids_sha256 = _digest(tuple(sorted(listed_names)))
+    pipe_values = (
+        *facts.stdin_identity.canonical_private_material().values(),
+        *facts.stdout_identity.canonical_private_material().values(),
+    )
+    if (
+        type(facts.coordinator_pid) is not int
+        or type(facts.child_pid) is not int
+        or facts.coordinator_pid <= 0
+        or facts.child_pid <= 0
+        or facts.child_pid == facts.coordinator_pid
+        or type(facts.executable_identity_sha256) is not str
+        or _SHA256_PATTERN.fullmatch(facts.executable_identity_sha256) is None
+        or facts.stdin_identity.endpoint_kind != "fifo"
+        or facts.stdout_identity.endpoint_kind != "fifo"
+        or any(type(value) is not int or value < 0 for value in pipe_values)
+        or facts.stdin_identity == facts.stdout_identity
+        or type(facts.stderr_byte_count) is not int
+        or facts.stderr_byte_count < 0
+        or not exact_counts
+        or len(listed_names) != _CHILD_TOOL_COUNT
+        or len(set(listed_names)) != _CHILD_TOOL_COUNT
+        or set(listed_names) != set(SOURCE_MATRIX_CHILD_TOOLS)
+        or tool_ids_sha256 != CHILD_TOOL_IDS_SHA256
+        or type(facts.child_exit_code) is not int
+        or facts.child_exit_code != 0
+        or facts.stdout_protocol_only is not True
+    ):
+        raise ValueError("process boundary facts are invalid")
+    return ProcessBoundaryReceipt(
+        process_identity_sha256=_digest(
+            {
+                "candidate_identity_sha256": (
+                    candidate_identity.candidate_identity_sha256
+                ),
+                "child_executable_identity_sha256": (
+                    facts.executable_identity_sha256
+                ),
+                "child_pid": facts.child_pid,
+                "coordinator_pid": facts.coordinator_pid,
+            },
+        ),
+        stdio_identity_sha256=_digest(
+            {
+                "stdin": facts.stdin_identity.canonical_private_material(),
+                "stdout": facts.stdout_identity.canonical_private_material(),
+            },
+        ),
+        tool_ids_sha256=tool_ids_sha256,
+    )
+
+
+async def _execute_official_source_matrix(
+    fixtures: SourceMatrixFixtures,
+) -> int:
+    seal: CandidateRuntimeSeal | None = None
+    layout: ExternalRunLayout | None = None
+    result = 1
+    cleanup_ok = True
+    try:
+        seal, layout = open_candidate_runtime_seal()
+        identity = source_matrix_candidate_identity()
+        if identity != seal.identity:
+            return 1
+        env = dict(os.environ)
+        captured_at = datetime.now(tz=UTC)
+        prepared = prepare_analytics_source_matrix(
+            env=env,
+            fixtures=fixtures,
+            candidate_identity=identity,
+            captured_at=captured_at,
+        )
+        if isinstance(prepared, PreclaimRefusal):
+            return 1
+        child_paths = prepare_child_run_paths(seal, layout)
+        config = build_child_launch_config(child_paths, env)
+        session = OneShotProcessSession(config)
+        result = await _execute_source_matrix_with_events(
+            fixtures=fixtures,
+            env=env,
+            seal=seal,
+            layout=layout,
+            session=session,
+            state_root=_source_matrix_state_root(),
+            captured_at=captured_at,
+            postexit_revalidate=lambda: revalidate_candidate_runtime(seal, layout),
+        )
+    except (CandidateRuntimeError, ChildConfigurationError, OSError, ValueError):
+        result = 1
+    finally:
+        if seal is not None:
+            close_candidate_runtime_seal(seal)
+        if layout is not None:
+            try:
+                _remove_empty_directories(
+                    (layout.child_cache, layout.child_work, layout.child_tmp),
+                )
+            except OSError:
+                cleanup_ok = False
+    return result if cleanup_ok else 1
+
+
+async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, PLR0915
+    *,
+    fixtures: SourceMatrixFixtures,
+    env: Mapping[str, str],
+    seal: CandidateRuntimeSeal,
+    layout: ExternalRunLayout,
+    session: ProcessMatrixSession,
+    state_root: Path,
+    captured_at: datetime,
+    postexit_revalidate: Callable[[], None],
+) -> int:
+    """Coordinate one finite child lifecycle around an already-open runtime seal."""
+    prepared = prepare_analytics_source_matrix(
+        env=env,
+        fixtures=fixtures,
+        candidate_identity=seal.identity,
+        captured_at=captured_at,
+    )
+    if isinstance(prepared, PreclaimRefusal):
+        return 1
+
+    claimed: _ClaimedGuardDirectory | None = None
+    draft: ClaimedMatrixDraft | None = None
+    preclaim: PreclaimRefusal | None = None
+    process_failure = False
+    matrix_failure = False
+    static_failure = False
+    facts: ProcessSessionFacts | None = None
+    spawn_attempted = False
+    spawn_succeeded = False
+    lifecycle_complete = False
+    claim_attempted = False
+
+    def claim_source_execution() -> bool:
+        nonlocal claim_attempted, claimed
+        if claim_attempted:
+            return False
+        claim_attempted = True
+        claimed = _claim_candidate_guard_directory(
+            lambda: _open_state_guard_parent(
+                state_root,
+                seal.identity.candidate_identity_sha256,
+            ),
+            seal.identity,
+        )
+        return claimed is not None
+
+    try:
+        try:
+            spawn_attempted = True
+            await session.spawn()
+            spawn_succeeded = True
+            await session.initialize()
+            try:
+                outcome = await run_analytics_source_matrix(
+                    session,
+                    prepared=prepared,
+                    claim_source_execution=claim_source_execution,
+                )
+            except ProcessSessionError:
+                process_failure = True
+            except Exception:  # noqa: BLE001 - converted to one finite public reason
+                matrix_failure = claimed is not None
+                process_failure = claimed is None
+            else:
+                if isinstance(outcome, PreclaimRefusal):
+                    preclaim = outcome
+                else:
+                    draft = outcome
+
+            if not process_failure and not matrix_failure:
+                lifecycle_complete = True
+                try:
+                    facts = await session.close()
+                except ProcessSessionError:
+                    process_failure = True
+        except ProcessSessionError:
+            process_failure = True
+        except Exception:  # noqa: BLE001 - never publish exception text
+            process_failure = True
+        finally:
+            if spawn_succeeded and not lifecycle_complete:
+                try:
+                    await session.abort()
+                except ProcessSessionError:
+                    process_failure = True
+                except Exception:  # noqa: BLE001 - never publish exception text
+                    process_failure = True
+            if spawn_attempted:
+                try:
+                    postexit_revalidate()
+                except Exception:  # noqa: BLE001 - exact finite static reason
+                    static_failure = True
+
+        if claimed is None:
+            # The selected finite preclaim reason is intentionally not printed or stored.
+            del preclaim
+            return 1
+
+        reason: PostclaimFailureReason | None = None
+        if static_failure:
+            reason = "candidate_static_runtime_changed"
+        elif process_failure:
+            reason = "child_process_failed"
+        elif matrix_failure or draft is None:
+            reason = "matrix_execution_failed"
+
+        text: str | None = None
+        if reason is None:
+            if facts is None:
+                reason = "child_process_failed"
+            else:
+                try:
+                    process_receipt = process_boundary_receipt(facts, seal.identity)
+                    receipt = AnalyticsSourceMatrixReceipt(
+                        **draft.model_dump(),
+                        process_boundary=process_receipt,
+                        privacy=PrivacyReceipt(findings=0, scan_errors=0),
+                    )
+                    text = json.dumps(
+                        receipt.model_dump(mode="json"),
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                except (TypeError, ValidationError, ValueError):
+                    reason = "matrix_execution_failed"
+
+        if reason is None and text is not None:
+            if _published_receipt_retains_private_values(
+                text,
+                facts=cast("ProcessSessionFacts", facts),
+                fixtures=fixtures,
+                env=env,
+                seal=seal,
+                layout=layout,
+            ):
+                reason = "evidence_secret_scan_failed"
+            else:
+                try:
+                    findings, scan_errors = scan_secret_text("source-matrix.json", text)
+                except Exception:  # noqa: BLE001 - scanner failures are finite
+                    reason = "evidence_secret_scan_failed"
+                else:
+                    if findings or scan_errors:
+                        reason = "evidence_secret_scan_failed"
+
+        if reason is not None:
+            text = _postclaim_failure_text(reason)
+        if text is None:
+            return 1
+        try:
+            published = _publish_claimed_text(claimed, text)
+        except (OSError, ValueError):
+            return 1
+        return 0 if published is not None and reason is None else 1
+    finally:
+        if claimed is not None:
+            os.close(claimed.descriptor)
+
+
+def _postclaim_failure_text(reason: PostclaimFailureReason) -> str:
+    return json.dumps(
+        {"status": "failed", "reason": reason},
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _published_receipt_retains_private_values(  # noqa: PLR0913
+    text: str,
+    *,
+    facts: ProcessSessionFacts,
+    fixtures: SourceMatrixFixtures,
+    env: Mapping[str, str],
+    seal: CandidateRuntimeSeal,
+    layout: ExternalRunLayout,
+) -> bool:
+    try:
+        document = json.loads(text)
+    except (TypeError, ValueError):
+        return True
+    field_names = _recursive_field_names(document)
+    if field_names & {"child_pid", "coordinator_pid", "descriptor", "inode", "stderr"}:
+        return True
+    raw_integer_values = {
+        facts.child_pid,
+        facts.coordinator_pid,
+        *facts.stdin_identity.canonical_private_material().values(),
+        *facts.stdout_identity.canonical_private_material().values(),
+    }
+    if raw_integer_values & _recursive_integer_values(document):
+        return True
+    private_strings = {
+        fixtures.account_key,
+        fixtures.client_key,
+        os.fspath(seal.runtime_root),
+        os.fspath(seal.executable),
+        os.fspath(seal.site_packages),
+        *(os.fspath(path) for path in (
+            layout.root,
+            layout.coordinator_cache,
+            layout.coordinator_work,
+            layout.coordinator_tmp,
+            layout.child_cache,
+            layout.child_work,
+            layout.child_tmp,
+        )),
+    }
+    private_strings.update(
+        value
+        for key, value in env.items()
+        if value and key in _PRIVATE_CHILD_ENV_KEYS
+    )
+    return any(value and value in text for value in private_strings)
+
+
+def _recursive_field_names(value: object) -> frozenset[str]:
+    if isinstance(value, dict):
+        result = set(cast("dict[object, object]", value))
+        for child in cast("dict[object, object]", value).values():
+            result.update(_recursive_field_names(child))
+        return frozenset(item for item in result if isinstance(item, str))
+    if isinstance(value, list):
+        return frozenset(
+            name
+            for child in cast("list[object]", value)
+            for name in _recursive_field_names(child)
+        )
+    return frozenset()
+
+
+def _recursive_integer_values(value: object) -> frozenset[int]:
+    if type(value) is int:
+        return frozenset((value,))
+    if isinstance(value, dict):
+        return frozenset(
+            item
+            for child in cast("dict[object, object]", value).values()
+            for item in _recursive_integer_values(child)
+        )
+    if isinstance(value, list):
+        return frozenset(
+            item
+            for child in cast("list[object]", value)
+            for item in _recursive_integer_values(child)
+        )
+    return frozenset()
 
 
 def candidate_guard_path(state_root: Path, candidate_identity_sha256: str) -> Path:
@@ -2178,8 +2612,6 @@ def _unlink_published_evidence(
 def _publish_claimed_text(
     claim: _ClaimedGuardDirectory,
     text: str,
-    *,
-    before_link: Callable[[], bool] | None = None,
 ) -> _PublishedEvidence | None:
     _validate_claimed_guard(claim)
     temporary_name = f".source-matrix.json.{uuid4().hex}.tmp"
@@ -2204,9 +2636,6 @@ def _publish_claimed_text(
             raise ValueError("source matrix evidence owner or mode is invalid")
         _write_all(descriptor, text.encode())
         os.fsync(descriptor)
-        _validate_claimed_guard(claim)
-        if before_link is not None and before_link() is not True:
-            raise _ExecutionClosureChangedError
         _validate_claimed_guard(claim)
         try:
             os.link(
@@ -2263,22 +2692,9 @@ def _publish_claimed_text(
 
 def _publish_claimed_failure(  # pyright: ignore[reportUnusedFunction]
     claim: _ClaimedGuardDirectory,
-    reason: str,
-    *,
-    before_link: Callable[[], bool] | None = None,
+    reason: PostclaimFailureReason,
 ) -> _PublishedEvidence | None:
-    text = (
-        json.dumps(
-            {
-                "reason": _safe_source_reason(reason),
-                "status": "failed",
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    return _publish_claimed_text(claim, text, before_link=before_link)
+    return _publish_claimed_text(claim, _postclaim_failure_text(reason))
 
 
 def _prepare_owner_only_directory(path: Path) -> None:
@@ -2325,6 +2741,54 @@ def _claim_candidate_guard(  # pyright: ignore[reportUnusedFunction]
     return True
 
 
+def _verify_official_local_mode(
+    fixtures: SourceMatrixFixtures,
+    *,
+    configure_child: bool,
+) -> SourceMatrixCandidateIdentity | None:
+    seal: CandidateRuntimeSeal | None = None
+    layout: ExternalRunLayout | None = None
+    verified: SourceMatrixCandidateIdentity | None = None
+    try:
+        seal, layout = open_candidate_runtime_seal()
+        identity = source_matrix_candidate_identity()
+        configuration_ready = not configure_child
+        if identity == seal.identity and configure_child:
+            env = dict(os.environ)
+            prepared = prepare_analytics_source_matrix(
+                env=env,
+                fixtures=fixtures,
+                candidate_identity=identity,
+                captured_at=datetime.now(tz=UTC),
+            )
+            if isinstance(prepared, PreparedMatrix):
+                child_paths = prepare_child_run_paths(seal, layout)
+                build_child_launch_config(child_paths, env)
+                configuration_ready = True
+        if identity == seal.identity and configuration_ready:
+            revalidate_candidate_runtime(seal, layout)
+            verified = identity
+    except (
+        CandidateRuntimeError,
+        ChildConfigurationError,
+        OSError,
+        ValidationError,
+        ValueError,
+    ):
+        verified = None
+    finally:
+        if seal is not None:
+            close_candidate_runtime_seal(seal)
+        if layout is not None:
+            try:
+                _remove_empty_directories(
+                    (layout.child_cache, layout.child_work, layout.child_tmp),
+                )
+            except OSError:
+                verified = None
+    return verified
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run the installed one-shot Saxo SIM analytics source matrix.",
@@ -2344,14 +2808,23 @@ def main(argv: list[str] | None = None) -> int:
         help="verify the local isolated execution closure without Saxo access",
     )
     arguments = parser.parse_args(argv)
-    try:
-        identity = source_matrix_candidate_identity()
-    except (OSError, ValidationError, ValueError):
-        return 1
+    fixtures = SourceMatrixFixtures(
+        account_key=os.environ.get("SAXO_MCP_QA_ACCOUNT_KEY", ""),
+        client_key=os.environ.get("SAXO_MCP_QA_CLIENT_KEY", ""),
+        instrument_uic=arguments.instrument_uic,
+        asset_type=arguments.asset_type,
+        option_root_id=arguments.option_root_id,
+    )
     if arguments.identity:
+        identity = _verify_official_local_mode(fixtures, configure_child=False)
+        if identity is None:
+            return 1
         sys.stdout.write(identity.candidate_identity_sha256 + "\n")
         return 0
     if arguments.preflight:
+        identity = _verify_official_local_mode(fixtures, configure_child=True)
+        if identity is None:
+            return 1
         sys.stdout.write(
             json.dumps(
                 {
@@ -2367,15 +2840,7 @@ def main(argv: list[str] | None = None) -> int:
             + "\n",
         )
         return 0
-    return execute_analytics_source_matrix_once(
-        fixtures=SourceMatrixFixtures(
-            account_key=os.environ.get("SAXO_MCP_QA_ACCOUNT_KEY", ""),
-            client_key=os.environ.get("SAXO_MCP_QA_CLIENT_KEY", ""),
-            instrument_uic=arguments.instrument_uic,
-            asset_type=arguments.asset_type,
-            option_root_id=arguments.option_root_id,
-        ),
-    )
+    return execute_analytics_source_matrix_once(fixtures=fixtures)
 
 
 if __name__ == "__main__":

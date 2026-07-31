@@ -1,27 +1,62 @@
+# ruff: noqa: SLF001
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, cast
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, Literal, cast
+from uuid import uuid4
 
+from saxo_bank_mcp import qa_analytics_source_matrix as matrix_module
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceContract,
+    source_contract_catalog_sha256,
     source_contract_fingerprint,
 )
 from saxo_bank_mcp.analytics_source_process import (
     SOURCE_MATRIX_CHILD_TOOLS,
     MatrixSession,
+    PipeIdentity,
+    ProcessMatrixSession,
     ProcessSessionError,
+    ProcessSessionFacts,
+)
+from saxo_bank_mcp.analytics_source_runtime import (
+    CandidateRuntimeError,
+    CandidateRuntimeSeal,
+    ExternalRunLayout,
+    SourceMatrixCandidateIdentity,
 )
 from saxo_bank_mcp.endpoint_registry import find_registered_operation, load_inventory
 
 if TYPE_CHECKING:
     from saxo_bank_mcp.analytics_source_process import RegisteredCallProfile
     from saxo_bank_mcp.qa_analytics_source_matrix import PreparedMatrix
+
+
+BOUNDARY_COORDINATOR_PID: Final = 987_654_321
+BOUNDARY_CHILD_PID: Final = 987_654_323
+BOUNDARY_STDIN_IDENTITIES: Final = (987_654_331, 987_654_337, 987_654_341, 987_654_343)
+BOUNDARY_STDOUT_IDENTITIES: Final = (987_654_349, 987_654_353, 987_654_359, 987_654_361)
+BOUNDARY_PRIVATE_ACCOUNT: Final = "boundary-private-account-sentinel"
+BOUNDARY_PRIVATE_CLIENT: Final = "boundary-private-client-sentinel"
+BOUNDARY_FORBIDDEN_SCALARS: Final[frozenset[str | int]] = frozenset(
+    {
+        BOUNDARY_COORDINATOR_PID,
+        BOUNDARY_CHILD_PID,
+        *BOUNDARY_STDIN_IDENTITIES,
+        *BOUNDARY_STDOUT_IDENTITIES,
+        BOUNDARY_PRIVATE_ACCOUNT,
+        BOUNDARY_PRIVATE_CLIENT,
+    },
+)
 
 
 _SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
@@ -75,6 +110,334 @@ class ScriptedMatrixSession(MatrixSession):
         if not queue:
             raise AssertionError(f"unexpected repeated tool call: {name}")
         return queue.popleft()
+
+
+@dataclass(slots=True)
+class ScriptedProcessSession(ProcessMatrixSession):
+    matrix: ScriptedMatrixSession
+    scenario: str
+    spawn_count: int = 0
+    initialize_count: int = 0
+    restart_count: int = 0
+    requests_replayed: int = 0
+    last_facts: ProcessSessionFacts | None = None
+    _failed_request: tuple[str, str] | None = field(default=None, init=False)
+    _state: Literal["new", "spawned", "initialized", "listed", "running", "exited"] = (
+        field(default="new", init=False)
+    )
+
+    async def spawn(self) -> None:
+        if self._state != "new":
+            self.restart_count += 1
+            raise ProcessSessionError("invalid_transition")
+        self.spawn_count += 1
+        if self.scenario == "spawn":
+            self._state = "exited"
+            raise ProcessSessionError("spawn_failed")
+        self._state = "spawned"
+
+    async def initialize(self) -> None:
+        if self._state != "spawned":
+            raise ProcessSessionError("invalid_transition")
+        self.initialize_count += 1
+        if self.scenario == "initialize":
+            raise ProcessSessionError("initialize_failed")
+        self._state = "initialized"
+
+    async def list_tools_once(self) -> tuple[str, ...]:
+        if self._state != "initialized":
+            raise ProcessSessionError("invalid_transition")
+        if self.scenario == "early_exit":
+            self.matrix.list_count += 1
+            raise ProcessSessionError("tool_list_failed")
+        names = await self.matrix.list_tools_once()
+        self._state = "listed"
+        return names
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        if self._state not in {"listed", "running"}:
+            raise ProcessSessionError("invalid_transition")
+        self._state = "running"
+        if name == "saxo_call_registered_endpoint" and self.scenario in {
+            "malformed_after_claim",
+            "postclaim",
+        }:
+            failed_request = (name, canonical_digest(arguments))
+            if self._failed_request == failed_request:
+                self.requests_replayed += 1
+            else:
+                self._failed_request = failed_request
+            self.matrix.events.append((name, arguments))
+            if self.scenario == "malformed_after_claim":
+                raise ProcessSessionError("protocol_failed")
+            raise RuntimeError("scripted private tool failure")
+        return await self.matrix.call_tool(name, arguments)
+
+    async def close(self) -> ProcessSessionFacts:
+        if self._state not in {"listed", "running"}:
+            raise ProcessSessionError("invalid_transition")
+        exit_code = 17 if self.scenario == "nonzero_after_matrix" else 0
+        self._state = "exited"
+        self.last_facts = self._facts(exit_code)
+        if exit_code != 0:
+            raise ProcessSessionError("nonzero_exit")
+        return self.last_facts
+
+    async def abort(self) -> ProcessSessionFacts:
+        if self._state in {"new", "exited"}:
+            raise ProcessSessionError("invalid_transition")
+        self._state = "exited"
+        self.last_facts = self._facts(0)
+        if self.scenario == "malformed_after_claim":
+            raise ProcessSessionError("protocol_failed")
+        return self.last_facts
+
+    def _facts(self, exit_code: int) -> ProcessSessionFacts:
+        stderr_count = 4099 if self.scenario == "stderr" else 0
+        return ProcessSessionFacts(
+            coordinator_pid=BOUNDARY_COORDINATOR_PID,
+            child_pid=BOUNDARY_CHILD_PID,
+            executable_identity_sha256="d" * 64,
+            stdin_identity=PipeIdentity("fifo", *BOUNDARY_STDIN_IDENTITIES),
+            stdout_identity=PipeIdentity("fifo", *BOUNDARY_STDOUT_IDENTITIES),
+            stderr_byte_count=stderr_count,
+            listed_tool_names=SOURCE_MATRIX_CHILD_TOOLS,
+            child_spawn_count=1,
+            mcp_session_count=1,
+            mcp_initialize_count=1,
+            tool_list_count=1,
+            reconnect_count=0,
+            restart_count=0,
+            child_exit_code=exit_code,
+            stdout_protocol_only=self.scenario != "malformed_after_claim",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundaryTestResult:
+    command_exit_code: int
+    child_exit_code: int | None
+    claimed: bool
+    spawn_count: int
+    restart_count: int
+    requests_replayed: int
+    publication_count: int
+    guard_path: Path
+    evidence_path: Path
+    published_text: str
+    redirected_evidence: Path
+    original_evidence: Path
+
+
+@dataclass(slots=True)
+class BoundaryEventFixture:
+    root: Path
+    forbidden_scalars: frozenset[str | int]
+
+    async def run(
+        self,
+        *,
+        child_scenario: str,
+        postexit_runtime_mutation: str | None = None,
+    ) -> BoundaryTestResult:
+        case_root = self.root / f"boundary-{uuid4().hex}"
+        state_root = case_root / "state"
+        runtime_root = case_root / "runtime"
+        payload = runtime_root / "payload.py"
+        run_root = case_root / "run"
+        state_root.mkdir(parents=True, mode=0o700)
+        runtime_root.mkdir(mode=0o700)
+        payload.write_text("VALUE = 1\n", encoding="utf-8")
+        payload.chmod(0o400)
+        run_root.mkdir(mode=0o700)
+        run_paths = tuple(
+            run_root / name
+            for name in (
+                "coordinator-cache",
+                "coordinator-work",
+                "coordinator-tmp",
+                "child-cache",
+                "child-work",
+                "child-tmp",
+            )
+        )
+        for path in run_paths:
+            path.mkdir(mode=0o700)
+        identity = SourceMatrixCandidateIdentity(
+            source_contract_catalog_sha256=source_contract_catalog_sha256(),
+            harness_build_sha256="b" * 64,
+            candidate_identity_sha256="c" * 64,
+        )
+        root_descriptor = os.open(runtime_root, os.O_RDONLY | os.O_DIRECTORY)
+        seal = CandidateRuntimeSeal(
+            identity=identity,
+            portable_identity_sha256="e" * 64,
+            instance_identity_sha256="f" * 64,
+            runtime_root=runtime_root,
+            executable=payload,
+            site_packages=runtime_root,
+            root_descriptor=root_descriptor,
+            ancestor_descriptors=(),
+            entry_snapshot=(),
+        )
+        layout = ExternalRunLayout(run_root, *run_paths)
+        captured_at = datetime(2026, 7, 31, 12, tzinfo=UTC)
+        fixtures = matrix_module.SourceMatrixFixtures(
+            account_key=BOUNDARY_PRIVATE_ACCOUNT,
+            client_key=BOUNDARY_PRIVATE_CLIENT,
+        )
+        env = {
+            "SAXO_MCP_ENVIRONMENT": "SIM",
+            "SAXO_MCP_ENABLE_LIVE_READS": "0",
+            "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+        }
+        prepared = matrix_module.prepare_analytics_source_matrix(
+            env=env,
+            fixtures=fixtures,
+            candidate_identity=identity,
+            captured_at=captured_at,
+        )
+        assert isinstance(prepared, matrix_module.PreparedMatrix)
+        payload_queues = matrix_payloads(prepared)
+        if child_scenario == "preclaim":
+            auth = payload_queues["saxo_auth_status"][0]
+            auth["token_cache_expired"] = True
+            auth["blocking_reasons"] = ["token_cache_expired"]
+        session = ScriptedProcessSession(
+            matrix=ScriptedMatrixSession(payloads=payload_queues),
+            scenario=child_scenario,
+        )
+        baseline = hashlib.sha256(payload.read_bytes()).hexdigest()
+
+        def postexit_revalidate() -> None:
+            if postexit_runtime_mutation == "content":
+                payload.chmod(0o600)
+                payload.write_bytes(payload.read_bytes() + b"MUTATION")
+                payload.chmod(0o400)
+            if hashlib.sha256(payload.read_bytes()).hexdigest() != baseline:
+                raise CandidateRuntimeError("runtime_identity_mismatch")
+
+        try:
+            command_exit_code = await matrix_module._execute_source_matrix_with_events(
+                fixtures=fixtures,
+                env=env,
+                seal=seal,
+                layout=layout,
+                session=session,
+                state_root=state_root,
+                captured_at=captured_at,
+                postexit_revalidate=postexit_revalidate,
+            )
+        finally:
+            os.close(root_descriptor)
+        guard_path = matrix_module.candidate_guard_path(
+            state_root,
+            identity.candidate_identity_sha256,
+        )
+        evidence_path = matrix_module.candidate_evidence_path(
+            state_root,
+            identity.candidate_identity_sha256,
+        )
+        published_text = (
+            evidence_path.read_text(encoding="utf-8") if evidence_path.is_file() else ""
+        )
+        return BoundaryTestResult(
+            command_exit_code=command_exit_code,
+            child_exit_code=(
+                session.last_facts.child_exit_code
+                if session.last_facts is not None
+                else None
+            ),
+            claimed=guard_path.is_file(),
+            spawn_count=session.spawn_count,
+            restart_count=session.restart_count,
+            requests_replayed=session.requests_replayed,
+            publication_count=int(evidence_path.is_file()),
+            guard_path=guard_path,
+            evidence_path=evidence_path,
+            published_text=published_text,
+            redirected_evidence=case_root / "unused-redirected-evidence",
+            original_evidence=evidence_path,
+        )
+
+    def swap_parent_then_publish(self) -> BoundaryTestResult:
+        case_root = self.root / f"swap-{uuid4().hex}"
+        state_root = case_root / "state"
+        state_root.mkdir(parents=True, mode=0o700)
+        identity = SourceMatrixCandidateIdentity(
+            source_contract_catalog_sha256=source_contract_catalog_sha256(),
+            harness_build_sha256="b" * 64,
+            candidate_identity_sha256="c" * 64,
+        )
+        claim = matrix_module._claim_candidate_guard_directory(
+            lambda: matrix_module._open_state_guard_parent(
+                state_root,
+                identity.candidate_identity_sha256,
+            ),
+            identity,
+        )
+        assert claim is not None
+        canonical_parent = state_root / "qa" / "analytics-source-matrix"
+        moved_parent = state_root / "qa" / "analytics-source-matrix.claimed"
+        redirected_parent = case_root / "redirected"
+        redirected_candidate = redirected_parent / identity.candidate_identity_sha256
+        redirected_candidate.mkdir(parents=True, mode=0o700)
+        canonical_parent.rename(moved_parent)
+        canonical_parent.symlink_to(redirected_parent, target_is_directory=True)
+        original_evidence = (
+            moved_parent / identity.candidate_identity_sha256 / "source-matrix.json"
+        )
+        redirected_evidence = redirected_candidate / "source-matrix.json"
+        command_exit_code = 1
+        try:
+            try:
+                matrix_module._publish_claimed_text(
+                    claim,
+                    '{"reason":"matrix_execution_failed","status":"failed"}',
+                )
+            except (OSError, ValueError):
+                pass
+            else:
+                command_exit_code = 0
+        finally:
+            os.close(claim.descriptor)
+        return BoundaryTestResult(
+            command_exit_code=command_exit_code,
+            child_exit_code=None,
+            claimed=True,
+            spawn_count=0,
+            restart_count=0,
+            requests_replayed=0,
+            publication_count=int(original_evidence.exists())
+            + int(redirected_evidence.exists()),
+            guard_path=moved_parent / identity.candidate_identity_sha256 / "claimed.json",
+            evidence_path=original_evidence,
+            published_text="",
+            redirected_evidence=redirected_evidence,
+            original_evidence=original_evidence,
+        )
+
+
+def recursive_scalar_values(
+    value: JsonValue,
+) -> frozenset[str | int | float | bool | None]:
+    if isinstance(value, Mapping):
+        return frozenset(
+            scalar
+            for child in value.values()
+            for scalar in recursive_scalar_values(child)
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str):
+        return frozenset(
+            scalar
+            for child in value
+            for scalar in recursive_scalar_values(child)
+        )
+    return frozenset({value})
 
 
 def canonical_digest(value: object) -> str:

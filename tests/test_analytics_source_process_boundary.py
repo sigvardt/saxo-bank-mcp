@@ -18,15 +18,19 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from types import ModuleType
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 from unittest.mock import Mock
 
 import anyio
 import pytest
 from analytics_source_matrix_support import (
+    BOUNDARY_FORBIDDEN_SCALARS,
+    BoundaryEventFixture,
     ScriptedMatrixSession,
+    canonical_digest,
     expected_matrix_events,
     matrix_payloads,
+    recursive_scalar_values,
 )
 
 from saxo_bank_mcp import (
@@ -37,6 +41,7 @@ from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
 from saxo_bank_mcp.analytics_source_process import (
     CHILD_BOOTSTRAP,
+    CHILD_TOOL_IDS_SHA256,
     SOURCE_MATRIX_CHILD_TOOLS,
     ChildBootstrapPaths,
     ChildConfigurationError,
@@ -44,11 +49,15 @@ from saxo_bank_mcp.analytics_source_process import (
     MatrixCallPolicy,
     MatrixSession,
     OneShotProcessSession,
+    PipeIdentity,
     ProcessSessionError,
+    ProcessSessionFacts,
     RegisteredCallProfile,
     RegisteredResponseMode,
     build_child_launch_config,
 )
+from saxo_bank_mcp.analytics_source_runtime import SourceMatrixCandidateIdentity
+from saxo_bank_mcp.qa_analytics_source_matrix import process_boundary_receipt
 
 if TYPE_CHECKING:
     from saxo_bank_mcp.analytics_source_runtime import (
@@ -506,6 +515,14 @@ def prepared_matrix(exact_sim_env: dict[str, str]) -> PreparedMatrix:
 @pytest.fixture
 def scripted_matrix_session(prepared_matrix: PreparedMatrix) -> ScriptedMatrixSession:
     return ScriptedMatrixSession(payloads=matrix_payloads(prepared_matrix))
+
+
+@pytest.fixture
+def boundary_fixture(tmp_path: Path) -> BoundaryEventFixture:
+    return BoundaryEventFixture(
+        root=tmp_path,
+        forbidden_scalars=BOUNDARY_FORBIDDEN_SCALARS,
+    )
 
 
 def test_official_matrix_has_no_fastmcp_transport_or_server_injection() -> None:
@@ -1247,3 +1264,136 @@ def test_live_object_projection_functions_are_absent() -> None:
     assert retired.isdisjoint(vars(qa_analytics_source_matrix))
     assert not any(name in source for name in retired)
     assert not ROUND7_PATH.exists()
+
+
+@pytest.mark.parametrize(
+    "process_failure",
+    ("spawn", "initialize", "early_exit"),  # noqa: PT007 - exact approved matrix
+)
+@pytest.mark.anyio
+async def test_child_start_initialize_or_early_exit_never_claims_or_restarts(
+    boundary_fixture: BoundaryEventFixture,
+    process_failure: Literal["spawn", "initialize", "early_exit"],
+) -> None:
+    result = await boundary_fixture.run(child_scenario=process_failure)
+    assert result.command_exit_code != 0
+    assert result.claimed is False
+    assert result.spawn_count <= 1
+    assert result.restart_count == 0
+    assert not result.guard_path.exists()
+    assert not result.evidence_path.exists()
+
+
+@pytest.mark.anyio
+async def test_child_protocol_failure_after_claim_publishes_one_minimal_failure(
+    boundary_fixture: BoundaryEventFixture,
+) -> None:
+    result = await boundary_fixture.run(child_scenario="malformed_after_claim")
+    assert result.requests_replayed == 0
+    assert json.loads(result.published_text) == {
+        "status": "failed",
+        "reason": "child_process_failed",
+    }
+    assert result.publication_count == 1
+
+
+@pytest.mark.anyio
+async def test_child_nonzero_exit_after_matrix_is_not_success(
+    boundary_fixture: BoundaryEventFixture,
+) -> None:
+    result = await boundary_fixture.run(child_scenario="nonzero_after_matrix")
+    assert result.child_exit_code != 0
+    assert json.loads(result.published_text) == {
+        "status": "failed",
+        "reason": "child_process_failed",
+    }
+
+
+@pytest.mark.anyio
+async def test_postexit_static_change_overrides_tool_or_child_failure(
+    boundary_fixture: BoundaryEventFixture,
+) -> None:
+    result = await boundary_fixture.run(
+        child_scenario="malformed_after_claim",
+        postexit_runtime_mutation="content",
+    )
+    assert json.loads(result.published_text) == {
+        "status": "failed",
+        "reason": "candidate_static_runtime_changed",
+    }
+
+
+def test_process_boundary_receipt_binds_pid_stdio_tools_and_zero_reconnects() -> None:
+    identity = SourceMatrixCandidateIdentity(
+        source_contract_catalog_sha256="a" * 64,
+        harness_build_sha256="b" * 64,
+        candidate_identity_sha256="c" * 64,
+    )
+    stdin = PipeIdentity("fifo", 101, 201, 101, 201)
+    stdout = PipeIdentity("fifo", 102, 202, 102, 202)
+    facts = ProcessSessionFacts(
+        coordinator_pid=30_001,
+        child_pid=30_002,
+        executable_identity_sha256="d" * 64,
+        stdin_identity=stdin,
+        stdout_identity=stdout,
+        stderr_byte_count=17,
+        listed_tool_names=SOURCE_MATRIX_CHILD_TOOLS,
+        child_spawn_count=1,
+        mcp_session_count=1,
+        mcp_initialize_count=1,
+        tool_list_count=1,
+        reconnect_count=0,
+        restart_count=0,
+        child_exit_code=0,
+        stdout_protocol_only=True,
+    )
+    receipt = process_boundary_receipt(facts, identity)
+    assert receipt.process_identity_sha256 == canonical_digest(
+        {
+            "candidate_identity_sha256": "c" * 64,
+            "child_executable_identity_sha256": "d" * 64,
+            "child_pid": 30_002,
+            "coordinator_pid": 30_001,
+        },
+    )
+    assert receipt.stdio_identity_sha256 == canonical_digest(
+        {
+            "stdin": stdin.canonical_private_material(),
+            "stdout": stdout.canonical_private_material(),
+        },
+    )
+    assert receipt.tool_ids_sha256 == CHILD_TOOL_IDS_SHA256
+    assert receipt.reconnect_count == receipt.restart_count == 0
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ("success", "preclaim", "postclaim", "stderr"),  # noqa: PT007 - exact matrix
+)
+@pytest.mark.anyio
+async def test_process_receipt_and_failure_paths_publish_no_private_runtime_values(
+    boundary_fixture: BoundaryEventFixture,
+    scenario: str,
+) -> None:
+    result = await boundary_fixture.run(child_scenario=scenario)
+    if scenario == "preclaim":
+        assert result.published_text == ""
+        assert not result.evidence_path.exists()
+        return
+    document = json.loads(result.published_text)
+    scalars = recursive_scalar_values(document)
+    assert boundary_fixture.forbidden_scalars.isdisjoint(scalars)
+    assert not any(
+        f'"{key}":' in result.published_text
+        for key in ("child_pid", "coordinator_pid", "descriptor", "inode", "stderr")
+    )
+
+
+def test_descriptor_bound_evidence_refuses_swapped_claimed_ancestor(
+    boundary_fixture: BoundaryEventFixture,
+) -> None:
+    result = boundary_fixture.swap_parent_then_publish()
+    assert result.command_exit_code != 0
+    assert not result.redirected_evidence.exists()
+    assert not result.original_evidence.exists()
