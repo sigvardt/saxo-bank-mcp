@@ -17,6 +17,7 @@ from typing import Final, Literal, Self, cast
 from uuid import uuid4
 
 import anyio
+from anyio.lowlevel import checkpoint
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -1183,6 +1184,12 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
                         postexit_revalidate()
                     except Exception:  # noqa: BLE001 - exact finite static reason
                         static_failure = True
+
+            try:
+                await checkpoint()
+            except anyio.get_cancelled_exc_class() as error:
+                pending_cancellation = pending_cancellation or error
+                process_failure = True
 
         if claimed is None:
             # The selected finite preclaim reason is intentionally not printed or stored.

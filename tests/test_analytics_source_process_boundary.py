@@ -1426,8 +1426,10 @@ async def test_cancellation_finalizes_one_child_before_propagation(
 
     assert result.command_exit_code != 0
     assert result.cancellation_observed is True
+    assert result.cancellation_propagated is True
     assert result.claimed is (expected_reason is not None)
     assert result.spawn_count == 1
+    assert result.close_count == 0
     assert result.abort_count == 1
     assert result.child_exit_code == 0
     assert result.restart_count == 0
@@ -1443,6 +1445,42 @@ async def test_cancellation_finalizes_one_child_before_propagation(
             "status": "failed",
         }
         assert result.publication_count == 1
+
+
+@pytest.mark.parametrize(
+    ("static_mutation", "expected_reason"),
+    [
+        (None, "child_process_failed"),
+        ("content", "candidate_static_runtime_changed"),
+    ],
+)
+@pytest.mark.anyio
+async def test_cancellation_during_postexit_revalidation_propagates_after_failure(
+    boundary_fixture: BoundaryEventFixture,
+    static_mutation: str | None,
+    expected_reason: str,
+) -> None:
+    result = await boundary_fixture.run(
+        child_scenario="cancel_during_revalidation",
+        postexit_runtime_mutation=static_mutation,
+    )
+
+    assert result.command_exit_code != 0
+    assert result.cancellation_observed is True
+    assert result.cancellation_propagated is True
+    assert result.claimed is True
+    assert result.spawn_count == 1
+    assert result.close_count == 1
+    assert result.abort_count == 0
+    assert result.child_exit_code == 0
+    assert result.restart_count == 0
+    assert result.requests_replayed == 0
+    assert result.revalidation_count == 1
+    assert json.loads(result.published_text) == {
+        "reason": expected_reason,
+        "status": "failed",
+    }
+    assert result.publication_count == 1
 
 
 @pytest.mark.anyio

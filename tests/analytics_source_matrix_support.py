@@ -121,6 +121,7 @@ class ScriptedProcessSession(ProcessMatrixSession):
     scenario: str
     spawn_count: int = 0
     initialize_count: int = 0
+    close_count: int = 0
     abort_count: int = 0
     restart_count: int = 0
     requests_replayed: int = 0
@@ -200,6 +201,7 @@ class ScriptedProcessSession(ProcessMatrixSession):
     async def close(self) -> ProcessSessionFacts:
         if self._state not in {"listed", "running"}:
             raise ProcessSessionError("invalid_transition")
+        self.close_count += 1
         exit_code = (
             17
             if self.scenario in {"nonzero_after_matrix", "invalid_close_facts"}
@@ -255,8 +257,10 @@ class BoundaryTestResult:
     command_exit_code: int
     child_exit_code: int | None
     cancellation_observed: bool
+    cancellation_propagated: bool
     claimed: bool
     spawn_count: int
+    close_count: int
     abort_count: int
     restart_count: int
     requests_replayed: int
@@ -274,7 +278,7 @@ class BoundaryEventFixture:
     root: Path
     forbidden_scalars: frozenset[str | int]
 
-    async def run(
+    async def run(  # noqa: PLR0915
         self,
         *,
         child_scenario: str,
@@ -353,6 +357,8 @@ class BoundaryEventFixture:
         def postexit_revalidate() -> None:
             nonlocal revalidation_count
             revalidation_count += 1
+            if child_scenario == "cancel_during_revalidation":
+                cancel_scope.cancel()
             if postexit_runtime_mutation == "content":
                 payload.chmod(0o600)
                 payload.write_bytes(payload.read_bytes() + b"MUTATION")
@@ -361,6 +367,7 @@ class BoundaryEventFixture:
                 raise CandidateRuntimeError("runtime_identity_mismatch")
 
         command_exit_code = 1
+        completed_normally = False
         cancel_scope = anyio.CancelScope()
         session.cancel_scope = cancel_scope
         try:
@@ -375,6 +382,7 @@ class BoundaryEventFixture:
                     captured_at=captured_at,
                     postexit_revalidate=postexit_revalidate,
                 )
+                completed_normally = True
         finally:
             os.close(root_descriptor)
         guard_path = matrix_module.candidate_guard_path(
@@ -396,8 +404,12 @@ class BoundaryEventFixture:
                 else None
             ),
             cancellation_observed=cancel_scope.cancel_called,
+            cancellation_propagated=(
+                cancel_scope.cancel_called and not completed_normally
+            ),
             claimed=guard_path.is_file(),
             spawn_count=session.spawn_count,
+            close_count=session.close_count,
             abort_count=session.abort_count,
             restart_count=session.restart_count,
             requests_replayed=session.requests_replayed,
@@ -455,8 +467,10 @@ class BoundaryEventFixture:
             command_exit_code=command_exit_code,
             child_exit_code=None,
             cancellation_observed=False,
+            cancellation_propagated=False,
             claimed=True,
             spawn_count=0,
+            close_count=0,
             abort_count=0,
             restart_count=0,
             requests_replayed=0,
