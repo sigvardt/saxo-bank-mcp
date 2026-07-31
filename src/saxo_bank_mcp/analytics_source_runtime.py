@@ -11,7 +11,6 @@ import stat
 import sys
 import sysconfig
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
 from dataclasses import dataclass, field
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
@@ -22,15 +21,6 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field
 
-from saxo_bank_mcp._source_matrix_run_directory import (
-    HeldRunDirectory,
-    RunDirectoryError,
-    cleanup_held_run_directory,
-    close_held_run_directory,
-    create_held_run_directories,
-    hold_existing_run_directories,
-    open_held_run_directory,
-)
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
 from saxo_bank_mcp.analytics_source_process import CHILD_BOOTSTRAP, ChildBootstrapPaths
 
@@ -93,12 +83,6 @@ _ALLOWED_INTERPRETER_LINKS: Final = {
     "bin/python3": "python3.12",
 }
 _RUN_ROOT_PATTERN: Final = re.compile(r"^\.saxo-source-matrix-run\.[1-9][0-9]*$")
-_COORDINATOR_RUN_DIRECTORY_NAMES: Final = (
-    "coordinator-cache",
-    "coordinator-work",
-    "coordinator-tmp",
-)
-_CHILD_RUN_DIRECTORY_NAMES: Final = ("child-cache", "child-work", "child-tmp")
 _READ_FLAGS: Final = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY_FLAGS: Final = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 _NOFOLLOW_FLAGS: Final = getattr(os, "O_NOFOLLOW", 0)
@@ -455,9 +439,13 @@ def _scalar_material(runtime_root: Path, layout: ExternalRunLayout) -> dict[str,
     }
 
 
-def _runtime_layout_from_process(
-    runtime_root: Path,
-) -> tuple[ExternalRunLayout, HeldRunDirectory]:
+def _remove_empty_directories(paths: Sequence[Path]) -> None:
+    # ponytail: trust the local owner; same-owner swaps need OS-user or sandbox isolation.
+    for path in reversed(paths):
+        path.rmdir()
+
+
+def _runtime_layout_from_process(runtime_root: Path) -> ExternalRunLayout:
     raw_cache = sys.pycache_prefix
     raw_tmp = os.environ.get("TMPDIR")
     if raw_cache is None or raw_tmp is None:
@@ -491,29 +479,18 @@ def _runtime_layout_from_process(
         child_work=root / "child-work",
         child_tmp=root / "child-tmp",
     )
-    held: HeldRunDirectory | None = None
+    created: list[Path] = []
     try:
-        held = open_held_run_directory(root)
-        hold_existing_run_directories(held, _COORDINATOR_RUN_DIRECTORY_NAMES)
-        create_held_run_directories(held, _CHILD_RUN_DIRECTORY_NAMES)
-    except (OSError, RunDirectoryError) as error:
-        if held is not None:
-            created = tuple(
-                name
-                for name in _CHILD_RUN_DIRECTORY_NAMES
-                if name in held.child_descriptors
-            )
-            if created:
-                with suppress(RunDirectoryError):
-                    cleanup_held_run_directory(
-                        held,
-                        remove_names=created,
-                        remove_root=False,
-                    )
-            else:
-                close_held_run_directory(held)
+        for child in (layout.child_cache, layout.child_work, layout.child_tmp):
+            child.mkdir(mode=_OWNER_DIRECTORY_MODE)
+            created.append(child)
+    except OSError as error:
+        try:
+            _remove_empty_directories(created)
+        except OSError as cleanup_error:
+            raise CandidateRuntimeError("external_layout_invalid") from cleanup_error
         raise CandidateRuntimeError("external_layout_invalid") from error
-    return layout, held
+    return layout
 
 
 def _layout_paths(layout: ExternalRunLayout) -> tuple[Path, ...]:
@@ -1507,7 +1484,7 @@ def _open_seal(  # noqa: PLR0913
 
 def open_candidate_runtime_seal() -> tuple[CandidateRuntimeSeal, ExternalRunLayout]:
     runtime_root = _official_runtime_root()
-    layout, held = _runtime_layout_from_process(runtime_root)
+    layout = _runtime_layout_from_process(runtime_root)
     try:
         manifest, source_mode = _load_candidate_manifest()
         if source_mode:
@@ -1523,19 +1500,15 @@ def open_candidate_runtime_seal() -> tuple[CandidateRuntimeSeal, ExternalRunLayo
         )
     except Exception as error:
         try:
-            cleanup_held_run_directory(
-                held,
-                remove_names=_CHILD_RUN_DIRECTORY_NAMES,
-                remove_root=False,
+            _remove_empty_directories(
+                (layout.child_cache, layout.child_work, layout.child_tmp),
             )
-        except RunDirectoryError:
+        except OSError:
             raise CandidateRuntimeError("external_layout_invalid") from None
         if isinstance(error, CandidateRuntimeError):
             raise
         raise CandidateRuntimeError("runtime_identity_mismatch") from None
-    else:
-        close_held_run_directory(held)
-        return seal, layout
+    return seal, layout
 
 
 def _open_candidate_runtime_seal_for_test(  # pyright: ignore[reportUnusedFunction]

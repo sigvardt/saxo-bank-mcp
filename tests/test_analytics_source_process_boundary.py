@@ -14,16 +14,13 @@ from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
 import anyio
 import pytest
 
-from saxo_bank_mcp import (
-    _source_matrix_run_directory as source_matrix_run_directory,
-)
 from saxo_bank_mcp import (
     analytics_source_process,
     qa_analytics_source_matrix,
@@ -1090,194 +1087,29 @@ def test_portable_entrypoint_normalization_rejects_behavior_changing_bytes(
         normalize("bin/fixture", unsafe, runtime)
 
 
-@pytest.mark.parametrize(
-    "launcher_name",
-    [
-        "saxo-bank-analytics-source-matrix",
-        "saxo-bank-analytics-source-matrix-generate",
-    ],
-)
-def test_installed_launcher_cleanup_refuses_a_swapped_run_root(
+def test_development_cleanup_removes_exact_empty_run_directories(
     tmp_path: Path,
-    launcher_name: str,
 ) -> None:
-    runtime = tmp_path / "runtime"
-    binary = runtime / "bin/python3.12"
-    site_packages = runtime / "lib/python3.12/site-packages"
-    package = site_packages / "saxo_bank_mcp"
-    package.mkdir(parents=True)
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.symlink_to(Path(sys.executable).resolve(strict=True))
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "_source_matrix_run_directory.py").write_bytes(
-        (_ROOT / "src/saxo_bank_mcp/_source_matrix_run_directory.py").read_bytes(),
-    )
-    swap_source = (
-        "from pathlib import Path\n"
-        "import sys\n"
-        "root = Path(sys.pycache_prefix).parent\n"
-        "held = root.with_name(root.name + '.held')\n"
-        "target = root.parent / 'unrelated-target'\n"
-        "root.rename(held)\n"
-        "target.mkdir()\n"
-        "for name in ('coordinator-cache', 'coordinator-work', 'coordinator-tmp'):\n"
-        "    (target / name).mkdir()\n"
-        "root.symlink_to(target, target_is_directory=True)\n"
-    )
-    (package / "qa_analytics_source_matrix.py").write_text(
-        swap_source,
-        encoding="utf-8",
-    )
-    (package / "generate_analytics_source_matrix_candidate.py").write_text(
-        swap_source,
-        encoding="utf-8",
-    )
-    launcher = runtime / "bin" / launcher_name
-    launcher.write_bytes((_ROOT / "scripts" / launcher_name).read_bytes())
-    launcher.chmod(0o700)
-    caller = tmp_path / "caller"
-    caller.mkdir()
-
-    completed = subprocess.run(
-        (os.fspath(launcher),),
-        cwd=caller,
-        env={"LANG": "C", "LC_ALL": "C"},
-        check=False,
-        capture_output=True,
-    )
-
-    target = tmp_path / "unrelated-target"
-    assert completed.returncode != 0
-    assert {
-        path.name for path in target.iterdir()
-    } == {"coordinator-cache", "coordinator-work", "coordinator-tmp"}
-
-
-def test_cleanup_does_not_remove_child_replaced_at_removal_boundary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "run"
-    child = root / "child"
-    moved = tmp_path / "held-child"
-    root.mkdir(mode=0o700)
-    child.mkdir(mode=0o700)
-    held = source_matrix_run_directory.open_held_run_directory(root)
-    source_matrix_run_directory.hold_existing_run_directories(held, ("child",))
-    real_rmdir = os.rmdir
-    replaced = False
-
-    def replace_child_before_remove(
-        path: str | bytes,
-        *,
-        dir_fd: int | None = None,
-    ) -> None:
-        nonlocal replaced
-        if not replaced and dir_fd == held.root_descriptor:
-            if child.exists():
-                child.rename(moved)
-            child.mkdir(mode=0o700)
-            replaced = True
-        real_rmdir(path, dir_fd=dir_fd)
-
-    monkeypatch.setattr(source_matrix_run_directory.os, "rmdir", replace_child_before_remove)
-    refused = False
-    try:
-        source_matrix_run_directory.cleanup_held_run_directory(
-            held,
-            remove_names=("child",),
-            remove_root=False,
-        )
-    except source_matrix_run_directory.RunDirectoryError:
-        refused = True
-
-    assert replaced
-    assert child.is_dir(), "cleanup deleted the unrelated replacement child"
-    assert refused, "cleanup accepted a child replacement at the removal boundary"
-
-
-def test_cleanup_does_not_remove_root_replaced_at_removal_boundary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = tmp_path / "run"
-    moved = tmp_path / "held-root"
-    root.mkdir(mode=0o700)
-    held = source_matrix_run_directory.open_held_run_directory(root)
-    real_rmdir = os.rmdir
-    replaced = False
-
-    def replace_root_before_remove(
-        path: str | bytes,
-        *,
-        dir_fd: int | None = None,
-    ) -> None:
-        nonlocal replaced
-        if not replaced and dir_fd == held.parent_descriptor:
-            if root.exists():
-                root.rename(moved)
-            root.mkdir(mode=0o700)
-            replaced = True
-        real_rmdir(path, dir_fd=dir_fd)
-
-    monkeypatch.setattr(source_matrix_run_directory.os, "rmdir", replace_root_before_remove)
-    refused = False
-    try:
-        source_matrix_run_directory.cleanup_held_run_directory(
-            held,
-            remove_names=(),
-            remove_root=True,
-        )
-    except source_matrix_run_directory.RunDirectoryError:
-        refused = True
-
-    assert replaced
-    assert root.is_dir(), "cleanup deleted the unrelated replacement root"
-    assert refused, "cleanup accepted a root replacement at the removal boundary"
-
-
-@pytest.mark.parametrize(
-    "script_name",
-    [
+    for script_name in (
         "run_analytics_source_matrix.py",
         "generate_analytics_source_matrix_candidate.py",
-    ],
-)
-def test_development_cleanup_refuses_a_swapped_run_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    script_name: str,
-) -> None:
-    wrapper = _load_task_script(script_name)
-    run_root = tmp_path / "development-run"
-    held_root = tmp_path / "held-development-run"
-    target = tmp_path / "unrelated-target"
-    run_root.mkdir(mode=0o700)
+    ):
+        wrapper = _load_task_script(script_name)
+        cleanup_empty = cast(
+            "Callable[[tuple[Path, ...]], None]",
+            wrapper._cleanup_empty,  # noqa: SLF001
+        )
+        run_root = tmp_path / script_name
+        paths = tuple(run_root / name for name in ("cache", "work", "tmp"))
+        for path in paths:
+            path.mkdir(parents=True, mode=0o700)
+        unrelated = tmp_path / f"{script_name}.keep"
+        unrelated.mkdir()
 
-    def swap_root(arguments: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
-        assert Path(cast("str", kwargs["cwd"])).parent == run_root
-        run_root.rename(held_root)
-        target.mkdir(mode=0o700)
-        for name in ("cache", "work", "tmp"):
-            (target / name).mkdir(mode=0o700)
-        run_root.symlink_to(target, target_is_directory=True)
-        return SimpleNamespace(args=arguments, returncode=0)
+        cleanup_empty((run_root, *paths))
 
-    def fixed_temp_directory(**_kwargs: object) -> str:
-        return os.fspath(run_root)
-
-    monkeypatch.setattr(
-        wrapper,
-        "tempfile",
-        SimpleNamespace(mkdtemp=fixed_temp_directory),
-    )
-    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(run=swap_root))
-    main = cast("Callable[[], int]", wrapper.main)
-
-    with pytest.raises(RuntimeError):
-        main()
-
-    assert {path.name for path in target.iterdir()} == {"cache", "work", "tmp"}
+        assert not run_root.exists()
+        assert unrelated.is_dir()
 
 
 def test_linux_lib64_alias_is_removed_before_final_symlink_check(

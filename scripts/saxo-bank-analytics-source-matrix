@@ -12,29 +12,35 @@ runtime_parent=$(CDPATH= cd -P -- "$runtime_root/.." && pwd -P)
 python="$runtime_root/bin/python3.12"
 site_packages="$runtime_root/lib/python3.12/site-packages"
 run_root="$runtime_parent/.saxo-source-matrix-run.$$"
-bootstrap='import os,runpy,sys
-from pathlib import Path
+bootstrap='import os,runpy,stat,sys
 runtime,site,root,module=sys.argv[1:5]
 del sys.argv[1:5]
 names=("coordinator-cache","coordinator-work","coordinator-tmp")
 paths=tuple(os.path.join(root,name) for name in names)
-sys.path.insert(0,site)
-from saxo_bank_mcp._source_matrix_run_directory import RunDirectoryError,cleanup_held_run_directory,create_held_run_directories,create_held_run_directory
-held=None
+created=[]
 try:
-    held=create_held_run_directory(Path(root))
-    create_held_run_directories(held,names)
+    try:
+        os.mkdir(root,0o700)
+        created.append(root)
+        for path in paths:
+            os.mkdir(path,0o700)
+            created.append(path)
+        for path in (root,*paths):
+            metadata=os.lstat(path)
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid!=os.getuid() or stat.S_IMODE(metadata.st_mode)!=0o700:
+                raise SystemExit("unsafe external run directory")
+    except OSError:
+        raise SystemExit("unsafe external run directory") from None
     os.environ["TMPDIR"]=paths[2]
     os.chdir(paths[1])
+    sys.path.insert(0,site)
     runpy.run_module(module,run_name="__main__",alter_sys=True)
-except RunDirectoryError:
-    raise SystemExit("unsafe external run directory") from None
 finally:
-    if held is not None:
-        try:
-            cleanup_held_run_directory(held,remove_names=names,remove_root=True)
-        except RunDirectoryError:
-            raise SystemExit("external run directory changed or is not empty") from None'
+    try:
+        for path in reversed(created):
+            os.rmdir(path)
+    except OSError:
+        raise SystemExit("external run directory changed or is not empty") from None'
 
 if [ ! -x "$python" ] || [ ! -d "$site_packages" ]; then
     echo "source matrix requires its sealed CPython 3.12 runtime" >&2
