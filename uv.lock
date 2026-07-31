@@ -1784,10 +1784,12 @@ name = "saxo-bank-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "duckdb" },
     { name = "fastmcp" },
     { name = "httpx2", extra = ["brotli", "http2", "zstd"] },
     { name = "matplotlib" },
+    { name = "mcp" },
     { name = "numpy" },
     { name = "plotly" },
     { name = "pydantic" },
@@ -1805,10 +1807,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = "==4.14.1" },
     { name = "duckdb", specifier = ">=1.2.0,<2.0" },
     { name = "fastmcp", specifier = "==3.4.2" },
     { name = "httpx2", extras = ["brotli", "http2", "zstd"], specifier = "==2.5.0" },
     { name = "matplotlib", specifier = ">=3.9.0,<4.0" },
+    { name = "mcp", specifier = "==1.28.1" },
     { name = "numpy", specifier = ">=2.1.0,<3.0" },
     { name = "plotly", specifier = ">=6.0.0,<7.0" },
     { name = "pydantic", specifier = ">=2.12.5" },
