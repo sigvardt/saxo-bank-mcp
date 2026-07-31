@@ -2461,7 +2461,7 @@ _SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
 
   ```bash
   git diff --check
-  git diff --name-status HEAD~5
+  git diff --name-status 369629df19de255e951393a8ac0399e0be37222f..HEAD
   git diff -- \
     data/analytics/source_contracts.json \
     src/saxo_bank_mcp/analytics_provider.py \
