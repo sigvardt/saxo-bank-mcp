@@ -1102,6 +1102,7 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
     matrix_failure = False
     static_failure = False
     facts: ProcessSessionFacts | None = None
+    pending_cancellation: BaseException | None = None
     spawn_attempted = False
     spawn_succeeded = False
     lifecycle_complete = False
@@ -1133,6 +1134,9 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
                     prepared=prepared,
                     claim_source_execution=claim_source_execution,
                 )
+            except anyio.get_cancelled_exc_class() as error:
+                pending_cancellation = error
+                process_failure = True
             except ProcessSessionError:
                 process_failure = True
             except Exception:  # noqa: BLE001 - converted to one finite public reason
@@ -1148,29 +1152,43 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
                 lifecycle_complete = True
                 try:
                     facts = await session.close()
+                except anyio.get_cancelled_exc_class() as error:
+                    pending_cancellation = error
+                    process_failure = True
                 except ProcessSessionError:
                     process_failure = True
+        except anyio.get_cancelled_exc_class() as error:
+            pending_cancellation = error
+            process_failure = True
         except ProcessSessionError:
             process_failure = True
         except Exception:  # noqa: BLE001 - never publish exception text
             process_failure = True
         finally:
-            if spawn_succeeded and not lifecycle_complete:
-                try:
-                    await session.abort()
-                except ProcessSessionError:
-                    process_failure = True
-                except Exception:  # noqa: BLE001 - never publish exception text
-                    process_failure = True
-            if spawn_attempted:
-                try:
-                    postexit_revalidate()
-                except Exception:  # noqa: BLE001 - exact finite static reason
-                    static_failure = True
+            # The process session owns a bounded abort; shielding only lets that
+            # finite cleanup and the synchronous static check reach a safe state.
+            with anyio.CancelScope(shield=True):
+                if spawn_succeeded and not lifecycle_complete:
+                    try:
+                        await session.abort()
+                    except anyio.get_cancelled_exc_class() as error:
+                        pending_cancellation = pending_cancellation or error
+                        process_failure = True
+                    except ProcessSessionError:
+                        process_failure = True
+                    except Exception:  # noqa: BLE001 - never publish exception text
+                        process_failure = True
+                if spawn_attempted:
+                    try:
+                        postexit_revalidate()
+                    except Exception:  # noqa: BLE001 - exact finite static reason
+                        static_failure = True
 
         if claimed is None:
             # The selected finite preclaim reason is intentionally not printed or stored.
             del preclaim
+            if pending_cancellation is not None:
+                raise pending_cancellation
             return 1
 
         reason: PostclaimFailureReason | None = None
@@ -1188,19 +1206,23 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
             else:
                 try:
                     process_receipt = process_boundary_receipt(facts, seal.identity)
-                    receipt = AnalyticsSourceMatrixReceipt(
-                        **draft.model_dump(),
-                        process_boundary=process_receipt,
-                        privacy=PrivacyReceipt(findings=0, scan_errors=0),
-                    )
-                    text = json.dumps(
-                        receipt.model_dump(mode="json"),
-                        allow_nan=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    )
                 except (TypeError, ValidationError, ValueError):
-                    reason = "matrix_execution_failed"
+                    reason = "child_process_failed"
+        if reason is None:
+            try:
+                receipt = AnalyticsSourceMatrixReceipt(
+                    **cast("ClaimedMatrixDraft", draft).model_dump(),
+                    process_boundary=process_receipt,
+                    privacy=PrivacyReceipt(findings=0, scan_errors=0),
+                )
+                text = json.dumps(
+                    receipt.model_dump(mode="json"),
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            except (TypeError, ValidationError, ValueError):
+                reason = "matrix_execution_failed"
 
         if reason is None and text is not None:
             if _published_receipt_retains_private_values(
@@ -1224,12 +1246,22 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
         if reason is not None:
             text = _postclaim_failure_text(reason)
         if text is None:
+            if pending_cancellation is not None:
+                raise pending_cancellation
             return 1
+        command_exit_code = 1
+        # Cancellation is checkpoint-delivered; this synchronous immutable link
+        # finishes before the stored cancellation is re-raised below.
         try:
             published = _publish_claimed_text(claimed, text)
         except (OSError, ValueError):
-            return 1
-        return 0 if published is not None and reason is None else 1
+            pass
+        else:
+            if published is not None and reason is None:
+                command_exit_code = 0
+        if pending_cancellation is not None:
+            raise pending_cancellation
+        return command_exit_code
     finally:
         if claimed is not None:
             os.close(claimed.descriptor)

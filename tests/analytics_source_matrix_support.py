@@ -13,6 +13,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, cast
 from uuid import uuid4
 
+import anyio
+from anyio.lowlevel import checkpoint
+
 from saxo_bank_mcp import qa_analytics_source_matrix as matrix_module
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import (
@@ -118,9 +121,11 @@ class ScriptedProcessSession(ProcessMatrixSession):
     scenario: str
     spawn_count: int = 0
     initialize_count: int = 0
+    abort_count: int = 0
     restart_count: int = 0
     requests_replayed: int = 0
     last_facts: ProcessSessionFacts | None = None
+    cancel_scope: anyio.CancelScope | None = None
     _failed_request: tuple[str, str] | None = field(default=None, init=False)
     _state: Literal["new", "spawned", "initialized", "listed", "running", "exited"] = (
         field(default="new", init=False)
@@ -162,6 +167,21 @@ class ScriptedProcessSession(ProcessMatrixSession):
         if self._state not in {"listed", "running"}:
             raise ProcessSessionError("invalid_transition")
         self._state = "running"
+        if (
+            self.scenario == "cancel_preclaim"
+            and name == "saxo_auth_status"
+        ):
+            self._cancel_current_scope()
+            await checkpoint()
+        if (
+            self.scenario in {"cancel_after_claim", "cancel_during_abort"}
+            and name == "saxo_call_registered_endpoint"
+        ):
+            self.matrix.events.append((name, arguments))
+            if self.scenario == "cancel_after_claim":
+                self._cancel_current_scope()
+                await checkpoint()
+            raise ProcessSessionError("call_failed")
         if name == "saxo_call_registered_endpoint" and self.scenario in {
             "malformed_after_claim",
             "postclaim",
@@ -180,21 +200,34 @@ class ScriptedProcessSession(ProcessMatrixSession):
     async def close(self) -> ProcessSessionFacts:
         if self._state not in {"listed", "running"}:
             raise ProcessSessionError("invalid_transition")
-        exit_code = 17 if self.scenario == "nonzero_after_matrix" else 0
+        exit_code = (
+            17
+            if self.scenario in {"nonzero_after_matrix", "invalid_close_facts"}
+            else 0
+        )
         self._state = "exited"
         self.last_facts = self._facts(exit_code)
-        if exit_code != 0:
+        if self.scenario == "nonzero_after_matrix":
             raise ProcessSessionError("nonzero_exit")
         return self.last_facts
 
     async def abort(self) -> ProcessSessionFacts:
         if self._state in {"new", "exited"}:
             raise ProcessSessionError("invalid_transition")
+        self.abort_count += 1
+        if self.scenario == "cancel_during_abort":
+            self._cancel_current_scope()
+            await checkpoint()
         self._state = "exited"
         self.last_facts = self._facts(0)
         if self.scenario == "malformed_after_claim":
             raise ProcessSessionError("protocol_failed")
         return self.last_facts
+
+    def _cancel_current_scope(self) -> None:
+        if self.cancel_scope is None:
+            raise AssertionError("scripted cancellation scope is unavailable")
+        self.cancel_scope.cancel()
 
     def _facts(self, exit_code: int) -> ProcessSessionFacts:
         stderr_count = 4099 if self.scenario == "stderr" else 0
@@ -221,11 +254,14 @@ class ScriptedProcessSession(ProcessMatrixSession):
 class BoundaryTestResult:
     command_exit_code: int
     child_exit_code: int | None
+    cancellation_observed: bool
     claimed: bool
     spawn_count: int
+    abort_count: int
     restart_count: int
     requests_replayed: int
     publication_count: int
+    revalidation_count: int
     guard_path: Path
     evidence_path: Path
     published_text: str
@@ -312,8 +348,11 @@ class BoundaryEventFixture:
             scenario=child_scenario,
         )
         baseline = hashlib.sha256(payload.read_bytes()).hexdigest()
+        revalidation_count = 0
 
         def postexit_revalidate() -> None:
+            nonlocal revalidation_count
+            revalidation_count += 1
             if postexit_runtime_mutation == "content":
                 payload.chmod(0o600)
                 payload.write_bytes(payload.read_bytes() + b"MUTATION")
@@ -321,17 +360,21 @@ class BoundaryEventFixture:
             if hashlib.sha256(payload.read_bytes()).hexdigest() != baseline:
                 raise CandidateRuntimeError("runtime_identity_mismatch")
 
+        command_exit_code = 1
+        cancel_scope = anyio.CancelScope()
+        session.cancel_scope = cancel_scope
         try:
-            command_exit_code = await matrix_module._execute_source_matrix_with_events(
-                fixtures=fixtures,
-                env=env,
-                seal=seal,
-                layout=layout,
-                session=session,
-                state_root=state_root,
-                captured_at=captured_at,
-                postexit_revalidate=postexit_revalidate,
-            )
+            with cancel_scope:
+                command_exit_code = await matrix_module._execute_source_matrix_with_events(
+                    fixtures=fixtures,
+                    env=env,
+                    seal=seal,
+                    layout=layout,
+                    session=session,
+                    state_root=state_root,
+                    captured_at=captured_at,
+                    postexit_revalidate=postexit_revalidate,
+                )
         finally:
             os.close(root_descriptor)
         guard_path = matrix_module.candidate_guard_path(
@@ -352,11 +395,14 @@ class BoundaryEventFixture:
                 if session.last_facts is not None
                 else None
             ),
+            cancellation_observed=cancel_scope.cancel_called,
             claimed=guard_path.is_file(),
             spawn_count=session.spawn_count,
+            abort_count=session.abort_count,
             restart_count=session.restart_count,
             requests_replayed=session.requests_replayed,
             publication_count=int(evidence_path.is_file()),
+            revalidation_count=revalidation_count,
             guard_path=guard_path,
             evidence_path=evidence_path,
             published_text=published_text,
@@ -408,12 +454,15 @@ class BoundaryEventFixture:
         return BoundaryTestResult(
             command_exit_code=command_exit_code,
             child_exit_code=None,
+            cancellation_observed=False,
             claimed=True,
             spawn_count=0,
+            abort_count=0,
             restart_count=0,
             requests_replayed=0,
             publication_count=int(original_evidence.exists())
             + int(redirected_evidence.exists()),
+            revalidation_count=0,
             guard_path=moved_parent / identity.candidate_identity_sha256 / "claimed.json",
             evidence_path=original_evidence,
             published_text="",

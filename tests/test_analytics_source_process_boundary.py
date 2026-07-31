@@ -1397,3 +1397,63 @@ def test_descriptor_bound_evidence_refuses_swapped_claimed_ancestor(
     assert result.command_exit_code != 0
     assert not result.redirected_evidence.exists()
     assert not result.original_evidence.exists()
+
+
+@pytest.mark.parametrize(
+    ("scenario", "static_mutation", "expected_reason"),
+    [
+        ("cancel_after_claim", None, "child_process_failed"),
+        ("cancel_during_abort", None, "child_process_failed"),
+        (
+            "cancel_after_claim",
+            "content",
+            "candidate_static_runtime_changed",
+        ),
+        ("cancel_preclaim", None, None),
+    ],
+)
+@pytest.mark.anyio
+async def test_cancellation_finalizes_one_child_before_propagation(
+    boundary_fixture: BoundaryEventFixture,
+    scenario: str,
+    static_mutation: str | None,
+    expected_reason: str | None,
+) -> None:
+    result = await boundary_fixture.run(
+        child_scenario=scenario,
+        postexit_runtime_mutation=static_mutation,
+    )
+
+    assert result.command_exit_code != 0
+    assert result.cancellation_observed is True
+    assert result.claimed is (expected_reason is not None)
+    assert result.spawn_count == 1
+    assert result.abort_count == 1
+    assert result.child_exit_code == 0
+    assert result.restart_count == 0
+    assert result.requests_replayed == 0
+    assert result.revalidation_count == 1
+    if expected_reason is None:
+        assert not result.guard_path.exists()
+        assert not result.evidence_path.exists()
+        assert result.publication_count == 0
+    else:
+        assert json.loads(result.published_text) == {
+            "reason": expected_reason,
+            "status": "failed",
+        }
+        assert result.publication_count == 1
+
+
+@pytest.mark.anyio
+async def test_invalid_close_facts_publish_child_process_failure(
+    boundary_fixture: BoundaryEventFixture,
+) -> None:
+    result = await boundary_fixture.run(child_scenario="invalid_close_facts")
+
+    assert result.child_exit_code == _NONZERO_FIXTURE_EXIT_CODE
+    assert json.loads(result.published_text) == {
+        "reason": "child_process_failed",
+        "status": "failed",
+    }
+    assert result.publication_count == 1
