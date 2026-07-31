@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import ctypes
 import os
+import secrets
 import stat
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 _OWNER_DIRECTORY_MODE: Final = 0o700
 _READ_FLAGS: Final = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY_FLAGS: Final = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 _NOFOLLOW_FLAGS: Final = getattr(os, "O_NOFOLLOW", 0)
+_REMOVAL_NAME_PREFIX: Final = ".saxo-source-matrix-remove-"
+_LINUX_RENAME_NOREPLACE: Final = 1
+_DARWIN_RENAME_EXCL: Final = 4
 
 
 class RunDirectoryError(RuntimeError):
@@ -70,19 +77,45 @@ def _open_directory(name: str, parent_descriptor: int) -> int:
     return descriptor
 
 
-def open_held_run_directory(root: Path) -> HeldRunDirectory:
-    if not root.is_absolute():
-        raise RunDirectoryError("run directory path is invalid")
-    _validate_name(root.name)
+def _open_parent_descriptor(root: Path) -> int:
     try:
-        parent_descriptor = os.open(
+        return os.open(
             root.parent,
             _DIRECTORY_FLAGS | _NOFOLLOW_FLAGS,
         )
     except OSError as error:
         raise RunDirectoryError("run directory parent is unavailable") from error
+
+
+def open_held_run_directory(root: Path) -> HeldRunDirectory:
+    if not root.is_absolute():
+        raise RunDirectoryError("run directory path is invalid")
+    _validate_name(root.name)
+    parent_descriptor = _open_parent_descriptor(root)
     try:
         root_descriptor = _open_directory(root.name, parent_descriptor)
+    except Exception:
+        os.close(parent_descriptor)
+        raise
+    return HeldRunDirectory(
+        root=root,
+        root_name=root.name,
+        parent_descriptor=parent_descriptor,
+        root_descriptor=root_descriptor,
+    )
+
+
+def create_held_run_directory(root: Path) -> HeldRunDirectory:
+    if not root.is_absolute():
+        raise RunDirectoryError("run directory path is invalid")
+    _validate_name(root.name)
+    parent_descriptor = _open_parent_descriptor(root)
+    try:
+        os.mkdir(root.name, _OWNER_DIRECTORY_MODE, dir_fd=parent_descriptor)
+        root_descriptor = _open_directory(root.name, parent_descriptor)
+    except OSError as error:
+        os.close(parent_descriptor)
+        raise RunDirectoryError("run directory creation failed") from error
     except Exception:
         os.close(parent_descriptor)
         raise
@@ -145,7 +178,79 @@ def close_held_run_directory(held: HeldRunDirectory) -> None:
             continue
 
 
-def _cleanup_entries(  # noqa: C901
+def _rename_no_replace(
+    name: str,
+    isolated_name: str,
+    parent_descriptor: int,
+) -> None:
+    library = ctypes.CDLL(None, use_errno=True)
+    function_name: str
+    flag: int
+    if sys.platform == "darwin":
+        function_name = "renameatx_np"
+        flag = _DARWIN_RENAME_EXCL
+    elif sys.platform.startswith("linux"):
+        function_name = "renameat2"
+        flag = _LINUX_RENAME_NOREPLACE
+    else:
+        raise RunDirectoryError("atomic run directory isolation is unavailable")
+    try:
+        rename = cast(
+            "Callable[[int, bytes, int, bytes, int], int]",
+            getattr(library, function_name),
+        )
+    except AttributeError as error:
+        raise RunDirectoryError("atomic run directory isolation is unavailable") from error
+    ctypes.set_errno(0)
+    result = rename(
+        parent_descriptor,
+        os.fsencode(name),
+        parent_descriptor,
+        os.fsencode(isolated_name),
+        flag,
+    )
+    if result != 0:
+        raise RunDirectoryError("atomic run directory isolation failed")
+
+
+def _entry_exists(name: str, parent_descriptor: int) -> bool:
+    try:
+        os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RunDirectoryError("run directory entry is unavailable") from error
+    return True
+
+
+def _isolate_verified_directory(
+    name: str,
+    parent_descriptor: int,
+    expected_descriptor: int,
+    reopened: list[int],
+) -> str:
+    isolated_name = f"{_REMOVAL_NAME_PREFIX}{secrets.token_hex(16)}"
+    _rename_no_replace(name, isolated_name, parent_descriptor)
+    current = _open_directory(isolated_name, parent_descriptor)
+    reopened.append(current)
+    if not _same_directory(current, expected_descriptor):
+        raise RunDirectoryError("run directory entry changed")
+    return isolated_name
+
+
+def _verify_named_directory(
+    name: str,
+    parent_descriptor: int,
+    expected_descriptor: int,
+    reopened: list[int],
+) -> None:
+    current = _open_directory(name, parent_descriptor)
+    reopened.append(current)
+    if not _same_directory(current, expected_descriptor):
+        raise RunDirectoryError("run directory entry changed")
+
+
+def _cleanup_entries(  # noqa: C901, PLR0912
     held: HeldRunDirectory,
     remove_names: tuple[str, ...],
     remove_root: bool,  # noqa: FBT001
@@ -155,34 +260,76 @@ def _cleanup_entries(  # noqa: C901
         raise RunDirectoryError("run directory handle is invalid")
     if any(name not in held.child_descriptors for name in remove_names):
         raise RunDirectoryError("run directory residue is untracked")
-    current_root = _open_directory(held.root_name, held.parent_descriptor)
-    reopened.append(current_root)
-    if not _same_directory(current_root, held.root_descriptor):
-        raise RunDirectoryError("run directory root changed")
+    isolated_root_name: str | None = None
+    if remove_root:
+        isolated_root_name = _isolate_verified_directory(
+            held.root_name,
+            held.parent_descriptor,
+            held.root_descriptor,
+            reopened,
+        )
+    else:
+        _verify_named_directory(
+            held.root_name,
+            held.parent_descriptor,
+            held.root_descriptor,
+            reopened,
+        )
     if set(os.listdir(held.root_descriptor)) != set(  # noqa: PTH208
         held.child_descriptors,
     ):
         raise RunDirectoryError("run directory entries changed")
+    remove_set = set(remove_names)
     for name, descriptor in held.child_descriptors.items():
         if os.listdir(descriptor):  # noqa: PTH208
             raise RunDirectoryError("run directory is not empty")
-        current = _open_directory(name, held.root_descriptor)
-        reopened.append(current)
-        if not _same_directory(current, descriptor):
-            raise RunDirectoryError("run directory child changed")
+        if name not in remove_set:
+            _verify_named_directory(
+                name,
+                held.root_descriptor,
+                descriptor,
+                reopened,
+            )
     for name in reversed(remove_names):
-        os.rmdir(name, dir_fd=held.root_descriptor)
-    expected_residue = set(held.child_descriptors).difference(remove_names)
+        isolated_name = _isolate_verified_directory(
+            name,
+            held.root_descriptor,
+            held.child_descriptors[name],
+            reopened,
+        )
+        if _entry_exists(name, held.root_descriptor):
+            raise RunDirectoryError("run directory child changed")
+        os.rmdir(isolated_name, dir_fd=held.root_descriptor)
+        if _entry_exists(name, held.root_descriptor):
+            raise RunDirectoryError("run directory child changed")
+    expected_residue = set(held.child_descriptors).difference(remove_set)
     if set(os.listdir(held.root_descriptor)) != expected_residue:  # noqa: PTH208
         raise RunDirectoryError("run directory cleanup changed")
+    for name in expected_residue:
+        _verify_named_directory(
+            name,
+            held.root_descriptor,
+            held.child_descriptors[name],
+            reopened,
+        )
     if remove_root:
         if expected_residue:
             raise RunDirectoryError("run directory root is not empty")
-        current_root = _open_directory(held.root_name, held.parent_descriptor)
-        reopened.append(current_root)
-        if not _same_directory(current_root, held.root_descriptor):
+        if isolated_root_name is None or _entry_exists(
+            held.root_name,
+            held.parent_descriptor,
+        ):
             raise RunDirectoryError("run directory root changed")
-        os.rmdir(held.root_name, dir_fd=held.parent_descriptor)
+        os.rmdir(isolated_root_name, dir_fd=held.parent_descriptor)
+        if _entry_exists(held.root_name, held.parent_descriptor):
+            raise RunDirectoryError("run directory root changed")
+    else:
+        _verify_named_directory(
+            held.root_name,
+            held.parent_descriptor,
+            held.root_descriptor,
+            reopened,
+        )
 
 
 def cleanup_held_run_directory(
@@ -216,6 +363,7 @@ __all__ = [
     "cleanup_held_run_directory",
     "close_held_run_directory",
     "create_held_run_directories",
+    "create_held_run_directory",
     "hold_existing_run_directories",
     "open_held_run_directory",
 ]

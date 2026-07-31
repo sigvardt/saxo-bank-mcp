@@ -21,7 +21,13 @@ from unittest.mock import Mock
 import anyio
 import pytest
 
-from saxo_bank_mcp import analytics_source_process, qa_analytics_source_matrix
+from saxo_bank_mcp import (
+    _source_matrix_run_directory as source_matrix_run_directory,
+)
+from saxo_bank_mcp import (
+    analytics_source_process,
+    qa_analytics_source_matrix,
+)
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
 from saxo_bank_mcp.analytics_source_process import (
@@ -1103,6 +1109,9 @@ def test_installed_launcher_cleanup_refuses_a_swapped_run_root(
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.symlink_to(Path(sys.executable).resolve(strict=True))
     (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "_source_matrix_run_directory.py").write_bytes(
+        (_ROOT / "src/saxo_bank_mcp/_source_matrix_run_directory.py").read_bytes(),
+    )
     swap_source = (
         "from pathlib import Path\n"
         "import sys\n"
@@ -1142,6 +1151,89 @@ def test_installed_launcher_cleanup_refuses_a_swapped_run_root(
     assert {
         path.name for path in target.iterdir()
     } == {"coordinator-cache", "coordinator-work", "coordinator-tmp"}
+
+
+def test_cleanup_does_not_remove_child_replaced_at_removal_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    child = root / "child"
+    moved = tmp_path / "held-child"
+    root.mkdir(mode=0o700)
+    child.mkdir(mode=0o700)
+    held = source_matrix_run_directory.open_held_run_directory(root)
+    source_matrix_run_directory.hold_existing_run_directories(held, ("child",))
+    real_rmdir = os.rmdir
+    replaced = False
+
+    def replace_child_before_remove(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        if not replaced and dir_fd == held.root_descriptor:
+            if child.exists():
+                child.rename(moved)
+            child.mkdir(mode=0o700)
+            replaced = True
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(source_matrix_run_directory.os, "rmdir", replace_child_before_remove)
+    refused = False
+    try:
+        source_matrix_run_directory.cleanup_held_run_directory(
+            held,
+            remove_names=("child",),
+            remove_root=False,
+        )
+    except source_matrix_run_directory.RunDirectoryError:
+        refused = True
+
+    assert replaced
+    assert child.is_dir(), "cleanup deleted the unrelated replacement child"
+    assert refused, "cleanup accepted a child replacement at the removal boundary"
+
+
+def test_cleanup_does_not_remove_root_replaced_at_removal_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    moved = tmp_path / "held-root"
+    root.mkdir(mode=0o700)
+    held = source_matrix_run_directory.open_held_run_directory(root)
+    real_rmdir = os.rmdir
+    replaced = False
+
+    def replace_root_before_remove(
+        path: str | bytes,
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal replaced
+        if not replaced and dir_fd == held.parent_descriptor:
+            if root.exists():
+                root.rename(moved)
+            root.mkdir(mode=0o700)
+            replaced = True
+        real_rmdir(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(source_matrix_run_directory.os, "rmdir", replace_root_before_remove)
+    refused = False
+    try:
+        source_matrix_run_directory.cleanup_held_run_directory(
+            held,
+            remove_names=(),
+            remove_root=True,
+        )
+    except source_matrix_run_directory.RunDirectoryError:
+        refused = True
+
+    assert replaced
+    assert root.is_dir(), "cleanup deleted the unrelated replacement root"
+    assert refused, "cleanup accepted a root replacement at the removal boundary"
 
 
 @pytest.mark.parametrize(
