@@ -4,8 +4,10 @@ import hashlib
 import json
 import math
 import os
+import select
 import stat
 import sys
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -14,6 +16,7 @@ from typing import Final, Literal, Protocol, cast
 
 import anyio
 from anyio.abc import Process, TaskGroup
+from anyio.lowlevel import checkpoint
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp import types
 from mcp.client.session import ClientSession
@@ -103,6 +106,8 @@ _READ_CHUNK_BYTES: Final = 65_536
 _SHUTDOWN_TIMEOUT_SECONDS: Final = 2.0
 _MAX_STDERR_BYTE_COUNT: Final = (1 << 63) - 1
 _PIPE_PAIR_COUNT: Final = 3
+_PIPE_PROBE_BYTES: Final = b"saxo-mcp-pipe-pair-proof"
+_PIPE_PROBE_TIMEOUT_SECONDS: Final = 0.25
 _SSL_ENV_KEYS: Final[frozenset[Literal["SSL_CERT_FILE", "SSL_CERT_DIR"]]] = frozenset(
     {"SSL_CERT_FILE", "SSL_CERT_DIR"},
 )
@@ -376,12 +381,9 @@ class OneShotProcessSession(ProcessMatrixSession):
             stdin_identity = _pipe_identity(parent_stdin, child_stdin)
             stdout_identity = _pipe_identity(parent_stdout, child_stdout)
             stderr_identity = _pipe_identity(parent_stderr, child_stderr)
-            pair_ids = {
-                (stdin_identity.parent_device, stdin_identity.parent_inode),
-                (stdout_identity.parent_device, stdout_identity.parent_inode),
-                (stderr_identity.parent_device, stderr_identity.parent_inode),
-            }
-            _require_distinct_pipe_pairs(pair_ids)
+            _require_distinct_pipe_pairs(
+                (stdin_identity, stdout_identity, stderr_identity),
+            )
 
             process = await anyio.open_process(
                 self._config.command,
@@ -431,13 +433,22 @@ class OneShotProcessSession(ProcessMatrixSession):
             task_group.start_soon(self._stdout_pump)
             task_group.start_soon(self._stderr_pump)
             self._state = "spawned"
-        except BaseException:  # noqa: BLE001
+        except BaseException as exc:
             for descriptor in descriptors:
                 _close_descriptor(descriptor)
             if process is not None:
                 self._process = process
-            await self._cleanup_failed_spawn()
+            self._shield_owned_task_group()
+            if self._task_group_entered:
+                await self._cleanup_failed_spawn()
+            else:
+                with anyio.CancelScope(shield=True):
+                    await self._cleanup_failed_spawn()
             self._state = "exited"
+            if isinstance(exc, anyio.get_cancelled_exc_class()):
+                raise
+            if not isinstance(exc, Exception):
+                raise
             raise ProcessSessionError("spawn_failed") from None
 
     async def initialize(self) -> None:
@@ -488,24 +499,40 @@ class OneShotProcessSession(ProcessMatrixSession):
     async def close(self) -> ProcessSessionFacts:
         self._require_state("listed", "running")
         self._state = "closing"
+        self._shield_owned_task_group()
         shutdown_failed = False
         try:
-            await self._close_client_session()
-            await self._close_outgoing_stream()
-        except Exception:  # noqa: BLE001
-            shutdown_failed = True
-        try:
-            with anyio.fail_after(_SHUTDOWN_TIMEOUT_SECONDS):
-                await self._require_event(self._stdin_done).wait()
-                self._child_exit_code = await self._require_process().wait()
-                await self._require_event(self._stdout_done).wait()
-                await self._require_event(self._stderr_done).wait()
-        except Exception:  # noqa: BLE001
-            shutdown_failed = True
-            self._close_parent_stdin()
-            self._child_exit_code = await self._terminate_and_reap_same_child()
-        await self._finalize_resources()
-        self._state = "exited"
+            try:
+                await self._consume_pending_outer_cancellation()
+            finally:
+                try:
+                    await self._close_client_session()
+                except Exception:  # noqa: BLE001
+                    shutdown_failed = True
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await self._close_outgoing_stream()
+                    except Exception:  # noqa: BLE001
+                        shutdown_failed = True
+                    try:
+                        with anyio.fail_after(_SHUTDOWN_TIMEOUT_SECONDS):
+                            await self._require_event(self._stdin_done).wait()
+                            self._child_exit_code = await self._require_process().wait()
+                            await self._require_event(self._stdout_done).wait()
+                            await self._require_event(self._stderr_done).wait()
+                    except Exception:  # noqa: BLE001
+                        shutdown_failed = True
+                        self._close_parent_stdin()
+                        self._child_exit_code = await self._terminate_and_reap_same_child()
+                    self._state = "exited"
+                await self._finalize_resources()
+        finally:
+            if self._state != "exited":
+                with anyio.CancelScope(shield=True):
+                    self._close_parent_stdin()
+                    self._child_exit_code = await self._terminate_and_reap_same_child()
+                    self._state = "exited"
+        await checkpoint()
         if self._pump_failure == "protocol_failed":
             raise ProcessSessionError("protocol_failed")
         if shutdown_failed or self._pump_failure == "shutdown_failed":
@@ -520,18 +547,34 @@ class OneShotProcessSession(ProcessMatrixSession):
         if self._state in {"new", "closing", "exited"}:
             raise ProcessSessionError("invalid_transition")
         self._state = "closing"
+        self._shield_owned_task_group()
         cleanup_failed = False
         try:
-            await self._close_client_session()
-            await self._close_outgoing_stream()
-        except Exception:  # noqa: BLE001
-            cleanup_failed = True
-        self._close_parent_stdin()
-        self._child_exit_code = await self._terminate_and_reap_same_child()
-        if self._child_exit_code is None:
-            cleanup_failed = True
-        await self._finalize_resources()
-        self._state = "exited"
+            try:
+                await self._consume_pending_outer_cancellation()
+            finally:
+                try:
+                    await self._close_client_session()
+                except Exception:  # noqa: BLE001
+                    cleanup_failed = True
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await self._close_outgoing_stream()
+                    except Exception:  # noqa: BLE001
+                        cleanup_failed = True
+                    self._close_parent_stdin()
+                    self._child_exit_code = await self._terminate_and_reap_same_child()
+                    if self._child_exit_code is None:
+                        cleanup_failed = True
+                    self._state = "exited"
+                await self._finalize_resources()
+        finally:
+            if self._state != "exited":
+                with anyio.CancelScope(shield=True):
+                    self._close_parent_stdin()
+                    self._child_exit_code = await self._terminate_and_reap_same_child()
+                    self._state = "exited"
+        await checkpoint()
         if cleanup_failed or self._pump_failure == "shutdown_failed":
             raise ProcessSessionError("shutdown_failed")
         if self._pump_failure == "protocol_failed":
@@ -676,9 +719,9 @@ class OneShotProcessSession(ProcessMatrixSession):
     async def _close_client_session(self) -> None:
         if not self._client_session_entered:
             return
-        self._client_session_entered = False
         client_session = self._require_client_session()
         await client_session.__aexit__(None, None, None)
+        self._client_session_entered = False
 
     async def _close_outgoing_stream(self) -> None:
         if self._outgoing_send is not None:
@@ -713,6 +756,17 @@ class OneShotProcessSession(ProcessMatrixSession):
         if self._process is not None:
             self._child_exit_code = await self._terminate_and_reap_same_child()
         await self._finalize_resources()
+
+    def _shield_owned_task_group(self) -> None:
+        if self._task_group is not None and self._task_group_entered:
+            self._task_group.cancel_scope.shield = True
+
+    @staticmethod
+    async def _consume_pending_outer_cancellation() -> None:
+        try:
+            await checkpoint()
+        except anyio.get_cancelled_exc_class():
+            pass
 
     async def _finalize_resources(self) -> None:
         self._close_parent_stdin()
@@ -825,6 +879,7 @@ def _pipe_identity(parent_descriptor: int, child_descriptor: int) -> PipeIdentit
         or (sys.platform != "darwin" and not same_kernel_identity)
     ):
         raise OSError("pipe_identity_invalid")
+    _probe_and_drain_pipe_pair(parent_descriptor, child_descriptor)
     return PipeIdentity(
         endpoint_kind="fifo",
         parent_device=parent_stat.st_dev,
@@ -834,9 +889,117 @@ def _pipe_identity(parent_descriptor: int, child_descriptor: int) -> PipeIdentit
     )
 
 
-def _require_distinct_pipe_pairs(pair_ids: set[tuple[int, int]]) -> None:
-    if len(pair_ids) != _PIPE_PAIR_COUNT:
+def _probe_and_drain_pipe_pair(first_descriptor: int, second_descriptor: int) -> None:
+    first_blocking = os.get_blocking(first_descriptor)
+    second_blocking = os.get_blocking(second_descriptor)
+    try:
+        os.set_blocking(first_descriptor, False)
+        os.set_blocking(second_descriptor, False)
+        _exchange_and_verify_pipe_probe(first_descriptor, second_descriptor)
+    except (OSError, ValueError):
+        raise OSError("pipe_identity_invalid") from None
+    finally:
+        with suppress(OSError):
+            os.set_blocking(first_descriptor, first_blocking)
+        with suppress(OSError):
+            os.set_blocking(second_descriptor, second_blocking)
+
+
+def _exchange_and_verify_pipe_probe(first_descriptor: int, second_descriptor: int) -> None:
+    first_writes = _descriptor_accepts_write(first_descriptor)
+    second_writes = _descriptor_accepts_write(second_descriptor)
+    if first_writes == second_writes:
         raise OSError("pipe_identity_invalid")
+    writer, reader = (
+        (first_descriptor, second_descriptor)
+        if first_writes
+        else (second_descriptor, first_descriptor)
+    )
+    deadline = time.monotonic() + _PIPE_PROBE_TIMEOUT_SECONDS
+    _write_pipe_probe(writer, deadline)
+    if _read_pipe_probe(reader, deadline) != _PIPE_PROBE_BYTES:
+        raise OSError("pipe_identity_invalid")
+    try:
+        os.read(reader, 1)
+    except BlockingIOError:
+        return
+    raise OSError("pipe_identity_invalid")
+
+
+def _descriptor_accepts_write(descriptor: int) -> bool:
+    try:
+        os.write(descriptor, b"")
+    except OSError:
+        return False
+    return True
+
+
+def _write_pipe_probe(descriptor: int, deadline: float) -> None:
+    offset = 0
+    while offset < len(_PIPE_PROBE_BYTES):
+        _wait_for_pipe_descriptor(descriptor, deadline, writable=True)
+        try:
+            written = os.write(descriptor, _PIPE_PROBE_BYTES[offset:])
+        except BlockingIOError:
+            continue
+        if written <= 0:
+            raise OSError("pipe_identity_invalid")
+        offset += written
+
+
+def _read_pipe_probe(descriptor: int, deadline: float) -> bytes:
+    received = bytearray()
+    while len(received) < len(_PIPE_PROBE_BYTES):
+        _wait_for_pipe_descriptor(descriptor, deadline, writable=False)
+        try:
+            chunk = os.read(descriptor, len(_PIPE_PROBE_BYTES) - len(received))
+        except BlockingIOError:
+            continue
+        if not chunk:
+            raise OSError("pipe_identity_invalid")
+        received.extend(chunk)
+    return bytes(received)
+
+
+def _wait_for_pipe_descriptor(descriptor: int, deadline: float, *, writable: bool) -> None:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise OSError("pipe_identity_invalid")
+    readable_descriptors = [] if writable else [descriptor]
+    writable_descriptors = [descriptor] if writable else []
+    readable, ready_to_write, _ = select.select(
+        readable_descriptors,
+        writable_descriptors,
+        [],
+        remaining,
+    )
+    if not readable and not ready_to_write:
+        raise OSError("pipe_identity_invalid")
+
+
+def _require_distinct_pipe_pairs(identities: tuple[PipeIdentity, ...]) -> None:
+    complete_pair_ids = {
+        (
+            identity.parent_device,
+            identity.parent_inode,
+            identity.child_device,
+            identity.child_inode,
+        )
+        for identity in identities
+    }
+    if len(complete_pair_ids) != _PIPE_PAIR_COUNT:
+        raise OSError("pipe_identity_invalid")
+    if sys.platform == "darwin":
+        endpoint_ids = {
+            endpoint
+            for identity in identities
+            for endpoint in (
+                (identity.parent_device, identity.parent_inode),
+                (identity.child_device, identity.child_inode),
+            )
+        }
+        if len(endpoint_ids) != _PIPE_PAIR_COUNT * 2:
+            raise OSError("pipe_identity_invalid")
 
 
 def _require_distinct_child_pid(child_pid: int, coordinator_pid: int) -> None:

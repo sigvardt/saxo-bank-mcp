@@ -1,14 +1,20 @@
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
+from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Final, cast
 
+import anyio
 import pytest
 
+from saxo_bank_mcp import analytics_source_process
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_process import (
     CHILD_BOOTSTRAP,
@@ -24,6 +30,8 @@ from saxo_bank_mcp.analytics_source_process import (
     RegisteredResponseMode,
     build_child_launch_config,
 )
+
+_NONZERO_FIXTURE_EXIT_CODE: Final = 17
 
 
 @pytest.fixture
@@ -77,6 +85,29 @@ def stdio_fixture_config(tmp_path: Path) -> ChildLaunchConfig:
     )
 
 
+def _fixture_scenario(config: ChildLaunchConfig, scenario: str) -> ChildLaunchConfig:
+    return replace(config, command=(*config.command[:-1], scenario))
+
+
+async def _emergency_cleanup_cancelled_session(session: OneShotProcessSession) -> None:
+    """Keep an intended RED cancellation failure from leaking its fixture child."""
+    task_group = session._task_group  # noqa: SLF001
+    if task_group is not None:
+        task_group.cancel_scope.shield = True
+    if session._client_session is not None and session._mcp_session_count == 1:  # noqa: SLF001
+        session._client_session_entered = True  # noqa: SLF001
+        with suppress(BaseException):
+            await session._close_client_session()  # noqa: SLF001
+    with suppress(BaseException):
+        await session._close_outgoing_stream()  # noqa: SLF001
+    session._close_parent_stdin()  # noqa: SLF001
+    with suppress(BaseException):
+        session._child_exit_code = await session._terminate_and_reap_same_child()  # noqa: SLF001
+    with suppress(BaseException):
+        await session._finalize_resources()  # noqa: SLF001
+    session._state = "exited"  # noqa: SLF001
+
+
 @pytest.mark.anyio
 async def test_process_session_spawns_one_distinct_child_over_stdio(
     stdio_fixture_config: ChildLaunchConfig,
@@ -112,6 +143,122 @@ async def test_process_session_cannot_initialize_connect_or_spawn_twice(
     facts = await session.close()
     assert facts.reconnect_count == 0
     assert facts.restart_count == 0
+
+
+@pytest.mark.anyio
+async def test_process_session_close_cancellation_reaps_child_and_exits(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(stdio_fixture_config)
+    cancelled = False
+    state_after_cancellation = ""
+    child_running_after_cancellation = True
+    with anyio.CancelScope() as caller_scope:
+        await session.spawn()
+        await session.initialize()
+        await session.list_tools_once()
+        process = session._process  # noqa: SLF001
+        assert process is not None
+        caller_scope.cancel()
+        try:
+            await session.close()
+        except anyio.get_cancelled_exc_class():
+            cancelled = True
+        finally:
+            state_after_cancellation = session._state  # noqa: SLF001
+            child_running_after_cancellation = process.returncode is None
+            if state_after_cancellation != "exited" or child_running_after_cancellation:
+                await _emergency_cleanup_cancelled_session(session)
+
+    assert cancelled
+    assert state_after_cancellation == "exited"
+    assert not child_running_after_cancellation
+
+
+@pytest.mark.anyio
+async def test_process_session_abort_cancellation_reaps_child_and_exits(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(stdio_fixture_config)
+    cancelled = False
+    state_after_cancellation = ""
+    child_running_after_cancellation = True
+    with anyio.CancelScope() as caller_scope:
+        await session.spawn()
+        process = session._process  # noqa: SLF001
+        assert process is not None
+        caller_scope.cancel()
+        try:
+            await session.abort()
+        except anyio.get_cancelled_exc_class():
+            cancelled = True
+        finally:
+            state_after_cancellation = session._state  # noqa: SLF001
+            child_running_after_cancellation = process.returncode is None
+            if state_after_cancellation != "exited" or child_running_after_cancellation:
+                await _emergency_cleanup_cancelled_session(session)
+
+    assert cancelled
+    assert state_after_cancellation == "exited"
+    assert not child_running_after_cancellation
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("scenario", "initialize_reason", "shutdown_reason", "exit_code"),
+    [
+        ("early_exit", "initialize_failed", "shutdown_failed", 0),
+        ("malformed", "protocol_failed", "protocol_failed", None),
+        ("truncated", "protocol_failed", "protocol_failed", 0),
+    ],
+)
+async def test_process_session_failure_fixtures_are_reaped(
+    stdio_fixture_config: ChildLaunchConfig,
+    scenario: str,
+    initialize_reason: str,
+    shutdown_reason: str,
+    exit_code: int | None,
+) -> None:
+    session = OneShotProcessSession(_fixture_scenario(stdio_fixture_config, scenario))
+    await session.spawn()
+    process = session._process  # noqa: SLF001
+    assert process is not None
+    with pytest.raises(ProcessSessionError, match=initialize_reason):
+        await session.initialize()
+    with pytest.raises(ProcessSessionError, match=shutdown_reason):
+        await session.abort()
+    assert process.returncode is not None
+    if exit_code is not None:
+        assert process.returncode == exit_code
+    assert session._state == "exited"  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_process_session_nonzero_fixture_is_reaped(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(_fixture_scenario(stdio_fixture_config, "nonzero"))
+    await session.spawn()
+    await session.initialize()
+    await session.list_tools_once()
+    process = session._process  # noqa: SLF001
+    assert process is not None
+    with pytest.raises(ProcessSessionError, match="nonzero_exit"):
+        await session.close()
+    assert process.returncode == _NONZERO_FIXTURE_EXIT_CODE
+    assert session._state == "exited"  # noqa: SLF001
+
+
+def test_pipe_identity_rejects_mismatched_endpoints() -> None:
+    first_read, first_write = os.pipe()
+    second_read, second_write = os.pipe()
+    try:
+        with pytest.raises(OSError, match="pipe_identity_invalid"):
+            analytics_source_process._pipe_identity(first_write, second_read)  # noqa: SLF001
+    finally:
+        for descriptor in (first_read, first_write, second_read, second_write):
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def test_child_command_uses_exact_installed_interpreter_and_isolated_bootstrap(
