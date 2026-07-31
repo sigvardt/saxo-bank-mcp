@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import stat
 import tomllib
 import typing
@@ -26,17 +27,26 @@ _SHA256_LENGTH = 64
 def test_installed_runner_binds_catalog_and_harness_identity() -> None:
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     scripts = project["project"]["scripts"]
-    assert scripts["saxo-bank-analytics-source-matrix"] == (
-        "saxo_bank_mcp.qa_analytics_source_matrix:main"
-    )
+    assert "saxo-bank-analytics-source-matrix" not in scripts
+    shared = project["tool"]["hatch"]["build"]["targets"]["wheel"]["shared-scripts"]
+    assert shared == {
+        "scripts/saxo-bank-analytics-source-matrix": ("saxo-bank-analytics-source-matrix"),
+        "scripts/saxo-bank-analytics-source-matrix-generate": (
+            "saxo-bank-analytics-source-matrix-generate"
+        ),
+    }
 
     identity_loader = getattr(matrix_module, "source_matrix_candidate_identity", None)
     assert identity_loader is not None
-    identity = identity_loader()
-    assert len(identity.source_contract_catalog_sha256) == _SHA256_LENGTH
-    assert len(identity.harness_build_sha256) == _SHA256_LENGTH
-    assert len(identity.candidate_identity_sha256) == _SHA256_LENGTH
-    assert identity.source_contract_catalog_sha256 != identity.harness_build_sha256
+    manifest = json.loads(
+        Path("data/analytics/source_matrix_candidate.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert len(manifest["source_contract_catalog_sha256"]) == _SHA256_LENGTH
+    assert len(manifest["harness_build_sha256"]) == _SHA256_LENGTH
+    assert len(manifest["candidate_identity_sha256"]) == _SHA256_LENGTH
+    assert manifest["source_contract_catalog_sha256"] != manifest["harness_build_sha256"]
 
 
 def test_candidate_guard_uses_full_identity_and_fixed_state_location(

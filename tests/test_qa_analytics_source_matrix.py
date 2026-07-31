@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import stat
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -585,6 +586,69 @@ async def test_matrix_claims_after_readiness_and_uses_safe_receipts_for_all_sour
     assert not any(
         tool == "saxo_call_registered_endpoint" for tool, _arguments in changed_state.calls
     )
+
+
+@pytest.mark.anyio
+async def test_execution_closure_is_revalidated_after_claim_and_around_every_mcp_call() -> None:
+    post_claim_state = FakeMatrixState()
+    search_projection = tuple(sys.path)
+
+    def mutate_after_claim() -> bool:
+        sys.path.append("round5-post-claim-root")
+        return True
+
+    def validate_post_claim() -> bool:
+        return tuple(sys.path) == search_projection
+
+    try:
+        post_claim_receipt = await run_analytics_source_matrix(
+            _matrix_server(post_claim_state),
+            env=_sim_env(),
+            fixtures=_fixtures(),
+            candidate_identity=_identity(),
+            captured_at=CAPTURED_AT,
+            claim_source_execution=mutate_after_claim,
+            validate_source_execution=validate_post_claim,
+        )
+    finally:
+        sys.path[:] = search_projection
+
+    assert post_claim_receipt.status == "failed"
+    assert post_claim_receipt.reason == "candidate_execution_closure_changed"
+    assert post_claim_receipt.source_execution_claimed is True
+    assert not any(
+        tool == "saxo_call_registered_endpoint" for tool, _arguments in post_claim_state.calls
+    )
+
+    between_calls_state = FakeMatrixState()
+
+    def validate_between_calls() -> bool:
+        source_calls = sum(
+            tool == "saxo_call_registered_endpoint"
+            and arguments.get("response_mode") == "analytics_contract_receipt"
+            for tool, arguments in between_calls_state.calls
+        )
+        return source_calls == 0
+
+    between_calls_receipt = await run_analytics_source_matrix(
+        _matrix_server(between_calls_state),
+        env=_sim_env(),
+        fixtures=_fixtures(),
+        candidate_identity=_identity(),
+        captured_at=CAPTURED_AT,
+        claim_source_execution=lambda: True,
+        validate_source_execution=validate_between_calls,
+    )
+    source_calls = [
+        arguments
+        for tool, arguments in between_calls_state.calls
+        if tool == "saxo_call_registered_endpoint"
+        and arguments.get("response_mode") == "analytics_contract_receipt"
+    ]
+    assert between_calls_receipt.status == "failed"
+    assert between_calls_receipt.reason == "candidate_execution_closure_changed"
+    assert between_calls_receipt.source_execution_claimed is True
+    assert len(source_calls) == 1
 
 
 @pytest.mark.anyio

@@ -1,191 +1,43 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import configparser
-import hashlib
-import io
-import json
+import os
 import sys
-import zipfile
+import sysconfig
 from pathlib import Path
-
-from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
-from saxo_bank_mcp.qa_analytics_source_matrix import (
-    _dependency_distributions,  # pyright: ignore[reportPrivateUsage]
-    _runtime_identity,  # pyright: ignore[reportPrivateUsage]
-    _source_candidate_files,  # pyright: ignore[reportPrivateUsage]
-)
-
-_CANDIDATE_RESOURCE = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
-_SOURCE_EXCLUSION = "data/analytics/source_matrix_candidate.json"
-_EXPECTED_INSTALLER = "uv"
-
-
-def _digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode(),
-    ).hexdigest()
-
-
-def _source_path_for_wheel_path(name: str) -> str | None:
-    resource_paths = {
-        "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json": (
-            "data/analytics/source_contracts.json"
-        ),
-        "saxo_bank_mcp/_endpoint_registry/openapi_inventory.json": (
-            "data/saxo/openapi_inventory.json"
-        ),
-    }
-    if name in resource_paths:
-        return resource_paths[name]
-    migration_prefix = "saxo_bank_mcp/_analytics_migrations/"
-    if name.startswith(migration_prefix):
-        return "data/analytics/migrations/" + name.removeprefix(migration_prefix)
-    package_prefix = "saxo_bank_mcp/"
-    if (
-        name.startswith(package_prefix)
-        and not name.startswith(
-            "saxo_bank_mcp/_analytics_",
-        )
-        and not name.startswith("saxo_bank_mcp/_endpoint_registry/")
-    ):
-        return "src/" + name
-    return None
-
-
-def _installed_files(
-    wheel: Path,
-    source_files: dict[str, str],
-) -> tuple[dict[str, str], tuple[str, ...], dict[str, str], str]:
-    with zipfile.ZipFile(wheel) as archive:
-        names = tuple(
-            sorted(info.filename for info in archive.infolist() if not info.is_dir()),
-        )
-        records = tuple(name for name in names if name.endswith(".dist-info/RECORD"))
-        if len(records) != 1 or _CANDIDATE_RESOURCE not in names:
-            raise ValueError("wheel does not have the expected candidate and RECORD")
-        exclusions = (_CANDIDATE_RESOURCE, records[0])
-        installed = {
-            name: hashlib.sha256(archive.read(name)).hexdigest()
-            for name in names
-            if name not in exclusions
-        }
-        projected: dict[str, str] = {}
-        for name in names:
-            if name in exclusions or ".dist-info/" in name:
-                continue
-            source_name = _source_path_for_wheel_path(name)
-            if source_name is None or source_files.get(source_name) != installed.get(name):
-                raise ValueError("wheel does not match the source execution projection")
-            projected[source_name] = name
-        expected_projected = {
-            name
-            for name in source_files
-            if name.startswith(
-                ("src/saxo_bank_mcp/", "data/analytics/migrations/"),
-            )
-            or name
-            in {
-                "data/analytics/source_contracts.json",
-                "data/saxo/openapi_inventory.json",
-            }
-        }
-        if set(projected) != expected_projected:
-            raise ValueError("wheel source projection is incomplete")
-        entry_points_name = next(
-            (name for name in names if name.endswith(".dist-info/entry_points.txt")),
-            None,
-        )
-        if entry_points_name is None:
-            raise ValueError("wheel console entry point projection is unavailable")
-        parser = configparser.ConfigParser()
-        parser.read_file(
-            io.StringIO(archive.read(entry_points_name).decode("utf-8")),
-        )
-        console_scripts = dict(parser.items("console_scripts"))
-    return installed, exclusions, console_scripts, _digest(projected)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Seal the complete analytics source-matrix candidate closure.",
-    )
-    parser.add_argument("--wheel", required=True, type=Path)
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path("data/analytics/source_matrix_candidate.json"),
-    )
-    arguments = parser.parse_args()
     repository_root = Path(__file__).resolve().parents[1]
-    source_files = _source_candidate_files(repository_root)
-    (
-        installed_files,
-        installed_exclusions,
-        console_scripts,
-        source_wheel_projection_sha256,
-    ) = _installed_files(
-        arguments.wheel.resolve(strict=True),
-        source_files,
-    )
-    runtime_identity = _runtime_identity().model_dump(mode="json")
-    dependency_distributions = {
-        name: item.model_dump(mode="json") for name, item in _dependency_distributions().items()
+    site_packages = sysconfig.get_path("purelib")
+    cache_prefix = Path(sys.prefix) / ".saxo-bank-mcp-pycache"
+    arguments = [
+        sys.executable,
+        "-I",
+        "-B",
+        "-S",
+        "-X",
+        f"pycache_prefix={cache_prefix}",
+        "-c",
+        (
+            "import os,runpy,sys;"
+            "os.makedirs(sys.pycache_prefix,mode=0o700,exist_ok=True);"
+            "sys.path[:0]=[sys.argv.pop(1),sys.argv.pop(1)];"
+            "runpy.run_module("
+            "'saxo_bank_mcp.generate_analytics_source_matrix_candidate',"
+            "run_name='__main__',alter_sys=True)"
+        ),
+        str(repository_root / "src"),
+        site_packages,
+        "--repository-root",
+        str(repository_root),
+        *sys.argv[1:],
+    ]
+    environment = {
+        **os.environ,
+        "SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER": "dev",
     }
-    installed_metadata_projection = {
-        "INSTALLER": hashlib.sha256(_EXPECTED_INSTALLER.encode()).hexdigest(),
-    }
-    source_build_sha256 = _digest(source_files)
-    installed_build_sha256 = _digest(installed_files)
-    source_exclusions = (_SOURCE_EXCLUSION,)
-    harness_build_sha256 = _digest(
-        {
-            "console_scripts": console_scripts,
-            "dependency_distributions": dependency_distributions,
-            "installed_build_sha256": installed_build_sha256,
-            "installed_exclusions": installed_exclusions,
-            "installed_metadata_projection": installed_metadata_projection,
-            "runtime_identity": runtime_identity,
-            "schema_version": "4",
-            "source_build_sha256": source_build_sha256,
-            "source_exclusions": source_exclusions,
-            "source_wheel_projection_sha256": source_wheel_projection_sha256,
-        },
-    )
-    catalog_sha256 = source_contract_catalog_sha256()
-    candidate_identity_sha256 = _digest(
-        {
-            "harness_build_sha256": harness_build_sha256,
-            "source_contract_catalog_sha256": catalog_sha256,
-        },
-    )
-    payload = {
-        "candidate_identity_sha256": candidate_identity_sha256,
-        "console_scripts": console_scripts,
-        "dependency_distributions": dependency_distributions,
-        "harness_build_sha256": harness_build_sha256,
-        "installed_build_sha256": installed_build_sha256,
-        "installed_exclusions": installed_exclusions,
-        "installed_files": installed_files,
-        "installed_metadata_projection": installed_metadata_projection,
-        "runtime_identity": runtime_identity,
-        "schema_version": "4",
-        "source_build_sha256": source_build_sha256,
-        "source_contract_catalog_sha256": catalog_sha256,
-        "source_exclusions": source_exclusions,
-        "source_files": source_files,
-        "source_wheel_projection_sha256": source_wheel_projection_sha256,
-    }
-    arguments.out.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    sys.stdout.write(candidate_identity_sha256 + "\n")
-    return 0
+    os.execve(sys.executable, arguments, environment)  # noqa: S606
 
 
 if __name__ == "__main__":

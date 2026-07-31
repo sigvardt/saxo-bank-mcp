@@ -1776,6 +1776,44 @@ Drive the actual FastMCP server and every new `analysis_kind` against Saxo SIM:
 Manifest validation, mocks, fixture replay, or a dry run cannot be reported as executable SIM
 proof.
 
+#### Official isolated source-matrix invocation
+
+The analytics source matrix is an installed-only command. A direct source import is a development
+surface and cannot claim or publish official evidence. Prepare each candidate in a new dedicated
+runtime from the lock-synchronized seed environment:
+
+```bash
+umask 077
+uv build --offline --wheel --out-dir dist/bootstrap
+.venv/bin/python scripts/prepare_analytics_source_matrix_runtime.py \
+  --runtime /absolute/private/path/source-matrix-bootstrap \
+  --wheel dist/bootstrap/saxo_bank_mcp-0.1.0-py3-none-any.whl
+/absolute/private/path/source-matrix-bootstrap/bin/saxo-bank-analytics-source-matrix-generate \
+  --repository-root "$PWD" \
+  --wheel dist/bootstrap/saxo_bank_mcp-0.1.0-py3-none-any.whl \
+  --out data/analytics/source_matrix_candidate.json
+uv build --offline --wheel --out-dir dist/final
+.venv/bin/python scripts/prepare_analytics_source_matrix_runtime.py \
+  --runtime /absolute/private/path/source-matrix-final \
+  --wheel dist/final/saxo_bank_mcp-0.1.0-py3-none-any.whl
+```
+
+The preparation command refuses an existing target, verifies the offline lock and sealed dependency
+seed, copies only the complete recorded runtime dependency closure, installs the wheel without
+dependency resolution, removes group and other permissions, and refuses Python cache artifacts.
+The installed launchers establish `-I -B -S`, a private empty cache prefix, and the fixed runtime
+site directory before importing `saxo_bank_mcp`. These local checks require no Saxo credentials:
+
+```bash
+/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --help
+/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --identity
+/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --preflight
+```
+
+Run the installed command without a mode flag only for the explicitly authorized one-shot SIM
+source exercise. Generate the manifest once more from the final runtime into a temporary file and
+require byte-for-byte equality before treating the candidate as sealed.
+
 ### Stage 6: Artifact and agent proof
 
 For every user-facing signature experience:

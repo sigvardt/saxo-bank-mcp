@@ -105,44 +105,39 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
     )
     assert build.returncode == 0, build.stderr
     wheel = next(wheel_dir.glob("*.whl"))
-    installed = tmp_path / "installed"
-    install = subprocess.run(
+    runtime = tmp_path / "runtime"
+    prepared = subprocess.run(
         (
-            uv,
-            "pip",
-            "install",
-            "--offline",
-            "--no-deps",
-            "--target",
-            str(installed),
+            sys.executable,
+            str(Path(__file__).parents[1] / "scripts/prepare_analytics_source_matrix_runtime.py"),
+            "--runtime",
+            str(runtime),
+            "--wheel",
             str(wheel),
+            "--uv",
+            uv,
         ),
+        cwd=Path(__file__).parents[1],
         check=False,
         capture_output=True,
         text=True,
     )
-    assert install.returncode == 0, install.stderr
+    assert prepared.returncode == 0, prepared.stderr
     command = (
-        sys.executable,
-        "-c",
-        (
-            "from saxo_bank_mcp.qa_analytics_source_matrix import "
-            "source_matrix_candidate_identity;"
-            "print(source_matrix_candidate_identity().candidate_identity_sha256)"
-        ),
+        str(runtime / "bin" / "saxo-bank-analytics-source-matrix"),
+        "--identity",
     )
-    environment = {**os.environ, "PYTHONPATH": str(installed)}
     baseline = subprocess.run(
         command,
         cwd=tmp_path,
-        env=environment,
         check=False,
         capture_output=True,
         text=True,
     )
     assert baseline.returncode == 0, baseline.stderr
 
-    dist_info = next(installed.glob("*.dist-info"))
+    installed = runtime / "lib" / "python3.12" / "site-packages"
+    dist_info = next(installed.glob("saxo_bank_mcp-*.dist-info"))
     targets = (
         installed / "saxo_bank_mcp" / "server.py",
         installed / "saxo_bank_mcp" / "endpoint_registry.py",
@@ -152,7 +147,7 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
         installed / "saxo_bank_mcp" / "_analytics_source_contracts" / "source_contracts.json",
         dist_info / "entry_points.txt",
         dist_info / "METADATA",
-        installed / "bin" / "saxo-bank-analytics-source-matrix",
+        runtime / "bin" / "saxo-bank-analytics-source-matrix",
     )
     for target in targets:
         original = target.read_bytes()
@@ -160,7 +155,6 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
         tampered = subprocess.run(
             command,
             cwd=tmp_path,
-            env=environment,
             check=False,
             capture_output=True,
             text=True,

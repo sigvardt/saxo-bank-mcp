@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+umask 077
+
+case $0 in
+    */*) launcher_dir=${0%/*} ;;
+    *) launcher_dir=. ;;
+esac
+launcher_dir=$(CDPATH= cd -P -- "$launcher_dir" && pwd -P)
+runtime_root=$(CDPATH= cd -P -- "$launcher_dir/.." && pwd -P)
+python="$launcher_dir/python3.12"
+site_packages="$runtime_root/lib/python3.12/site-packages"
+cache_prefix="$runtime_root/.saxo-bank-mcp-pycache"
+
+if [ ! -x "$python" ] || [ ! -d "$site_packages" ]; then
+    echo "candidate generation requires its complete CPython 3.12 isolated runtime" >&2
+    exit 1
+fi
+
+SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER=1
+export SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER
+exec "$python" -I -B -S -X "pycache_prefix=$cache_prefix" -c 'import os,runpy,stat,sys;p=sys.pycache_prefix;os.mkdir(p,0o700) if not os.path.exists(p) else None;m=os.lstat(p);(stat.S_ISDIR(m.st_mode) and not stat.S_ISLNK(m.st_mode) and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o700 and not os.listdir(p)) or (_ for _ in ()).throw(SystemExit("unsafe isolated cache prefix"));site=sys.argv.pop(1);module=sys.argv.pop(1);sys.path.insert(0,site);runpy.run_module(module,run_name="__main__",alter_sys=True)' "$site_packages" saxo_bank_mcp.generate_analytics_source_matrix_candidate "$@"

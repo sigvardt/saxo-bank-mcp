@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import stat
 import sys
 import sysconfig
+import zipimport
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
+from types import CellType
 from typing import Final, Literal, Self, cast
 from uuid import uuid4
 
@@ -64,19 +67,31 @@ _HTTP_STATUS_RATE_LIMITED: Final = 429
 _MAX_CAPABILITY_TEXT_LENGTH: Final = 80
 _OWNER_DIRECTORY_MODE: Final = 0o700
 _OWNER_FILE_MODE: Final = 0o600
+_OWNER_ONLY_MASK: Final = 0o077
 _OWNER_COMMON_WRITE_MASK: Final = 0o022
 _EXACT_DIRECTORY_COMPONENT_INDEX: Final = 2
 _SELF_REFERENCE_EXCLUSION_COUNT: Final = 2
 _ENTRYPOINT_TARGET_PART_COUNT: Final = 2
+_PORTABLE_ENTRYPOINT_MIN_LINES: Final = 4
+_IMPORT_STATE_MAX_DEPTH: Final = 5
+_IMPORT_CLOSURE_CELL_COUNT: Final = 2
+_IMPORT_LOADER_DETAIL_COUNT: Final = 2
 _INSTALLER_GENERATED_METADATA: Final = frozenset(
     {"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"},
 )
 _EXPECTED_INSTALLER: Final = "uv"
-_RUNTIME_ARTIFACT_SUFFIXES: Final = frozenset(
-    {".py", ".pyi", ".so", ".dylib", ".dll", ".pyd"},
+_OFFICIAL_LAUNCHER_ENV: Final = "SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER"
+_PYTHON_SOURCE_SUFFIXES: Final = frozenset(importlib.machinery.SOURCE_SUFFIXES)
+_PYTHON_BYTECODE_SUFFIXES: Final = frozenset(
+    {*importlib.machinery.BYTECODE_SUFFIXES, ".pyo"},
 )
-_PYTHON_BYTECODE_SUFFIXES: Final = frozenset({".pyc", ".pyo"})
-_IMPORTABLE_ARTIFACT_SUFFIXES: Final = _RUNTIME_ARTIFACT_SUFFIXES | _PYTHON_BYTECODE_SUFFIXES
+_PYTHON_EXTENSION_SUFFIXES: Final = frozenset(importlib.machinery.EXTENSION_SUFFIXES)
+_IMPORTABLE_ARTIFACT_SUFFIXES: Final = (
+    _PYTHON_SOURCE_SUFFIXES | _PYTHON_BYTECODE_SUFFIXES | _PYTHON_EXTENSION_SUFFIXES
+)
+_RUNTIME_ARTIFACT_SUFFIXES: Final = _IMPORTABLE_ARTIFACT_SUFFIXES | frozenset(
+    {".pyi", ".dylib", ".dll", ".pyd"},
+)
 _RUNTIME_TREE_EXCLUDED_PARTS: Final = frozenset(
     {"dist-packages", "site-packages"},
 )
@@ -99,7 +114,14 @@ _PYTHON_BUILD_CONFIG_KEYS: Final = (
 )
 _SOURCE_RUNNERS: Final = (
     "scripts/generate_analytics_source_matrix_candidate.py",
+    "scripts/prepare_analytics_source_matrix_runtime.py",
     "scripts/run_analytics_source_matrix.py",
+    "scripts/saxo-bank-analytics-source-matrix",
+    "scripts/saxo-bank-analytics-source-matrix-generate",
+)
+_OFFICIAL_LAUNCHER_NAMES: Final = (
+    "saxo-bank-analytics-source-matrix",
+    "saxo-bank-analytics-source-matrix-generate",
 )
 _SOURCE_RECEIPT_COMMON_FIELDS: Final = frozenset(
     {
@@ -210,6 +232,10 @@ type PaginationState = Literal[
 type HistoryState = Literal["present", "absent", "unverified"]
 
 
+class _ExecutionClosureChangedError(RuntimeError):
+    """Internal value-free signal that the claimed execution closure changed."""
+
+
 @dataclass(frozen=True, slots=True)
 class SourceMatrixFixtures:
     account_key: str = ""
@@ -249,6 +275,8 @@ class _RuntimeIdentity(BaseModel):
     shared_runtime_file_count: int = Field(ge=0)
     startup_configuration_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     startup_configuration_file_count: int = Field(ge=0)
+    interpreter_policy_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    importable_suffixes: tuple[str, ...]
 
 
 class _DependencyDistribution(BaseModel):
@@ -631,6 +659,7 @@ class AnalyticsSourceMatrixReceipt(BaseModel):
     live_events: int = Field(ge=0)
     live_mutation_calls: Literal[0] = 0
     errors: tuple[str, ...]
+    execution_closure_checkpoints: tuple[str, ...] = ()
 
 
 def prove_sim_environment(env: Mapping[str, str]) -> EnvironmentProof:
@@ -708,6 +737,21 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913,
             "source_plan_invalid",
         )
     errors: list[str] = []
+    execution_checkpoints: list[str] = []
+
+    def closure_valid(label: str) -> bool:
+        execution_checkpoints.append(label)
+        if validate_source_execution is None:
+            return True
+        try:
+            return validate_source_execution() is True
+        except Exception:  # noqa: BLE001 - every callback failure closes execution
+            return False
+
+    def require_closure(label: str) -> None:
+        if not closure_valid(label):
+            raise _ExecutionClosureChangedError
+
     async with Client(server) as client:
         auth = await _call_tool(client, "saxo_auth_status", {})
         auth_status = _auth_receipt_status(auth)
@@ -777,13 +821,7 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913,
                 entitlement_status=entitlement_status,
                 reason="request_ledger_unavailable",
             )
-        try:
-            execution_closure_valid = (
-                validate_source_execution is None or validate_source_execution()
-            )
-        except Exception:  # noqa: BLE001 - callback failure must refuse before the claim
-            execution_closure_valid = False
-        if not execution_closure_valid:
+        if not closure_valid("readiness_to_source"):
             return _readiness_refusal(
                 candidate_identity,
                 capture_time,
@@ -803,68 +841,99 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913,
                 entitlement_status=entitlement_status,
                 reason="candidate_already_claimed",
             )
-        before = await _state_fingerprint(client, registry)
-        if before is None:
-            errors.append("state_fingerprint_unverified")
-        source_receipts_list: list[SourceContractReceipt] = []
-        exclusion_reasons = {
-            exclusion.contract_id: exclusion.reason for exclusion in source_plan.exclusions
-        }
-        for contract in contracts.values():
-            request = requests.get(contract.contract_id)
-            if request is None:
+        try:
+            require_closure("after_claim")
+            before = await _state_fingerprint(
+                client,
+                registry,
+                checkpoint=require_closure,
+                phase="before_state",
+            )
+            if before is None:
+                errors.append("state_fingerprint_unverified")
+            source_receipts_list: list[SourceContractReceipt] = []
+            exclusion_reasons = {
+                exclusion.contract_id: exclusion.reason for exclusion in source_plan.exclusions
+            }
+            for contract in contracts.values():
+                request = requests.get(contract.contract_id)
+                if request is None:
+                    source_receipts_list.append(
+                        _unavailable_source_receipt(
+                            contract,
+                            registered=True,
+                            reason=exclusion_reasons[contract.contract_id],
+                        ),
+                    )
+                    continue
                 source_receipts_list.append(
-                    _unavailable_source_receipt(
+                    await _run_provider_source(
+                        client,
                         contract,
-                        registered=True,
-                        reason=exclusion_reasons[contract.contract_id],
+                        request,
+                        checkpoint=require_closure,
                     ),
                 )
-                continue
-            source_receipts_list.append(
-                await _run_provider_source(client, contract, request),
+            source_receipts = tuple(source_receipts_list)
+            after = await _state_fingerprint(
+                client,
+                registry,
+                checkpoint=require_closure,
+                phase="after_state",
             )
-        source_receipts = tuple(source_receipts_list)
-        after = await _state_fingerprint(client, registry)
-        cleanup = CleanupReceipt(
-            before_fingerprint=before,
-            after_fingerprint=after,
-            state_equal=before is not None and before == after,
-            complete=before is not None and before == after,
-        )
-        if not cleanup.state_equal:
-            errors.append("state_fingerprint_mismatch")
-        ledger_payload = await _call_tool(client, "saxo_get_safe_request_ledger", {})
-        ledger = _ledger_receipt(ledger_payload)
-        if not ledger.sim_only:
-            errors.append("unsafe_request_ledger")
-        if ledger.live_events:
-            errors.append("live_events_detected")
-        status = _matrix_status(source_receipts, errors)
-        reason = errors[0] if errors else _matrix_reason(source_receipts, status)
-        receipt = AnalyticsSourceMatrixReceipt(
-            status=status,
-            reason=reason,
-            environment="SIM",
-            source_contract_catalog_sha256=(candidate_identity.source_contract_catalog_sha256),
-            harness_build_sha256=candidate_identity.harness_build_sha256,
-            candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
-            captured_at=capture_time,
-            source_plan_sha256=source_plan.plan_sha256,
-            source_plan_exclusions=source_plan.exclusions,
-            environment_proof=proof,
-            auth_status=auth_status,
-            session_status=session_status,
-            entitlement_status=entitlement_status,
-            source_receipts=source_receipts,
-            history_state=_history_state(source_receipts),
-            source_execution_claimed=True,
-            cleanup=cleanup,
-            ledger=ledger,
-            privacy=PrivacyReceipt(findings=0, scan_errors=0),
-            live_events=ledger.live_events,
-            errors=tuple(errors),
-        )
+            cleanup = CleanupReceipt(
+                before_fingerprint=before,
+                after_fingerprint=after,
+                state_equal=before is not None and before == after,
+                complete=before is not None and before == after,
+            )
+            require_closure("cleanup_readback_complete")
+            if not cleanup.state_equal:
+                errors.append("state_fingerprint_mismatch")
+            require_closure("before_ledger_readback")
+            ledger_payload = await _call_tool(client, "saxo_get_safe_request_ledger", {})
+            require_closure("after_ledger_readback")
+            ledger = _ledger_receipt(ledger_payload)
+            if not ledger.sim_only:
+                errors.append("unsafe_request_ledger")
+            if ledger.live_events:
+                errors.append("live_events_detected")
+            status = _matrix_status(source_receipts, errors)
+            reason = errors[0] if errors else _matrix_reason(source_receipts, status)
+            receipt = AnalyticsSourceMatrixReceipt(
+                status=status,
+                reason=reason,
+                environment="SIM",
+                source_contract_catalog_sha256=(candidate_identity.source_contract_catalog_sha256),
+                harness_build_sha256=candidate_identity.harness_build_sha256,
+                candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
+                captured_at=capture_time,
+                source_plan_sha256=source_plan.plan_sha256,
+                source_plan_exclusions=source_plan.exclusions,
+                environment_proof=proof,
+                auth_status=auth_status,
+                session_status=session_status,
+                entitlement_status=entitlement_status,
+                source_receipts=source_receipts,
+                history_state=_history_state(source_receipts),
+                source_execution_claimed=True,
+                cleanup=cleanup,
+                ledger=ledger,
+                privacy=PrivacyReceipt(findings=0, scan_errors=0),
+                live_events=ledger.live_events,
+                errors=tuple(errors),
+                execution_closure_checkpoints=tuple(execution_checkpoints),
+            )
+        except _ExecutionClosureChangedError:
+            return _claimed_execution_closure_failure(
+                candidate_identity,
+                capture_time,
+                proof,
+                auth_status=auth_status,
+                session_status=session_status,
+                entitlement_status=entitlement_status,
+                checkpoints=execution_checkpoints,
+            )
     return _with_privacy_scan(receipt, fixtures)
 
 
@@ -873,6 +942,11 @@ def execute_analytics_source_matrix_once(
     fixtures: SourceMatrixFixtures | None = None,
 ) -> int:
     """Run only the installed candidate in its fixed owner-only state location."""
+    try:
+        _normalize_official_import_machinery()
+        _validate_official_interpreter_state()
+    except (OSError, ValueError):
+        return 1
     return _execute_analytics_source_matrix_once(
         fixtures=fixtures,
         server=mcp,
@@ -883,7 +957,7 @@ def execute_analytics_source_matrix_once(
     )
 
 
-def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0913
+def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0913
     *,
     fixtures: SourceMatrixFixtures | None,
     server: FastMCP,
@@ -905,9 +979,12 @@ def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0913
 
             def verify_official_candidate() -> bool:
                 try:
+                    if _execution_root_projection_sha256() != initial_root_projection:
+                        return False
+                    current_identity = source_matrix_candidate_identity()
                     return (
-                        _execution_root_projection_sha256() == initial_root_projection
-                        and source_matrix_candidate_identity() == identity
+                        current_identity == identity
+                        and _execution_root_projection_sha256() == initial_root_projection
                     )
                 except (OSError, ValidationError, ValueError):
                     return False
@@ -965,6 +1042,20 @@ def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0913
         return 1
     if not receipt.source_execution_claimed:
         return 1
+    if receipt.status == "failed" and receipt.reason == "candidate_execution_closure_changed":
+        _write_immutable_failure(evidence, "candidate_execution_closure_changed")
+        return 1
+    if source_execution_validator is not None and not source_execution_validator():
+        _write_immutable_failure(evidence, "candidate_execution_closure_changed")
+        return 1
+    receipt = receipt.model_copy(
+        update={
+            "execution_closure_checkpoints": (
+                *receipt.execution_closure_checkpoints,
+                "before_immutable_evidence_publication",
+            ),
+        },
+    )
     payload = cast("dict[str, JsonValue]", receipt.model_dump(mode="json"))
     published = _write_immutable_evidence(evidence, payload)
     return 0 if published and receipt.status in {"passed", "reduced"} else 1
@@ -1066,6 +1157,8 @@ async def _run_provider_source(
     client: MatrixClient,
     contract: SourceContract,
     request: Mapping[str, object],
+    *,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> SourceContractReceipt:
     path = _resolved_contract_path(contract, request)
     params = {
@@ -1073,6 +1166,8 @@ async def _run_provider_source(
         for key, value in request.items()
         if key in contract.query_parameters
     }
+    if checkpoint is not None:
+        checkpoint(f"before_source:{contract.contract_id}")
     payload = await _call_tool(
         client,
         "saxo_call_registered_endpoint",
@@ -1084,6 +1179,8 @@ async def _run_provider_source(
             "analytics_contract_id": contract.contract_id,
         },
     )
+    if checkpoint is not None:
+        checkpoint(f"after_source:{contract.contract_id}")
     operation = find_registered_operation("GET", path)
     status = _safe_status(payload)
     page_proofs = _source_page_proofs(payload.get("page_receipts"))
@@ -1425,12 +1522,18 @@ def _unavailable_source_receipt(
 async def _state_fingerprint(
     client: MatrixClient,
     registry: Mapping[str, bool],
+    *,
+    checkpoint: Callable[[str], None] | None = None,
+    phase: str = "state",
 ) -> str | None:
     fingerprints: dict[str, str] = {}
     for path in _STATE_PATHS:
         operation = find_registered_operation("GET", path)
         if operation is None or registry.get(operation.operation_id) is not True:
             return None
+        checkpoint_name = operation.operation_id
+        if checkpoint is not None:
+            checkpoint(f"before_{phase}:{checkpoint_name}")
         payload = await _call_tool(
             client,
             "saxo_call_registered_endpoint",
@@ -1440,6 +1543,8 @@ async def _state_fingerprint(
                 "response_mode": "fingerprint_only",
             },
         )
+        if checkpoint is not None:
+            checkpoint(f"after_{phase}:{checkpoint_name}")
         _require_sim_registered_read(payload, operation)
         if _safe_status(payload) != "passed":
             return None
@@ -1944,6 +2049,41 @@ def _readiness_refusal(  # noqa: PLR0913
     )
 
 
+def _claimed_execution_closure_failure(  # noqa: PLR0913
+    candidate_identity: SourceMatrixCandidateIdentity,
+    captured_at: datetime,
+    proof: EnvironmentProof,
+    *,
+    auth_status: str,
+    session_status: str,
+    entitlement_status: str,
+    checkpoints: Sequence[str],
+) -> AnalyticsSourceMatrixReceipt:
+    """Return a claimed, value-free failure that can only publish minimally."""
+    return AnalyticsSourceMatrixReceipt(
+        status="failed",
+        reason="candidate_execution_closure_changed",
+        environment="SIM",
+        source_contract_catalog_sha256=candidate_identity.source_contract_catalog_sha256,
+        harness_build_sha256=candidate_identity.harness_build_sha256,
+        candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
+        captured_at=captured_at,
+        environment_proof=proof,
+        auth_status=auth_status,
+        session_status=session_status,
+        entitlement_status=entitlement_status,
+        source_receipts=(),
+        history_state="unverified",
+        source_execution_claimed=True,
+        cleanup=_empty_cleanup(),
+        ledger=_empty_ledger(),
+        privacy=PrivacyReceipt(findings=0, scan_errors=0),
+        live_events=0,
+        errors=("candidate_execution_closure_changed",),
+        execution_closure_checkpoints=tuple(checkpoints),
+    )
+
+
 def _empty_cleanup() -> CleanupReceipt:
     return CleanupReceipt(
         before_fingerprint=None,
@@ -2080,8 +2220,10 @@ def _enabled(value: str | None) -> bool:
     return value.strip().casefold() not in {"", "0", "false", "off", "no"}
 
 
-def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
+def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:  # noqa: C901
     """Verify the complete source or installed distribution closure."""
+    if os.environ.get(_OFFICIAL_LAUNCHER_ENV) == "1":
+        _validate_official_interpreter_state()
     initial_search_directories = _execution_search_directory_snapshot()
     source_mode = _CANDIDATE_SOURCE_PATH.is_file()
     if source_mode:
@@ -2115,6 +2257,7 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
         manifest,
         source_repository_root=repository_root,
     )
+    stabilized_execution_projection = _execution_root_projection_sha256()
     catalog_sha256 = source_contract_catalog_sha256()
     source_build_sha256 = _digest(dict(manifest.source_files))
     installed_build_sha256 = _digest(dict(manifest.installed_files))
@@ -2154,8 +2297,19 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:
         harness_build_sha256=harness_sha256,
         candidate_identity_sha256=identity_sha256,
     )
-    if _execution_search_directory_snapshot() != initial_search_directories:
-        raise ValueError("source matrix execution search directories changed")
+    if _runtime_identity() != manifest.runtime_identity:
+        raise ValueError("source matrix runtime identity changed")
+    if _dependency_distributions() != dict(manifest.dependency_distributions):
+        raise ValueError("source matrix dependency closure changed")
+    _validate_import_execution_closure(
+        manifest,
+        source_repository_root=repository_root,
+    )
+    if (
+        _execution_search_directory_snapshot() != initial_search_directories
+        or _execution_root_projection_sha256() != stabilized_execution_projection
+    ):
+        raise ValueError("source matrix execution closure changed")
     return identity
 
 
@@ -2171,12 +2325,17 @@ def _validate_candidate_manifest_paths(
         or not any(name.endswith(".dist-info/RECORD") for name in manifest.installed_exclusions)
     ):
         raise ValueError("source matrix candidate exclusions are invalid")
-    for mapping in (manifest.source_files, manifest.installed_files):
-        if not mapping or any(
-            not _safe_artifact_path(name) or _SHA256_PATTERN.fullmatch(sha256) is None
-            for name, sha256 in mapping.items()
-        ):
-            raise ValueError("source matrix candidate file map is invalid")
+    if not manifest.source_files or any(
+        not _safe_artifact_path(name) or _SHA256_PATTERN.fullmatch(sha256) is None
+        for name, sha256 in manifest.source_files.items()
+    ):
+        raise ValueError("source matrix candidate file map is invalid")
+    if not manifest.installed_files or any(
+        (not _safe_artifact_path(name) and not _official_launcher_record_path(name))
+        or _SHA256_PATTERN.fullmatch(sha256) is None
+        for name, sha256 in manifest.installed_files.items()
+    ):
+        raise ValueError("source matrix candidate file map is invalid")
     if set(manifest.source_files) & set(manifest.source_exclusions):
         raise ValueError("source matrix source closure includes an exclusion")
     if set(manifest.installed_files) & set(manifest.installed_exclusions):
@@ -2245,6 +2404,8 @@ def _validate_directory_entry_tree(
     if not stat.S_ISDIR(root_metadata.st_mode):
         raise ValueError(f"source matrix {scope} is not a directory")
     for path in sorted(root.rglob("*")):
+        if _inactive_runtime_cache_allowed(path):
+            continue
         _validated_closure_entry_metadata(
             path,
             scope=scope,
@@ -2352,16 +2513,569 @@ def _execution_search_directory_snapshot() -> tuple[dict[str, JsonValue], ...]:
     return tuple(_execution_path_projection(value) for value in sys.path)
 
 
+def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
+    value: object,
+    *,
+    depth: int = 0,
+    seen: frozenset[int] = frozenset(),
+) -> JsonValue:
+    """Project mutable finder state without retaining private strings or paths."""
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, str | bytes):
+        raw = os.fsencode(value)
+        return {
+            "length": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if isinstance(value, os.PathLike):
+        raw_path = os.fspath(
+            cast("os.PathLike[str] | os.PathLike[bytes]", value),
+        )
+        raw = raw_path if isinstance(raw_path, bytes) else os.fsencode(raw_path)
+        return {
+            "length": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if depth >= _IMPORT_STATE_MAX_DEPTH:
+        return {
+            "module": type(value).__module__,
+            "qualname": type(value).__qualname__,
+        }
+    identity = id(value)
+    if identity in seen:
+        return {
+            "cycle_module": type(value).__module__,
+            "cycle_qualname": type(value).__qualname__,
+        }
+    next_seen = seen | {identity}
+    if isinstance(value, Mapping):
+        projected: list[tuple[JsonValue, JsonValue]] = [
+            (
+                _stable_import_state(key, depth=depth + 1, seen=next_seen),
+                _stable_import_state(item, depth=depth + 1, seen=next_seen),
+            )
+            for key, item in cast("Mapping[object, object]", value).items()
+        ]
+
+        def projection_key(item: tuple[JsonValue, JsonValue]) -> str:
+            return json.dumps(item[0], default=str, sort_keys=True)
+
+        return sorted(
+            projected,
+            key=projection_key,
+        )
+    if isinstance(value, set | frozenset):
+        projected_items = [
+            _stable_import_state(item, depth=depth + 1, seen=next_seen)
+            for item in cast("set[object] | frozenset[object]", value)
+        ]
+        return sorted(
+            projected_items,
+            key=lambda item: json.dumps(item, default=str, sort_keys=True),
+        )
+    if isinstance(value, Sequence):
+        return [
+            _stable_import_state(item, depth=depth + 1, seen=next_seen)
+            for item in cast("Sequence[object]", value)
+        ]
+    if isinstance(value, type):
+        return {
+            "kind": "type",
+            "module": value.__module__,
+            "qualname": value.__qualname__,
+        }
+    state: dict[str, JsonValue] = {
+        "kind": "object",
+        "module": str(getattr(value, "__module__", type(value).__module__)),
+        "qualname": str(getattr(value, "__qualname__", type(value).__qualname__)),
+        "type_module": type(value).__module__,
+        "type_qualname": type(value).__qualname__,
+    }
+    raw_dict: object = getattr(value, "__dict__", None)
+    if isinstance(raw_dict, Mapping):
+        state["state"] = _stable_import_state(
+            cast("Mapping[object, object]", raw_dict),
+            depth=depth + 1,
+            seen=next_seen,
+        )
+    raw_closure: object = getattr(value, "__closure__", None)
+    if isinstance(raw_closure, tuple):
+        closure: list[JsonValue] = []
+        for cell in cast("tuple[CellType, ...]", raw_closure):
+            try:
+                cell_value = cast("object", cell.cell_contents)
+            except ValueError:
+                cell_value = None
+            closure.append(
+                _stable_import_state(
+                    cell_value,
+                    depth=depth + 1,
+                    seen=next_seen,
+                ),
+            )
+        state["closure"] = closure
+    return state
+
+
+def _loaded_module_origin_projection() -> list[dict[str, JsonValue]]:
+    result: list[dict[str, JsonValue]] = []
+    for module_name, module in sorted(sys.modules.items()):
+        for origin in sorted(_import_origin_paths(module), key=os.fspath):
+            raw = os.fspath(origin)
+            projected: dict[str, JsonValue] = {
+                "module_name_sha256": hashlib.sha256(module_name.encode()).hexdigest(),
+                "path_sha256": hashlib.sha256(os.fsencode(origin)).hexdigest(),
+            }
+            if raw.startswith("<") and raw.endswith(">"):
+                projected["file_backed"] = False
+                result.append(projected)
+                continue
+            absolute = origin if origin.is_absolute() else Path.cwd() / origin
+            try:
+                metadata = absolute.lstat()
+            except OSError:
+                projected["exists"] = False
+                result.append(projected)
+                continue
+            projected.update(
+                {
+                    "change_time_ns": metadata.st_ctime_ns,
+                    "device": metadata.st_dev,
+                    "exists": True,
+                    "file_backed": stat.S_ISREG(metadata.st_mode),
+                    "inode": metadata.st_ino,
+                    "mode": metadata.st_mode,
+                    "modified_time_ns": metadata.st_mtime_ns,
+                    "owner": metadata.st_uid,
+                    "resolved_sha256": hashlib.sha256(
+                        os.fsencode(absolute.resolve(strict=True)),
+                    ).hexdigest(),
+                    "size": metadata.st_size,
+                    "symlink": stat.S_ISLNK(metadata.st_mode),
+                },
+            )
+            if stat.S_ISREG(metadata.st_mode):
+                projected["content_sha256"] = hashlib.sha256(absolute.read_bytes()).hexdigest()
+            result.append(projected)
+    return result
+
+
+def _interpreter_flag_projection() -> dict[str, JsonValue]:
+    return {
+        name: cast("JsonValue", getattr(sys.flags, name))
+        for name in (
+            "bytes_warning",
+            "debug",
+            "dev_mode",
+            "dont_write_bytecode",
+            "hash_randomization",
+            "ignore_environment",
+            "inspect",
+            "interactive",
+            "isolated",
+            "no_site",
+            "no_user_site",
+            "optimize",
+            "quiet",
+            "safe_path",
+            "utf8_mode",
+            "verbose",
+            "warn_default_encoding",
+        )
+    }
+
+
+def _interpreter_xoptions() -> dict[str, object]:
+    raw_xoptions: object = vars(sys).get("_xoptions", {})
+    if not isinstance(raw_xoptions, Mapping):
+        return {}
+    return {
+        key: item
+        for key, item in cast("Mapping[object, object]", raw_xoptions).items()
+        if isinstance(key, str)
+    }
+
+
+def _official_interpreter_flags() -> dict[str, JsonValue]:
+    return {
+        "bytes_warning": 0,
+        "debug": 0,
+        "dev_mode": False,
+        "dont_write_bytecode": 1,
+        "hash_randomization": 1,
+        "ignore_environment": 1,
+        "inspect": 0,
+        "interactive": 0,
+        "isolated": 1,
+        "no_site": 1,
+        "no_user_site": 1,
+        "optimize": 0,
+        "quiet": 0,
+        "safe_path": True,
+        "utf8_mode": 0,
+        "verbose": 0,
+        "warn_default_encoding": 0,
+    }
+
+
+def _interpreter_execution_projection() -> dict[str, JsonValue]:
+    """Bind all behavior-changing interpreter and import execution state."""
+    importer_cache: list[dict[str, JsonValue]] = []
+    for raw_path, finder in sorted(sys.path_importer_cache.items()):
+        importer_cache.append(
+            {
+                "finder": _stable_import_state(finder),
+                "path": _execution_path_projection(raw_path),
+            },
+        )
+    return {
+        "flags": _interpreter_flag_projection(),
+        "importable_suffixes": sorted(
+            {
+                *importlib.machinery.SOURCE_SUFFIXES,
+                *importlib.machinery.BYTECODE_SUFFIXES,
+                *importlib.machinery.EXTENSION_SUFFIXES,
+            },
+        ),
+        "loaded_module_origins": _loaded_module_origin_projection(),
+        "meta_path": [_stable_import_state(item) for item in sys.meta_path],
+        "path_hooks": [_stable_import_state(item) for item in sys.path_hooks],
+        "path_importer_cache": importer_cache,
+        "sys_path": list(_execution_search_directory_snapshot()),
+        "xoptions": _stable_import_state(dict(sorted(_interpreter_xoptions().items()))),
+    }
+
+
+def _interpreter_policy_sha256() -> str:
+    """Return the deterministic policy sealed into every candidate manifest."""
+    return _digest(
+        {
+            "allowed_importer_cache_types": (
+                "_frozen_importlib_external.FileFinder",
+                "zipimport.zipimporter",
+                "none",
+            ),
+            "allowed_meta_path": (
+                "_frozen_importlib.BuiltinImporter",
+                "_frozen_importlib.FrozenImporter",
+                "_frozen_importlib_external.PathFinder",
+            ),
+            "allowed_path_hooks": (
+                "importlib._bootstrap_external.FileFinder.path_hook[beartype]",
+                "_frozen_importlib_external.FileFinder.path_hook",
+                "zipimport.zipimporter",
+            ),
+            "flags": _official_interpreter_flags(),
+            "importable_suffixes": sorted(_IMPORTABLE_ARTIFACT_SUFFIXES),
+            "path_importer_cache": (
+                "canonical_beartype_file_finder",
+                "missing_sys_path_none",
+                "sealed_zipimporter",
+            ),
+            "xoptions": ("pycache_prefix",),
+        },
+    )
+
+
+def _import_callable_name(value: object) -> tuple[str, str]:
+    return (
+        str(getattr(value, "__module__", type(value).__module__)),
+        str(getattr(value, "__qualname__", type(value).__qualname__)),
+    )
+
+
+def _normalize_official_import_machinery() -> None:
+    """Remove the one dependency-installed compatibility adapter before execution."""
+    if os.environ.get(_OFFICIAL_LAUNCHER_ENV) != "1":
+        return
+    key_value_module = sys.modules.get("key_value")
+    deprecated_finder = getattr(key_value_module, "_DeprecatedModuleFinder", None)
+    if not isinstance(deprecated_finder, type):
+        return
+    sys.meta_path[:] = [item for item in sys.meta_path if type(item) is not deprecated_finder]
+
+
+def _official_runtime_root() -> Path:
+    """Resolve the venv root without `site`, which owns prefix handling on 3.12."""
+    executable = Path(sys.executable).absolute()
+    runtime_root = executable.parent.parent
+    configuration = runtime_root / "pyvenv.cfg"
+    if executable.parent.name != "bin" or not configuration.is_file() or configuration.is_symlink():
+        raise ValueError("source matrix isolated runtime root is unavailable")
+    return runtime_root
+
+
+def _validate_owner_only_runtime() -> None:
+    prefix = _official_runtime_root()
+    prefix_metadata = prefix.lstat()
+    if (
+        not stat.S_ISDIR(prefix_metadata.st_mode)
+        or prefix_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(prefix_metadata.st_mode) & _OWNER_ONLY_MASK
+    ):
+        raise ValueError("source matrix isolated runtime is not owner-only")
+    for path in prefix.rglob("*"):
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            continue
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) & _OWNER_ONLY_MASK:
+            raise ValueError("source matrix isolated runtime is not owner-only")
+    for launcher_name in _OFFICIAL_LAUNCHER_NAMES:
+        launcher = prefix / "bin" / launcher_name
+        metadata = launcher.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != _OWNER_DIRECTORY_MODE
+        ):
+            raise ValueError("source matrix isolated launcher mode is invalid")
+
+
+def _file_finder_hook_details(  # noqa: PLR0911
+    hook: object,
+) -> tuple[object, tuple[tuple[object, tuple[str, ...]], ...]] | None:
+    raw_closure_object: object = getattr(hook, "__closure__", None)
+    if not isinstance(raw_closure_object, tuple):
+        return None
+    raw_closure = cast("tuple[object, ...]", raw_closure_object)
+    if len(raw_closure) != _IMPORT_CLOSURE_CELL_COUNT:
+        return None
+    closure = cast("tuple[CellType, CellType]", raw_closure)
+    try:
+        finder_type = cast("object", closure[0].cell_contents)
+        raw_details = cast("object", closure[1].cell_contents)
+    except ValueError:
+        return None
+    if not isinstance(raw_details, tuple):
+        return None
+    detail_items = cast("tuple[object, ...]", raw_details)
+    details: list[tuple[object, tuple[str, ...]]] = []
+    for raw_detail_object in detail_items:
+        if not isinstance(raw_detail_object, tuple):
+            return None
+        raw_detail = cast("tuple[object, ...]", raw_detail_object)
+        raw_suffixes = raw_detail[1] if len(raw_detail) == _IMPORT_LOADER_DETAIL_COUNT else None
+        if (
+            len(raw_detail) != _IMPORT_LOADER_DETAIL_COUNT
+            or not isinstance(raw_suffixes, Sequence)
+            or isinstance(raw_suffixes, str)
+        ):
+            return None
+        suffix_items = cast("Sequence[object]", raw_suffixes)
+        if any(not isinstance(suffix, str) for suffix in suffix_items):
+            return None
+        details.append(
+            (
+                raw_detail[0],
+                tuple(cast("str", suffix) for suffix in suffix_items),
+            ),
+        )
+    return finder_type, tuple(details)
+
+
+def _official_file_finder_details() -> tuple[
+    tuple[tuple[object, tuple[str, ...]], ...],
+    tuple[tuple[object, tuple[str, ...]], ...],
+]:
+    beartype_module = sys.modules.get("beartype.claw._importlib._clawimpload")
+    beartype_loader = getattr(beartype_module, "BeartypeSourceFileLoader", None)
+    if not isinstance(beartype_loader, type):
+        raise TypeError("source matrix sealed source loader is unavailable")
+    extension = (
+        importlib.machinery.ExtensionFileLoader,
+        tuple(importlib.machinery.EXTENSION_SUFFIXES),
+    )
+    bytecode = (
+        importlib.machinery.SourcelessFileLoader,
+        tuple(importlib.machinery.BYTECODE_SUFFIXES),
+    )
+    beartype_details = (
+        extension,
+        (beartype_loader, tuple(importlib.machinery.SOURCE_SUFFIXES)),
+        bytecode,
+    )
+    standard_details = (
+        extension,
+        (
+            importlib.machinery.SourceFileLoader,
+            tuple(importlib.machinery.SOURCE_SUFFIXES),
+        ),
+        bytecode,
+    )
+    return beartype_details, standard_details
+
+
+def _validate_official_import_machinery() -> None:  # noqa: C901, PLR0912
+    """Reject every import hook, finder, loader, cache path, and cache-state deviation."""
+    if sys.meta_path != [
+        importlib.machinery.BuiltinImporter,
+        importlib.machinery.FrozenImporter,
+        importlib.machinery.PathFinder,
+    ]:
+        raise ValueError("source matrix meta path is unsupported")
+    beartype_details, standard_details = _official_file_finder_details()
+    expected_hooks = (
+        ("zipimport", "zipimporter", None),
+        (
+            "importlib._bootstrap_external",
+            "FileFinder.path_hook.<locals>.path_hook_for_FileFinder",
+            (importlib.machinery.FileFinder, beartype_details),
+        ),
+        (
+            "_frozen_importlib_external",
+            "FileFinder.path_hook.<locals>.path_hook_for_FileFinder",
+            (importlib.machinery.FileFinder, standard_details),
+        ),
+    )
+    if len(sys.path_hooks) != len(expected_hooks):
+        raise ValueError("source matrix path hooks are unsupported")
+    for hook, (expected_module, expected_qualname, expected_details) in zip(
+        sys.path_hooks,
+        expected_hooks,
+        strict=True,
+    ):
+        if _import_callable_name(hook) != (expected_module, expected_qualname) or (
+            hook is not zipimport.zipimporter
+            if expected_details is None
+            else _file_finder_hook_details(hook) != expected_details
+        ):
+            raise ValueError("source matrix path hooks are unsupported")
+
+    search_roots = tuple(Path(value).absolute() for value in sys.path)
+    flattened_loaders = [
+        (suffix, loader) for loader, suffixes in beartype_details for suffix in suffixes
+    ]
+    for raw_path, finder in cast(
+        "Mapping[object, object]",
+        sys.path_importer_cache,
+    ).items():
+        if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+            raise TypeError("source matrix importer cache key is unsupported")
+        path = Path(raw_path).absolute()
+        if not any(path == root or path.is_relative_to(root) for root in search_roots):
+            raise ValueError("source matrix importer cache path is unsupported")
+        if finder is None:
+            if raw_path not in sys.path or path.exists() or path.is_symlink():
+                raise ValueError("source matrix importer cache state is unsupported")
+            continue
+        if type(finder) is zipimport.zipimporter:
+            if raw_path not in sys.path or not path.is_file() or path.is_symlink():
+                raise ValueError("source matrix zip importer cache is unsupported")
+            if Path(str(getattr(finder, "archive", ""))).absolute() != path:
+                raise ValueError("source matrix zip importer cache is unsupported")
+            continue
+        if type(finder) is not importlib.machinery.FileFinder:
+            raise ValueError("source matrix importer cache finder is unsupported")
+        if (
+            getattr(finder, "path", None) != raw_path
+            or getattr(finder, "_loaders", None) != flattened_loaders
+            or not path.is_dir()
+            or path.is_symlink()
+        ):
+            raise ValueError("source matrix file finder cache is unsupported")
+        metadata = path.stat()
+        entries = {item.name for item in path.iterdir()}
+        relaxed_entries: set[str] = (
+            {name.casefold() for name in entries}
+            if sys.platform.startswith(("win", "cygwin", "darwin"))
+            else set()
+        )
+        if (
+            getattr(finder, "_path_mtime", None) != metadata.st_mtime
+            or getattr(finder, "_path_cache", None) != entries
+            or getattr(finder, "_relaxed_path_cache", None) != relaxed_entries
+        ):
+            raise ValueError("source matrix file finder cache state is unsupported")
+
+
+def _validate_official_interpreter_state() -> None:
+    """Require the exact isolated CPython/import policy established by the launcher."""
+    if os.environ.get(_OFFICIAL_LAUNCHER_ENV) != "1":
+        raise ValueError("source matrix official isolated launcher is required")
+    observed_flags = _interpreter_flag_projection()
+    if observed_flags != _official_interpreter_flags():
+        raise ValueError("source matrix interpreter flags are unsafe")
+    xoptions = _interpreter_xoptions()
+    if set(xoptions) != {"pycache_prefix"}:
+        raise ValueError("source matrix interpreter xoptions are unsafe")
+    raw_cache_prefix = xoptions.get("pycache_prefix")
+    if not isinstance(raw_cache_prefix, str):
+        raise TypeError("source matrix interpreter cache prefix is unavailable")
+    cache_prefix = Path(raw_cache_prefix)
+    expected_cache_prefix = _official_runtime_root() / ".saxo-bank-mcp-pycache"
+    if (
+        not cache_prefix.is_absolute()
+        or cache_prefix != expected_cache_prefix
+        or cache_prefix.is_symlink()
+        or not cache_prefix.is_dir()
+    ):
+        raise ValueError("source matrix interpreter cache prefix is unsafe")
+    cache_metadata = cache_prefix.lstat()
+    if (
+        cache_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(cache_metadata.st_mode) != _OWNER_DIRECTORY_MODE
+        or any(cache_prefix.iterdir())
+    ):
+        raise ValueError("source matrix interpreter cache prefix is unsafe")
+
+    if any(not value or not Path(value).is_absolute() for value in sys.path):
+        raise ValueError("source matrix import search path is unsupported")
+    _validate_official_import_machinery()
+    _validate_owner_only_runtime()
+
+
+def _inactive_runtime_cache_allowed(path: Path) -> bool:  # noqa: C901, PLR0911, PLR0912
+    launcher_mode = os.environ.get(_OFFICIAL_LAUNCHER_ENV)
+    if launcher_mode not in {"1", "dev"}:
+        if sys.flags.dont_write_bytecode != 1:
+            return False
+        cache_entry = (
+            path.name == "__pycache__" or path.suffix.casefold() in _PYTHON_BYTECODE_SUFFIXES
+        )
+        if not cache_entry:
+            return False
+        base_executable = Path(
+            str(getattr(sys, "_base_executable", sys.executable)),
+        ).resolve(strict=True)
+        original_base_root = base_executable.parent.parent
+        try:
+            path.absolute().relative_to(Path(sys.base_prefix).absolute())
+        except ValueError:
+            pass
+        else:
+            if Path(sys.base_prefix).resolve(strict=True) == original_base_root:
+                return True
+        for raw_root in sys.path:
+            root = Path.cwd() if raw_root == "" else Path(raw_root)
+            if root.name not in {"site-packages", "dist-packages"}:
+                continue
+            try:
+                path.absolute().relative_to(root.absolute())
+            except ValueError:
+                continue
+            return True
+        return False
+    if sys.flags.isolated != 1 or sys.flags.dont_write_bytecode != 1 or sys.flags.no_site != 1:
+        return False
+    raw_cache_prefix = _interpreter_xoptions().get("pycache_prefix")
+    if not isinstance(raw_cache_prefix, str):
+        return False
+    if launcher_mode == "dev":
+        return path.name == "__pycache__" or path.suffix.casefold() in _PYTHON_BYTECODE_SUFFIXES
+    try:
+        _official_runtime_root()
+    except ValueError:
+        return False
+    try:
+        path.absolute().relative_to(Path(sys.base_prefix).absolute())
+    except ValueError:
+        return False
+    return path.name == "__pycache__" or path.suffix.casefold() in _PYTHON_BYTECODE_SUFFIXES
+
+
 def _execution_root_projection_sha256() -> str:
     """Seal import roots and import machinery without publishing private paths."""
-
-    def hook_projection(item: object) -> dict[str, JsonValue]:
-        return {
-            "identity": id(item),
-            "module": str(getattr(item, "__module__", type(item).__module__)),
-            "qualname": str(getattr(item, "__qualname__", type(item).__qualname__)),
-        }
-
     return _digest(
         {
             "cwd": _execution_path_projection(os.fspath(Path.cwd())),
@@ -2373,9 +3087,7 @@ def _execution_root_projection_sha256() -> str:
                 hashlib.sha256(os.fsencode(str(value))).hexdigest()
                 for value in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)
             ],
-            "sys_path": _execution_search_directory_snapshot(),
-            "meta_path": [hook_projection(item) for item in sys.meta_path],
-            "path_hooks": [hook_projection(item) for item in sys.path_hooks],
+            "interpreter": _interpreter_execution_projection(),
         },
     )
 
@@ -2420,6 +3132,8 @@ def _runtime_tree_entries(root: Path) -> tuple[dict[str, str], set[Path]]:
     entries: dict[str, str] = {}
     paths: set[Path] = set()
     for path in sorted(root.rglob("*")):
+        if _inactive_runtime_cache_allowed(path):
+            continue
         metadata = _validated_closure_entry_metadata(path, scope="runtime tree")
         relative_path = path.relative_to(root)
         if any(part in _RUNTIME_TREE_EXCLUDED_PARTS for part in relative_path.parts):
@@ -2459,6 +3173,21 @@ def _import_search_roots() -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _runtime_location_projection(path: Path) -> str:
+    resolved = path.resolve(strict=True)
+    try:
+        runtime_root = _official_runtime_root().resolve(strict=True)
+        relative = resolved.relative_to(runtime_root)
+    except ValueError:
+        return hashlib.sha256(os.fsencode(resolved)).hexdigest()
+    return _digest(
+        {
+            "relative_path": relative.as_posix(),
+            "scope": "isolated_runtime",
+        },
+    )
+
+
 def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR0912, PLR0915
     entries: list[dict[str, str]] = []
     observed: set[Path] = set()
@@ -2471,14 +3200,23 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
             allowed_symlinks=allowed_symlinks,
         )
         for child in sorted(root.iterdir()):
+            if _inactive_runtime_cache_allowed(child):
+                continue
             child_metadata = _validated_closure_entry_metadata(
                 child,
                 scope="startup search directory",
                 allowed_symlinks=allowed_symlinks,
             )
             startup_package_name = child.name in {"sitecustomize", "usercustomize"}
-            startup_file = child.name in _STARTUP_CONFIGURATION_NAMES or child.name.endswith(
-                _STARTUP_CONFIGURATION_SUFFIXES,
+            startup_module_file = any(
+                child.name == f"{module_name}{suffix}"
+                for module_name in ("sitecustomize", "usercustomize")
+                for suffix in _IMPORTABLE_ARTIFACT_SUFFIXES
+            )
+            startup_file = (
+                child.name in _STARTUP_CONFIGURATION_NAMES
+                or child.name.endswith(_STARTUP_CONFIGURATION_SUFFIXES)
+                or startup_module_file
             )
             if not startup_package_name and not startup_file:
                 continue
@@ -2489,9 +3227,7 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
             if resolved in observed:
                 continue
             observed.add(resolved)
-            root_sha256 = hashlib.sha256(
-                os.fsencode(root.resolve(strict=True)),
-            ).hexdigest()
+            root_sha256 = _runtime_location_projection(root)
             if stat.S_ISDIR(child_metadata.st_mode):
                 tree_sha256, file_count = _runtime_tree_projection(child)
                 entries.append(
@@ -2543,7 +3279,7 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
                 {
                     "file_count": "1",
                     "name_sha256": hashlib.sha256(child.name.encode()).hexdigest(),
-                    "root_sha256": hashlib.sha256(os.fsencode(root)).hexdigest(),
+                    "root_sha256": _runtime_location_projection(root),
                     "sha256": _runtime_file_projection(child),
                     "type": "file",
                 },
@@ -2564,9 +3300,7 @@ def _startup_configuration_projection() -> tuple[str, int]:  # noqa: C901, PLR09
             {
                 "file_count": "1",
                 "name_sha256": hashlib.sha256(candidate.name.encode()).hexdigest(),
-                "root_sha256": hashlib.sha256(
-                    os.fsencode(candidate.parent.resolve(strict=True)),
-                ).hexdigest(),
+                "root_sha256": _runtime_location_projection(candidate.parent),
                 "sha256": _runtime_file_projection(candidate),
                 "type": "file",
             },
@@ -2638,6 +3372,8 @@ def _runtime_identity() -> _RuntimeIdentity:
         shared_runtime_file_count=shared_runtime_file_count,
         startup_configuration_sha256=startup_sha256,
         startup_configuration_file_count=startup_file_count,
+        interpreter_policy_sha256=_interpreter_policy_sha256(),
+        importable_suffixes=tuple(sorted(_IMPORTABLE_ARTIFACT_SUFFIXES)),
     )
 
 
@@ -3032,8 +3768,6 @@ def _validate_import_execution_closure(  # noqa: C901, PLR0912, PLR0915
             raise ValueError(f"import root {module_name} is shadowed")
     for module_name, module in tuple(sys.modules.items()):
         top_level = module_name.partition(".")[0]
-        if top_level not in import_roots:
-            continue
         for origin in _import_origin_paths(module):
             if origin.is_symlink():
                 raise ValueError(f"imported module {module_name} uses a symlink")
@@ -3045,6 +3779,22 @@ def _validate_import_execution_closure(  # noqa: C901, PLR0912, PLR0915
                     resolved == root or resolved.is_relative_to(root) for root in runtime_roots
                 ):
                     raise ValueError(f"imported standard-library module {module_name} is shadowed")
+                continue
+            if top_level not in import_roots:
+                if (
+                    resolved.is_file()
+                    and resolved not in allowed_files
+                    and resolved not in runtime_files
+                ):
+                    raise ValueError(f"imported module {module_name} is unsealed")
+                if resolved.is_dir() and not any(
+                    resolved == root or resolved.is_relative_to(root)
+                    for root in (
+                        *runtime_roots,
+                        *(item for roots in import_roots.values() for item in roots),
+                    )
+                ):
+                    raise ValueError(f"imported module {module_name} is unsealed")
                 continue
             if resolved.is_file() and resolved not in allowed_files:
                 raise ValueError(f"imported module {module_name} is unrecorded")
@@ -3079,6 +3829,11 @@ def _installed_candidate_files(  # noqa: C901
     result: dict[str, str] = {}
     for package_path in distribution_files:
         name = str(package_path).replace(os.sep, "/")
+        normalized_name = (
+            f"../../../{name}"
+            if name in {f"bin/{launcher_name}" for launcher_name in _OFFICIAL_LAUNCHER_NAMES}
+            else name
+        )
         path = Path(str(installed_distribution.locate_file(package_path)))
         metadata = _validated_closure_entry_metadata(
             path,
@@ -3091,7 +3846,9 @@ def _installed_candidate_files(  # noqa: C901
             ):
                 raise ValueError("installed console entry point projection is invalid")
             continue
-        if not _safe_artifact_path(name):
+        if not _safe_artifact_path(name) and not _official_launcher_record_path(
+            normalized_name,
+        ):
             raise ValueError("installed source matrix path is invalid")
         if ".dist-info/" in name and Path(name).name in _INSTALLER_GENERATED_METADATA:
             continue
@@ -3102,7 +3859,7 @@ def _installed_candidate_files(  # noqa: C901
             continue
         if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("installed source matrix file is unavailable")
-        result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        result[normalized_name] = hashlib.sha256(path.read_bytes()).hexdigest()
     if observed_exclusions != excluded:
         raise ValueError("installed source matrix exclusions are incomplete")
     return dict(sorted(result.items()))
@@ -3116,7 +3873,7 @@ def _installer_entrypoint_projection(
     return path.name in console_scripts and "bin" in path.parts and value not in console_scripts
 
 
-def _installer_entrypoint_projection_valid(
+def _installer_entrypoint_projection_valid(  # noqa: PLR0911
     path: Path,
     target: str,
     *,
@@ -3139,7 +3896,7 @@ def _installer_entrypoint_projection_valid(
     ):
         return False
     try:
-        first_line, body = path.read_text(encoding="utf-8").split("\n", 1)
+        lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError, ValueError):
         return False
     module, callable_name = target_parts
@@ -3155,17 +3912,43 @@ def _installer_entrypoint_projection_valid(
         f"    sys.exit({callable_name}())\n"
     )
     expected_interpreter = Path(sys.executable) if interpreter is None else interpreter
-    shebang_interpreter = Path(first_line.removeprefix("#!"))
+    if not lines:
+        return False
+    first_line = lines[0]
+    body_lines = lines[1:]
+    if (
+        first_line == "#!/bin/sh"
+        and len(lines) >= _PORTABLE_ENTRYPOINT_MIN_LINES
+        and lines[1].startswith("'''exec' '")
+        and lines[1].endswith('\' "$0" "$@"')
+        and lines[2] == "' '''"
+    ):
+        raw_interpreter = (
+            lines[1]
+            .removeprefix("'''exec' '")
+            .removesuffix(
+                '\' "$0" "$@"',
+            )
+        )
+        shebang_interpreter = Path(raw_interpreter)
+        body_lines = lines[3:]
+    elif first_line.startswith("#!/"):
+        shebang_interpreter = Path(first_line.removeprefix("#!"))
+    else:
+        return False
     return (
-        first_line.startswith("#!/")
-        and shebang_interpreter.resolve(strict=True) == expected_interpreter.resolve(strict=True)
-        and body == expected_body
+        shebang_interpreter.resolve(strict=True) == expected_interpreter.resolve(strict=True)
+        and "\n".join(body_lines) + "\n" == expected_body
     )
 
 
 def _safe_artifact_path(value: str) -> bool:
     path = Path(value)
     return bool(value) and not path.is_absolute() and ".." not in path.parts and "\\" not in value
+
+
+def _official_launcher_record_path(value: str) -> bool:
+    return value in {f"../../../bin/{launcher_name}" for launcher_name in _OFFICIAL_LAUNCHER_NAMES}
 
 
 def _require_sha256(value: str) -> None:
@@ -3464,7 +4247,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--instrument-uic", type=int, default=211)
     parser.add_argument("--asset-type", default="Stock")
     parser.add_argument("--option-root-id", type=int, default=120)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--identity",
+        action="store_true",
+        help="verify and print the immutable installed candidate identity",
+    )
+    mode.add_argument(
+        "--preflight",
+        action="store_true",
+        help="verify the local isolated execution closure without Saxo access",
+    )
     arguments = parser.parse_args(argv)
+    try:
+        _normalize_official_import_machinery()
+        _validate_official_interpreter_state()
+        identity = source_matrix_candidate_identity()
+    except (OSError, ValidationError, ValueError):
+        return 1
+    if arguments.identity:
+        sys.stdout.write(identity.candidate_identity_sha256 + "\n")
+        return 0
+    if arguments.preflight:
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "candidate_identity_sha256": identity.candidate_identity_sha256,
+                    "closure": "sealed",
+                    "dont_write_bytecode": sys.flags.dont_write_bytecode == 1,
+                    "ignore_environment": sys.flags.ignore_environment == 1,
+                    "isolated": sys.flags.isolated == 1,
+                    "no_site": sys.flags.no_site == 1,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        return 0
     return execute_analytics_source_matrix_once(
         fixtures=SourceMatrixFixtures(
             account_key=os.environ.get("SAXO_MCP_QA_ACCOUNT_KEY", ""),
@@ -3474,3 +4293,7 @@ def main(argv: list[str] | None = None) -> int:
             option_root_id=arguments.option_root_id,
         ),
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

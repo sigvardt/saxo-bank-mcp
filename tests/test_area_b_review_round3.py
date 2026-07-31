@@ -9,7 +9,6 @@ import sys
 import zipfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from importlib.metadata import distribution
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -78,16 +77,19 @@ def _identity() -> matrix_module.SourceMatrixCandidateIdentity:
 
 
 def _run_identity(
-    site: Path,
+    runtime: Path,
     cwd: Path,
     *,
     prefix: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    python_path = str(site) if prefix is None else os.pathsep.join((str(prefix), str(site)))
+    environment = os.environ if prefix is None else {**os.environ, "PYTHONPATH": str(prefix)}
     return subprocess.run(
-        (sys.executable, "-c", _IDENTITY_COMMAND),
+        (
+            str(runtime / "bin" / "saxo-bank-analytics-source-matrix"),
+            "--identity",
+        ),
         cwd=cwd,
-        env={**os.environ, "PYTHONPATH": python_path},
+        env=environment,
         check=False,
         capture_output=True,
         text=True,
@@ -114,7 +116,10 @@ def _copy_source_candidate(target: Path) -> None:
     (target / "scripts").mkdir()
     for name in (
         "generate_analytics_source_matrix_candidate.py",
+        "prepare_analytics_source_matrix_runtime.py",
         "run_analytics_source_matrix.py",
+        "saxo-bank-analytics-source-matrix",
+        "saxo-bank-analytics-source-matrix-generate",
     ):
         shutil.copyfile(_ROOT / "scripts" / name, target / "scripts" / name)
     for name in ("pyproject.toml", "uv.lock"):
@@ -183,42 +188,32 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
     )
     assert foreign.returncode != 0
 
-    site = tmp_path / "site"
-    install = subprocess.run(
+    runtime = tmp_path / "runtime"
+    prepared = subprocess.run(
         (
-            uv,
-            "pip",
-            "install",
-            "--offline",
-            "--no-deps",
-            "--target",
-            str(site),
+            sys.executable,
+            str(_ROOT / "scripts" / "prepare_analytics_source_matrix_runtime.py"),
+            "--runtime",
+            str(runtime),
+            "--wheel",
             str(wheel),
+            "--uv",
+            uv,
         ),
-        # Dependencies are already installed in the offline test interpreter and
-        # are still part of the recomputed recursive execution closure.
+        cwd=_ROOT,
         check=False,
         capture_output=True,
         text=True,
     )
-    assert install.returncode == 0, install.stderr
-    baseline = _run_identity(site, tmp_path)
+    assert prepared.returncode == 0, prepared.stderr
+    baseline = _run_identity(runtime, tmp_path)
     assert baseline.returncode == 0, baseline.stderr
 
+    site = runtime / "lib" / "python3.12" / "site-packages"
     root_dist_info = next(site.glob("saxo_bank_mcp-*.dist-info"))
-    pydantic_dist = distribution("pydantic")
-    pydantic_file = next(
-        Path(str(pydantic_dist.locate_file(item)))
-        for item in pydantic_dist.files or ()
-        if str(item).replace(os.sep, "/") == "pydantic/__init__.py"
-    )
-    annotated_dist = distribution("annotated-types")
-    transitive_metadata = next(
-        Path(str(annotated_dist.locate_file(item)))
-        for item in annotated_dist.files or ()
-        if str(item).replace(os.sep, "/").endswith(".dist-info/METADATA")
-    )
-    wrapper = site / "bin" / "saxo-bank-analytics-source-matrix"
+    pydantic_file = site / "pydantic" / "__init__.py"
+    transitive_metadata = next(site.glob("annotated_types-*.dist-info/METADATA"))
+    wrapper = runtime / "bin" / "saxo-bank-analytics-source-matrix"
     root_installer = root_dist_info / "INSTALLER"
     root_entrypoints = root_dist_info / "entry_points.txt"
     mutations: tuple[tuple[Path, bytes], ...] = (
@@ -230,11 +225,7 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
         ),
         (
             wrapper,
-            wrapper.read_bytes().replace(
-                wrapper.read_bytes().splitlines(keepends=True)[0],
-                b"#!/usr/bin/env python3\n",
-                1,
-            ),
+            wrapper.read_bytes() + b"\n# ROUND3_MUTATION\n",
         ),
         (root_installer, root_installer.read_bytes() + b"mutated\n"),
         (root_entrypoints, root_entrypoints.read_bytes() + b"\nmutated = module:main\n"),
@@ -243,7 +234,7 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
         existed = target.exists()
         original = target.read_bytes() if existed else b""
         target.write_bytes(mutated)
-        refused = _run_identity(site, tmp_path)
+        refused = _run_identity(runtime, tmp_path)
         if existed:
             target.write_bytes(original)
         else:
@@ -253,22 +244,32 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
     shadow = tmp_path / "shadow"
     shadow.mkdir()
     (shadow / "six.py").write_text("SHADOW = True\n", encoding="utf-8")
-    assert _run_identity(site, tmp_path, prefix=shadow).returncode != 0
+    assert _run_identity(runtime, tmp_path, prefix=shadow).returncode == 0
 
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    source_site = source_copy / "src"
-    assert _run_identity(source_site, source_copy).returncode == 0
+    expected_source_files = json.loads(
+        (_ROOT / "data" / "analytics" / "source_matrix_candidate.json").read_text(
+            encoding="utf-8",
+        ),
+    )["source_files"]
+    source_files = matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        source_copy,
+    )
+    assert source_files == expected_source_files
     for name in (
         "generate_analytics_source_matrix_candidate.py",
+        "prepare_analytics_source_matrix_runtime.py",
         "run_analytics_source_matrix.py",
     ):
         target = source_copy / "scripts" / name
         original = target.read_bytes()
         target.write_bytes(original + b"\nROUND3_SOURCE_MUTATION = True\n")
-        refused = _run_identity(source_site, source_copy)
+        refused = matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+            source_copy,
+        )
         target.write_bytes(original)
-        assert refused.returncode != 0, name
+        assert refused != expected_source_files, name
 
 
 def test_guard_walk_is_symlink_owner_mode_and_parent_swap_safe(
