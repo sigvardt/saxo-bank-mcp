@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import math
 import os
 import platform
 import pwd
@@ -20,7 +21,14 @@ from datetime import UTC, date, datetime, timedelta
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
-from types import CellType
+from types import (
+    BuiltinFunctionType,
+    CellType,
+    CodeType,
+    FunctionType,
+    MethodType,
+    ModuleType,
+)
 from typing import Final, Literal, Self, cast
 from uuid import uuid4
 
@@ -76,6 +84,7 @@ _PORTABLE_ENTRYPOINT_MIN_LINES: Final = 4
 _IMPORT_STATE_MAX_DEPTH: Final = 5
 _IMPORT_CLOSURE_CELL_COUNT: Final = 2
 _IMPORT_LOADER_DETAIL_COUNT: Final = 2
+_CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS: Final = 4300
 _INSTALLER_GENERATED_METADATA: Final = frozenset(
     {"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"},
 )
@@ -243,6 +252,23 @@ class SourceMatrixFixtures:
     instrument_uic: int = 211
     asset_type: str = "Stock"
     option_root_id: int = 120
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaimedGuardDirectory:
+    descriptor: int
+    device: int
+    inode: int
+    guard_device: int
+    guard_inode: int
+    guard_payload: bytes
+    reopen: Callable[[], tuple[int, os.stat_result]]
+
+
+@dataclass(frozen=True, slots=True)
+class _PublishedEvidence:
+    device: int
+    inode: int
 
 
 class SourceMatrixCandidateIdentity(BaseModel):
@@ -890,9 +916,13 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913,
             require_closure("cleanup_readback_complete")
             if not cleanup.state_equal:
                 errors.append("state_fingerprint_mismatch")
-            require_closure("before_ledger_readback")
-            ledger_payload = await _call_tool(client, "saxo_get_safe_request_ledger", {})
-            require_closure("after_ledger_readback")
+            ledger_payload = await _call_tool_with_checkpoint(
+                client,
+                "saxo_get_safe_request_ledger",
+                {},
+                checkpoint=require_closure,
+                checkpoint_name="ledger_readback",
+            )
             ledger = _ledger_receipt(ledger_payload)
             if not ledger.sim_only:
                 errors.append("unsafe_request_ledger")
@@ -934,7 +964,36 @@ async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913,
                 entitlement_status=entitlement_status,
                 checkpoints=execution_checkpoints,
             )
-    return _with_privacy_scan(receipt, fixtures)
+        try:
+            require_closure("before_mcp_client_close")
+        except _ExecutionClosureChangedError:
+            return _claimed_execution_closure_failure(
+                candidate_identity,
+                capture_time,
+                proof,
+                auth_status=auth_status,
+                session_status=session_status,
+                entitlement_status=entitlement_status,
+                checkpoints=execution_checkpoints,
+            )
+    try:
+        require_closure("after_mcp_client_close")
+        require_closure("before_receipt_serialization")
+        try:
+            scanned_receipt = _with_privacy_scan(receipt, fixtures)
+        finally:
+            require_closure("after_privacy_scan")
+    except _ExecutionClosureChangedError:
+        return _claimed_execution_closure_failure(
+            candidate_identity,
+            capture_time,
+            proof,
+            auth_status=auth_status,
+            session_status=session_status,
+            entitlement_status=entitlement_status,
+            checkpoints=execution_checkpoints,
+        )
+    return scanned_receipt
 
 
 def execute_analytics_source_matrix_once(
@@ -957,7 +1016,7 @@ def execute_analytics_source_matrix_once(
     )
 
 
-def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0913
+def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
     *,
     fixtures: SourceMatrixFixtures | None,
     server: FastMCP,
@@ -1001,26 +1060,28 @@ def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0913
         account_key=selected_env.get("SAXO_MCP_QA_ACCOUNT_KEY", ""),
         client_key=selected_env.get("SAXO_MCP_QA_CLIENT_KEY", ""),
     )
-    guard = candidate_guard_path(
-        selected_state_root,
-        identity.candidate_identity_sha256,
-    )
-    evidence = candidate_evidence_path(
-        selected_state_root,
-        identity.candidate_identity_sha256,
-    )
     claimed = False
+    claimed_guard: _ClaimedGuardDirectory | None = None
 
     def claim() -> bool:
-        nonlocal claimed
-        claimed = (
-            _claim_candidate_guard_at_owner(
-                Path(pwd.getpwuid(os.getuid()).pw_dir),
-                identity,
+        nonlocal claimed, claimed_guard
+        reopen = (
+            (
+                lambda: _open_guard_parent(
+                    Path(pwd.getpwuid(os.getuid()).pw_dir),
+                    identity.candidate_identity_sha256,
+                )
             )
             if state_root is None
-            else _claim_candidate_guard(guard, identity)
+            else (
+                lambda: _open_state_guard_parent(
+                    selected_state_root,
+                    identity.candidate_identity_sha256,
+                )
+            )
         )
+        claimed_guard = _claim_candidate_guard_directory(reopen, identity)
+        claimed = claimed_guard is not None
         return claimed
 
     async def run() -> AnalyticsSourceMatrixReceipt:
@@ -1034,31 +1095,115 @@ def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0913
             validate_source_execution=source_execution_validator,
         )
 
+    def execution_closure_valid() -> bool:
+        if source_execution_validator is None:
+            return True
+        try:
+            return source_execution_validator() is True
+        except Exception:  # noqa: BLE001 - callback failure closes the execution
+            return False
+
+    def require_execution_closure() -> None:
+        if not execution_closure_valid():
+            raise _ExecutionClosureChangedError
+
+    def publish_failure(reason: str) -> None:
+        if claimed_guard is None:
+            return
+        selected_reason = reason
+        if reason != "candidate_execution_closure_changed" and not execution_closure_valid():
+            selected_reason = "candidate_execution_closure_changed"
+        before_link = (
+            execution_closure_valid
+            if selected_reason != "candidate_execution_closure_changed"
+            else None
+        )
+        try:
+            published_failure = _publish_claimed_failure(
+                claimed_guard,
+                selected_reason,
+                before_link=before_link,
+            )
+        except _ExecutionClosureChangedError:
+            try:
+                published_failure = _publish_claimed_failure(
+                    claimed_guard,
+                    "candidate_execution_closure_changed",
+                )
+            except Exception:  # noqa: BLE001 - secure refusal publishes nothing
+                return
+            selected_reason = "candidate_execution_closure_changed"
+        except Exception:  # noqa: BLE001 - secure refusal publishes nothing
+            return
+        if (
+            published_failure is not None
+            and selected_reason != "candidate_execution_closure_changed"
+            and not execution_closure_valid()
+        ):
+            try:
+                _unlink_published_evidence(claimed_guard, published_failure)
+                _publish_claimed_failure(
+                    claimed_guard,
+                    "candidate_execution_closure_changed",
+                )
+            except Exception:  # noqa: BLE001 - secure refusal publishes nothing
+                return
+
     try:
-        receipt = anyio.run(run)
-    except Exception:  # noqa: BLE001 - freeze only after the irreversible claim
+        try:
+            receipt = anyio.run(run)
+        except Exception:  # noqa: BLE001 - freeze only after the irreversible claim
+            if claimed:
+                publish_failure("matrix_execution_failed")
+            return 1
+        if not receipt.source_execution_claimed or claimed_guard is None:
+            return 1
+        if receipt.status == "failed" and receipt.reason == "candidate_execution_closure_changed":
+            publish_failure("candidate_execution_closure_changed")
+            return 1
+        if not execution_closure_valid():
+            publish_failure("candidate_execution_closure_changed")
+            return 1
+        receipt = receipt.model_copy(
+            update={
+                "execution_closure_checkpoints": (
+                    *receipt.execution_closure_checkpoints,
+                    "before_evidence_serialization",
+                    "after_evidence_privacy_scan",
+                    "before_immutable_evidence_publication",
+                ),
+            },
+        )
+        require_execution_closure()
+        payload = cast("dict[str, JsonValue]", receipt.model_dump(mode="json"))
+        text = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
+        findings, scan_errors = scan_secret_text("source-matrix.json", text)
+        require_execution_closure()
+        if findings or scan_errors:
+            publish_failure("evidence_secret_scan_failed")
+            return 1
+        published = _publish_claimed_text(
+            claimed_guard,
+            text,
+            before_link=execution_closure_valid,
+        )
+        if published is None:
+            return 1
+        if not execution_closure_valid():
+            _unlink_published_evidence(claimed_guard, published)
+            publish_failure("candidate_execution_closure_changed")
+            return 1
+        return 0 if receipt.status in {"passed", "reduced"} else 1  # noqa: TRY300
+    except _ExecutionClosureChangedError:
+        publish_failure("candidate_execution_closure_changed")
+        return 1
+    except Exception:  # noqa: BLE001 - revalidate before publishing generic failure
         if claimed:
-            _write_immutable_failure(evidence, "matrix_execution_failed")
+            publish_failure("matrix_execution_failed")
         return 1
-    if not receipt.source_execution_claimed:
-        return 1
-    if receipt.status == "failed" and receipt.reason == "candidate_execution_closure_changed":
-        _write_immutable_failure(evidence, "candidate_execution_closure_changed")
-        return 1
-    if source_execution_validator is not None and not source_execution_validator():
-        _write_immutable_failure(evidence, "candidate_execution_closure_changed")
-        return 1
-    receipt = receipt.model_copy(
-        update={
-            "execution_closure_checkpoints": (
-                *receipt.execution_closure_checkpoints,
-                "before_immutable_evidence_publication",
-            ),
-        },
-    )
-    payload = cast("dict[str, JsonValue]", receipt.model_dump(mode="json"))
-    published = _write_immutable_evidence(evidence, payload)
-    return 0 if published and receipt.status in {"passed", "reduced"} else 1
+    finally:
+        if claimed_guard is not None:
+            os.close(claimed_guard.descriptor)
 
 
 def candidate_guard_path(state_root: Path, candidate_identity_sha256: str) -> Path:
@@ -1091,6 +1236,22 @@ async def _call_tool(
             "tool_name": name,
             "reason": "structured_result_invalid",
         }
+
+
+async def _call_tool_with_checkpoint(
+    client: MatrixClient,
+    name: str,
+    arguments: dict[str, JsonValue],
+    *,
+    checkpoint: Callable[[str], None],
+    checkpoint_name: str,
+) -> dict[str, JsonValue]:
+    """Validate the claimed closure on both sides of one MCP boundary."""
+    checkpoint(f"before_{checkpoint_name}")
+    try:
+        return await _call_tool(client, name, arguments)
+    finally:
+        checkpoint(f"after_{checkpoint_name}")
 
 
 async def _registered_operation_receipts(  # noqa: C901
@@ -1166,21 +1327,28 @@ async def _run_provider_source(
         for key, value in request.items()
         if key in contract.query_parameters
     }
-    if checkpoint is not None:
-        checkpoint(f"before_source:{contract.contract_id}")
-    payload = await _call_tool(
-        client,
-        "saxo_call_registered_endpoint",
-        {
-            "method": "GET",
-            "path": path,
-            "params": params,
-            "response_mode": "analytics_contract_receipt",
-            "analytics_contract_id": contract.contract_id,
-        },
+    arguments: dict[str, JsonValue] = {
+        "method": "GET",
+        "path": path,
+        "params": params,
+        "response_mode": "analytics_contract_receipt",
+        "analytics_contract_id": contract.contract_id,
+    }
+    payload = (
+        await _call_tool(
+            client,
+            "saxo_call_registered_endpoint",
+            arguments,
+        )
+        if checkpoint is None
+        else await _call_tool_with_checkpoint(
+            client,
+            "saxo_call_registered_endpoint",
+            arguments,
+            checkpoint=checkpoint,
+            checkpoint_name=f"source:{contract.contract_id}",
+        )
     )
-    if checkpoint is not None:
-        checkpoint(f"after_source:{contract.contract_id}")
     operation = find_registered_operation("GET", path)
     status = _safe_status(payload)
     page_proofs = _source_page_proofs(payload.get("page_receipts"))
@@ -1532,19 +1700,26 @@ async def _state_fingerprint(
         if operation is None or registry.get(operation.operation_id) is not True:
             return None
         checkpoint_name = operation.operation_id
-        if checkpoint is not None:
-            checkpoint(f"before_{phase}:{checkpoint_name}")
-        payload = await _call_tool(
-            client,
-            "saxo_call_registered_endpoint",
-            {
-                "method": "GET",
-                "path": path,
-                "response_mode": "fingerprint_only",
-            },
+        arguments: dict[str, JsonValue] = {
+            "method": "GET",
+            "path": path,
+            "response_mode": "fingerprint_only",
+        }
+        payload = (
+            await _call_tool(
+                client,
+                "saxo_call_registered_endpoint",
+                arguments,
+            )
+            if checkpoint is None
+            else await _call_tool_with_checkpoint(
+                client,
+                "saxo_call_registered_endpoint",
+                arguments,
+                checkpoint=checkpoint,
+                checkpoint_name=f"{phase}:{checkpoint_name}",
+            )
         )
-        if checkpoint is not None:
-            checkpoint(f"after_{phase}:{checkpoint_name}")
         _require_sim_registered_read(payload, operation)
         if _safe_status(payload) != "passed":
             return None
@@ -2520,8 +2695,10 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
     seen: frozenset[int] = frozenset(),
 ) -> JsonValue:
     """Project mutable finder state without retaining private strings or paths."""
-    if value is None or isinstance(value, bool | int | float):
+    if value is None or isinstance(value, bool | int):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else {"float": value.hex()}
     if isinstance(value, str | bytes):
         raw = os.fsencode(value)
         return {
@@ -2549,7 +2726,7 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
             "cycle_qualname": type(value).__qualname__,
         }
     next_seen = seen | {identity}
-    if isinstance(value, Mapping):
+    if isinstance(value, dict):
         projected: list[tuple[JsonValue, JsonValue]] = [
             (
                 _stable_import_state(key, depth=depth + 1, seen=next_seen),
@@ -2579,9 +2756,182 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
             _stable_import_state(item, depth=depth + 1, seen=next_seen)
             for item in cast("Sequence[object]", value)
         ]
+    if isinstance(value, CodeType):
+        return {
+            "argcount": value.co_argcount,
+            "bytecode_sha256": hashlib.sha256(value.co_code).hexdigest(),
+            "cellvars": _stable_import_state(
+                value.co_cellvars,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "constants": _stable_import_state(
+                value.co_consts,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "exceptiontable_sha256": hashlib.sha256(value.co_exceptiontable).hexdigest(),
+            "filename": _stable_import_state(
+                value.co_filename,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "firstlineno": value.co_firstlineno,
+            "flags": value.co_flags,
+            "freevars": _stable_import_state(
+                value.co_freevars,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "kind": "code",
+            "kwonlyargcount": value.co_kwonlyargcount,
+            "linetable_sha256": hashlib.sha256(value.co_linetable).hexdigest(),
+            "name": _stable_import_state(
+                value.co_name,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "names": _stable_import_state(
+                value.co_names,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "nlocals": value.co_nlocals,
+            "posonlyargcount": value.co_posonlyargcount,
+            "qualname": _stable_import_state(
+                value.co_qualname,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "stacksize": value.co_stacksize,
+            "varnames": _stable_import_state(
+                value.co_varnames,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+        }
+    if isinstance(value, FunctionType):
+        return {
+            "annotations": _stable_import_state(
+                value.__annotations__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "closure": _stable_import_state(
+                tuple(
+                    None if _empty_closure_cell(cell) else cast("object", cell.cell_contents)
+                    for cell in value.__closure__ or ()
+                ),
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "code": _stable_import_state(
+                value.__code__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "defaults": _stable_import_state(
+                value.__defaults__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "dict": _stable_import_state(
+                value.__dict__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "kind": "function",
+            "kwdefaults": _stable_import_state(
+                value.__kwdefaults__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "module": value.__module__,
+            "qualname": value.__qualname__,
+        }
+    if isinstance(value, MethodType):
+        return {
+            "function": _stable_import_state(
+                value.__func__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "kind": "method",
+            "owner": _stable_import_state(
+                value.__self__,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+        }
+    if isinstance(value, BuiltinFunctionType):
+        owner = getattr(value, "__self__", None)
+        return {
+            "kind": "builtin",
+            "module": str(getattr(value, "__module__", "")),
+            "name": str(getattr(value, "__name__", "")),
+            "owner_module": type(owner).__module__,
+            "owner_qualname": type(owner).__qualname__,
+            "qualname": str(getattr(value, "__qualname__", "")),
+        }
+    if isinstance(value, classmethod | staticmethod):
+        descriptor_function = cast(  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            "object",
+            value.__func__,
+        )
+        return {
+            "descriptor": ("classmethod" if isinstance(value, classmethod) else "staticmethod"),
+            "function": _stable_import_state(
+                descriptor_function,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+        }
+    if isinstance(value, property):
+        return {
+            "deleter": _stable_import_state(
+                value.fdel,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "getter": _stable_import_state(
+                value.fget,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+            "kind": "property",
+            "setter": _stable_import_state(
+                value.fset,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
+        }
     if isinstance(value, type):
+        members: list[dict[str, JsonValue]] = []
+        for name, item in sorted(vars(value).items()):
+            if not _class_execution_member(item):
+                continue
+            item_projection: JsonValue
+            if isinstance(item, type) and depth >= 1:
+                item_projection = {
+                    "kind": "type_reference",
+                    "module": item.__module__,
+                    "qualname": item.__qualname__,
+                }
+            else:
+                item_projection = _stable_import_state(
+                    item,
+                    depth=depth + 1,
+                    seen=next_seen,
+                )
+            members.append(
+                {
+                    "name_sha256": hashlib.sha256(name.encode()).hexdigest(),
+                    "value": item_projection,
+                },
+            )
         return {
             "kind": "type",
+            "members": members,
             "module": value.__module__,
             "qualname": value.__qualname__,
         }
@@ -2618,46 +2968,187 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
     return state
 
 
-def _loaded_module_origin_projection() -> list[dict[str, JsonValue]]:
+def _empty_closure_cell(cell: CellType) -> bool:
+    try:
+        _ = cell.cell_contents
+    except ValueError:
+        return True
+    return False
+
+
+def _class_execution_member(value: object) -> bool:
+    return (
+        value is None
+        or isinstance(
+            value,
+            bool
+            | int
+            | float
+            | str
+            | bytes
+            | CodeType
+            | FunctionType
+            | BuiltinFunctionType
+            | MethodType
+            | type
+            | classmethod
+            | staticmethod
+            | property
+            | tuple
+            | frozenset,
+        )
+        or callable(value)
+    )
+
+
+def _module_execution_projection(
+    module: ModuleType,
+    cache: dict[int, JsonValue] | None = None,
+) -> list[dict[str, JsonValue]]:
+    """Project executable module members without retaining names or private values."""
+    members: list[dict[str, JsonValue]] = []
+    module_members = cast("Mapping[str, object]", vars(module))
+    for name, value in sorted(module_members.items()):
+        raw_value: object = value
+        if not isinstance(
+            value,
+            FunctionType
+            | BuiltinFunctionType
+            | MethodType
+            | type
+            | classmethod
+            | staticmethod
+            | property,
+        ):
+            continue
+        value_identity = id(raw_value)
+        value_projection = None if cache is None else cache.get(value_identity)
+        if value_projection is None:
+            value_projection = _stable_import_state(raw_value)
+            if cache is not None:
+                cache[value_identity] = value_projection
+        members.append(
+            {
+                "name_sha256": hashlib.sha256(name.encode()).hexdigest(),
+                "value": value_projection,
+            },
+        )
+    return members
+
+
+def _projection_import_origin_paths(module: ModuleType) -> set[Path]:
+    """Read module origins without iterating a lazy namespace path."""
+    origins: set[Path] = set()
+    module_state = vars(module)
+    raw_file = module_state.get("__file__")
+    if isinstance(raw_file, str):
+        origins.add(Path(raw_file))
+    spec = module_state.get("__spec__")
+    raw_origin = getattr(spec, "origin", None)
+    if isinstance(raw_origin, str) and raw_origin not in {"built-in", "frozen"}:
+        origins.add(Path(raw_origin))
+    raw_search: object = getattr(spec, "submodule_search_locations", None)
+    if isinstance(raw_search, list | tuple):
+        search_items = cast("Sequence[object]", raw_search)
+    else:
+        raw_search_state: object = getattr(raw_search, "__dict__", None)
+        stable_search = (
+            cast("Mapping[object, object]", raw_search_state).get("_path")
+            if isinstance(raw_search_state, dict)
+            else None
+        )
+        search_items = (
+            cast("Sequence[object]", stable_search)
+            if isinstance(stable_search, list | tuple)
+            else ()
+        )
+    origins.update(Path(item) for item in search_items if isinstance(item, str))
+    return origins
+
+
+def _loaded_module_projection() -> list[dict[str, JsonValue]]:
+    """Bind every loaded module entry, including negative and originless entries."""
     result: list[dict[str, JsonValue]] = []
-    for module_name, module in sorted(sys.modules.items()):
-        for origin in sorted(_import_origin_paths(module), key=os.fspath):
-            raw = os.fspath(origin)
-            projected: dict[str, JsonValue] = {
-                "module_name_sha256": hashlib.sha256(module_name.encode()).hexdigest(),
-                "path_sha256": hashlib.sha256(os.fsencode(origin)).hexdigest(),
-            }
-            if raw.startswith("<") and raw.endswith(">"):
-                projected["file_backed"] = False
-                result.append(projected)
-                continue
-            absolute = origin if origin.is_absolute() else Path.cwd() / origin
-            try:
-                metadata = absolute.lstat()
-            except OSError:
-                projected["exists"] = False
-                result.append(projected)
-                continue
+    executable_cache: dict[int, JsonValue] = {}
+    loaded_modules = cast("Mapping[str, object]", sys.modules)
+    for module_name, module in sorted(loaded_modules.items()):
+        projected: dict[str, JsonValue] = {
+            "name_sha256": hashlib.sha256(module_name.encode()).hexdigest(),
+            "present": module is not None,
+        }
+        if isinstance(module, ModuleType):
             projected.update(
                 {
-                    "change_time_ns": metadata.st_ctime_ns,
-                    "device": metadata.st_dev,
-                    "exists": True,
-                    "file_backed": stat.S_ISREG(metadata.st_mode),
-                    "inode": metadata.st_ino,
-                    "mode": metadata.st_mode,
-                    "modified_time_ns": metadata.st_mtime_ns,
-                    "owner": metadata.st_uid,
-                    "resolved_sha256": hashlib.sha256(
-                        os.fsencode(absolute.resolve(strict=True)),
-                    ).hexdigest(),
-                    "size": metadata.st_size,
-                    "symlink": stat.S_ISLNK(metadata.st_mode),
+                    "executable_members": _module_execution_projection(
+                        module,
+                        executable_cache,
+                    ),
+                    "module_type": (f"{type(module).__module__}.{type(module).__qualname__}"),
+                    "origins": [
+                        _loaded_origin_projection(module_name, origin)
+                        for origin in sorted(
+                            _projection_import_origin_paths(module),
+                            key=os.fspath,
+                        )
+                    ],
                 },
             )
-            if stat.S_ISREG(metadata.st_mode):
-                projected["content_sha256"] = hashlib.sha256(absolute.read_bytes()).hexdigest()
-            result.append(projected)
+        elif module is not None:
+            projected["value"] = _stable_import_state(module)
+        result.append(projected)
+    return result
+
+
+def _loaded_origin_projection(
+    module_name: str,
+    origin: Path,
+) -> dict[str, JsonValue]:
+    raw = os.fspath(origin)
+    projected: dict[str, JsonValue] = {
+        "module_name_sha256": hashlib.sha256(module_name.encode()).hexdigest(),
+        "path_sha256": hashlib.sha256(os.fsencode(origin)).hexdigest(),
+    }
+    if raw.startswith("<") and raw.endswith(">"):
+        projected["file_backed"] = False
+        return projected
+    absolute = origin if origin.is_absolute() else Path.cwd() / origin
+    try:
+        metadata = absolute.lstat()
+    except OSError:
+        projected["exists"] = False
+        return projected
+    projected.update(
+        {
+            "change_time_ns": metadata.st_ctime_ns,
+            "device": metadata.st_dev,
+            "exists": True,
+            "file_backed": stat.S_ISREG(metadata.st_mode),
+            "inode": metadata.st_ino,
+            "mode": metadata.st_mode,
+            "modified_time_ns": metadata.st_mtime_ns,
+            "owner": metadata.st_uid,
+            "resolved_sha256": hashlib.sha256(
+                os.fsencode(absolute.resolve(strict=True)),
+            ).hexdigest(),
+            "size": metadata.st_size,
+            "symlink": stat.S_ISLNK(metadata.st_mode),
+        },
+    )
+    if stat.S_ISREG(metadata.st_mode):
+        projected["content_sha256"] = hashlib.sha256(absolute.read_bytes()).hexdigest()
+    return projected
+
+
+def _loaded_module_origin_projection() -> list[dict[str, JsonValue]]:
+    result: list[dict[str, JsonValue]] = []
+    loaded_modules = cast("Mapping[str, object]", sys.modules)
+    for module_name, module in sorted(loaded_modules.items()):
+        if not isinstance(module, ModuleType):
+            continue
+        result.extend(
+            _loaded_origin_projection(module_name, origin)
+            for origin in sorted(_projection_import_origin_paths(module), key=os.fspath)
+        )
     return result
 
 
@@ -2674,6 +3165,7 @@ def _interpreter_flag_projection() -> dict[str, JsonValue]:
             "inspect",
             "interactive",
             "isolated",
+            "int_max_str_digits",
             "no_site",
             "no_user_site",
             "optimize",
@@ -2708,6 +3200,7 @@ def _official_interpreter_flags() -> dict[str, JsonValue]:
         "inspect": 0,
         "interactive": 0,
         "isolated": 1,
+        "int_max_str_digits": _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS,
         "no_site": 1,
         "no_user_site": 1,
         "optimize": 0,
@@ -2738,10 +3231,16 @@ def _interpreter_execution_projection() -> dict[str, JsonValue]:
                 *importlib.machinery.EXTENSION_SUFFIXES,
             },
         ),
+        "loaded_modules": _loaded_module_projection(),
         "loaded_module_origins": _loaded_module_origin_projection(),
         "meta_path": [_stable_import_state(item) for item in sys.meta_path],
         "path_hooks": [_stable_import_state(item) for item in sys.path_hooks],
         "path_importer_cache": importer_cache,
+        "runtime_controls": {
+            "dont_write_bytecode": sys.dont_write_bytecode,
+            "int_max_str_digits": sys.get_int_max_str_digits(),
+            "pycache_prefix": _stable_import_state(sys.pycache_prefix),
+        },
         "sys_path": list(_execution_search_directory_snapshot()),
         "xoptions": _stable_import_state(dict(sorted(_interpreter_xoptions().items()))),
     }
@@ -2768,6 +3267,11 @@ def _interpreter_policy_sha256() -> str:
             ),
             "flags": _official_interpreter_flags(),
             "importable_suffixes": sorted(_IMPORTABLE_ARTIFACT_SUFFIXES),
+            "runtime_controls": {
+                "dont_write_bytecode": True,
+                "int_max_str_digits": _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS,
+                "pycache_prefix": "isolated_runtime/.saxo-bank-mcp-pycache",
+            },
             "path_importer_cache": (
                 "canonical_beartype_file_finder",
                 "missing_sys_path_none",
@@ -2989,7 +3493,7 @@ def _validate_official_import_machinery() -> None:  # noqa: C901, PLR0912
             raise ValueError("source matrix file finder cache state is unsupported")
 
 
-def _validate_official_interpreter_state() -> None:
+def _validate_official_interpreter_state() -> None:  # noqa: C901
     """Require the exact isolated CPython/import policy established by the launcher."""
     if os.environ.get(_OFFICIAL_LAUNCHER_ENV) != "1":
         raise ValueError("source matrix official isolated launcher is required")
@@ -3004,6 +3508,15 @@ def _validate_official_interpreter_state() -> None:
         raise TypeError("source matrix interpreter cache prefix is unavailable")
     cache_prefix = Path(raw_cache_prefix)
     expected_cache_prefix = _official_runtime_root() / ".saxo-bank-mcp-pycache"
+    if sys.dont_write_bytecode is not True:
+        raise ValueError("source matrix interpreter bytecode policy is unsafe")
+    if sys.pycache_prefix != raw_cache_prefix:
+        raise ValueError("source matrix interpreter cache prefix state is unsafe")
+    if (
+        sys.int_info.default_max_str_digits != _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS
+        or sys.get_int_max_str_digits() != _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS
+    ):
+        raise ValueError("source matrix interpreter integer conversion limit is unsafe")
     if (
         not cache_prefix.is_absolute()
         or cache_prefix != expected_cache_prefix
@@ -4055,16 +4568,105 @@ def _open_guard_parent(
         raise
 
 
-def _claim_candidate_guard_at_owner(
-    owner_home: Path,
-    identity: SourceMatrixCandidateIdentity,
-) -> bool:
-    """Atomically claim the canonical owner guard through held directory FDs."""
-    parent, parent_metadata = _open_guard_parent(
-        owner_home,
-        identity.candidate_identity_sha256,
+def _open_state_guard_parent(
+    state_root: Path,
+    candidate_identity_sha256: str,
+) -> tuple[int, os.stat_result]:
+    _require_sha256(candidate_identity_sha256)
+    descriptor = _open_owner_directory(state_root)
+    try:
+        for name in ("qa", "analytics-source-matrix", candidate_identity_sha256):
+            child = _open_or_create_directory_at(
+                descriptor,
+                name,
+                exact_mode=True,
+            )
+            os.close(descriptor)
+            descriptor = child
+        return descriptor, _validated_directory(descriptor, exact_mode=True)
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _guard_payload(identity: SourceMatrixCandidateIdentity) -> bytes:
+    return (
+        json.dumps(
+            {
+                **identity.model_dump(mode="json"),
+                "claimed": True,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise ValueError("source matrix file write was incomplete")
+        offset += written
+
+
+def _read_all(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, 8192):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _validated_guard_file(
+    parent: int,
+    expected_payload: bytes,
+) -> os.stat_result:
+    descriptor = os.open(
+        "claimed.json",
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=parent,
     )
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
+            or _read_all(descriptor) != expected_payload
+        ):
+            raise ValueError("source matrix guard content, owner, or mode is invalid")
+        return metadata
+    finally:
+        os.close(descriptor)
+
+
+def _validate_claimed_guard(claim: _ClaimedGuardDirectory) -> None:
+    held_metadata = _validated_directory(claim.descriptor, exact_mode=True)
+    if held_metadata.st_dev != claim.device or held_metadata.st_ino != claim.inode:
+        raise ValueError("source matrix held guard parent changed")
+    held_guard = _validated_guard_file(claim.descriptor, claim.guard_payload)
+    if held_guard.st_dev != claim.guard_device or held_guard.st_ino != claim.guard_inode:
+        raise ValueError("source matrix held guard changed")
+    current_parent, current_metadata = claim.reopen()
+    try:
+        if current_metadata.st_dev != claim.device or current_metadata.st_ino != claim.inode:
+            raise ValueError("source matrix canonical guard parent changed")
+        current_guard = _validated_guard_file(current_parent, claim.guard_payload)
+        if current_guard.st_dev != claim.guard_device or current_guard.st_ino != claim.guard_inode:
+            raise ValueError("source matrix canonical guard changed")
+    finally:
+        os.close(current_parent)
+
+
+def _claim_candidate_guard_directory(
+    reopen: Callable[[], tuple[int, os.stat_result]],
+    identity: SourceMatrixCandidateIdentity,
+) -> _ClaimedGuardDirectory | None:
+    parent, parent_metadata = reopen()
+    expected_payload = _guard_payload(identity)
     created = False
+    retained = False
     try:
         try:
             descriptor = os.open(
@@ -4075,22 +4677,8 @@ def _claim_candidate_guard_at_owner(
             )
             created = True
         except FileExistsError:
-            existing = os.open(
-                "claimed.json",
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=parent,
-            )
-            try:
-                metadata = os.fstat(existing)
-                if (
-                    not stat.S_ISREG(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
-                ):
-                    raise ValueError("source matrix guard owner or mode is invalid")
-            finally:
-                os.close(existing)
-            return False
+            _validated_guard_file(parent, expected_payload)
+            return None
         try:
             os.fchmod(descriptor, _OWNER_FILE_MODE)
             metadata = os.fstat(descriptor)
@@ -4100,36 +4688,24 @@ def _claim_candidate_guard_at_owner(
                 or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
             ):
                 raise ValueError("source matrix guard owner or mode is invalid")
-            payload = (
-                json.dumps(
-                    {
-                        **identity.model_dump(mode="json"),
-                        "claimed": True,
-                    },
-                    sort_keys=True,
-                )
-                + "\n"
-            ).encode()
-            written = os.write(descriptor, payload)
-            if written != len(payload):
-                raise ValueError("source matrix guard write was incomplete")
+            _write_all(descriptor, expected_payload)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         os.fsync(parent)
-        current_parent, current_metadata = _open_guard_parent(
-            owner_home,
-            identity.candidate_identity_sha256,
+        guard_metadata = _validated_guard_file(parent, expected_payload)
+        claim = _ClaimedGuardDirectory(
+            descriptor=parent,
+            device=parent_metadata.st_dev,
+            inode=parent_metadata.st_ino,
+            guard_device=guard_metadata.st_dev,
+            guard_inode=guard_metadata.st_ino,
+            guard_payload=expected_payload,
+            reopen=reopen,
         )
-        try:
-            if (
-                current_metadata.st_dev != parent_metadata.st_dev
-                or current_metadata.st_ino != parent_metadata.st_ino
-            ):
-                raise ValueError("source matrix guard parent changed during claim")
-        finally:
-            os.close(current_parent)
-        return True  # noqa: TRY300
+        _validate_claimed_guard(claim)
+        retained = True
+        return claim  # noqa: TRY300
     except Exception:
         if created:
             try:
@@ -4139,7 +4715,154 @@ def _claim_candidate_guard_at_owner(
                 pass
         raise
     finally:
-        os.close(parent)
+        if not retained:
+            os.close(parent)
+
+
+def _claim_candidate_guard_at_owner(  # pyright: ignore[reportUnusedFunction]
+    owner_home: Path,
+    identity: SourceMatrixCandidateIdentity,
+) -> bool:
+    """Atomically claim the canonical owner guard through held directory FDs."""
+    claim = _claim_candidate_guard_directory(
+        lambda: _open_guard_parent(
+            owner_home,
+            identity.candidate_identity_sha256,
+        ),
+        identity,
+    )
+    if claim is None:
+        return False
+    os.close(claim.descriptor)
+    return True
+
+
+def _unlink_published_evidence(
+    claim: _ClaimedGuardDirectory,
+    expected: _PublishedEvidence,
+) -> None:
+    try:
+        descriptor = os.open(
+            "source-matrix.json",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=claim.descriptor,
+        )
+    except FileNotFoundError:
+        return
+    try:
+        metadata = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if metadata.st_dev != expected.device or metadata.st_ino != expected.inode:
+        return
+    os.unlink("source-matrix.json", dir_fd=claim.descriptor)
+    os.fsync(claim.descriptor)
+
+
+def _publish_claimed_text(
+    claim: _ClaimedGuardDirectory,
+    text: str,
+    *,
+    before_link: Callable[[], bool] | None = None,
+) -> _PublishedEvidence | None:
+    _validate_claimed_guard(claim)
+    temporary_name = f".source-matrix.json.{uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+        _OWNER_FILE_MODE,
+        dir_fd=claim.descriptor,
+    )
+    temporary_metadata = os.fstat(descriptor)
+    final_created = False
+    complete = False
+    published: _PublishedEvidence | None = None
+    try:
+        os.fchmod(descriptor, _OWNER_FILE_MODE)
+        temporary_metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(temporary_metadata.st_mode)
+            or temporary_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(temporary_metadata.st_mode) != _OWNER_FILE_MODE
+        ):
+            raise ValueError("source matrix evidence owner or mode is invalid")
+        _write_all(descriptor, text.encode())
+        os.fsync(descriptor)
+        _validate_claimed_guard(claim)
+        if before_link is not None and before_link() is not True:
+            raise _ExecutionClosureChangedError
+        _validate_claimed_guard(claim)
+        try:
+            os.link(
+                temporary_name,
+                "source-matrix.json",
+                src_dir_fd=claim.descriptor,
+                dst_dir_fd=claim.descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            return None
+        final_created = True
+        final_descriptor = os.open(
+            "source-matrix.json",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=claim.descriptor,
+        )
+        try:
+            final_metadata = os.fstat(final_descriptor)
+            if (
+                not stat.S_ISREG(final_metadata.st_mode)
+                or final_metadata.st_uid != os.getuid()
+                or stat.S_IMODE(final_metadata.st_mode) != _OWNER_FILE_MODE
+                or final_metadata.st_dev != temporary_metadata.st_dev
+                or final_metadata.st_ino != temporary_metadata.st_ino
+            ):
+                raise ValueError("source matrix evidence identity is invalid")
+            os.fsync(final_descriptor)
+        finally:
+            os.close(final_descriptor)
+        os.fsync(claim.descriptor)
+        _validate_claimed_guard(claim)
+        published = _PublishedEvidence(
+            device=temporary_metadata.st_dev,
+            inode=temporary_metadata.st_ino,
+        )
+        complete = True
+        return published
+    finally:
+        os.close(descriptor)
+        if final_created and not complete and published is None:
+            _unlink_published_evidence(
+                claim,
+                _PublishedEvidence(
+                    device=temporary_metadata.st_dev,
+                    inode=temporary_metadata.st_ino,
+                ),
+            )
+        with suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=claim.descriptor)
+        with suppress(OSError):
+            os.fsync(claim.descriptor)
+
+
+def _publish_claimed_failure(
+    claim: _ClaimedGuardDirectory,
+    reason: str,
+    *,
+    before_link: Callable[[], bool] | None = None,
+) -> _PublishedEvidence | None:
+    text = (
+        json.dumps(
+            {
+                "reason": _safe_source_reason(reason),
+                "status": "failed",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    return _publish_claimed_text(claim, text, before_link=before_link)
 
 
 def _prepare_owner_only_directory(path: Path) -> None:
@@ -4151,7 +4874,7 @@ def _prepare_owner_only_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def _claim_candidate_guard(
+def _claim_candidate_guard(  # pyright: ignore[reportUnusedFunction]
     path: Path,
     identity: SourceMatrixCandidateIdentity,
 ) -> bool:
@@ -4184,60 +4907,6 @@ def _claim_candidate_guard(
     finally:
         os.close(directory)
     return True
-
-
-def _write_immutable_evidence(
-    path: Path,
-    payload: Mapping[str, JsonValue],
-) -> bool:
-    text = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
-    findings, scan_errors = scan_secret_text(path.name, text)
-    if findings or scan_errors:
-        return _write_immutable_failure(path, "evidence_secret_scan_failed")
-    return _write_immutable_text(path, text)
-
-
-def _write_immutable_failure(path: Path, reason: str) -> bool:
-    text = (
-        json.dumps(
-            {
-                "reason": _safe_source_reason(reason),
-                "status": "failed",
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    return _write_immutable_text(path, text)
-
-
-def _write_immutable_text(path: Path, text: str) -> bool:
-    _prepare_owner_only_directory(path.parent)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            return False
-        path.chmod(0o600)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-        return True
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
