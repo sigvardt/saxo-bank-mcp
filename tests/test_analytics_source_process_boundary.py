@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -11,10 +12,14 @@ import pytest
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_process import (
     CHILD_BOOTSTRAP,
+    SOURCE_MATRIX_CHILD_TOOLS,
     ChildBootstrapPaths,
     ChildConfigurationError,
+    ChildLaunchConfig,
     MatrixCallPolicy,
     MatrixSession,
+    OneShotProcessSession,
+    ProcessSessionError,
     RegisteredCallProfile,
     RegisteredResponseMode,
     build_child_launch_config,
@@ -58,6 +63,55 @@ def exact_sim_env(tmp_path: Path) -> dict[str, str]:
         "SAXO_MCP_SIM_REDIRECT_URI": "http://localhost:8080/callback",
         "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token-cache.json"),
     }
+
+
+@pytest.fixture
+def stdio_fixture_config(tmp_path: Path) -> ChildLaunchConfig:
+    fixture = Path("tests/fixtures/analytics/source_matrix_stdio_child.py").resolve(strict=True)
+    executable = Path(sys.executable).resolve(strict=True)
+    return ChildLaunchConfig(
+        command=(str(executable), "-I", "-B", "-S", str(fixture), "normal"),
+        environment={"LANG": "C", "LC_ALL": "C"},
+        cwd=tmp_path,
+        executable_identity_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+    )
+
+
+@pytest.mark.anyio
+async def test_process_session_spawns_one_distinct_child_over_stdio(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(stdio_fixture_config)
+    await session.spawn()
+    await session.initialize()
+    assert await session.list_tools_once() == SOURCE_MATRIX_CHILD_TOOLS
+    facts = await session.close()
+    assert facts.child_pid != facts.coordinator_pid
+    assert facts.stdin_identity.endpoint_kind == "fifo"
+    assert facts.stdout_identity.endpoint_kind == "fifo"
+    assert facts.stdin_identity != facts.stdout_identity
+    assert facts.child_spawn_count == facts.mcp_session_count == 1
+    assert facts.mcp_initialize_count == facts.tool_list_count == 1
+    assert facts.child_exit_code == 0
+
+
+@pytest.mark.anyio
+async def test_process_session_cannot_initialize_connect_or_spawn_twice(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(stdio_fixture_config)
+    await session.spawn()
+    with pytest.raises(ProcessSessionError):
+        await session.spawn()
+    await session.initialize()
+    with pytest.raises(ProcessSessionError):
+        await session.initialize()
+    await session.list_tools_once()
+    with pytest.raises(ProcessSessionError):
+        await session.list_tools_once()
+    facts = await session.close()
+    assert facts.reconnect_count == 0
+    assert facts.restart_count == 0
 
 
 def test_child_command_uses_exact_installed_interpreter_and_isolated_bootstrap(
