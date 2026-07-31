@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import Mock
 
@@ -49,6 +51,26 @@ _SEALED_FILE_MODE: Final = 0o400
 _ROOT: Final = Path(__file__).parents[1]
 QA_MATRIX_PATH: Final = Path("src/saxo_bank_mcp/qa_analytics_source_matrix.py")
 ROUND7_PATH: Final = Path("tests/test_area_b_review_round7.py")
+
+
+def _load_task_script(name: str) -> ModuleType:
+    path = _ROOT / "scripts" / name
+    spec = importlib.util.spec_from_file_location(f"_task3_{path.stem}", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _FakeDistribution:
+    def __init__(self, sources: dict[str, Path], *, version: str = "1.0") -> None:
+        self.version = version
+        self.files = tuple(PurePosixPath(path) for path in sources)
+        self._sources = sources
+
+    def locate_file(self, path: object) -> Path:
+        return self._sources[str(path)]
 
 
 def _canonical_digest(value: object) -> str:
@@ -911,6 +933,285 @@ def test_runtime_is_owner_only_nonwritable_and_uses_external_empty_caches(
             for path in runtime.rglob("*")
         )
         assert not (runtime / ".saxo-bank-mcp-pycache").exists()
+
+
+def test_dependency_copy_cannot_overwrite_interpreter_with_unmanifested_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    runtime = tmp_path / "runtime"
+    runtime_site = runtime / "lib/python3.12/site-packages"
+    interpreter = runtime / "bin/python3.12"
+    runtime_site.mkdir(parents=True)
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"validated-interpreter")
+    package = tmp_path / "seed/package.py"
+    replacement = tmp_path / "seed/replacement-python"
+    package.parent.mkdir()
+    package.write_bytes(b"PACKAGE = True\n")
+    replacement.write_bytes(b"unchecked-interpreter")
+    seed = _FakeDistribution(
+        {
+            "package.py": package,
+            "../../../bin/python3.12": replacement,
+        },
+    )
+
+    def find_seed(_name: str) -> _FakeDistribution:
+        return seed
+
+    monkeypatch.setattr(preparation, "distribution", find_seed)
+    copy_locked = cast(
+        "Callable[[Path, dict[str, object]], None]",
+        preparation._copy_locked_dependencies,  # noqa: SLF001
+    )
+
+    copy_locked(
+        runtime,
+        {
+            "dependency_distributions": {
+                "fixture": {
+                    "files": {
+                        "package.py": hashlib.sha256(package.read_bytes()).hexdigest(),
+                    },
+                    "version": "1.0",
+                },
+            },
+        },
+    )
+
+    assert interpreter.read_bytes() == b"validated-interpreter"
+    assert (runtime_site / "package.py").read_bytes() == package.read_bytes()
+
+
+def test_dependency_copy_refuses_two_manifest_files_with_the_same_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    runtime_site = tmp_path / "runtime/lib/python3.12/site-packages"
+    runtime_site.mkdir(parents=True)
+    first = tmp_path / "first/shared.py"
+    second = tmp_path / "second/shared.py"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"VALUE = 1\n")
+    second.write_bytes(b"VALUE = 2\n")
+    seeds = {
+        "first": _FakeDistribution({"shared.py": first}),
+        "second": _FakeDistribution({"shared.py": second}),
+    }
+    monkeypatch.setattr(preparation, "distribution", seeds.__getitem__)
+    copy_locked = cast(
+        "Callable[[Path, dict[str, object]], None]",
+        preparation._copy_locked_dependencies,  # noqa: SLF001
+    )
+
+    with pytest.raises(ValueError, match="collision"):
+        copy_locked(
+            tmp_path / "runtime",
+            {
+                "dependency_distributions": {
+                    name: {
+                        "files": {
+                            "shared.py": hashlib.sha256(source.read_bytes()).hexdigest(),
+                        },
+                        "version": "1.0",
+                    }
+                    for name, source in (("first", first), ("second", second))
+                },
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "mutation"),
+    [
+        ("direct", "flag"),
+        ("direct", "alternate"),
+        ("direct", "trailing"),
+        ("shell", "flag"),
+        ("shell", "alternate"),
+        ("shell", "trailing"),
+    ],
+)
+def test_portable_entrypoint_normalization_rejects_behavior_changing_bytes(
+    tmp_path: Path,
+    wrapper: str,
+    mutation: str,
+) -> None:
+    runtime_module = importlib.import_module("saxo_bank_mcp.analytics_source_runtime")
+    normalize = cast(
+        "Callable[[str, bytes, Path], bytes | None]",
+        runtime_module._portable_file_content,  # noqa: SLF001
+    )
+    runtime = tmp_path / "runtime"
+    interpreter = os.fsencode(runtime / "bin/python3.12")
+    selected = interpreter
+    suffix = b""
+    if mutation == "flag":
+        suffix = b" -E"
+    elif mutation == "alternate":
+        selected = os.fsencode(runtime / "bin/python3")
+    elif mutation == "trailing":
+        suffix = b" "
+    else:
+        raise AssertionError("unsupported entrypoint mutation")
+    if wrapper == "direct":
+        safe = b"#!" + interpreter + b"\nprint('safe')\n"
+        unsafe = b"#!" + selected + suffix + b"\nprint('safe')\n"
+        expected = b"#!bin/python3.12\nprint('safe')\n"
+    else:
+        safe = (
+            b"#!/bin/sh\n'''exec' '"
+            + interpreter
+            + b"' \"$0\" \"$@\"\n' '''\nprint('safe')\n"
+        )
+        unsafe = (
+            b"#!/bin/sh\n'''exec' '"
+            + selected
+            + b"'"
+            + suffix
+            + b" \"$0\" \"$@\"\n' '''\nprint('safe')\n"
+        )
+        expected = (
+            b"#!/bin/sh\n'''exec' 'bin/python3.12' \"$0\" \"$@\"\n"
+            b"' '''\nprint('safe')\n"
+        )
+    assert normalize("bin/fixture", safe, runtime) == expected
+    with pytest.raises(runtime_module.CandidateRuntimeError):
+        normalize("bin/fixture", unsafe, runtime)
+
+
+@pytest.mark.parametrize(
+    "launcher_name",
+    [
+        "saxo-bank-analytics-source-matrix",
+        "saxo-bank-analytics-source-matrix-generate",
+    ],
+)
+def test_installed_launcher_cleanup_refuses_a_swapped_run_root(
+    tmp_path: Path,
+    launcher_name: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    binary = runtime / "bin/python3.12"
+    site_packages = runtime / "lib/python3.12/site-packages"
+    package = site_packages / "saxo_bank_mcp"
+    package.mkdir(parents=True)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.symlink_to(Path(sys.executable).resolve(strict=True))
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    swap_source = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "root = Path(sys.pycache_prefix).parent\n"
+        "held = root.with_name(root.name + '.held')\n"
+        "target = root.parent / 'unrelated-target'\n"
+        "root.rename(held)\n"
+        "target.mkdir()\n"
+        "for name in ('coordinator-cache', 'coordinator-work', 'coordinator-tmp'):\n"
+        "    (target / name).mkdir()\n"
+        "root.symlink_to(target, target_is_directory=True)\n"
+    )
+    (package / "qa_analytics_source_matrix.py").write_text(
+        swap_source,
+        encoding="utf-8",
+    )
+    (package / "generate_analytics_source_matrix_candidate.py").write_text(
+        swap_source,
+        encoding="utf-8",
+    )
+    launcher = runtime / "bin" / launcher_name
+    launcher.write_bytes((_ROOT / "scripts" / launcher_name).read_bytes())
+    launcher.chmod(0o700)
+    caller = tmp_path / "caller"
+    caller.mkdir()
+
+    completed = subprocess.run(
+        (os.fspath(launcher),),
+        cwd=caller,
+        env={"LANG": "C", "LC_ALL": "C"},
+        check=False,
+        capture_output=True,
+    )
+
+    target = tmp_path / "unrelated-target"
+    assert completed.returncode != 0
+    assert {
+        path.name for path in target.iterdir()
+    } == {"coordinator-cache", "coordinator-work", "coordinator-tmp"}
+
+
+@pytest.mark.parametrize(
+    "script_name",
+    [
+        "run_analytics_source_matrix.py",
+        "generate_analytics_source_matrix_candidate.py",
+    ],
+)
+def test_development_cleanup_refuses_a_swapped_run_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    script_name: str,
+) -> None:
+    wrapper = _load_task_script(script_name)
+    run_root = tmp_path / "development-run"
+    held_root = tmp_path / "held-development-run"
+    target = tmp_path / "unrelated-target"
+    run_root.mkdir(mode=0o700)
+
+    def swap_root(arguments: tuple[str, ...], **kwargs: object) -> SimpleNamespace:
+        assert Path(cast("str", kwargs["cwd"])).parent == run_root
+        run_root.rename(held_root)
+        target.mkdir(mode=0o700)
+        for name in ("cache", "work", "tmp"):
+            (target / name).mkdir(mode=0o700)
+        run_root.symlink_to(target, target_is_directory=True)
+        return SimpleNamespace(args=arguments, returncode=0)
+
+    def fixed_temp_directory(**_kwargs: object) -> str:
+        return os.fspath(run_root)
+
+    monkeypatch.setattr(
+        wrapper,
+        "tempfile",
+        SimpleNamespace(mkdtemp=fixed_temp_directory),
+    )
+    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(run=swap_root))
+    main = cast("Callable[[], int]", wrapper.main)
+
+    with pytest.raises(RuntimeError):
+        main()
+
+    assert {path.name for path in target.iterdir()} == {"cache", "work", "tmp"}
+
+
+def test_linux_lib64_alias_is_removed_before_final_symlink_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    runtime = tmp_path / "runtime"
+    binary = runtime / "bin/python3.12"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"fixture-python")
+    binary.chmod(0o700)
+    (runtime / "lib").mkdir()
+    (runtime / "lib64").symlink_to("lib", target_is_directory=True)
+    monkeypatch.setattr(preparation.sys, "platform", "linux")
+    normalize_aliases = cast(
+        "Callable[[Path], None]",
+        preparation._normalize_interpreter_aliases,  # noqa: SLF001
+    )
+
+    normalize_aliases(runtime)
+
+    assert not (runtime / "lib64").exists()
+    assert not (runtime / "lib64").is_symlink()
+    assert (runtime / "bin/python").readlink() == Path("python3.12")
+    assert (runtime / "bin/python3").readlink() == Path("python3.12")
 
 
 def test_live_object_projection_functions_are_absent() -> None:

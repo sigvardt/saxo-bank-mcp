@@ -15,13 +15,22 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final, Literal, cast
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from pydantic import BaseModel, ConfigDict, Field
 
+from saxo_bank_mcp._source_matrix_run_directory import (
+    HeldRunDirectory,
+    RunDirectoryError,
+    cleanup_held_run_directory,
+    close_held_run_directory,
+    create_held_run_directories,
+    hold_existing_run_directories,
+    open_held_run_directory,
+)
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
 from saxo_bank_mcp.analytics_source_process import CHILD_BOOTSTRAP, ChildBootstrapPaths
 
@@ -84,6 +93,12 @@ _ALLOWED_INTERPRETER_LINKS: Final = {
     "bin/python3": "python3.12",
 }
 _RUN_ROOT_PATTERN: Final = re.compile(r"^\.saxo-source-matrix-run\.[1-9][0-9]*$")
+_COORDINATOR_RUN_DIRECTORY_NAMES: Final = (
+    "coordinator-cache",
+    "coordinator-work",
+    "coordinator-tmp",
+)
+_CHILD_RUN_DIRECTORY_NAMES: Final = ("child-cache", "child-work", "child-tmp")
 _READ_FLAGS: Final = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY_FLAGS: Final = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 _NOFOLLOW_FLAGS: Final = getattr(os, "O_NOFOLLOW", 0)
@@ -237,6 +252,19 @@ def _expected_owner_uid() -> int:
 def _safe_artifact_path(value: str) -> bool:
     path = Path(value)
     return bool(value) and not path.is_absolute() and ".." not in path.parts and "\\" not in value
+
+
+def _excluded_outside_site_record_path(value: str) -> bool:
+    path = PurePosixPath(value)
+    prefix = ("..", "..", "..")
+    target = path.parts[len(prefix) :]
+    return (
+        path.as_posix() == value
+        and path.parts[: len(prefix)] == prefix
+        and bool(target[1:])
+        and target[0] in {"bin", "share"}
+        and all(part not in {"", ".", ".."} and "\\" not in part for part in target[1:])
+    )
 
 
 def _official_launcher_record_path(value: str) -> bool:
@@ -427,7 +455,9 @@ def _scalar_material(runtime_root: Path, layout: ExternalRunLayout) -> dict[str,
     }
 
 
-def _runtime_layout_from_process(runtime_root: Path) -> ExternalRunLayout:
+def _runtime_layout_from_process(
+    runtime_root: Path,
+) -> tuple[ExternalRunLayout, HeldRunDirectory]:
     raw_cache = sys.pycache_prefix
     raw_tmp = os.environ.get("TMPDIR")
     if raw_cache is None or raw_tmp is None:
@@ -461,12 +491,29 @@ def _runtime_layout_from_process(runtime_root: Path) -> ExternalRunLayout:
         child_work=root / "child-work",
         child_tmp=root / "child-tmp",
     )
-    for child in (layout.child_cache, layout.child_work, layout.child_tmp):
-        try:
-            child.mkdir(mode=_OWNER_DIRECTORY_MODE)
-        except OSError as error:
-            raise CandidateRuntimeError("external_layout_invalid") from error
-    return layout
+    held: HeldRunDirectory | None = None
+    try:
+        held = open_held_run_directory(root)
+        hold_existing_run_directories(held, _COORDINATOR_RUN_DIRECTORY_NAMES)
+        create_held_run_directories(held, _CHILD_RUN_DIRECTORY_NAMES)
+    except (OSError, RunDirectoryError) as error:
+        if held is not None:
+            created = tuple(
+                name
+                for name in _CHILD_RUN_DIRECTORY_NAMES
+                if name in held.child_descriptors
+            )
+            if created:
+                with suppress(RunDirectoryError):
+                    cleanup_held_run_directory(
+                        held,
+                        remove_names=created,
+                        remove_root=False,
+                    )
+            else:
+                close_held_run_directory(held)
+        raise CandidateRuntimeError("external_layout_invalid") from error
+    return layout, held
 
 
 def _layout_paths(layout: ExternalRunLayout) -> tuple[Path, ...]:
@@ -556,15 +603,27 @@ def _portable_file_content(relative: str, content: bytes, runtime_root: Path) ->
         return _normalize_pyvenv_content(content, runtime_root)
     if relative.startswith("bin/") and content.startswith(b"#!"):
         first, separator, rest = content.partition(b"\n")
-        if os.fsencode(runtime_root) in first:
+        runtime_token = os.fsencode(runtime_root)
+        interpreter_token = os.fsencode(runtime_root / "bin/python3.12")
+        if runtime_token in first:
+            if first != b"#!" + interpreter_token or separator != b"\n":
+                raise CandidateRuntimeError("runtime_entry_invalid")
             return b"#!bin/python3.12" + separator + rest
         lines = content.splitlines(keepends=True)
-        if (
-            first == b"#!/bin/sh"
-            and len(lines) >= _PORTABLE_ENTRYPOINT_MIN_LINES
-            and lines[1].startswith(b"'''exec' '")
-            and os.fsencode(runtime_root) in lines[1]
-        ):
+        startup = b"".join(lines[:3])
+        if first == b"#!/bin/sh" and runtime_token in startup:
+            expected_exec = (
+                b"'''exec' '"
+                + interpreter_token
+                + b"' \"$0\" \"$@\"\n"
+            )
+            if (
+                len(lines) < _PORTABLE_ENTRYPOINT_MIN_LINES
+                or lines[0] != b"#!/bin/sh\n"
+                or lines[1] != expected_exec
+                or lines[2] != b"' '''\n"
+            ):
+                raise CandidateRuntimeError("runtime_entry_invalid")
             lines[1] = b"'''exec' 'bin/python3.12' \"$0\" \"$@\"\n"
             return b"".join(lines)
     return content
@@ -1048,7 +1107,11 @@ def _dependency_distributions() -> dict[str, _DependencyDistribution]:  # noqa: 
             relative = str(package_path).replace(os.sep, "/")
             path = Path(str(dependency.locate_file(package_path)))
             if ".." in Path(relative).parts:
-                continue
+                if _excluded_outside_site_record_path(relative):
+                    continue
+                raise ValueError(
+                    f"source matrix dependency {name} RECORD path is invalid",
+                )
             metadata = _validated_closure_entry_metadata(path, scope=f"dependency {name}")
             if ".dist-info/" in relative and Path(relative).name in _INSTALLER_GENERATED_METADATA:
                 if Path(relative).name == "INSTALLER":
@@ -1444,30 +1507,35 @@ def _open_seal(  # noqa: PLR0913
 
 def open_candidate_runtime_seal() -> tuple[CandidateRuntimeSeal, ExternalRunLayout]:
     runtime_root = _official_runtime_root()
-    layout = _runtime_layout_from_process(runtime_root)
+    layout, held = _runtime_layout_from_process(runtime_root)
     try:
         manifest, source_mode = _load_candidate_manifest()
         if source_mode:
             raise CandidateRuntimeError("runtime_identity_mismatch")  # noqa: TRY301
         identity = source_matrix_candidate_identity()
-        return (
-            _open_seal(
-                runtime_root,
-                manifest,
-                identity,
-                layout,
-                validate_scalar=True,
-                require_official_layout=True,
-            ),
+        seal = _open_seal(
+            runtime_root,
+            manifest,
+            identity,
             layout,
+            validate_scalar=True,
+            require_official_layout=True,
         )
     except Exception as error:
-        for path in (layout.child_tmp, layout.child_work, layout.child_cache):
-            with suppress(OSError):
-                path.rmdir()
+        try:
+            cleanup_held_run_directory(
+                held,
+                remove_names=_CHILD_RUN_DIRECTORY_NAMES,
+                remove_root=False,
+            )
+        except RunDirectoryError:
+            raise CandidateRuntimeError("external_layout_invalid") from None
         if isinstance(error, CandidateRuntimeError):
             raise
         raise CandidateRuntimeError("runtime_identity_mismatch") from None
+    else:
+        close_held_run_directory(held)
+        return seal, layout
 
 
 def _open_candidate_runtime_seal_for_test(  # pyright: ignore[reportUnusedFunction]

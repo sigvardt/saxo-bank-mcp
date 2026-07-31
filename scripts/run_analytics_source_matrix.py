@@ -8,12 +8,11 @@ import sysconfig
 import tempfile
 from pathlib import Path
 
-
-def _cleanup_empty(paths: tuple[Path, ...]) -> None:
-    for path in reversed(paths):
-        if path.is_dir() and any(path.iterdir()):
-            raise RuntimeError("development run directory is not empty")
-        path.rmdir()
+from saxo_bank_mcp._source_matrix_run_directory import (
+    cleanup_held_run_directory,
+    create_held_run_directories,
+    open_held_run_directory,
+)
 
 
 def main() -> int:
@@ -23,10 +22,11 @@ def main() -> int:
         raise ValueError("development site-packages is unavailable")
     site_packages = Path(raw_site_packages).resolve(strict=True)
     run_root = Path(tempfile.mkdtemp(prefix="saxo-source-matrix-dev-"))
-    paths = tuple(run_root / name for name in ("cache", "work", "tmp"))
+    names = ("cache", "work", "tmp")
+    paths = tuple(run_root / name for name in names)
+    held = open_held_run_directory(run_root)
     try:
-        for path in paths:
-            path.mkdir(mode=0o700)
+        create_held_run_directories(held, names)
         cache, work, tmp = paths
         arguments = (
             sys.executable,
@@ -60,7 +60,7 @@ def main() -> int:
         )
         return completed.returncode
     finally:
-        _cleanup_empty((run_root, *paths))
+        cleanup_held_run_directory(held, remove_names=names, remove_root=True)
 
 
 if __name__ == "__main__":

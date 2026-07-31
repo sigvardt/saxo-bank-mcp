@@ -34,6 +34,5 @@ def test_installed_launcher_builds_a_fresh_locked_isolated_closure() -> None:
             )
         )
         assert '"$python" -I -B -S' in launcher
-        assert "os.rmdir(path)" in launcher
         assert module in launcher
         assert ".saxo-bank-mcp-pycache" not in launcher
