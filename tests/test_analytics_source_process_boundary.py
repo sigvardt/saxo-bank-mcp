@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_process import (
     CHILD_BOOTSTRAP,
     ChildBootstrapPaths,
     ChildConfigurationError,
     MatrixCallPolicy,
+    MatrixSession,
     RegisteredCallProfile,
+    RegisteredResponseMode,
     build_child_launch_config,
 )
 
@@ -111,7 +116,7 @@ def test_registered_call_profile_refuses_unsealed_tool_arguments() -> None:
         registry_page_offsets={"Portfolio": (0,)},
         registered_calls=(profile,),
     )
-    valid = {
+    valid: dict[str, JsonValue] = {
         "method": "GET",
         "path": "/port/v1/balances/me",
         "response_mode": "fingerprint_only",
@@ -134,9 +139,132 @@ def test_registry_result_requires_the_next_sealed_offset() -> None:
         registry_page_offsets={"Portfolio": (0, 100)},
         registered_calls=(),
     )
-    arguments = {"service_group": "Portfolio", "limit": 100, "offset": 0}
+    arguments: dict[str, JsonValue] = {
+        "service_group": "Portfolio",
+        "limit": 100,
+        "offset": 0,
+    }
     policy.validate("saxo_list_registered_endpoints", arguments)
-    policy.validate_result("saxo_list_registered_endpoints", {"next_offset": 100})
+    policy.observe("saxo_list_registered_endpoints", arguments, {"next_offset": 100})
     policy.validate("saxo_list_registered_endpoints", {**arguments, "offset": 100})
     with pytest.raises(ChildConfigurationError):
-        policy.validate_result("saxo_list_registered_endpoints", {"next_offset": 100})
+        policy.observe(
+            "saxo_list_registered_endpoints",
+            {**arguments, "offset": 100},
+            {"next_offset": 100},
+        )
+
+
+@pytest.mark.parametrize("escape", ["parent", "ancestor_symlink"])
+def test_child_paths_refuse_parent_escape_and_symlinked_ancestor(
+    escape: str,
+    sealed_child_paths: ChildBootstrapPaths,
+    exact_sim_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    if escape == "parent":
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o700)
+        executable = sealed_child_paths.runtime_root / ".." / "outside" / "python3.12"
+        shutil.copy2(sys.executable, outside / "python3.12")
+        paths = ChildBootstrapPaths(
+            sealed_child_paths.runtime_root,
+            executable,
+            sealed_child_paths.site_packages,
+            sealed_child_paths.pycache_prefix,
+            sealed_child_paths.workdir,
+            sealed_child_paths.tmpdir,
+        )
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o700)
+        shutil.copy2(sys.executable, outside / "python3.12")
+        sealed_child_paths.runtime_root.chmod(0o700)
+        linked_runtime = sealed_child_paths.runtime_root / "linked-bin"
+        linked_runtime.symlink_to(outside, target_is_directory=True)
+        sealed_child_paths.runtime_root.chmod(0o500)
+        paths = ChildBootstrapPaths(
+            sealed_child_paths.runtime_root,
+            linked_runtime / "python3.12",
+            sealed_child_paths.site_packages,
+            sealed_child_paths.pycache_prefix,
+            sealed_child_paths.workdir,
+            sealed_child_paths.tmpdir,
+        )
+
+    with pytest.raises(ChildConfigurationError, match="child_path_invalid"):
+        build_child_launch_config(paths, exact_sim_env)
+
+
+def test_isolated_bootstrap_imports_from_the_installed_site_packages(tmp_path: Path) -> None:
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "saxo_bank_mcp"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "server.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    cache = tmp_path / "cache"
+    work = tmp_path / "work"
+    temp = tmp_path / "temp"
+    for directory in (cache, work, temp):
+        directory.mkdir()
+
+    interpreter = str(Path(sys.executable).resolve())
+    completed = subprocess.run(
+        (
+            interpreter,
+            "-I",
+            "-B",
+            "-S",
+            "-X",
+            f"pycache_prefix={cache}",
+            "-c",
+            CHILD_BOOTSTRAP,
+            "/",
+            interpreter,
+            str(site_packages),
+            str(cache),
+            str(work),
+            str(temp),
+        ),
+        check=False,
+        cwd=work,
+        env={"TMPDIR": str(temp)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == ""
+    assert completed.stderr == ""
+
+
+def test_shared_process_interfaces_match_the_approved_plan(
+    sealed_child_paths: ChildBootstrapPaths,
+    exact_sim_env: dict[str, str],
+) -> None:
+    config = build_child_launch_config(sealed_child_paths, exact_sim_env, ssl_runtime_entry=None)
+    assert config.executable_identity_sha256
+    assert not hasattr(config, "executable_sha256")
+    assert getattr(MatrixSession, "_is_protocol", False) is True
+
+    with pytest.raises(ChildConfigurationError, match="registered_call_profile_invalid"):
+        RegisteredCallProfile(
+            path="/port/v1/balances/me",
+            params={},
+            response_mode=cast("RegisteredResponseMode", "redacted_body"),
+            analytics_contract_id=None,
+        )
+
+    policy = MatrixCallPolicy(registry_page_offsets={"Portfolio": (0,)}, registered_calls=())
+    assert callable(policy.observe)
+
+
+def test_registry_final_page_accepts_explicit_null_next_offset() -> None:
+    policy = MatrixCallPolicy(registry_page_offsets={"Portfolio": (0,)}, registered_calls=())
+    arguments: dict[str, JsonValue] = {
+        "service_group": "Portfolio",
+        "limit": 100,
+        "offset": 0,
+    }
+    policy.validate("saxo_list_registered_endpoints", arguments)
+    policy.observe("saxo_list_registered_endpoints", arguments, {"next_offset": None})

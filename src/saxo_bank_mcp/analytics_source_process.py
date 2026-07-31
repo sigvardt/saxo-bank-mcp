@@ -7,7 +7,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.config import SimAuthSettingsError, resolve_sim_auth_settings
@@ -54,7 +54,8 @@ type ChildConfigurationReason = Literal[
     "tool_call_profile_invalid",
 ]
 
-type LedgerPhase = Literal["initial", "cleared", "read"]
+type LedgerPhase = Literal["clear", "readback", "complete"]
+type RegisteredResponseMode = Literal["fingerprint_only", "analytics_contract_receipt"]
 
 _SIM_ENVIRONMENT: Final = "SAXO_MCP_ENVIRONMENT"
 _LIVE_READS_ENV: Final = "SAXO_MCP_ENABLE_LIVE_READS"
@@ -98,42 +99,65 @@ import runpy
 import sys
 from pathlib import Path
 
+def checked_path(raw, directory):
+    path = Path(raw)
+    if not path.is_absolute() or any(part == \"..\" for part in path.parts):
+        raise ValueError(\"child_bootstrap_refused\")
+    descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index, part in enumerate(path.parts[1:]):
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            if index + 1 < len(path.parts[1:]) or directory:
+                flags |= os.O_DIRECTORY
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        return Path(os.path.realpath(path))
+    finally:
+        os.close(descriptor)
+
 if len(sys.argv) != 7:
     raise SystemExit(\"child_bootstrap_refused\")
-(
-    _,
-    runtime_root_raw,
-    executable_raw,
-    site_packages_raw,
-    pycache_prefix_raw,
-    workdir_raw,
-    tmpdir_raw,
-) = sys.argv
-runtime_root = Path(runtime_root_raw)
-executable = Path(executable_raw)
-site_packages = Path(site_packages_raw)
-pycache_prefix = Path(pycache_prefix_raw)
-workdir = Path(workdir_raw)
-tmpdir = Path(tmpdir_raw)
-required_flags = (
-    sys.flags.isolated == 1,
-    sys.flags.dont_write_bytecode == 1,
-    sys.flags.no_site == 1,
-    sys.flags.ignore_environment == 1,
-    sys.flags.safe_path is True,
-)
-required_paths = (
-    os.path.samefile(sys.executable, executable),
-    Path(sys.prefix).is_relative_to(runtime_root),
-    Path(sys.base_prefix).is_relative_to(runtime_root),
-    Path(site_packages).is_relative_to(runtime_root),
-    Path(sys.pycache_prefix or \"\") == pycache_prefix,
-    Path.cwd() == workdir,
-    Path(os.environ.get(\"TMPDIR\", \"\")) == tmpdir,
-)
+try:
+    (
+        _,
+        runtime_root_raw,
+        executable_raw,
+        site_packages_raw,
+        pycache_prefix_raw,
+        workdir_raw,
+        tmpdir_raw,
+    ) = sys.argv
+    runtime_root = checked_path(runtime_root_raw, True)
+    executable = checked_path(executable_raw, False)
+    site_packages = checked_path(site_packages_raw, True)
+    pycache_prefix = checked_path(pycache_prefix_raw, True)
+    workdir = checked_path(workdir_raw, True)
+    tmpdir = checked_path(tmpdir_raw, True)
+    prefix = checked_path(sys.prefix, True)
+    base_prefix = checked_path(sys.base_prefix, True)
+    current_executable = checked_path(sys.executable, False)
+    required_flags = (
+        sys.flags.isolated == 1,
+        sys.flags.dont_write_bytecode == 1,
+        sys.flags.no_site == 1,
+        sys.flags.ignore_environment == 1,
+        sys.flags.safe_path is True,
+    )
+    required_paths = (
+        os.path.samefile(current_executable, executable),
+        prefix.is_relative_to(runtime_root),
+        base_prefix.is_relative_to(runtime_root),
+        site_packages.is_relative_to(runtime_root),
+        Path(sys.pycache_prefix or \"\") == pycache_prefix,
+        Path.cwd() == workdir,
+        Path(os.environ.get(\"TMPDIR\", \"\")) == tmpdir,
+    )
+except (OSError, ValueError):
+    raise SystemExit(\"child_bootstrap_refused\") from None
 if not all(required_flags) or not all(required_paths):
     raise SystemExit(\"child_bootstrap_refused\")
-sys.path.insert(0, site_packages)
+sys.path.insert(0, os.fspath(site_packages))
 sys.argv[:] = [\"saxo-bank-mcp\", \"--transport\", \"stdio\"]
 runpy.run_module(\"saxo_bank_mcp.server\", run_name=\"__main__\", alter_sys=True)
 """
@@ -149,27 +173,27 @@ class ChildConfigurationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ChildBootstrapPaths:
-    runtime_root: Path
-    executable: Path
-    site_packages: Path
-    pycache_prefix: Path
-    workdir: Path
-    tmpdir: Path
+    runtime_root: Path = field(repr=False)
+    executable: Path = field(repr=False)
+    site_packages: Path = field(repr=False)
+    pycache_prefix: Path = field(repr=False)
+    workdir: Path = field(repr=False)
+    tmpdir: Path = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class ChildLaunchConfig:
-    command: tuple[str, ...]
-    cwd: Path
+    command: tuple[str, ...] = field(repr=False)
     environment: Mapping[str, str] = field(repr=False)
-    executable_sha256: str
+    cwd: Path = field(repr=False)
+    executable_identity_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
 class RegisteredCallProfile:
     path: str
     params: Mapping[str, str]
-    response_mode: str
+    response_mode: RegisteredResponseMode
     analytics_contract_id: str | None
 
     def __post_init__(self) -> None:  # noqa: D105
@@ -177,26 +201,33 @@ class RegisteredCallProfile:
             not self.path.startswith("/")
             or "?" in self.path
             or "://" in self.path
-            or not self.response_mode
+            or self.response_mode not in {"fingerprint_only", "analytics_contract_receipt"}
             or any(not key or not value for key, value in self.params.items())
         ):
             raise ChildConfigurationError("registered_call_profile_invalid")
 
 
-@dataclass(slots=True)
-class MatrixSession:
-    ledger_phase: LedgerPhase = "initial"
-    registry_positions: dict[str, int] = field(default_factory=dict)
-    pending_registry_results: list[int | None] = field(default_factory=list)
+class MatrixSession(Protocol):
+    async def list_tools_once(self) -> tuple[str, ...]:
+        raise NotImplementedError
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, JsonValue],
+    ) -> dict[str, JsonValue]:
+        raise NotImplementedError
 
 
 @dataclass(slots=True)
 class MatrixCallPolicy:
     registry_page_offsets: Mapping[str, tuple[int, ...]]
     registered_calls: tuple[RegisteredCallProfile, ...]
-    session: MatrixSession = field(default_factory=MatrixSession)
+    _registry_positions: dict[str, int] = field(init=False, repr=False)
+    _ledger_phase: LedgerPhase = field(init=False, repr=False, default="clear")
 
     def __post_init__(self) -> None:  # noqa: D105
+        self._registry_positions = {}
         for service_group, offsets in self.registry_page_offsets.items():
             if (
                 not service_group
@@ -218,7 +249,7 @@ class MatrixCallPolicy:
         }
         return cls(registry_page_offsets=offsets, registered_calls=registered_calls)
 
-    def validate(self, name: str, arguments: Mapping[str, JsonValue]) -> None:
+    def validate(self, name: str, arguments: dict[str, JsonValue]) -> None:
         if name in {
             "saxo_auth_status",
             "saxo_get_session_capabilities",
@@ -237,30 +268,42 @@ class MatrixCallPolicy:
             return
         raise ChildConfigurationError("tool_call_profile_invalid")
 
-    def validate_result(self, name: str, result: Mapping[str, JsonValue]) -> None:
+    def observe(
+        self,
+        name: str,
+        arguments: dict[str, JsonValue],
+        payload: Mapping[str, JsonValue],
+    ) -> None:
         if name != "saxo_list_registered_endpoints":
             return
-        if not self.session.pending_registry_results:
+        service_group, offsets, position = self._registered_page(arguments)
+        expected = offsets[position + 1] if position + 1 < len(offsets) else None
+        actual = payload.get("next_offset")
+        if expected is None:
+            if "next_offset" in payload and actual is not None:
+                raise ChildConfigurationError("tool_call_profile_invalid")
+        elif actual != expected or not isinstance(actual, int) or isinstance(actual, bool):
             raise ChildConfigurationError("tool_call_profile_invalid")
-        expected = self.session.pending_registry_results.pop(0)
-        actual = result.get("next_offset")
-        if expected is None and "next_offset" not in result:
-            return
-        if actual != expected or not isinstance(actual, int) or isinstance(actual, bool):
-            raise ChildConfigurationError("tool_call_profile_invalid")
+        self._registry_positions[service_group] = position + 1
 
-    def _validate_ledger(self, arguments: Mapping[str, JsonValue]) -> None:
-        if self.session.ledger_phase == "initial":
+    def _validate_ledger(self, arguments: dict[str, JsonValue]) -> None:
+        if self._ledger_phase == "clear":
             self._require_exact_arguments(arguments, {"clear": True})
-            self.session.ledger_phase = "cleared"
+            self._ledger_phase = "readback"
             return
-        if self.session.ledger_phase == "cleared":
+        if self._ledger_phase == "readback":
             self._require_exact_arguments(arguments, {})
-            self.session.ledger_phase = "read"
+            self._ledger_phase = "complete"
             return
         raise ChildConfigurationError("tool_call_profile_invalid")
 
-    def _validate_registry_page(self, arguments: Mapping[str, JsonValue]) -> None:
+    def _validate_registry_page(self, arguments: dict[str, JsonValue]) -> None:
+        self._registered_page(arguments)
+
+    def _registered_page(
+        self,
+        arguments: Mapping[str, JsonValue],
+    ) -> tuple[str, tuple[int, ...], int]:
         service_group = arguments.get("service_group")
         limit = arguments.get("limit")
         offset = arguments.get("offset")
@@ -275,14 +318,12 @@ class MatrixCallPolicy:
         ):
             raise ChildConfigurationError("tool_call_profile_invalid")
         offsets = self.registry_page_offsets.get(service_group)
-        position = self.session.registry_positions.get(service_group, 0)
+        position = self._registry_positions.get(service_group, 0)
         if offsets is None or position >= len(offsets) or offset != offsets[position]:
             raise ChildConfigurationError("tool_call_profile_invalid")
-        next_offset = offsets[position + 1] if position + 1 < len(offsets) else None
-        self.session.registry_positions[service_group] = position + 1
-        self.session.pending_registry_results.append(next_offset)
+        return service_group, offsets, position
 
-    def _validate_registered_call(self, arguments: Mapping[str, JsonValue]) -> None:
+    def _validate_registered_call(self, arguments: dict[str, JsonValue]) -> None:
         for profile in self.registered_calls:
             expected: dict[str, JsonValue] = {
                 "method": "GET",
@@ -314,9 +355,10 @@ def build_child_environment(
 ) -> dict[str, str]:
     """Return the complete child environment or refuse without retaining values."""
     _require_sim_caller_environment(caller_env)
-    if not tmpdir.is_absolute() or tmpdir.is_symlink():
+    if not tmpdir.is_absolute():
         raise ChildConfigurationError("child_environment_invalid")
     try:
+        _canonical_no_follow_path(tmpdir, require_directory=True)
         settings = resolve_sim_auth_settings(caller_env)
         credential_key, credential_value = _child_credential_source(caller_env)
         _require_runtime_ssl_entry(ssl_runtime_entry)
@@ -371,9 +413,15 @@ def _require_exact_child_filter(child: Mapping[str, str]) -> None:
 def build_child_launch_config(
     paths: ChildBootstrapPaths,
     caller_env: Mapping[str, str],
+    *,
+    ssl_runtime_entry: tuple[Literal["SSL_CERT_FILE", "SSL_CERT_DIR"], Path] | None = None,
 ) -> ChildLaunchConfig:
     _validate_child_paths(paths)
-    environment = build_child_environment(caller_env, tmpdir=paths.tmpdir)
+    environment = build_child_environment(
+        caller_env,
+        tmpdir=paths.tmpdir,
+        ssl_runtime_entry=ssl_runtime_entry,
+    )
     command = (
         str(paths.executable),
         "-I",
@@ -392,9 +440,9 @@ def build_child_launch_config(
     )
     return ChildLaunchConfig(
         command=command,
-        cwd=paths.workdir,
         environment=environment,
-        executable_sha256=_hash_regular_file_no_follow(paths.executable),
+        cwd=paths.workdir,
+        executable_identity_sha256=_hash_regular_file_no_follow(paths.executable),
     )
 
 
@@ -417,9 +465,9 @@ def _require_runtime_ssl_entry(
     if entry is None:
         return
     key, path = entry
-    if key not in _SSL_ENV_KEYS or not path.is_absolute() or path.is_symlink():
+    if key not in _SSL_ENV_KEYS:
         raise ValueError("ssl_runtime_entry_invalid")
-    _lstat_path(path)
+    _canonical_no_follow_path(path, require_directory=False)
 
 
 def _validate_child_paths(paths: ChildBootstrapPaths) -> None:
@@ -431,15 +479,27 @@ def _validate_child_paths(paths: ChildBootstrapPaths) -> None:
         paths.workdir,
         paths.tmpdir,
     )
-    if any(not path.is_absolute() or path.is_symlink() for path in checked):
+    if any(not path.is_absolute() for path in checked):
         raise ChildConfigurationError("child_path_invalid")
     try:
-        runtime_stat = _lstat_path(paths.runtime_root)
-        executable_stat = _lstat_path(paths.executable)
-        site_stat = _lstat_path(paths.site_packages)
-        cache_stat = _lstat_path(paths.pycache_prefix)
-        work_stat = _lstat_path(paths.workdir)
-        temp_stat = _lstat_path(paths.tmpdir)
+        runtime_root, runtime_stat = _canonical_no_follow_path(
+            paths.runtime_root,
+            require_directory=True,
+        )
+        executable, executable_stat = _canonical_no_follow_path(
+            paths.executable,
+            require_directory=False,
+        )
+        site_packages, site_stat = _canonical_no_follow_path(
+            paths.site_packages,
+            require_directory=True,
+        )
+        pycache_prefix, cache_stat = _canonical_no_follow_path(
+            paths.pycache_prefix,
+            require_directory=True,
+        )
+        workdir, work_stat = _canonical_no_follow_path(paths.workdir, require_directory=True)
+        tmpdir, temp_stat = _canonical_no_follow_path(paths.tmpdir, require_directory=True)
     except OSError:
         raise ChildConfigurationError("child_path_invalid") from None
     if (
@@ -449,11 +509,11 @@ def _validate_child_paths(paths: ChildBootstrapPaths) -> None:
         or not stat.S_ISDIR(cache_stat.st_mode)
         or not stat.S_ISDIR(work_stat.st_mode)
         or not stat.S_ISDIR(temp_stat.st_mode)
-        or not paths.executable.is_relative_to(paths.runtime_root)
-        or not paths.site_packages.is_relative_to(paths.runtime_root)
+        or not executable.is_relative_to(runtime_root)
+        or not site_packages.is_relative_to(runtime_root)
         or any(
-            path.is_relative_to(paths.runtime_root)
-            for path in (paths.pycache_prefix, paths.workdir, paths.tmpdir)
+            path.is_relative_to(runtime_root)
+            for path in (pycache_prefix, workdir, tmpdir)
         )
     ):
         raise ChildConfigurationError("child_path_invalid")
@@ -463,12 +523,40 @@ def _validate_child_paths(paths: ChildBootstrapPaths) -> None:
         raise ChildConfigurationError("child_path_invalid") from None
 
 
-def _lstat_path(path: Path) -> os.stat_result:
-    return os.lstat(path)
+def _canonical_no_follow_path(
+    path: Path,
+    *,
+    require_directory: bool,
+) -> tuple[Path, os.stat_result]:
+    descriptor = _open_no_follow_path(path, require_directory=require_directory)
+    try:
+        return Path(os.path.realpath(path)), os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _open_no_follow_path(path: Path, *, require_directory: bool) -> int:
+    if not path.is_absolute() or any(part == ".." for part in path.parts):
+        raise OSError("child_path_invalid")
+    parts = path.parts[1:]
+    descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for index, part in enumerate(parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW
+            if index + 1 < len(parts) or require_directory:
+                flags |= os.O_DIRECTORY
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+    else:
+        return descriptor
 
 
 def _hash_regular_file_no_follow(path: Path) -> str:
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    descriptor = _open_no_follow_path(path, require_directory=False)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise OSError("not_a_regular_file")
