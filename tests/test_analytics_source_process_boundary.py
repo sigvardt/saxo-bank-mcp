@@ -1,9 +1,11 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -13,6 +15,7 @@ import sys
 from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import TYPE_CHECKING, Final, cast
@@ -20,6 +23,11 @@ from unittest.mock import Mock
 
 import anyio
 import pytest
+from analytics_source_matrix_support import (
+    ScriptedMatrixSession,
+    expected_matrix_events,
+    matrix_payloads,
+)
 
 from saxo_bank_mcp import (
     analytics_source_process,
@@ -47,6 +55,7 @@ if TYPE_CHECKING:
         CandidateRuntimeSeal,
         ExternalRunLayout,
     )
+    from saxo_bank_mcp.qa_analytics_source_matrix import PreparedMatrix
 
 _NONZERO_FIXTURE_EXIT_CODE: Final = 17
 _SEALED_DIRECTORY_MODE: Final = 0o500
@@ -475,6 +484,93 @@ def exact_sim_env(tmp_path: Path) -> dict[str, str]:
         "SAXO_MCP_SIM_REDIRECT_URI": "http://localhost:8080/callback",
         "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token-cache.json"),
     }
+
+
+@pytest.fixture
+def prepared_matrix(exact_sim_env: dict[str, str]) -> PreparedMatrix:
+    identity = qa_analytics_source_matrix.SourceMatrixCandidateIdentity(
+        source_contract_catalog_sha256=source_contract_catalog_sha256(),
+        harness_build_sha256="a" * 64,
+        candidate_identity_sha256="b" * 64,
+    )
+    result = qa_analytics_source_matrix.prepare_analytics_source_matrix(
+        env=exact_sim_env,
+        fixtures=qa_analytics_source_matrix.SourceMatrixFixtures(),
+        candidate_identity=identity,
+        captured_at=datetime(2026, 7, 31, tzinfo=UTC),
+    )
+    assert isinstance(result, qa_analytics_source_matrix.PreparedMatrix)
+    return result
+
+
+@pytest.fixture
+def scripted_matrix_session(prepared_matrix: PreparedMatrix) -> ScriptedMatrixSession:
+    return ScriptedMatrixSession(payloads=matrix_payloads(prepared_matrix))
+
+
+def test_official_matrix_has_no_fastmcp_transport_or_server_injection() -> None:
+    tree = ast.parse(QA_MATRIX_PATH.read_text(encoding="utf-8"))
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    source = QA_MATRIX_PATH.read_text(encoding="utf-8")
+    signature = inspect.signature(qa_analytics_source_matrix.execute_analytics_source_matrix_once)
+    assert not any(name.startswith("fastmcp") for name in imported)
+    assert "saxo_bank_mcp.server" not in imported
+    assert "Client(server)" not in source
+    assert tuple(signature.parameters) == ("fixtures",)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "tool_names",
+    (  # noqa: PT007 - exact protocol matrix from the approved plan
+        SOURCE_MATRIX_CHILD_TOOLS[:-1],
+        (*SOURCE_MATRIX_CHILD_TOOLS, "saxo_auth_status"),
+        (*SOURCE_MATRIX_CHILD_TOOLS, "saxo_get_orders"),
+        tuple(f"server:{name}" for name in SOURCE_MATRIX_CHILD_TOOLS),
+    ),
+)
+async def test_child_lists_exact_six_tools_before_readiness(
+    tool_names: tuple[str, ...],
+    scripted_matrix_session: ScriptedMatrixSession,
+    prepared_matrix: PreparedMatrix,
+) -> None:
+    scripted_matrix_session.tool_names = tool_names
+    outcome = await qa_analytics_source_matrix.run_analytics_source_matrix(
+        scripted_matrix_session,
+        prepared=prepared_matrix,
+        claim_source_execution=lambda: True,
+    )
+    assert outcome == qa_analytics_source_matrix.PreclaimRefusal(
+        reason="child_tool_allowlist_mismatch",
+    )
+    assert scripted_matrix_session.events == [("tools/list", {})]
+
+
+@pytest.mark.anyio
+async def test_readiness_clear_claim_state_source_ledger_order_is_exact(
+    scripted_matrix_session: ScriptedMatrixSession,
+    prepared_matrix: PreparedMatrix,
+) -> None:
+    def claim() -> bool:
+        scripted_matrix_session.events.append(("claim", {}))
+        return True
+
+    outcome = await qa_analytics_source_matrix.run_analytics_source_matrix(
+        scripted_matrix_session,
+        prepared=prepared_matrix,
+        claim_source_execution=claim,
+    )
+    assert isinstance(outcome, qa_analytics_source_matrix.ClaimedMatrixDraft)
+    assert scripted_matrix_session.events == expected_matrix_events(prepared_matrix)
 
 
 @pytest.fixture

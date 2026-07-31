@@ -4,12 +4,13 @@ import copy
 import hashlib
 import json
 import shutil
+from collections import deque
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import httpx2
 import pytest
+from analytics_source_matrix_support import ScriptedMatrixSession
 
 import saxo_bank_mcp.analytics_source_receipt as receipt_module
 import saxo_bank_mcp.qa_analytics_source_matrix as matrix_module
@@ -18,6 +19,7 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_fingerprint,
     source_contracts_by_id,
 )
+from saxo_bank_mcp.analytics_source_process import MatrixCallPolicy, RegisteredCallProfile
 from saxo_bank_mcp.endpoint_registry import find_registered_endpoint
 from saxo_bank_mcp.read_tool_execution import ReadExecutionContext
 from saxo_bank_mcp.registered_read_execution import RegisteredReadResponse
@@ -145,21 +147,6 @@ def test_candidate_identity_seals_ordered_search_directories_during_verification
     assert "sys.meta_path" not in runtime_source
 
 
-class _ReceiptClient:
-    def __init__(self, payload: dict[str, JsonValue]) -> None:
-        self.payload = payload
-
-    async def call_tool(
-        self,
-        _name: str,
-        _arguments: dict[str, JsonValue],
-        *,
-        raise_on_error: bool,
-    ) -> SimpleNamespace:
-        assert raise_on_error is False
-        return SimpleNamespace(structured_content=self.payload)
-
-
 def _source_failure_payload(  # noqa: PLR0913
     *,
     status: str = "http_error",
@@ -221,9 +208,21 @@ def _source_failure_payload(  # noqa: PLR0913
 async def _source_receipt(
     payload: dict[str, JsonValue],
 ) -> matrix_module.SourceContractReceipt:
+    contract = source_contracts_by_id()["chart_v3"]
+    profile = RegisteredCallProfile(
+        path=contract.path_template,
+        params={"AssetType": "Stock", "Count": "2", "Uic": "1001"},
+        response_mode="analytics_contract_receipt",
+        analytics_contract_id=contract.contract_id,
+    )
+    session = ScriptedMatrixSession(
+        payloads={"saxo_call_registered_endpoint": deque([payload])},
+    )
+    policy = MatrixCallPolicy.from_local_registry((profile,))
     return await matrix_module._run_provider_source(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        cast("matrix_module.MatrixClient", _ReceiptClient(payload)),
-        source_contracts_by_id()["chart_v3"],
+        session,
+        policy,
+        contract,
         {"AssetType": "Stock", "Count": 2, "Uic": 1001},
     )
 

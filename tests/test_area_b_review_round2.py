@@ -7,15 +7,16 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import httpx2
 import pytest
+from analytics_source_matrix_support import ScriptedMatrixSession
 
 import saxo_bank_mcp.analytics_provider as provider_module
 import saxo_bank_mcp.analytics_source_contracts as contracts_module
@@ -31,6 +32,7 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_fingerprint,
     source_contracts_by_id,
 )
+from saxo_bank_mcp.analytics_source_process import MatrixCallPolicy, RegisteredCallProfile
 from saxo_bank_mcp.analytics_source_runtime import (
     CandidateRuntimeError,
     ExternalRunLayout,
@@ -397,19 +399,19 @@ async def test_source_and_ledger_receipts_recompute_all_declared_proof() -> None
         "http_status": 200,
     }
 
-    class Client:
-        async def call_tool(
-            self,
-            _name: str,
-            _arguments: dict[str, JsonValue],
-            *,
-            raise_on_error: bool,
-        ) -> SimpleNamespace:
-            assert raise_on_error is False
-            return SimpleNamespace(structured_content=payload)
-
+    profile = RegisteredCallProfile(
+        path=contract.path_template,
+        params={"AssetType": "Stock", "Count": "2", "Uic": "1001"},
+        response_mode="analytics_contract_receipt",
+        analytics_contract_id=contract.contract_id,
+    )
+    session = ScriptedMatrixSession(
+        payloads={"saxo_call_registered_endpoint": deque([payload])},
+    )
+    policy = MatrixCallPolicy.from_local_registry((profile,))
     receipt = await matrix_module._run_provider_source(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        cast("matrix_module.MatrixClient", Client()),
+        session,
+        policy,
         contract,
         request,
     )

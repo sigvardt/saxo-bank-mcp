@@ -10,14 +10,12 @@ import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal, Self, cast
+from typing import Final, Literal, Self, cast
 from uuid import uuid4
 
-import anyio
-from fastmcp import Client, FastMCP
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -32,8 +30,17 @@ from saxo_bank_mcp import analytics_source_runtime as _source_runtime
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceContract,
+    source_contract_catalog_sha256,
     source_contract_fingerprint,
     source_contracts_by_id,
+)
+from saxo_bank_mcp.analytics_source_process import (
+    CHILD_TOOL_IDS_SHA256,
+    SOURCE_MATRIX_CHILD_TOOLS,
+    ChildConfigurationError,
+    MatrixCallPolicy,
+    MatrixSession,
+    RegisteredCallProfile,
 )
 from saxo_bank_mcp.analytics_source_runtime import (
     SourceMatrixCandidateIdentity,
@@ -41,7 +48,6 @@ from saxo_bank_mcp.analytics_source_runtime import (
 )
 from saxo_bank_mcp.endpoint_registry import EndpointOperation, find_registered_operation
 from saxo_bank_mcp.secret_scan import scan_secret_text
-from saxo_bank_mcp.server import mcp
 
 _source_candidate_files = _source_runtime._source_candidate_files  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 _validate_directory_entry_tree = _source_runtime._validate_directory_entry_tree  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
@@ -53,6 +59,26 @@ _installed_candidate_files = _source_runtime._installed_candidate_files  # pyrig
 
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _SOURCE_COUNT: Final = 18
+_SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
+    "chart_v3",
+    "reference_instruments_v1",
+    "reference_instrument_details_v1",
+    "options_chain_reference_v1",
+    "info_price_v1",
+    "info_prices_list_v1",
+    "performance_summary_v4",
+    "performance_timeseries_v4",
+    "balances_v1",
+    "positions_v1",
+    "orders_v1",
+    "transactions_v1",
+    "bookings_v1",
+    "closed_positions_history_v1",
+    "exposure_instruments_v1",
+    "costs_v1",
+    "corporate_action_events_v2",
+    "corporate_action_holdings_v2",
+)
 _REGISTRY_PAGE_SIZE: Final = 100
 _HTTP_STATUS_MIN: Final = 100
 _HTTP_STATUS_MAX: Final = 599
@@ -121,9 +147,6 @@ _HISTORY_CONTRACTS: Final = frozenset(
 _SAFE_SOURCE_REASON_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_:.-]{0,159}$")
 _SAFE_EXCHANGE_ID_PATTERN: Final = re.compile(r"^[A-Z0-9._:-]{1,32}$")
 _JSON_OBJECT: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(dict[str, JsonValue])
-_SOURCE_PLAN_UNAVAILABLE_SHA256: Final = hashlib.sha256(
-    b"source-plan-unavailable",
-).hexdigest()
 _REDUCIBLE_SOURCE_FIXTURES: Final = {
     "bookings_v1": "fixture_client_key_unavailable",
     "closed_positions_history_v1": "fixture_client_key_unavailable",
@@ -161,9 +184,25 @@ _LEDGER_EVENT_FIELDS: Final = frozenset(
     },
 )
 
-type MatrixClient = Client[Any]
 type SourceStatus = Literal["observed", "reduced", "refused"]
 type MatrixStatus = Literal["passed", "reduced", "refused", "failed"]
+type PreclaimReason = Literal[
+    "environment_not_sim",
+    "live_reads_enabled",
+    "live_writes_enabled",
+    "source_contract_count_mismatch",
+    "source_plan_invalid",
+    "candidate_static_runtime_invalid",
+    "child_configuration_refused",
+    "child_process_unavailable",
+    "child_tool_allowlist_mismatch",
+    "sim_auth_unavailable",
+    "registered_operation_mismatch",
+    "sim_session_unavailable",
+    "sim_entitlements_unavailable",
+    "request_ledger_unavailable",
+    "candidate_already_claimed",
+]
 type PaginationState = Literal[
     "completed",
     "not_applicable",
@@ -528,35 +567,60 @@ class _SourceExecutionPlan(BaseModel):
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
-class AnalyticsSourceMatrixReceipt(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class PreclaimRefusal(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    status: Literal["refused"] = "refused"
+    reason: PreclaimReason
+    source_execution_claimed: Literal[False] = False
+
+
+class ClaimedMatrixDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     status: MatrixStatus
     reason: str
-    environment: Literal["SIM"]
-    source_contract_catalog_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    harness_build_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    candidate_identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    environment: Literal["SIM"] = "SIM"
+    source_contract_catalog_sha256: str
+    harness_build_sha256: str
+    candidate_identity_sha256: str
     captured_at: datetime
-    source_plan_sha256: str = Field(
-        default=_SOURCE_PLAN_UNAVAILABLE_SHA256,
-        pattern=r"^[a-f0-9]{64}$",
-    )
-    source_plan_exclusions: tuple[SourcePlanExclusion, ...] = ()
+    source_plan_sha256: str
+    source_plan_exclusions: tuple[SourcePlanExclusion, ...]
     environment_proof: EnvironmentProof
     auth_status: str
     session_status: str
     entitlement_status: str
     source_receipts: tuple[SourceContractReceipt, ...]
     history_state: HistoryState
-    source_execution_claimed: bool
+    source_execution_claimed: Literal[True] = True
     cleanup: CleanupReceipt
     ledger: LedgerReceipt
-    privacy: PrivacyReceipt
     live_events: int = Field(ge=0)
     live_mutation_calls: Literal[0] = 0
     errors: tuple[str, ...]
-    execution_closure_checkpoints: tuple[str, ...] = ()
+
+
+type MatrixProtocolOutcome = PreclaimRefusal | ClaimedMatrixDraft
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixExecutionError(RuntimeError):
+    reason: Literal["structured_result_invalid", "matrix_receipt_invalid"]
+
+    def __str__(self) -> str:  # noqa: D105
+        return self.reason
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMatrix:
+    candidate_identity: SourceMatrixCandidateIdentity
+    captured_at: datetime
+    environment_proof: EnvironmentProof
+    contracts: tuple[SourceContract, ...]
+    requests: Mapping[str, Mapping[str, object] | None] = field(repr=False)
+    source_plan: _SourceExecutionPlan
+    call_policy: MatrixCallPolicy = field(repr=False)
 
 
 def prove_sim_environment(env: Mapping[str, str]) -> EnvironmentProof:
@@ -590,481 +654,241 @@ def prove_sim_environment(env: Mapping[str, str]) -> EnvironmentProof:
     )
 
 
-async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
-    server: FastMCP,
+def prepare_analytics_source_matrix(  # noqa: PLR0911
     *,
     env: Mapping[str, str],
     fixtures: SourceMatrixFixtures,
     candidate_identity: SourceMatrixCandidateIdentity,
     captured_at: datetime | None = None,
-    claim_source_execution: Callable[[], bool] | None = None,
-    validate_source_execution: Callable[[], bool] | None = None,
-) -> AnalyticsSourceMatrixReceipt:
+) -> PreclaimRefusal | PreparedMatrix:
     capture_time = captured_at or datetime.now(tz=UTC)
-    if capture_time.tzinfo is None or capture_time.utcoffset() is None:
-        raise ValueError("captured_at must include a UTC offset")
     proof = prove_sim_environment(env)
     if not proof.network_allowed:
-        return _refused_without_calls(
-            candidate_identity,
-            capture_time,
-            proof,
-            proof.reasons[0] if proof.reasons else "environment_not_sim",
-        )
-    contracts = source_contracts_by_id()
-    if len(contracts) != _SOURCE_COUNT:
-        return _refused_without_calls(
-            candidate_identity,
-            capture_time,
-            proof,
-            "source_contract_count_mismatch",
-        )
+        reason = proof.reasons[0] if proof.reasons else "environment_not_sim"
+        return PreclaimRefusal(reason=cast("PreclaimReason", reason))
+    if capture_time.tzinfo is None or capture_time.utcoffset() is None:
+        return PreclaimRefusal(reason="source_plan_invalid")
+    try:
+        contracts_by_id = source_contracts_by_id()
+        catalog_sha256 = source_contract_catalog_sha256()
+    except (OSError, ValidationError, ValueError):
+        return PreclaimRefusal(reason="candidate_static_runtime_invalid")
+    if len(contracts_by_id) != _SOURCE_COUNT:
+        return PreclaimRefusal(reason="source_contract_count_mismatch")
+    if tuple(contracts_by_id) != _SOURCE_CONTRACT_ORDER:
+        return PreclaimRefusal(reason="source_plan_invalid")
+    if candidate_identity.source_contract_catalog_sha256 != catalog_sha256:
+        return PreclaimRefusal(reason="candidate_static_runtime_invalid")
+    contracts = tuple(contracts_by_id[contract_id] for contract_id in _SOURCE_CONTRACT_ORDER)
     requests = _source_requests(fixtures, capture_time.date())
     try:
         source_plan = _source_execution_plan(
-            contracts,
+            contracts_by_id,
             requests,
             candidate_identity,
         )
-    except ValueError:
-        return _refused_without_calls(
-            candidate_identity,
-            capture_time,
-            proof,
-            "source_plan_invalid",
-        )
-    errors: list[str] = []
-    execution_checkpoints: list[str] = []
+        profiles = _registered_call_profiles(contracts, requests)
+        call_policy = MatrixCallPolicy.from_local_registry(profiles)
+    except (ChildConfigurationError, OSError, TypeError, ValueError):
+        return PreclaimRefusal(reason="source_plan_invalid")
+    return PreparedMatrix(
+        candidate_identity=candidate_identity,
+        captured_at=capture_time,
+        environment_proof=proof,
+        contracts=contracts,
+        requests=requests,
+        source_plan=source_plan,
+        call_policy=call_policy,
+    )
 
-    def closure_valid(label: str) -> bool:
-        execution_checkpoints.append(label)
-        if validate_source_execution is None:
-            return True
-        try:
-            return validate_source_execution() is True
-        except Exception:  # noqa: BLE001 - every callback failure closes execution
-            return False
 
-    def require_closure(label: str) -> None:
-        if not closure_valid(label):
-            raise _ExecutionClosureChangedError
+async def run_analytics_source_matrix(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    session: MatrixSession,
+    *,
+    prepared: PreparedMatrix,
+    claim_source_execution: Callable[[], bool],
+) -> MatrixProtocolOutcome:
+    tool_names = await session.list_tools_once()
+    if (
+        len(tool_names) != len(SOURCE_MATRIX_CHILD_TOOLS)
+        or len(set(tool_names)) != len(tool_names)
+        or any(":" in name for name in tool_names)
+        or set(tool_names) != set(SOURCE_MATRIX_CHILD_TOOLS)
+        or _digest(tuple(sorted(tool_names))) != CHILD_TOOL_IDS_SHA256
+    ):
+        return PreclaimRefusal(reason="child_tool_allowlist_mismatch")
 
-    async with Client(
-        server,
-    ) as client:
-        auth = await _call_tool(client, "saxo_auth_status", {})
-        auth_status = _auth_receipt_status(auth)
-        if auth_status != "ready":
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status="not_called",
-                entitlement_status="not_called",
-                reason="sim_auth_unavailable",
-            )
-        registry = await _registered_operation_receipts(client, contracts)
-        if not all(registry.get(contract.operation_id) is True for contract in contracts.values()):
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status="not_called",
-                entitlement_status="not_called",
-                reason="registered_operation_mismatch",
-            )
-        session = await _call_tool(client, "saxo_get_session_capabilities", {})
-        session_status = _network_read_receipt_status(
-            session,
-            "saxo_get_session_capabilities",
-        )
-        if session_status != "passed":
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status="unverified",
-                reason="sim_session_unavailable",
-            )
-        entitlements = await _call_tool(client, "saxo_get_entitlements", {})
-        entitlement_status = _network_read_receipt_status(
-            entitlements,
-            "saxo_get_entitlements",
-        )
-        if entitlement_status != "passed":
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                reason="sim_entitlements_unavailable",
-            )
-        cleared = await _call_tool(
-            client,
-            "saxo_get_safe_request_ledger",
-            {"clear": True},
-        )
-        if not _ledger_clear_valid(cleared):
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                reason="request_ledger_unavailable",
-            )
-        if not closure_valid("readiness_to_source"):
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                reason="candidate_execution_closure_changed",
-            )
-        if claim_source_execution is not None and not claim_source_execution():
-            return _readiness_refusal(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                reason="candidate_already_claimed",
-            )
-        try:
-            require_closure("after_claim")
-            before = await _state_fingerprint(
-                client,
-                registry,
-                checkpoint=require_closure,
-                phase="before_state",
-            )
-            if before is None:
-                errors.append("state_fingerprint_unverified")
-            source_receipts_list: list[SourceContractReceipt] = []
-            exclusion_reasons = {
-                exclusion.contract_id: exclusion.reason for exclusion in source_plan.exclusions
-            }
-            for contract in contracts.values():
-                request = requests.get(contract.contract_id)
-                if request is None:
-                    source_receipts_list.append(
-                        _unavailable_source_receipt(
-                            contract,
-                            registered=True,
-                            reason=exclusion_reasons[contract.contract_id],
-                        ),
-                    )
-                    continue
-                source_receipts_list.append(
-                    await _run_provider_source(
-                        client,
-                        contract,
-                        request,
-                        checkpoint=require_closure,
-                    ),
-                )
-            source_receipts = tuple(source_receipts_list)
-            after = await _state_fingerprint(
-                client,
-                registry,
-                checkpoint=require_closure,
-                phase="after_state",
-            )
-            cleanup = CleanupReceipt(
-                before_fingerprint=before,
-                after_fingerprint=after,
-                state_equal=before is not None and before == after,
-                complete=before is not None and before == after,
-            )
-            require_closure("cleanup_readback_complete")
-            if not cleanup.state_equal:
-                errors.append("state_fingerprint_mismatch")
-            ledger_payload = await _call_tool_with_checkpoint(
-                client,
-                "saxo_get_safe_request_ledger",
-                {},
-                checkpoint=require_closure,
-                checkpoint_name="ledger_readback",
-            )
-            ledger = _ledger_receipt(ledger_payload)
-            if not ledger.sim_only:
-                errors.append("unsafe_request_ledger")
-            if ledger.live_events:
-                errors.append("live_events_detected")
-            status = _matrix_status(source_receipts, errors)
-            reason = errors[0] if errors else _matrix_reason(source_receipts, status)
-            receipt = AnalyticsSourceMatrixReceipt(
-                status=status,
-                reason=reason,
-                environment="SIM",
-                source_contract_catalog_sha256=(candidate_identity.source_contract_catalog_sha256),
-                harness_build_sha256=candidate_identity.harness_build_sha256,
-                candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
-                captured_at=capture_time,
-                source_plan_sha256=source_plan.plan_sha256,
-                source_plan_exclusions=source_plan.exclusions,
-                environment_proof=proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                source_receipts=source_receipts,
-                history_state=_history_state(source_receipts),
-                source_execution_claimed=True,
-                cleanup=cleanup,
-                ledger=ledger,
-                privacy=PrivacyReceipt(findings=0, scan_errors=0),
-                live_events=ledger.live_events,
-                errors=tuple(errors),
-                execution_closure_checkpoints=tuple(execution_checkpoints),
-            )
-        except _ExecutionClosureChangedError:
-            return _claimed_execution_closure_failure(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                checkpoints=execution_checkpoints,
-            )
-        try:
-            require_closure("before_mcp_client_close")
-        except _ExecutionClosureChangedError:
-            return _claimed_execution_closure_failure(
-                candidate_identity,
-                capture_time,
-                proof,
-                auth_status=auth_status,
-                session_status=session_status,
-                entitlement_status=entitlement_status,
-                checkpoints=execution_checkpoints,
-            )
+    policy = prepared.call_policy
+    auth = await _call_tool(session, policy, "saxo_auth_status", {})
+    auth_status = _auth_receipt_status(auth)
+    if auth_status != "ready":
+        return PreclaimRefusal(reason="sim_auth_unavailable")
     try:
-        require_closure("after_mcp_client_close")
-        require_closure("before_receipt_serialization")
-        try:
-            scanned_receipt = _with_privacy_scan(receipt, fixtures)
-        finally:
-            require_closure("after_privacy_scan")
-    except _ExecutionClosureChangedError:
-        return _claimed_execution_closure_failure(
-            candidate_identity,
-            capture_time,
-            proof,
+        registry = await _registered_operation_receipts(
+            session,
+            policy,
+            prepared.contracts,
+        )
+    except ChildConfigurationError:
+        return PreclaimRefusal(reason="registered_operation_mismatch")
+    expected_operation_ids = {contract.operation_id for contract in prepared.contracts}
+    state_operations = [find_registered_operation("GET", path) for path in _STATE_PATHS]
+    if any(operation is None for operation in state_operations):
+        return PreclaimRefusal(reason="registered_operation_mismatch")
+    expected_operation_ids.update(
+        operation.operation_id for operation in state_operations if operation is not None
+    )
+    if set(registry) != expected_operation_ids or not all(registry.values()):
+        return PreclaimRefusal(reason="registered_operation_mismatch")
+
+    capabilities = await _call_tool(
+        session,
+        policy,
+        "saxo_get_session_capabilities",
+        {},
+    )
+    session_status = _network_read_receipt_status(
+        capabilities,
+        "saxo_get_session_capabilities",
+    )
+    if session_status != "passed":
+        return PreclaimRefusal(reason="sim_session_unavailable")
+    entitlements = await _call_tool(session, policy, "saxo_get_entitlements", {})
+    entitlement_status = _network_read_receipt_status(
+        entitlements,
+        "saxo_get_entitlements",
+    )
+    if entitlement_status != "passed":
+        return PreclaimRefusal(reason="sim_entitlements_unavailable")
+    cleared = await _call_tool(
+        session,
+        policy,
+        "saxo_get_safe_request_ledger",
+        {"clear": True},
+    )
+    if not _ledger_clear_valid(cleared):
+        return PreclaimRefusal(reason="request_ledger_unavailable")
+    if not claim_source_execution():
+        return PreclaimRefusal(reason="candidate_already_claimed")
+
+    errors: list[str] = []
+    before = await _state_fingerprint(session, policy, registry)
+    if before is None:
+        errors.append("state_fingerprint_unverified")
+    exclusion_reasons = {
+        exclusion.contract_id: exclusion.reason
+        for exclusion in prepared.source_plan.exclusions
+    }
+    source_receipts_list: list[SourceContractReceipt] = []
+    for contract in prepared.contracts:
+        request = prepared.requests[contract.contract_id]
+        if request is None:
+            source_receipts_list.append(
+                _unavailable_source_receipt(
+                    contract,
+                    registered=True,
+                    reason=exclusion_reasons[contract.contract_id],
+                ),
+            )
+        else:
+            source_receipts_list.append(
+                await _run_provider_source(session, policy, contract, request),
+            )
+    source_receipts = tuple(source_receipts_list)
+    after = await _state_fingerprint(session, policy, registry)
+    cleanup = CleanupReceipt(
+        before_fingerprint=before,
+        after_fingerprint=after,
+        state_equal=before is not None and before == after,
+        complete=before is not None and before == after,
+    )
+    if not cleanup.state_equal:
+        errors.append("state_fingerprint_mismatch")
+    ledger_payload = await _call_tool(
+        session,
+        policy,
+        "saxo_get_safe_request_ledger",
+        {},
+    )
+    ledger = _ledger_receipt(ledger_payload)
+    if not ledger.sim_only:
+        errors.append("unsafe_request_ledger")
+    if ledger.live_events:
+        errors.append("live_events_detected")
+    status = _matrix_status(source_receipts, errors)
+    reason = errors[0] if errors else _matrix_reason(source_receipts, status)
+    identity = prepared.candidate_identity
+    try:
+        return ClaimedMatrixDraft(
+            status=status,
+            reason=reason,
+            source_contract_catalog_sha256=identity.source_contract_catalog_sha256,
+            harness_build_sha256=identity.harness_build_sha256,
+            candidate_identity_sha256=identity.candidate_identity_sha256,
+            captured_at=prepared.captured_at,
+            source_plan_sha256=prepared.source_plan.plan_sha256,
+            source_plan_exclusions=prepared.source_plan.exclusions,
+            environment_proof=prepared.environment_proof,
             auth_status=auth_status,
             session_status=session_status,
             entitlement_status=entitlement_status,
-            checkpoints=execution_checkpoints,
+            source_receipts=source_receipts,
+            history_state=_history_state(source_receipts),
+            cleanup=cleanup,
+            ledger=ledger,
+            live_events=ledger.live_events,
+            errors=tuple(errors),
         )
-    return scanned_receipt
+    except ValidationError:
+        raise MatrixExecutionError("matrix_receipt_invalid") from None
+
+
+def _registered_call_profiles(
+    contracts: tuple[SourceContract, ...],
+    requests: Mapping[str, Mapping[str, object] | None],
+) -> tuple[RegisteredCallProfile, ...]:
+    profiles: list[RegisteredCallProfile] = []
+    for path in _STATE_PATHS:
+        if find_registered_operation("GET", path) is None:
+            raise ValueError("state operation unavailable")
+        profiles.append(
+            RegisteredCallProfile(
+                path=path,
+                params={},
+                response_mode="fingerprint_only",
+                analytics_contract_id=None,
+            ),
+        )
+    for contract in contracts:
+        request = requests[contract.contract_id]
+        if request is None:
+            continue
+        path = _resolved_contract_path(contract, request)
+        operation = find_registered_operation("GET", path)
+        if operation is None or operation.operation_id != contract.operation_id:
+            raise ValueError("source operation unavailable")
+        profiles.append(
+            RegisteredCallProfile(
+                path=path,
+                params={
+                    key: _render_query_value(value)
+                    for key, value in request.items()
+                    if key in contract.query_parameters
+                },
+                response_mode="analytics_contract_receipt",
+                analytics_contract_id=contract.contract_id,
+            ),
+        )
+    return tuple(profiles)
 
 
 def execute_analytics_source_matrix_once(
     *,
     fixtures: SourceMatrixFixtures | None = None,
 ) -> int:
-    """Run only the installed candidate in its fixed owner-only state location."""
-    return _execute_analytics_source_matrix_once(
-        fixtures=fixtures,
-        server=mcp,
-        env=os.environ,
-        captured_at=None,
-        state_root=None,
-        candidate_identity=None,
-    )
-
-
-def _execute_analytics_source_matrix_once(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
-    *,
-    fixtures: SourceMatrixFixtures | None,
-    server: FastMCP,
-    env: Mapping[str, str],
-    captured_at: datetime | None,
-    state_root: Path | None,
-    candidate_identity: SourceMatrixCandidateIdentity | None,
-) -> int:
-    """Execute through the internal seam used for deterministic protocol tests."""
-    selected_env = dict(env)
-    proof = prove_sim_environment(selected_env)
-    if not proof.network_allowed:
-        return 1
-    source_execution_validator: Callable[[], bool] | None = None
-    try:
-        if candidate_identity is None:
-            identity = source_matrix_candidate_identity()
-
-            def verify_official_candidate() -> bool:
-                try:
-                    return source_matrix_candidate_identity() == identity
-                except (OSError, ValidationError, ValueError):
-                    return False
-
-            source_execution_validator = verify_official_candidate
-        else:
-            identity = candidate_identity
-        selected_state_root = (
-            _source_matrix_state_root() if state_root is None else state_root.absolute()
-        )
-    except (OSError, ValidationError, ValueError):
-        return 1
-    selected_fixtures = fixtures or SourceMatrixFixtures(
-        account_key=selected_env.get("SAXO_MCP_QA_ACCOUNT_KEY", ""),
-        client_key=selected_env.get("SAXO_MCP_QA_CLIENT_KEY", ""),
-    )
-    claimed = False
-    claimed_guard: _ClaimedGuardDirectory | None = None
-
-    def claim() -> bool:
-        nonlocal claimed, claimed_guard
-        reopen = (
-            (
-                lambda: _open_guard_parent(
-                    Path(pwd.getpwuid(os.getuid()).pw_dir),
-                    identity.candidate_identity_sha256,
-                )
-            )
-            if state_root is None
-            else (
-                lambda: _open_state_guard_parent(
-                    selected_state_root,
-                    identity.candidate_identity_sha256,
-                )
-            )
-        )
-        claimed_guard = _claim_candidate_guard_directory(reopen, identity)
-        claimed = claimed_guard is not None
-        return claimed
-
-    async def run() -> AnalyticsSourceMatrixReceipt:
-        return await run_analytics_source_matrix(
-            server,
-            env=selected_env,
-            fixtures=selected_fixtures,
-            candidate_identity=identity,
-            captured_at=captured_at,
-            claim_source_execution=claim,
-            validate_source_execution=source_execution_validator,
-        )
-
-    def execution_closure_valid() -> bool:
-        if source_execution_validator is None:
-            return True
-        try:
-            return source_execution_validator() is True
-        except Exception:  # noqa: BLE001 - callback failure closes the execution
-            return False
-
-    def require_execution_closure() -> None:
-        if not execution_closure_valid():
-            raise _ExecutionClosureChangedError
-
-    def publish_failure(reason: str) -> None:
-        if claimed_guard is None:
-            return
-        selected_reason = reason
-        if reason != "candidate_execution_closure_changed" and not execution_closure_valid():
-            selected_reason = "candidate_execution_closure_changed"
-        before_link = (
-            execution_closure_valid
-            if selected_reason != "candidate_execution_closure_changed"
-            else None
-        )
-        try:
-            published_failure = _publish_claimed_failure(
-                claimed_guard,
-                selected_reason,
-                before_link=before_link,
-            )
-        except _ExecutionClosureChangedError:
-            try:
-                published_failure = _publish_claimed_failure(
-                    claimed_guard,
-                    "candidate_execution_closure_changed",
-                )
-            except Exception:  # noqa: BLE001 - secure refusal publishes nothing
-                return
-            selected_reason = "candidate_execution_closure_changed"
-        except Exception:  # noqa: BLE001 - secure refusal publishes nothing
-            return
-        if (
-            published_failure is not None
-            and selected_reason != "candidate_execution_closure_changed"
-            and not execution_closure_valid()
-        ):
-            try:
-                _unlink_published_evidence(claimed_guard, published_failure)
-                _publish_claimed_failure(
-                    claimed_guard,
-                    "candidate_execution_closure_changed",
-                )
-            except Exception:  # noqa: BLE001 - secure refusal publishes nothing
-                return
-
-    try:
-        try:
-            receipt = anyio.run(run)
-        except Exception:  # noqa: BLE001 - freeze only after the irreversible claim
-            if claimed:
-                publish_failure("matrix_execution_failed")
-            return 1
-        if not receipt.source_execution_claimed or claimed_guard is None:
-            return 1
-        if receipt.status == "failed" and receipt.reason == "candidate_execution_closure_changed":
-            publish_failure("candidate_execution_closure_changed")
-            return 1
-        if not execution_closure_valid():
-            publish_failure("candidate_execution_closure_changed")
-            return 1
-        receipt = receipt.model_copy(
-            update={
-                "execution_closure_checkpoints": (
-                    *receipt.execution_closure_checkpoints,
-                    "before_evidence_serialization",
-                    "after_evidence_privacy_scan",
-                    "before_immutable_evidence_publication",
-                ),
-            },
-        )
-        require_execution_closure()
-        payload = cast("dict[str, JsonValue]", receipt.model_dump(mode="json"))
-        text = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
-        findings, scan_errors = scan_secret_text("source-matrix.json", text)
-        require_execution_closure()
-        if findings or scan_errors:
-            publish_failure("evidence_secret_scan_failed")
-            return 1
-        published = _publish_claimed_text(
-            claimed_guard,
-            text,
-            before_link=execution_closure_valid,
-        )
-        if published is None:
-            return 1
-        if not execution_closure_valid():
-            _unlink_published_evidence(claimed_guard, published)
-            publish_failure("candidate_execution_closure_changed")
-            return 1
-        return 0 if receipt.status in {"passed", "reduced"} else 1  # noqa: TRY300
-    except _ExecutionClosureChangedError:
-        publish_failure("candidate_execution_closure_changed")
-        return 1
-    except Exception:  # noqa: BLE001 - revalidate before publishing generic failure
-        if claimed:
-            publish_failure("matrix_execution_failed")
-        return 1
-    finally:
-        if claimed_guard is not None:
-            os.close(claimed_guard.descriptor)
+    """Fail closed until Task 5 wires the prepared protocol to one child process."""
+    del fixtures
+    return 1
 
 
 def candidate_guard_path(state_root: Path, candidate_identity_sha256: str) -> Path:
@@ -1084,43 +908,27 @@ def candidate_evidence_path(
 
 
 async def _call_tool(
-    client: MatrixClient,
+    session: MatrixSession,
+    policy: MatrixCallPolicy,
     name: str,
     arguments: dict[str, JsonValue],
 ) -> dict[str, JsonValue]:
-    result = await client.call_tool(name, arguments, raise_on_error=False)
+    policy.validate(name, arguments)
+    payload = await session.call_tool(name, arguments)
+    policy.observe(name, arguments, payload)
     try:
-        return _JSON_OBJECT.validate_python(result.structured_content)
+        return _JSON_OBJECT.validate_python(payload)
     except ValidationError:
-        return {
-            "status": "failed",
-            "tool_name": name,
-            "reason": "structured_result_invalid",
-        }
-
-
-async def _call_tool_with_checkpoint(
-    client: MatrixClient,
-    name: str,
-    arguments: dict[str, JsonValue],
-    *,
-    checkpoint: Callable[[str], None],
-    checkpoint_name: str,
-) -> dict[str, JsonValue]:
-    """Validate the claimed closure on both sides of one MCP boundary."""
-    checkpoint(f"before_{checkpoint_name}")
-    try:
-        return await _call_tool(client, name, arguments)
-    finally:
-        checkpoint(f"after_{checkpoint_name}")
+        raise MatrixExecutionError("structured_result_invalid") from None
 
 
 async def _registered_operation_receipts(  # noqa: C901
-    client: MatrixClient,
-    contracts: Mapping[str, SourceContract],
+    session: MatrixSession,
+    policy: MatrixCallPolicy,
+    contracts: Sequence[SourceContract],
 ) -> dict[str, bool]:
     expected: dict[str, EndpointOperation] = {}
-    for contract in contracts.values():
+    for contract in contracts:
         operation = find_registered_operation("GET", contract.path_template)
         if operation is not None:
             expected[operation.operation_id] = operation
@@ -1134,7 +942,8 @@ async def _registered_operation_receipts(  # noqa: C901
         offset = 0
         while True:
             payload = await _call_tool(
-                client,
+                session,
+                policy,
                 "saxo_list_registered_endpoints",
                 {
                     "service_group": service_group,
@@ -1176,11 +985,10 @@ def _registry_row_matches(
 
 
 async def _run_provider_source(
-    client: MatrixClient,
+    session: MatrixSession,
+    policy: MatrixCallPolicy,
     contract: SourceContract,
     request: Mapping[str, object],
-    *,
-    checkpoint: Callable[[str], None] | None = None,
 ) -> SourceContractReceipt:
     path = _resolved_contract_path(contract, request)
     params = {
@@ -1191,24 +999,16 @@ async def _run_provider_source(
     arguments: dict[str, JsonValue] = {
         "method": "GET",
         "path": path,
-        "params": params,
         "response_mode": "analytics_contract_receipt",
         "analytics_contract_id": contract.contract_id,
     }
-    payload = (
-        await _call_tool(
-            client,
-            "saxo_call_registered_endpoint",
-            arguments,
-        )
-        if checkpoint is None
-        else await _call_tool_with_checkpoint(
-            client,
-            "saxo_call_registered_endpoint",
-            arguments,
-            checkpoint=checkpoint,
-            checkpoint_name=f"source:{contract.contract_id}",
-        )
+    if params:
+        arguments["params"] = params
+    payload = await _call_tool(
+        session,
+        policy,
+        "saxo_call_registered_endpoint",
+        arguments,
     )
     operation = find_registered_operation("GET", path)
     status = _safe_status(payload)
@@ -1549,39 +1349,30 @@ def _unavailable_source_receipt(
 
 
 async def _state_fingerprint(
-    client: MatrixClient,
+    session: MatrixSession,
+    policy: MatrixCallPolicy,
     registry: Mapping[str, bool],
-    *,
-    checkpoint: Callable[[str], None] | None = None,
-    phase: str = "state",
 ) -> str | None:
     fingerprints: dict[str, str] = {}
     for path in _STATE_PATHS:
         operation = find_registered_operation("GET", path)
         if operation is None or registry.get(operation.operation_id) is not True:
             return None
-        checkpoint_name = operation.operation_id
         arguments: dict[str, JsonValue] = {
             "method": "GET",
             "path": path,
             "response_mode": "fingerprint_only",
         }
-        payload = (
-            await _call_tool(
-                client,
-                "saxo_call_registered_endpoint",
-                arguments,
-            )
-            if checkpoint is None
-            else await _call_tool_with_checkpoint(
-                client,
-                "saxo_call_registered_endpoint",
-                arguments,
-                checkpoint=checkpoint,
-                checkpoint_name=f"{phase}:{checkpoint_name}",
-            )
+        payload = await _call_tool(
+            session,
+            policy,
+            "saxo_call_registered_endpoint",
+            arguments,
         )
-        _require_sim_registered_read(payload, operation)
+        try:
+            _require_sim_registered_read(payload, operation)
+        except RuntimeError:
+            return None
         if _safe_status(payload) != "passed":
             return None
         expected_scope = (
@@ -1974,176 +1765,6 @@ def _matrix_reason(
     return reasons[0] if reasons else "source_coverage_reduced"
 
 
-def _with_privacy_scan(
-    receipt: AnalyticsSourceMatrixReceipt,
-    fixtures: SourceMatrixFixtures,
-) -> AnalyticsSourceMatrixReceipt:
-    text = receipt.model_dump_json()
-    findings, scan_errors = scan_secret_text("source-matrix.json", text)
-    private_values = tuple(
-        value
-        for value in (fixtures.account_key.strip(), fixtures.client_key.strip())
-        if value and value in text
-    )
-    finding_count = len(findings) + len(private_values)
-    errors = list(receipt.errors)
-    status = receipt.status
-    reason = receipt.reason
-    if finding_count or scan_errors:
-        errors.append("privacy_scan_failed")
-        status = "failed"
-        reason = "privacy_scan_failed"
-    return receipt.model_copy(
-        update={
-            "status": status,
-            "reason": reason,
-            "privacy": PrivacyReceipt(
-                findings=finding_count,
-                scan_errors=len(scan_errors),
-            ),
-            "errors": tuple(errors),
-        },
-    )
-
-
-def _refused_without_calls(
-    candidate_identity: SourceMatrixCandidateIdentity,
-    captured_at: datetime,
-    proof: EnvironmentProof,
-    reason: str,
-) -> AnalyticsSourceMatrixReceipt:
-    contracts = source_contracts_by_id()
-    source_receipts = tuple(
-        _unavailable_source_receipt(
-            contract,
-            registered=False,
-            reason=reason,
-        )
-        for contract in contracts.values()
-    )
-    return AnalyticsSourceMatrixReceipt(
-        status="refused",
-        reason=_safe_source_reason(reason),
-        environment="SIM",
-        source_contract_catalog_sha256=(candidate_identity.source_contract_catalog_sha256),
-        harness_build_sha256=candidate_identity.harness_build_sha256,
-        candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
-        captured_at=captured_at,
-        environment_proof=proof,
-        auth_status="not_called",
-        session_status="not_called",
-        entitlement_status="not_called",
-        source_receipts=source_receipts,
-        history_state="unverified",
-        source_execution_claimed=False,
-        cleanup=_empty_cleanup(),
-        ledger=_empty_ledger(),
-        privacy=PrivacyReceipt(findings=0, scan_errors=0),
-        live_events=0,
-        errors=(),
-    )
-
-
-def _readiness_refusal(  # noqa: PLR0913
-    candidate_identity: SourceMatrixCandidateIdentity,
-    captured_at: datetime,
-    proof: EnvironmentProof,
-    *,
-    auth_status: str,
-    session_status: str,
-    entitlement_status: str,
-    reason: str,
-) -> AnalyticsSourceMatrixReceipt:
-    source_receipts = tuple(
-        _unavailable_source_receipt(
-            contract,
-            registered=False,
-            reason=reason,
-        )
-        for contract in source_contracts_by_id().values()
-    )
-    return AnalyticsSourceMatrixReceipt(
-        status="refused",
-        reason=_safe_source_reason(reason),
-        environment="SIM",
-        source_contract_catalog_sha256=(candidate_identity.source_contract_catalog_sha256),
-        harness_build_sha256=candidate_identity.harness_build_sha256,
-        candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
-        captured_at=captured_at,
-        environment_proof=proof,
-        auth_status=auth_status,
-        session_status=session_status,
-        entitlement_status=entitlement_status,
-        source_receipts=source_receipts,
-        history_state="unverified",
-        source_execution_claimed=False,
-        cleanup=_empty_cleanup(),
-        ledger=_empty_ledger(),
-        privacy=PrivacyReceipt(findings=0, scan_errors=0),
-        live_events=0,
-        errors=(),
-    )
-
-
-def _claimed_execution_closure_failure(  # noqa: PLR0913
-    candidate_identity: SourceMatrixCandidateIdentity,
-    captured_at: datetime,
-    proof: EnvironmentProof,
-    *,
-    auth_status: str,
-    session_status: str,
-    entitlement_status: str,
-    checkpoints: Sequence[str],
-) -> AnalyticsSourceMatrixReceipt:
-    """Return a claimed, value-free failure that can only publish minimally."""
-    return AnalyticsSourceMatrixReceipt(
-        status="failed",
-        reason="candidate_execution_closure_changed",
-        environment="SIM",
-        source_contract_catalog_sha256=candidate_identity.source_contract_catalog_sha256,
-        harness_build_sha256=candidate_identity.harness_build_sha256,
-        candidate_identity_sha256=candidate_identity.candidate_identity_sha256,
-        captured_at=captured_at,
-        environment_proof=proof,
-        auth_status=auth_status,
-        session_status=session_status,
-        entitlement_status=entitlement_status,
-        source_receipts=(),
-        history_state="unverified",
-        source_execution_claimed=True,
-        cleanup=_empty_cleanup(),
-        ledger=_empty_ledger(),
-        privacy=PrivacyReceipt(findings=0, scan_errors=0),
-        live_events=0,
-        errors=("candidate_execution_closure_changed",),
-        execution_closure_checkpoints=tuple(checkpoints),
-    )
-
-
-def _empty_cleanup() -> CleanupReceipt:
-    return CleanupReceipt(
-        before_fingerprint=None,
-        after_fingerprint=None,
-        state_equal=False,
-        complete=False,
-    )
-
-
-def _empty_ledger() -> LedgerReceipt:
-    return LedgerReceipt(
-        ledger_complete=False,
-        events_evicted=0,
-        negative_proof_available=False,
-        request_count=0,
-        non_get_request_count=0,
-        methods=(),
-        host_roles=(),
-        gateway_environments=(),
-        sim_only=False,
-        live_events=0,
-    )
-
-
 def _safe_status(payload: Mapping[str, JsonValue]) -> str:
     status = payload.get("status")
     if isinstance(status, str) and _SAFE_SOURCE_REASON_PATTERN.fullmatch(status):
@@ -2261,7 +1882,10 @@ def _require_sha256(value: str) -> None:
         raise ValueError("candidate identity must be lowercase SHA-256")
 
 
-def _source_matrix_state_root(*, owner_home: Path | None = None) -> Path:
+def _source_matrix_state_root(  # pyright: ignore[reportUnusedFunction]
+    *,
+    owner_home: Path | None = None,
+) -> Path:
     selected_home = Path(pwd.getpwuid(os.getuid()).pw_dir) if owner_home is None else owner_home
     if not selected_home.is_absolute():
         raise ValueError("source matrix owner home must be absolute")
@@ -2360,7 +1984,7 @@ def _open_guard_parent(
         raise
 
 
-def _open_state_guard_parent(
+def _open_state_guard_parent(  # pyright: ignore[reportUnusedFunction]
     state_root: Path,
     candidate_identity_sha256: str,
 ) -> tuple[int, os.stat_result]:
@@ -2637,7 +2261,7 @@ def _publish_claimed_text(
             os.fsync(claim.descriptor)
 
 
-def _publish_claimed_failure(
+def _publish_claimed_failure(  # pyright: ignore[reportUnusedFunction]
     claim: _ClaimedGuardDirectory,
     reason: str,
     *,
