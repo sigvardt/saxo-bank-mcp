@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import _thread
 import argparse
+import dis
 import hashlib
 import importlib.machinery
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -15,9 +18,12 @@ import sys
 import sysconfig
 import zipimport
 from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from functools import cache
 from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
@@ -26,6 +32,7 @@ from types import (
     CellType,
     CodeType,
     FunctionType,
+    MappingProxyType,
     MethodType,
     ModuleType,
 )
@@ -85,6 +92,49 @@ _IMPORT_STATE_MAX_DEPTH: Final = 5
 _IMPORT_CLOSURE_CELL_COUNT: Final = 2
 _IMPORT_LOADER_DETAIL_COUNT: Final = 2
 _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS: Final = 4300
+_EXECUTION_PROJECTION_STABILIZATION_LIMIT: Final = 3
+_REGEX_CACHE_KEY_PART_COUNT: Final = 3
+_GLOBAL_LOAD_OPNAMES: Final = frozenset(
+    {"LOAD_FROM_DICT_OR_GLOBALS", "LOAD_GLOBAL", "LOAD_NAME"},
+)
+_OPAQUE_MUTATOR_NAMES: Final = frozenset(
+    {
+        "__iadd__",
+        "__iand__",
+        "__ifloordiv__",
+        "__ilshift__",
+        "__imatmul__",
+        "__imod__",
+        "__imul__",
+        "__ior__",
+        "__ipow__",
+        "__irshift__",
+        "__isub__",
+        "__itruediv__",
+        "__ixor__",
+        "__next__",
+        "__setitem__",
+        "acquire",
+        "add",
+        "append",
+        "clear",
+        "close",
+        "discard",
+        "extend",
+        "insert",
+        "pop",
+        "popitem",
+        "release",
+        "remove",
+        "reset",
+        "send",
+        "set",
+        "setdefault",
+        "throw",
+        "update",
+        "write",
+    },
+)
 _INSTALLER_GENERATED_METADATA: Final = frozenset(
     {"INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json"},
 )
@@ -2432,7 +2482,6 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:  # noqa
         manifest,
         source_repository_root=repository_root,
     )
-    stabilized_execution_projection = _execution_root_projection_sha256()
     catalog_sha256 = source_contract_catalog_sha256()
     source_build_sha256 = _digest(dict(manifest.source_files))
     installed_build_sha256 = _digest(dict(manifest.installed_files))
@@ -2472,6 +2521,7 @@ def source_matrix_candidate_identity() -> SourceMatrixCandidateIdentity:  # noqa
         harness_build_sha256=harness_sha256,
         candidate_identity_sha256=identity_sha256,
     )
+    stabilized_execution_projection = _stabilized_execution_root_projection_sha256()
     if _runtime_identity() != manifest.runtime_identity:
         raise ValueError("source matrix runtime identity changed")
     if _dependency_distributions() != dict(manifest.dependency_distributions):
@@ -2688,7 +2738,7 @@ def _execution_search_directory_snapshot() -> tuple[dict[str, JsonValue], ...]:
     return tuple(_execution_path_projection(value) for value in sys.path)
 
 
-def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
+def _stable_import_state(  # noqa: C901, PLR0911, PLR0912, PLR0915
     value: object,
     *,
     depth: int = 0,
@@ -2714,6 +2764,62 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
             "length": len(raw),
             "sha256": hashlib.sha256(raw).hexdigest(),
         }
+    if isinstance(value, ContextVar):
+        context_variable = cast("ContextVar[object]", value)
+        identity = id(context_variable)
+        if identity in seen:
+            return {
+                "cycle_module": type(context_variable).__module__,
+                "cycle_qualname": type(context_variable).__qualname__,
+            }
+        missing = object()
+        current = context_variable.get(missing)
+        stable_repr = _without_object_addresses(repr(context_variable))
+        return {
+            "definition_sha256": hashlib.sha256(stable_repr.encode()).hexdigest(),
+            "kind": "context_variable",
+            "present": current is not missing,
+            "value": (
+                None
+                if current is missing
+                else _stable_import_state(
+                    current,
+                    depth=depth + 1,
+                    seen=seen | {identity},
+                )
+            ),
+        }
+    if isinstance(value, _thread.LockType):
+        return {
+            "kind": "thread_lock",
+            "locked": value.locked(),
+        }
+    if isinstance(value, _thread.RLock):
+        representation = repr(value)
+        count_marker = " count="
+        count_start = representation.find(count_marker)
+        count_start = count_start + len(count_marker) if count_start >= 0 else -1
+        count_end = count_start
+        while count_end >= 0 and count_end < len(representation):
+            if not representation[count_end].isdigit():
+                break
+            count_end += 1
+        return {
+            "count": (
+                int(representation[count_start:count_end])
+                if count_start >= 0 and count_end > count_start
+                else 0
+            ),
+            "kind": "thread_recursive_lock",
+            "locked": representation.startswith("<locked "),
+        }
+    if isinstance(value, itertools.count):
+        return {
+            "kind": "count_iterator",
+            "state_sha256": hashlib.sha256(
+                repr(cast("object", value)).encode(),
+            ).hexdigest(),
+        }
     if depth >= _IMPORT_STATE_MAX_DEPTH:
         return {
             "module": type(value).__module__,
@@ -2726,26 +2832,35 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
             "cycle_qualname": type(value).__qualname__,
         }
     next_seen = seen | {identity}
-    if isinstance(value, dict):
-        projected: list[tuple[JsonValue, JsonValue]] = [
-            (
-                _stable_import_state(key, depth=depth + 1, seen=next_seen),
-                _stable_import_state(item, depth=depth + 1, seen=next_seen),
+    if isinstance(value, Mapping) and (
+        isinstance(value, dict | MappingProxyType)
+        or not _execution_slots_declared(cast("object", value))
+    ):
+        try:
+            items = tuple(cast("Mapping[object, object]", value).items())
+        except Exception:
+            if isinstance(value, dict | MappingProxyType):
+                raise
+        else:
+            projected: list[tuple[JsonValue, JsonValue]] = [
+                (
+                    _stable_import_state(key, depth=depth + 1, seen=next_seen),
+                    _stable_import_state(item, depth=depth + 1, seen=next_seen),
+                )
+                for key, item in items
+            ]
+
+            def projection_key(item: tuple[JsonValue, JsonValue]) -> str:
+                return json.dumps(item[0], default=str, sort_keys=True)
+
+            return sorted(
+                projected,
+                key=projection_key,
             )
-            for key, item in cast("Mapping[object, object]", value).items()
-        ]
-
-        def projection_key(item: tuple[JsonValue, JsonValue]) -> str:
-            return json.dumps(item[0], default=str, sort_keys=True)
-
-        return sorted(
-            projected,
-            key=projection_key,
-        )
-    if isinstance(value, set | frozenset):
+    if isinstance(value, AbstractSet):
         projected_items = [
             _stable_import_state(item, depth=depth + 1, seen=next_seen)
-            for item in cast("set[object] | frozenset[object]", value)
+            for item in tuple(cast("AbstractSet[object]", value))
         ]
         return sorted(
             projected_items,
@@ -2754,8 +2869,11 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
     if isinstance(value, Sequence):
         return [
             _stable_import_state(item, depth=depth + 1, seen=next_seen)
-            for item in cast("Sequence[object]", value)
+            for item in tuple(cast("Sequence[object]", value))
         ]
+    value = cast("object", value)
+    if isinstance(value, ModuleType):
+        return _execution_reference_projection(value)
     if isinstance(value, CodeType):
         return {
             "argcount": value.co_argcount,
@@ -2848,6 +2966,11 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
             ),
             "module": value.__module__,
             "qualname": value.__qualname__,
+            "referenced_globals": _function_execution_dependencies(
+                value,
+                depth=depth + 1,
+                seen=next_seen,
+            ),
         }
     if isinstance(value, MethodType):
         return {
@@ -2908,17 +3031,18 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
     if isinstance(value, type):
         members: list[dict[str, JsonValue]] = []
         for name, item in sorted(vars(value).items()):
-            if not _class_execution_member(item):
-                continue
             item_projection: JsonValue
-            if isinstance(item, type) and depth >= 1:
-                item_projection = {
-                    "kind": "type_reference",
-                    "module": item.__module__,
-                    "qualname": item.__qualname__,
-                }
+            if _class_execution_member(item):
+                if isinstance(item, type) and depth >= 1:
+                    item_projection = _execution_reference_projection(item)
+                else:
+                    item_projection = _stable_import_state(
+                        item,
+                        depth=depth + 1,
+                        seen=next_seen,
+                    )
             else:
-                item_projection = _stable_import_state(
+                item_projection = _privacy_safe_execution_dependency(
                     item,
                     depth=depth + 1,
                     seen=next_seen,
@@ -2929,27 +3053,47 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
                     "value": item_projection,
                 },
             )
+        metaclass = type(value)
+        metaclass_projection = _execution_reference_projection(metaclass)
+        if metaclass is not type:
+            metaclass_projection = _privacy_safe_projected_execution_state(
+                metaclass,
+                _stable_import_state(
+                    metaclass,
+                    depth=depth + 1,
+                    seen=next_seen,
+                ),
+            )
         return {
             "kind": "type",
+            "metaclass": metaclass_projection,
             "members": members,
             "module": value.__module__,
             "qualname": value.__qualname__,
         }
     state: dict[str, JsonValue] = {
         "kind": "object",
-        "module": str(getattr(value, "__module__", type(value).__module__)),
-        "qualname": str(getattr(value, "__qualname__", type(value).__qualname__)),
         "type_module": type(value).__module__,
         "type_qualname": type(value).__qualname__,
     }
-    raw_dict: object = getattr(value, "__dict__", None)
+    try:
+        raw_dict: object = object.__getattribute__(value, "__dict__")
+    except Exception:  # noqa: BLE001 - thread-local state needs normal lookup
+        value_type = type(value)
+        thread_local = value_type.__module__ == "_thread" and value_type.__qualname__ == "_local"
+        raw_dict = vars(value) if thread_local else None
+    state_captured = False
     if isinstance(raw_dict, Mapping):
         state["state"] = _stable_import_state(
             cast("Mapping[object, object]", raw_dict),
             depth=depth + 1,
             seen=next_seen,
         )
-    raw_closure: object = getattr(value, "__closure__", None)
+        state_captured = True
+    try:
+        raw_closure: object = object.__getattribute__(value, "__closure__")
+    except Exception:  # noqa: BLE001 - non-callable objects have no closure
+        raw_closure = None
     if isinstance(raw_closure, tuple):
         closure: list[JsonValue] = []
         for cell in cast("tuple[CellType, ...]", raw_closure):
@@ -2965,6 +3109,14 @@ def _stable_import_state(  # noqa: C901, PLR0911, PLR0912
                 ),
             )
         state["closure"] = closure
+        state_captured = True
+    slots = _execution_slot_state(value, depth=depth, seen=next_seen)
+    if slots:
+        state["slots"] = slots
+    if slots or _execution_slots_declared(value):
+        state_captured = True
+    if not state_captured and _opaque_execution_dependency_is_mutable(value):
+        raise ValueError("mutable execution dependency is unsupported")
     return state
 
 
@@ -2977,28 +3129,256 @@ def _empty_closure_cell(cell: CellType) -> bool:
 
 
 def _class_execution_member(value: object) -> bool:
-    return (
-        value is None
-        or isinstance(
-            value,
-            bool
-            | int
-            | float
-            | str
-            | bytes
-            | CodeType
-            | FunctionType
-            | BuiltinFunctionType
-            | MethodType
-            | type
-            | classmethod
-            | staticmethod
-            | property
-            | tuple
-            | frozenset,
-        )
-        or callable(value)
+    return isinstance(
+        value,
+        CodeType
+        | FunctionType
+        | BuiltinFunctionType
+        | MethodType
+        | type
+        | classmethod
+        | staticmethod
+        | property,
+    ) or callable(value)
+
+
+def _execution_slot_state(
+    value: object,
+    *,
+    depth: int,
+    seen: frozenset[int],
+) -> list[dict[str, JsonValue]]:
+    slot_names: set[str] = set()
+    for value_type in type(value).__mro__:
+        raw_slots = vars(value_type).get("__slots__", ())
+        names = (raw_slots,) if isinstance(raw_slots, str) else raw_slots
+        if not isinstance(names, Sequence):
+            continue
+        for raw_name in cast("Sequence[object]", names):
+            if not isinstance(raw_name, str) or raw_name in {"__dict__", "__weakref__"}:
+                continue
+            name = raw_name
+            if name.startswith("__") and not name.endswith("__"):
+                owner_name = value_type.__name__.lstrip("_")
+                name = f"_{owner_name}{name}"
+            slot_names.add(name)
+    result: list[dict[str, JsonValue]] = []
+    for name in sorted(slot_names):
+        projected: dict[str, JsonValue] = {
+            "name_sha256": hashlib.sha256(name.encode()).hexdigest(),
+        }
+        try:
+            item = object.__getattribute__(value, name)
+        except AttributeError:
+            projected["present"] = False
+        except Exception as exc:
+            raise ValueError("execution dependency slot is unreadable") from exc
+        else:
+            projected.update(
+                {
+                    "present": True,
+                    "value": _stable_import_state(
+                        item,
+                        depth=depth + 1,
+                        seen=seen,
+                    ),
+                },
+            )
+        result.append(projected)
+    return result
+
+
+def _execution_slots_declared(value: object) -> bool:
+    return any("__slots__" in vars(value_type) for value_type in type(value).__mro__)
+
+
+def _opaque_execution_dependency_is_mutable(value: object) -> bool:
+    return any(
+        name in vars(value_type)
+        for value_type in type(value).__mro__
+        for name in _OPAQUE_MUTATOR_NAMES
     )
+
+
+def _execution_type_sha256(value: object) -> str:
+    value_type = type(value)
+    return hashlib.sha256(
+        f"{value_type.__module__}\0{value_type.__qualname__}".encode(),
+    ).hexdigest()
+
+
+def _without_object_addresses(representation: str) -> str:
+    marker = " at 0x"
+    search_start = 0
+    while True:
+        marker_start = representation.find(marker, search_start)
+        if marker_start < 0:
+            return representation
+        address_start = marker_start + len(marker)
+        address_end = address_start
+        while (
+            address_end < len(representation)
+            and representation[address_end] in "0123456789abcdefABCDEF"
+        ):
+            address_end += 1
+        if address_end > address_start and representation[address_end : address_end + 1] == ">":
+            representation = representation[:marker_start] + representation[address_end:]
+            search_start = marker_start
+        else:
+            search_start = address_start
+
+
+def _execution_reference_projection(value: object) -> dict[str, JsonValue]:
+    return {
+        "kind": "execution_reference",
+        "module_sha256": hashlib.sha256(
+            str(getattr(value, "__module__", type(value).__module__)).encode(),
+        ).hexdigest(),
+        "qualname_sha256": hashlib.sha256(
+            str(getattr(value, "__qualname__", type(value).__qualname__)).encode(),
+        ).hexdigest(),
+        "type_sha256": _execution_type_sha256(value),
+    }
+
+
+def _privacy_safe_projected_execution_state(
+    value: object,
+    state: JsonValue,
+) -> dict[str, JsonValue]:
+    return {
+        "state_sha256": _digest(state),
+        "type_sha256": _execution_type_sha256(value),
+    }
+
+
+def _privacy_safe_execution_dependency(
+    value: object,
+    *,
+    depth: int,
+    seen: frozenset[int],
+) -> dict[str, JsonValue]:
+    state: JsonValue
+    if value is vars(re).get("_cache"):
+        state = _validated_regex_cache_state(value)
+    elif value is sys.modules:
+        state = {
+            **_execution_reference_projection(value),
+            "kind": "loaded_module_registry_reference",
+        }
+    else:
+        state = (
+            _execution_reference_projection(cast("object", value))
+            if isinstance(
+                value,
+                ModuleType
+                | FunctionType
+                | BuiltinFunctionType
+                | MethodType
+                | type
+                | classmethod
+                | staticmethod
+                | property,
+            )
+            else _stable_import_state(value, depth=depth, seen=seen)
+        )
+    return _privacy_safe_projected_execution_state(cast("object", value), state)
+
+
+def _validated_regex_cache_state(value: object) -> dict[str, JsonValue]:
+    if not isinstance(value, dict):
+        raise TypeError("regular expression cache is unsupported")
+    compiler_module = vars(re).get("_compiler")
+    compiler = (
+        vars(compiler_module).get("compile") if isinstance(compiler_module, ModuleType) else None
+    )
+    if not callable(compiler):
+        raise TypeError("regular expression compiler is unavailable")
+    compile_pattern = cast("Callable[[str | bytes, int], object]", compiler)
+    for key, cached in tuple(cast("dict[object, object]", value).items()):
+        cache_key = cast("tuple[object, ...]", key) if isinstance(key, tuple) else ()
+        if (
+            len(cache_key) != _REGEX_CACHE_KEY_PART_COUNT
+            or (cache_key[0] is not str and cache_key[0] is not bytes)
+            or not isinstance(cache_key[1], str | bytes)
+            or type(cache_key[1]) is not cache_key[0]
+            or not isinstance(cache_key[2], int)
+            or not isinstance(cached, re.Pattern)
+        ):
+            raise ValueError("regular expression cache entry is unsupported")
+        expected = compile_pattern(cache_key[1], cache_key[2])
+        if not isinstance(expected, re.Pattern):
+            raise TypeError("regular expression compiler result is unsupported")
+        cached_object = cast("object", cached)
+        expected_object = cast("object", expected)
+        cached_details = (
+            object.__getattribute__(cached_object, "pattern"),
+            object.__getattribute__(cached_object, "flags"),
+            object.__getattribute__(cached_object, "groups"),
+            object.__getattribute__(cached_object, "groupindex"),
+        )
+        expected_details = (
+            object.__getattribute__(expected_object, "pattern"),
+            object.__getattribute__(expected_object, "flags"),
+            object.__getattribute__(expected_object, "groups"),
+            object.__getattribute__(expected_object, "groupindex"),
+        )
+        if cached_details != expected_details:
+            raise ValueError("regular expression cache entry is invalid")
+    return {
+        "kind": "validated_regular_expression_cache",
+    }
+
+
+@cache
+def _code_global_names(code: CodeType) -> frozenset[str]:
+    names = {
+        instruction.argval
+        for instruction in dis.get_instructions(code)
+        if instruction.opname in _GLOBAL_LOAD_OPNAMES and isinstance(instruction.argval, str)
+    }
+    for constant in code.co_consts:
+        if isinstance(constant, CodeType):
+            names.update(_code_global_names(constant))
+    return frozenset(names)
+
+
+def _function_execution_dependencies(
+    function: FunctionType,
+    *,
+    depth: int,
+    seen: frozenset[int],
+) -> list[dict[str, JsonValue]]:
+    dependencies: list[dict[str, JsonValue]] = []
+    global_values = cast("Mapping[str, object]", function.__globals__)
+    builtin_values = cast("Mapping[str, object]", function.__builtins__)
+    for name in sorted(_code_global_names(function.__code__)):
+        if name in global_values:
+            scope = "global"
+            value = global_values[name]
+        elif name in builtin_values:
+            scope = "builtins"
+            value = builtin_values[name]
+        else:
+            dependencies.append(
+                {
+                    "name_sha256": hashlib.sha256(name.encode()).hexdigest(),
+                    "present": False,
+                },
+            )
+            continue
+        dependencies.append(
+            {
+                "name_sha256": hashlib.sha256(name.encode()).hexdigest(),
+                "present": True,
+                "scope": scope,
+                "value": _privacy_safe_execution_dependency(
+                    value,
+                    depth=depth + 1,
+                    seen=seen,
+                ),
+            },
+        )
+    return dependencies
 
 
 def _module_execution_projection(
@@ -3603,6 +3983,16 @@ def _execution_root_projection_sha256() -> str:
             "interpreter": _interpreter_execution_projection(),
         },
     )
+
+
+def _stabilized_execution_root_projection_sha256() -> str:
+    previous = _execution_root_projection_sha256()
+    for _ in range(_EXECUTION_PROJECTION_STABILIZATION_LIMIT):
+        current = _execution_root_projection_sha256()
+        if current == previous:
+            return current
+        previous = current
+    raise ValueError("source matrix execution closure does not stabilize")
 
 
 def _runtime_file_projection(path: Path) -> str:
