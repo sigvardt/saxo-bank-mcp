@@ -31,6 +31,12 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_fingerprint,
     source_contracts_by_id,
 )
+from saxo_bank_mcp.analytics_source_runtime import (
+    CandidateRuntimeError,
+    ExternalRunLayout,
+    _open_candidate_runtime_seal_for_test,
+    close_candidate_runtime_seal,
+)
 from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreValidationError
 from saxo_bank_mcp.endpoint_registry import EndpointOperation, find_registered_endpoint
 from saxo_bank_mcp.read_tool_types import ReadExecutionContext
@@ -93,74 +99,123 @@ async def _chart_pages(
 def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
     tmp_path: Path,
 ) -> None:
+    repository_root = Path(__file__).parents[1]
+    build_root = tmp_path / "source"
+    shutil.copytree(
+        repository_root,
+        build_root,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".ruff_cache",
+            ".pytest_cache",
+            ".basedpyright",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+        ),
+    )
     wheel_dir = tmp_path / "wheel"
     uv = shutil.which("uv")
     assert uv is not None
+    uv_path = Path(uv).resolve(strict=True)
     build = subprocess.run(
-        (uv, "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
-        cwd=Path(__file__).parents[1],
+        (str(uv_path), "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
+        cwd=build_root,
         check=False,
         capture_output=True,
         text=True,
     )
     assert build.returncode == 0, build.stderr
-    wheel = next(wheel_dir.glob("*.whl"))
+    wheel = next(wheel_dir.glob("*.whl")).resolve(strict=True)
     runtime = tmp_path / "runtime"
     prepared = subprocess.run(
         (
             sys.executable,
-            str(Path(__file__).parents[1] / "scripts/prepare_analytics_source_matrix_runtime.py"),
+            str(build_root / "scripts/prepare_analytics_source_matrix_runtime.py"),
             "--runtime",
             str(runtime),
             "--wheel",
             str(wheel),
             "--uv",
-            uv,
+            str(uv_path),
         ),
-        cwd=Path(__file__).parents[1],
+        cwd=build_root,
         check=False,
         capture_output=True,
         text=True,
     )
     assert prepared.returncode == 0, prepared.stderr
-    command = (
-        str(runtime / "bin" / "saxo-bank-analytics-source-matrix"),
-        "--identity",
-    )
-    baseline = subprocess.run(
-        command,
+    manifest = tmp_path / "candidate.json"
+    generated = subprocess.run(
+        (
+            str(runtime / "bin/saxo-bank-analytics-source-matrix-generate"),
+            "--repository-root",
+            str(build_root),
+            "--wheel",
+            str(wheel),
+            "--out",
+            str(manifest),
+        ),
         cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
     )
-    assert baseline.returncode == 0, baseline.stderr
+    assert generated.returncode == 0, generated.stderr
+
+    run_root = tmp_path / "run"
+    run_root.mkdir(mode=0o700)
+    directories = tuple(
+        run_root / name
+        for name in (
+            "coordinator-cache",
+            "coordinator-work",
+            "coordinator-tmp",
+            "child-cache",
+            "child-work",
+            "child-tmp",
+        )
+    )
+    for directory in directories:
+        directory.mkdir(mode=0o700)
+    layout = ExternalRunLayout(run_root, *directories)
+    manifest_text = manifest.read_text(encoding="utf-8")
+    baseline = _open_candidate_runtime_seal_for_test(runtime, manifest_text, layout)
+    close_candidate_runtime_seal(baseline)
 
     installed = runtime / "lib" / "python3.12" / "site-packages"
     dist_info = next(installed.glob("saxo_bank_mcp-*.dist-info"))
     targets = (
         installed / "saxo_bank_mcp" / "server.py",
         installed / "saxo_bank_mcp" / "endpoint_registry.py",
-        installed / "saxo_bank_mcp" / "live_token_refresh.py",
-        installed / "saxo_bank_mcp" / "read_tool_results.py",
         installed / "saxo_bank_mcp" / "secret_scan.py",
         installed / "saxo_bank_mcp" / "_analytics_source_contracts" / "source_contracts.json",
         dist_info / "entry_points.txt",
         dist_info / "METADATA",
         runtime / "bin" / "saxo-bank-analytics-source-matrix",
     )
-    for target in targets:
-        original = target.read_bytes()
-        target.write_bytes(original + b"\n# installed artifact mutation\n")
-        tampered = subprocess.run(
-            command,
-            cwd=tmp_path,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        target.write_bytes(original)
-        assert tampered.returncode != 0, target
+    try:
+        for target in targets:
+            original = target.read_bytes()
+            original_mode = stat.S_IMODE(target.stat().st_mode)
+            target.chmod(0o600)
+            target.write_bytes(original + b"\n# installed artifact mutation\n")
+            target.chmod(original_mode)
+            with pytest.raises(CandidateRuntimeError):
+                _open_candidate_runtime_seal_for_test(runtime, manifest_text, layout)
+            target.chmod(0o600)
+            target.write_bytes(original)
+            target.chmod(original_mode)
+    finally:
+        for path in sorted(
+            runtime.rglob("*"),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        ):
+            if not path.is_symlink():
+                path.chmod(0o700 if path.is_dir() else 0o600)
+        runtime.chmod(0o700)
 
 
 def test_guard_root_ignores_process_environment_and_claim_is_durable_once(

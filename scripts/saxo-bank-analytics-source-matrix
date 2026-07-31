@@ -8,15 +8,43 @@ case $0 in
 esac
 launcher_dir=$(CDPATH= cd -P -- "$launcher_dir" && pwd -P)
 runtime_root=$(CDPATH= cd -P -- "$launcher_dir/.." && pwd -P)
-python="$launcher_dir/python3.12"
+runtime_parent=$(CDPATH= cd -P -- "$runtime_root/.." && pwd -P)
+python="$runtime_root/bin/python3.12"
 site_packages="$runtime_root/lib/python3.12/site-packages"
-cache_prefix="$runtime_root/.saxo-bank-mcp-pycache"
+run_root="$runtime_parent/.saxo-source-matrix-run.$$"
+bootstrap='import os,runpy,stat,sys
+runtime,site,root,module=sys.argv[1:5]
+del sys.argv[1:5]
+names=("coordinator-cache","coordinator-work","coordinator-tmp")
+paths=tuple(os.path.join(root,name) for name in names)
+created=[]
+try:
+    os.mkdir(root,0o700)
+    created.append(root)
+    for path in paths:
+        os.mkdir(path,0o700)
+        created.append(path)
+    for path in (root,*paths):
+        metadata=os.lstat(path)
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid!=os.getuid() or stat.S_IMODE(metadata.st_mode)!=0o700:
+            raise SystemExit("unsafe external run directory")
+    os.environ["TMPDIR"]=paths[2]
+    os.chdir(paths[1])
+    sys.path.insert(0,site)
+    runpy.run_module(module,run_name="__main__",alter_sys=True)
+finally:
+    for path in reversed(created):
+        if os.path.isdir(path) and os.listdir(path):
+            raise SystemExit("external run directory is not empty")
+        os.rmdir(path)'
 
 if [ ! -x "$python" ] || [ ! -d "$site_packages" ]; then
-    echo "source matrix requires its complete CPython 3.12 isolated runtime" >&2
+    echo "source matrix requires its sealed CPython 3.12 runtime" >&2
     exit 1
 fi
 
 SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER=1
 export SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER
-exec "$python" -I -B -S -X "pycache_prefix=$cache_prefix" -c 'import os,runpy,stat,sys;p=sys.pycache_prefix;os.mkdir(p,0o700) if not os.path.exists(p) else None;m=os.lstat(p);(stat.S_ISDIR(m.st_mode) and not stat.S_ISLNK(m.st_mode) and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o700 and not os.listdir(p)) or (_ for _ in ()).throw(SystemExit("unsafe isolated cache prefix"));site=sys.argv.pop(1);module=sys.argv.pop(1);sys.path.insert(0,site);runpy.run_module(module,run_name="__main__",alter_sys=True)' "$site_packages" saxo_bank_mcp.qa_analytics_source_matrix "$@"
+exec "$python" -I -B -S -X "pycache_prefix=$run_root/coordinator-cache" -c "$bootstrap" \
+    "$runtime_root" "$site_packages" "$run_root" \
+    saxo_bank_mcp.qa_analytics_source_matrix "$@"

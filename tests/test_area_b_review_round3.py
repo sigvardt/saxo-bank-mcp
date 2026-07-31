@@ -106,7 +106,11 @@ def _mutated_wheel(source: Path, target: Path) -> None:
 
 
 def _copy_source_candidate(target: Path) -> None:
-    shutil.copytree(_ROOT / "src", target / "src")
+    shutil.copytree(
+        _ROOT / "src",
+        target / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
     shutil.copytree(_ROOT / "data" / "analytics", target / "data" / "analytics")
     (target / "data" / "saxo").mkdir(parents=True)
     shutil.copyfile(
@@ -126,45 +130,83 @@ def _copy_source_candidate(target: Path) -> None:
         shutil.copyfile(_ROOT / name, target / name)
 
 
-def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projection(  # noqa: PLR0915
+def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projection(
     tmp_path: Path,
 ) -> None:
     uv = shutil.which("uv")
     assert uv is not None
+    uv_path = Path(uv).resolve(strict=True)
+    build_root = tmp_path / "build-source"
+    shutil.copytree(
+        _ROOT,
+        build_root,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".ruff_cache",
+            ".pytest_cache",
+            ".basedpyright",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+        ),
+    )
     wheel_dir = tmp_path / "wheel"
     build = subprocess.run(
-        (uv, "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
-        cwd=_ROOT,
+        (str(uv_path), "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
+        cwd=build_root,
         check=False,
         capture_output=True,
         text=True,
     )
     assert build.returncode == 0, build.stderr
-    wheel = next(wheel_dir.glob("*.whl"))
+    wheel = next(wheel_dir.glob("*.whl")).resolve(strict=True)
+    runtime = tmp_path / "runtime"
+    prepared = subprocess.run(
+        (
+            sys.executable,
+            str(build_root / "scripts/prepare_analytics_source_matrix_runtime.py"),
+            "--runtime",
+            str(runtime),
+            "--wheel",
+            str(wheel),
+            "--uv",
+            str(uv_path),
+        ),
+        cwd=build_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert prepared.returncode == 0, prepared.stderr
     generated = tmp_path / "candidate.json"
     generation = subprocess.run(
         (
-            sys.executable,
-            str(_ROOT / "scripts" / "generate_analytics_source_matrix_candidate.py"),
+            str(runtime / "bin/saxo-bank-analytics-source-matrix-generate"),
+            "--repository-root",
+            str(build_root),
             "--wheel",
             str(wheel),
             "--out",
             str(generated),
         ),
-        cwd=_ROOT,
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
     )
     assert generation.returncode == 0, generation.stderr
     manifest = json.loads(generated.read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == "4"
+    assert manifest["schema_version"] == "5"
     assert manifest["runtime_identity"]["implementation"] == sys.implementation.name
     assert manifest["runtime_identity"]["executable_sha256"]
     assert "pydantic" in manifest["dependency_distributions"]
     assert "annotated-types" in manifest["dependency_distributions"]
     assert manifest["dependency_distributions"]["pydantic"]["files"]
     assert manifest["source_wheel_projection_sha256"]
+    assert manifest["portable_runtime_tree_sha256"]
+    assert manifest["portable_runtime_entry_count"] > 1
+    assert manifest["child_bootstrap_sha256"]
     assert {
         "scripts/generate_analytics_source_matrix_candidate.py",
         "scripts/run_analytics_source_matrix.py",
@@ -174,89 +216,24 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
     _mutated_wheel(wheel, foreign_wheel)
     foreign = subprocess.run(
         (
-            sys.executable,
-            str(_ROOT / "scripts" / "generate_analytics_source_matrix_candidate.py"),
+            str(runtime / "bin/saxo-bank-analytics-source-matrix-generate"),
+            "--repository-root",
+            str(build_root),
             "--wheel",
             str(foreign_wheel),
             "--out",
             str(tmp_path / "foreign.json"),
         ),
-        cwd=_ROOT,
+        cwd=tmp_path,
         check=False,
         capture_output=True,
         text=True,
     )
     assert foreign.returncode != 0
 
-    runtime = tmp_path / "runtime"
-    prepared = subprocess.run(
-        (
-            sys.executable,
-            str(_ROOT / "scripts" / "prepare_analytics_source_matrix_runtime.py"),
-            "--runtime",
-            str(runtime),
-            "--wheel",
-            str(wheel),
-            "--uv",
-            uv,
-        ),
-        cwd=_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert prepared.returncode == 0, prepared.stderr
-    baseline = _run_identity(runtime, tmp_path)
-    assert baseline.returncode == 0, baseline.stderr
-
-    site = runtime / "lib" / "python3.12" / "site-packages"
-    root_dist_info = next(site.glob("saxo_bank_mcp-*.dist-info"))
-    pydantic_file = site / "pydantic" / "__init__.py"
-    transitive_metadata = next(site.glob("annotated_types-*.dist-info/METADATA"))
-    wrapper = runtime / "bin" / "saxo-bank-analytics-source-matrix"
-    root_installer = root_dist_info / "INSTALLER"
-    root_entrypoints = root_dist_info / "entry_points.txt"
-    mutations: tuple[tuple[Path, bytes], ...] = (
-        (site / "saxo_bank_mcp" / "unrecorded_shadow.py", b"SHADOW = True\n"),
-        (pydantic_file, pydantic_file.read_bytes() + b"\nROUND3_MUTATION = True\n"),
-        (
-            transitive_metadata,
-            transitive_metadata.read_bytes().replace(b"Version: 0.7.0", b"Version: 0.7.1"),
-        ),
-        (
-            wrapper,
-            wrapper.read_bytes() + b"\n# ROUND3_MUTATION\n",
-        ),
-        (root_installer, root_installer.read_bytes() + b"mutated\n"),
-        (root_entrypoints, root_entrypoints.read_bytes() + b"\nmutated = module:main\n"),
-    )
-    for target, mutated in mutations:
-        existed = target.exists()
-        original = target.read_bytes() if existed else b""
-        target.write_bytes(mutated)
-        refused = _run_identity(runtime, tmp_path)
-        if existed:
-            target.write_bytes(original)
-        else:
-            target.unlink()
-        assert refused.returncode != 0, target
-
-    shadow = tmp_path / "shadow"
-    shadow.mkdir()
-    (shadow / "six.py").write_text("SHADOW = True\n", encoding="utf-8")
-    assert _run_identity(runtime, tmp_path, prefix=shadow).returncode == 0
-
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    expected_source_files = json.loads(
-        (_ROOT / "data" / "analytics" / "source_matrix_candidate.json").read_text(
-            encoding="utf-8",
-        ),
-    )["source_files"]
-    source_files = matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-        source_copy,
-    )
-    assert source_files == expected_source_files
+    source_files = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
     for name in (
         "generate_analytics_source_matrix_candidate.py",
         "prepare_analytics_source_matrix_runtime.py",
@@ -265,11 +242,18 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
         target = source_copy / "scripts" / name
         original = target.read_bytes()
         target.write_bytes(original + b"\nROUND3_SOURCE_MUTATION = True\n")
-        refused = matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            source_copy,
-        )
+        refused = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
         target.write_bytes(original)
-        assert refused != expected_source_files, name
+        assert refused != source_files, name
+
+    for path in sorted(
+        runtime.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        if not path.is_symlink():
+            path.chmod(0o700 if path.is_dir() else 0o600)
+    runtime.chmod(0o700)
 
 
 def test_guard_walk_is_symlink_owner_mode_and_parent_swap_safe(

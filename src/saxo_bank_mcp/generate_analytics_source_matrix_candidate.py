@@ -11,12 +11,12 @@ import zipfile
 from pathlib import Path
 
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
-from saxo_bank_mcp.qa_analytics_source_matrix import (
+from saxo_bank_mcp.analytics_source_process import CHILD_BOOTSTRAP
+from saxo_bank_mcp.analytics_source_runtime import (
     _dependency_distributions,  # pyright: ignore[reportPrivateUsage]
-    _normalize_official_import_machinery,  # pyright: ignore[reportPrivateUsage]
     _runtime_identity,  # pyright: ignore[reportPrivateUsage]
     _source_candidate_files,  # pyright: ignore[reportPrivateUsage]
-    _validate_official_interpreter_state,  # pyright: ignore[reportPrivateUsage]
+    portable_runtime_projection,
 )
 
 _CANDIDATE_RESOURCE = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
@@ -149,10 +149,7 @@ def main() -> int:
     )
     arguments = parser.parse_args()
     launcher_mode = os.environ.get("SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER")
-    if launcher_mode == "1":
-        _normalize_official_import_machinery()
-        _validate_official_interpreter_state()
-    elif launcher_mode != "dev" or (
+    if launcher_mode not in {"1", "dev"} or (
         sys.flags.isolated != 1
         or sys.flags.dont_write_bytecode != 1
         or sys.flags.no_site != 1
@@ -172,6 +169,7 @@ def main() -> int:
         source_files,
     )
     runtime_identity = _runtime_identity().model_dump(mode="json")
+    portable_runtime = portable_runtime_projection() if launcher_mode == "1" else None
     dependency_distributions = {
         name: item.model_dump(mode="json") for name, item in _dependency_distributions().items()
     }
@@ -181,15 +179,27 @@ def main() -> int:
     source_build_sha256 = _digest(source_files)
     installed_build_sha256 = _digest(installed_files)
     source_exclusions = (_SOURCE_EXCLUSION,)
+    child_bootstrap_sha256 = hashlib.sha256(CHILD_BOOTSTRAP.encode("utf-8")).hexdigest()
+    portable_runtime_tree_sha256 = (
+        portable_runtime.sha256
+        if portable_runtime is not None
+        else _digest({"runtime": "development-only-unsealed"})
+    )
+    portable_runtime_entry_count = (
+        portable_runtime.entry_count if portable_runtime is not None else 1
+    )
     harness_build_sha256 = _digest(
         {
+            "child_bootstrap_sha256": child_bootstrap_sha256,
             "console_scripts": console_scripts,
             "dependency_distributions": dependency_distributions,
             "installed_build_sha256": installed_build_sha256,
             "installed_exclusions": installed_exclusions,
             "installed_metadata_projection": installed_metadata_projection,
+            "portable_runtime_entry_count": portable_runtime_entry_count,
+            "portable_runtime_tree_sha256": portable_runtime_tree_sha256,
             "runtime_identity": runtime_identity,
-            "schema_version": "4",
+            "schema_version": "5",
             "source_build_sha256": source_build_sha256,
             "source_exclusions": source_exclusions,
             "source_wheel_projection_sha256": source_wheel_projection_sha256,
@@ -204,6 +214,7 @@ def main() -> int:
     )
     payload = {
         "candidate_identity_sha256": candidate_identity_sha256,
+        "child_bootstrap_sha256": child_bootstrap_sha256,
         "console_scripts": console_scripts,
         "dependency_distributions": dependency_distributions,
         "harness_build_sha256": harness_build_sha256,
@@ -211,8 +222,10 @@ def main() -> int:
         "installed_exclusions": installed_exclusions,
         "installed_files": installed_files,
         "installed_metadata_projection": installed_metadata_projection,
+        "portable_runtime_entry_count": portable_runtime_entry_count,
+        "portable_runtime_tree_sha256": portable_runtime_tree_sha256,
         "runtime_identity": runtime_identity,
-        "schema_version": "4",
+        "schema_version": "5",
         "source_build_sha256": source_build_sha256,
         "source_contract_catalog_sha256": catalog_sha256,
         "source_exclusions": source_exclusions,

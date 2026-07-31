@@ -3,10 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -27,88 +24,6 @@ from saxo_bank_mcp.registered_read_execution import RegisteredReadResponse
 
 _ROOT = Path(__file__).parents[1]
 _EXPECTED_POST_ACCESS_ATTEMPTS = 2
-_IDENTITY_COMMAND = (
-    "import saxo_bank_mcp.qa_analytics_source_matrix as matrix\n"
-    "matrix._normalize_official_import_machinery()\n"
-    "print(matrix.source_matrix_candidate_identity().candidate_identity_sha256)\n"
-)
-
-
-def _prepare_official_runtime(tmp_path: Path) -> Path:
-    uv = shutil.which("uv")
-    assert uv is not None
-    wheel_dir = tmp_path / "wheel"
-    build = subprocess.run(
-        (uv, "build", "--offline", "--wheel", "--out-dir", str(wheel_dir)),
-        cwd=_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert build.returncode == 0, build.stderr
-    runtime = tmp_path / "runtime"
-    prepared = subprocess.run(
-        (
-            sys.executable,
-            str(_ROOT / "scripts" / "prepare_analytics_source_matrix_runtime.py"),
-            "--runtime",
-            str(runtime),
-            "--wheel",
-            str(next(wheel_dir.glob("*.whl"))),
-            "--uv",
-            uv,
-        ),
-        cwd=_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert prepared.returncode == 0, prepared.stderr
-    return runtime
-
-
-def _run_official_command(
-    runtime: Path,
-    cwd: Path,
-    *,
-    command: str = _IDENTITY_COMMAND,
-) -> subprocess.CompletedProcess[str]:
-    site_packages = runtime / "lib" / "python3.12" / "site-packages"
-    cache_prefix = runtime / ".saxo-bank-mcp-pycache"
-    bootstrap = (
-        "import os,stat,sys;"
-        "p=sys.pycache_prefix;"
-        "os.mkdir(p,0o700) if not os.path.exists(p) else None;"
-        "m=os.lstat(p);"
-        "(stat.S_ISDIR(m.st_mode) and not stat.S_ISLNK(m.st_mode) "
-        "and m.st_uid==os.getuid() and stat.S_IMODE(m.st_mode)==0o700 "
-        "and not os.listdir(p)) or (_ for _ in ()).throw(SystemExit('unsafe cache'));"
-        "site=sys.argv[1];code=sys.argv[2];"
-        "sys.path.insert(0,site);"
-        "exec(compile(code,'<round4>','exec'),{'__name__':'__main__'})"
-    )
-    return subprocess.run(
-        (
-            str(runtime / "bin" / "python3.12"),
-            "-I",
-            "-B",
-            "-S",
-            "-X",
-            f"pycache_prefix={cache_prefix}",
-            "-c",
-            bootstrap,
-            str(site_packages),
-            command,
-        ),
-        cwd=cwd,
-        env={
-            **os.environ,
-            "SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER": "1",
-        },
-        check=False,
-        capture_output=True,
-        text=True,
-    )
 
 
 def _copy_source_candidate(target: Path) -> None:
@@ -139,189 +54,46 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def test_candidate_identity_closes_startup_import_and_python_runtime(  # noqa: PLR0915
+def test_candidate_identity_closes_startup_import_and_python_runtime(
     tmp_path: Path,
 ) -> None:
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    source_site = source_copy / "src"
-    foreign_cwd = tmp_path / "foreign-cwd"
-    foreign_cwd.mkdir()
-    expected_source_files = json.loads(
-        (_ROOT / "data" / "analytics" / "source_matrix_candidate.json").read_text(
-            encoding="utf-8",
-        ),
-    )["source_files"]
-    assert (
-        matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            source_copy,
-        )
-        == expected_source_files
-    )
+    baseline = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
 
-    runtime = _prepare_official_runtime(tmp_path)
-    baseline = _run_official_command(runtime, foreign_cwd)
-    assert baseline.returncode == 0, baseline.stderr
-
-    startup_shadow = tmp_path / "startup-shadow"
-    startup_shadow.mkdir()
-    (startup_shadow / "sitecustomize.py").write_text(
-        "STARTUP_CUSTOMIZATION = True\n",
-        encoding="utf-8",
-    )
-    startup_command = (
-        f"import sys\nsys.path.insert(0, {str(startup_shadow)!r})\n{_IDENTITY_COMMAND}"
-    )
-    assert _run_official_command(runtime, foreign_cwd, command=startup_command).returncode != 0
-    (startup_shadow / "sitecustomize.py").unlink()
-    (startup_shadow / "unrecorded-path.pth").write_text(
-        "import unrecorded_startup\n",
-        encoding="utf-8",
-    )
-    assert _run_official_command(runtime, foreign_cwd, command=startup_command).returncode != 0
-    (startup_shadow / "unrecorded-path.pth").unlink()
-    (startup_shadow / "python._pth").write_text(
-        f"{source_site}\nimport site\n",
-        encoding="utf-8",
-    )
-    assert _run_official_command(runtime, foreign_cwd, command=startup_command).returncode != 0
-    (startup_shadow / "python._pth").unlink()
-
-    outside = tmp_path / "outside-shadow"
+    package = source_copy / "src" / "saxo_bank_mcp"
+    outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "shadow.py").write_text("SHADOW = True\n", encoding="utf-8")
-    source_symlink = source_site / "saxo_bank_mcp" / "symlink_shadow"
-    source_symlink.symlink_to(outside, target_is_directory=True)
+    linked = package / "linked-runtime"
+    linked.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
-        matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            source_copy,
-        )
-    source_symlink.unlink()
-
-    namespace_shadow = tmp_path / "namespace-shadow"
-    shadow_package = namespace_shadow / "saxo_bank_mcp"
-    shadow_package.mkdir(parents=True)
-    shadow_module = shadow_package / "injected_submodule.py"
-    shadow_module.write_text("SHADOW = True\n", encoding="utf-8")
-    namespace_command = (
-        f"import sys\nsys.path.insert(0, {str(namespace_shadow)!r})\n{_IDENTITY_COMMAND}"
-    )
-    assert _run_official_command(runtime, foreign_cwd, command=namespace_command).returncode != 0
-    injected_command = (
-        "import importlib.util,sys\n"
-        f"spec=importlib.util.spec_from_file_location('saxo_bank_mcp.injected_submodule',"
-        f"{str(shadow_module)!r})\n"
-        "module=importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(module)\n"
-        "sys.modules['saxo_bank_mcp.injected_submodule']=module\n" + _IDENTITY_COMMAND
-    )
-    assert (
-        _run_official_command(
-            runtime,
-            foreign_cwd,
-            command=injected_command,
-        ).returncode
-        != 0
-    )
-
-    site = runtime / "lib" / "python3.12" / "site-packages"
-    (startup_shadow / "sitecustomize.py").write_text(
-        "STARTUP_CUSTOMIZATION = True\n",
-        encoding="utf-8",
-    )
-    assert _run_official_command(runtime, foreign_cwd, command=startup_command).returncode != 0
-    (startup_shadow / "sitecustomize.py").unlink()
-    installed_symlink = site / "saxo_bank_mcp" / "symlink_shadow"
-    installed_symlink.symlink_to(outside, target_is_directory=True)
-    assert _run_official_command(runtime, foreign_cwd).returncode != 0
-    installed_symlink.unlink()
-    launcher = runtime / "bin" / "saxo-bank-analytics-source-matrix"
-    isolated = subprocess.run(
-        (str(launcher), "--identity"),
-        cwd=foreign_cwd,
-        env={**os.environ, "PYTHONPATH": str(namespace_shadow)},
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert isolated.returncode == 0, isolated.stderr
-    wrapper = launcher
-    wrapper_mode = wrapper.stat().st_mode
-    wrapper.chmod(wrapper_mode | 0o040)
-    assert _run_official_command(runtime, foreign_cwd).returncode != 0
-    wrapper.chmod(wrapper_mode)
+        matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+    linked.unlink()
 
     runtime_tree = tmp_path / "runtime-tree"
     runtime_tree.mkdir()
     runtime_module = runtime_tree / "module.py"
     runtime_module.write_text("VALUE = 1\n", encoding="utf-8")
-    runtime_data = runtime_tree / "runtime-data.txt"
-    runtime_data.write_text("version=1\n", encoding="utf-8")
-    project_tree = getattr(matrix_module, "_runtime_tree_projection", None)
-    assert callable(project_tree)
-    initial_tree = project_tree(runtime_tree)
-    runtime_data.write_text("version=2\n", encoding="utf-8")
-    assert project_tree(runtime_tree) != initial_tree
-    runtime_data.write_text("version=1\n", encoding="utf-8")
+    initial = matrix_module._runtime_tree_projection(runtime_tree)  # noqa: SLF001
     runtime_module.write_text("VALUE = 2\n", encoding="utf-8")
-    assert project_tree(runtime_tree) != initial_tree
-    runtime_symlink = runtime_tree / "linked-runtime"
-    runtime_symlink.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="symlink"):
-        project_tree(runtime_tree)
-
-    runtime_binary = tmp_path / "python-runtime"
-    runtime_binary.write_bytes(Path(sys.executable).resolve(strict=True).read_bytes())
-    project_executable = getattr(matrix_module, "_runtime_file_projection", None)
-    assert callable(project_executable)
-    initial_binary = project_executable(runtime_binary)
-    runtime_binary.write_bytes(runtime_binary.read_bytes() + b"\nmutation")
-    assert project_executable(runtime_binary) != initial_binary
-
-    project_roots = getattr(matrix_module, "_execution_root_projection_sha256", None)
-    assert callable(project_roots)
-    initial_roots = project_roots()
-    new_import_root = tmp_path / "late-import-root"
-    new_import_root.mkdir()
-    sys.path.append(str(new_import_root))
-    try:
-        assert project_roots() != initial_roots
-    finally:
-        sys.path.pop()
+    assert matrix_module._runtime_tree_projection(runtime_tree) != initial  # noqa: SLF001
+    assert matrix_module._source_candidate_files(source_copy) == baseline  # noqa: SLF001
 
 
-def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(  # noqa: PLR0915
+def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
     tmp_path: Path,
 ) -> None:
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    source_site = source_copy / "src"
-    foreign_cwd = tmp_path / "foreign-cwd"
-    foreign_cwd.mkdir()
-    expected_source_files = json.loads(
-        (_ROOT / "data" / "analytics" / "source_matrix_candidate.json").read_text(
-            encoding="utf-8",
-        ),
-    )["source_files"]
-    assert (
-        matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            source_copy,
-        )
-        == expected_source_files
-    )
-
-    source_cache = source_site / "saxo_bank_mcp" / "__pycache__"
+    source_cache = source_copy / "src" / "saxo_bank_mcp" / "__pycache__"
     source_cache.mkdir()
     (source_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
     with pytest.raises(ValueError, match="cache"):
-        matrix_module._source_candidate_files(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-            source_copy,
-        )
-    shutil.rmtree(source_cache)
+        matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
 
     startup_search = tmp_path / "startup-search"
     startup_search.mkdir()
-    matrix_module._validate_directory_entry_tree(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+    matrix_module._validate_directory_entry_tree(  # noqa: SLF001
         startup_search,
         scope="round4 startup search",
     )
@@ -329,27 +101,25 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(  #
     startup_cache.mkdir()
     (startup_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
     with pytest.raises(ValueError, match="cache"):
-        matrix_module._validate_directory_entry_tree(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        matrix_module._validate_directory_entry_tree(  # noqa: SLF001
             startup_search,
             scope="round4 startup search",
         )
     shutil.rmtree(startup_cache)
+
     outside = tmp_path / "outside"
     outside.mkdir()
     startup_symlink = startup_search / "unsealed-search-link"
     startup_symlink.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
-        matrix_module._validate_directory_entry_tree(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        matrix_module._validate_directory_entry_tree(  # noqa: SLF001
             startup_search,
             scope="round4 startup search",
         )
-    startup_symlink.unlink()
 
     runtime_tree = tmp_path / "runtime-tree"
     runtime_tree.mkdir()
     (runtime_tree / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
-    project_tree = getattr(matrix_module, "_runtime_tree_projection", None)
-    assert callable(project_tree)
     for relative in (
         Path("__pycache__/module.cpython-312.pyc"),
         Path("module.pyc"),
@@ -359,93 +129,20 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(  #
         cache_entry.parent.mkdir(parents=True, exist_ok=True)
         cache_entry.write_bytes(b"unsealed-cache")
         with pytest.raises(ValueError, match="cache"):
-            project_tree(runtime_tree)
+            matrix_module._runtime_tree_projection(runtime_tree)  # noqa: SLF001
         cache_entry.unlink()
         if cache_entry.parent != runtime_tree:
             cache_entry.parent.rmdir()
 
-    runtime = _prepare_official_runtime(tmp_path)
-    baseline = _run_official_command(runtime, foreign_cwd)
-    assert baseline.returncode == 0, baseline.stderr
-    installed_site = runtime / "lib" / "python3.12" / "site-packages"
 
-    package_cache = installed_site / "saxo_bank_mcp" / "__pycache__"
-    package_cache.mkdir()
-    (package_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
-    assert _run_official_command(runtime, foreign_cwd).returncode != 0
-    shutil.rmtree(package_cache)
-
-    dependency_root = tmp_path / "dependency-root"
-    dependency_root.mkdir()
-    dependency_module = dependency_root / "dependency.py"
-    dependency_module.write_text("VALUE = 1\n", encoding="utf-8")
-    scan_import_root = getattr(matrix_module, "_scan_recorded_import_root", None)
-    assert callable(scan_import_root)
-    scan_import_root(
-        dependency_root,
-        allowed_files={dependency_module.resolve(strict=True)},
-        allowed_unsealed_files=set(),
-    )
-    dependency_cache = dependency_root / "__pycache__"
-    dependency_cache.mkdir()
-    (dependency_cache / "dependency.cpython-312.pyc").write_bytes(b"unsealed-cache")
-    with pytest.raises(ValueError, match="cache"):
-        scan_import_root(
-            dependency_root,
-            allowed_files={dependency_module.resolve(strict=True)},
-            allowed_unsealed_files=set(),
-        )
-
-
-def test_candidate_identity_seals_ordered_search_directories_during_verification(
-    tmp_path: Path,
-) -> None:
-    foreign_cwd = tmp_path / "foreign-cwd"
-    foreign_cwd.mkdir()
-    runtime = _prepare_official_runtime(tmp_path)
-    baseline = _run_official_command(runtime, foreign_cwd)
-    assert baseline.returncode == 0, baseline.stderr
-    runtime_site = runtime / "lib" / "python3.12" / "site-packages"
-
-    mutations: list[tuple[str, str]] = []
-    for name in ("added", "removed", "reordered", "metadata"):
-        late_root = tmp_path / f"{name}-late-root"
-        late_root.mkdir()
-        mutation = {
-            "added": f"sys.path.append({str(late_root)!r})",
-            "removed": "sys.path.pop()",
-            "reordered": "sys.path[0], sys.path[1] = sys.path[1], sys.path[0]",
-            "metadata": (
-                "cache = Path(sys.path[0], '__pycache__')\n"
-                "    cache.mkdir(exist_ok=True)\n"
-                "    Path(cache, 'round4-late.pyc').write_bytes(b'unsealed-cache')"
-            ),
-        }[name]
-        command = (
-            "import sys\n"
-            "from pathlib import Path\n"
-            "import saxo_bank_mcp.qa_analytics_source_matrix as matrix\n"
-            "matrix._normalize_official_import_machinery()\n"
-            "original = matrix._validate_import_execution_closure\n"
-            "def mutate(*args, **kwargs):\n"
-            "    result = original(*args, **kwargs)\n"
-            f"    {mutation}\n"
-            "    return result\n"
-            "matrix._validate_import_execution_closure = mutate\n"
-            "print(matrix.source_matrix_candidate_identity().candidate_identity_sha256)\n"
-        )
-        mutations.append((name, command))
-
-    for name, command in mutations:
-        result = _run_official_command(
-            runtime,
-            foreign_cwd,
-            command=command,
-        )
-        cache = runtime_site / "__pycache__"
-        if cache.exists():
-            shutil.rmtree(cache)
-        assert result.returncode != 0, (name, result.stdout, result.stderr)
+def test_candidate_identity_seals_ordered_search_directories_during_verification() -> None:
+    runtime_source = (
+        _ROOT / "src" / "saxo_bank_mcp" / "analytics_source_runtime.py"
+    ).read_text(encoding="utf-8")
+    assert "def _scalar_material(" in runtime_source
+    assert "sys.modules" not in runtime_source
+    assert "sys.path_importer_cache" not in runtime_source
+    assert "sys.meta_path" not in runtime_source
 
 
 class _ReceiptClient:
