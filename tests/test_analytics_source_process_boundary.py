@@ -1051,6 +1051,60 @@ def test_runtime_is_owner_only_nonwritable_and_uses_external_empty_caches(
         assert not (runtime / ".saxo-bank-mcp-pycache").exists()
 
 
+def test_fresh_final_runtimes_remove_exact_dynamic_installer_metadata(
+    two_prepared_runtimes: tuple[PreparedRuntimeFixture, PreparedRuntimeFixture],
+    tmp_path: Path,
+) -> None:
+    first, second = two_prepared_runtimes
+    assert first.portable_identity == second.portable_identity
+    dynamic_names = ("direct_url.json", "uv_cache.json")
+    for prepared in (first, second):
+        metadata = (
+            prepared.root
+            / "lib/python3.12/site-packages/saxo_bank_mcp-0.1.0.dist-info"
+        )
+        assert (metadata / "INSTALLER").is_file()
+        assert all(not (metadata / name).exists() for name in dynamic_names)
+
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    remove_metadata = cast(
+        "Callable[[Path], None]",
+        preparation._remove_root_installer_metadata,  # noqa: SLF001
+    )
+    exact_runtime = tmp_path / "exact-runtime"
+    exact_metadata = (
+        exact_runtime
+        / "lib/python3.12/site-packages/saxo_bank_mcp-0.1.0.dist-info"
+    )
+    exact_metadata.mkdir(parents=True)
+    for name in (*dynamic_names, "INSTALLER"):
+        (exact_metadata / name).write_text(name, encoding="utf-8")
+
+    remove_metadata(exact_runtime)
+
+    assert (exact_metadata / "INSTALLER").read_text(encoding="utf-8") == "INSTALLER"
+    assert all(not (exact_metadata / name).exists() for name in dynamic_names)
+    for kind in ("symlink", "directory"):
+        unsafe_runtime = tmp_path / f"unsafe-runtime-{kind}"
+        unsafe_metadata = (
+            unsafe_runtime
+            / "lib/python3.12/site-packages/saxo_bank_mcp-0.1.0.dist-info"
+        )
+        unsafe_metadata.mkdir(parents=True)
+        safe_target = unsafe_metadata / "safe-target"
+        safe_target.write_text("safe", encoding="utf-8")
+        (unsafe_metadata / "direct_url.json").write_text("exact", encoding="utf-8")
+        unsafe = unsafe_metadata / "uv_cache.json"
+        if kind == "symlink":
+            unsafe.symlink_to(safe_target)
+        else:
+            unsafe.mkdir()
+        with pytest.raises(ValueError, match="installed metadata is invalid"):
+            remove_metadata(unsafe_runtime)
+        assert (unsafe_metadata / "direct_url.json").is_file()
+        assert safe_target.read_text(encoding="utf-8") == "safe"
+
+
 def test_dependency_copy_cannot_overwrite_interpreter_with_unmanifested_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

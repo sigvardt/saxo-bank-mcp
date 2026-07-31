@@ -17,6 +17,8 @@ _SEALED_DIRECTORY_MODE = 0o500
 _SEALED_FILE_MODE = 0o400
 _SEALED_EXECUTABLE_MODE = 0o500
 _PYTHON_CACHE_SUFFIXES = {".pyc", ".pyo"}
+_ROOT_DIST_INFO = "saxo_bank_mcp-0.1.0.dist-info"
+_DYNAMIC_ROOT_METADATA = ("direct_url.json", "uv_cache.json")
 
 
 def _run(command: tuple[str, ...], *, cwd: Path) -> None:
@@ -33,6 +35,24 @@ def _run(command: tuple[str, ...], *, cwd: Path) -> None:
 
 def _is_cache_entry(path: Path) -> bool:
     return path.name == "__pycache__" or path.suffix.casefold() in _PYTHON_CACHE_SUFFIXES
+
+
+def _remove_root_installer_metadata(runtime: Path) -> None:
+    metadata = runtime / "lib/python3.12/site-packages" / _ROOT_DIST_INFO
+    targets = tuple(metadata / name for name in _DYNAMIC_ROOT_METADATA)
+    try:
+        entries = tuple(target.lstat() for target in targets)
+    except OSError:
+        raise ValueError("installed metadata is invalid") from None
+    if any(
+        not stat.S_ISREG(entry.st_mode)
+        or entry.st_uid != os.getuid()
+        or entry.st_nlink != 1
+        for entry in entries
+    ):
+        raise ValueError("installed metadata is invalid")
+    for target in targets:
+        target.unlink()
 
 
 def _excluded_outside_site_record_path(value: str) -> bool:
@@ -414,6 +434,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             cwd=repository_root,
         )
+        _remove_root_installer_metadata(runtime)
         _remove_python_caches(runtime)
         _normalize_interpreter_aliases(runtime)
         _validate_internal_python_runtime(runtime)
