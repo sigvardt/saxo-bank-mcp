@@ -1,5 +1,5 @@
 {
-  "candidate_identity_sha256": "cdb5abd68e41045631ef029dbba7876eab39288b1e912f72228935ee25eebed3",
+  "candidate_identity_sha256": "f346a26ea2b98f6371599e262f27b70101b28692ae80db1b0c03d7acc0b1af0a",
   "child_bootstrap_sha256": "c00351114ca9afd69de55cf2fbeee8e1e258a279858e25348a511d4323e66fa8",
   "console_scripts": {
     "saxo-bank-bind-live-evidence": "saxo_bank_mcp.live_evidence_bundle:main",
@@ -9649,8 +9649,8 @@
       "version": "0.25.0"
     }
   },
-  "harness_build_sha256": "dd1562a52edeff04d5e6e97fd815860adc43601dffa01303fda6014680c09d04",
-  "installed_build_sha256": "12e94551c21c79e5068dbada5123d8ff72f57ab7553316e11d1dc0a6e21cb374",
+  "harness_build_sha256": "ed075827ca8b4fd7c4b18d3b7facdcf27dbf018752a95e428cf0c1be7b73113a",
+  "installed_build_sha256": "29836801f45d3f1f8677327022f59ed01cfac2d394caf1cfb829496a460e48e5",
   "installed_exclusions": [
     "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json",
     "saxo_bank_mcp-0.1.0.dist-info/RECORD"
@@ -9801,7 +9801,7 @@
     "saxo_bank_mcp/py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "saxo_bank_mcp/qa.py": "da95f58696f0dd1aa1f3f1fc136a4d20724379d1f0528c1ec49106541250fa61",
     "saxo_bank_mcp/qa_account.py": "9ffaba581878a9f44a1144a19ac64ba65b74738141909298c26bf195fe9c59fa",
-    "saxo_bank_mcp/qa_analytics_source_matrix.py": "0e24cfd3708bb3a60e356662b533d251ca7c32dfb4af5945956689dd3ba9d85b",
+    "saxo_bank_mcp/qa_analytics_source_matrix.py": "0dcc64c64e08d3160b4e63e95b58f014baa8d7c416e86e1c541afc6f4d557110",
     "saxo_bank_mcp/qa_auth_probes.py": "169f07ccb4e30d5259c631d6f774b663d48f2f715c7556ec0d30f0f269a8bdcf",
     "saxo_bank_mcp/qa_events.py": "603e18f383acc162687c946673270f054a8ee387489e9ad020648609a27d51c3",
     "saxo_bank_mcp/qa_exact_tool_probe.py": "3a5e204a2eeaae8e64c93410d3fe11331b2ebd16dd8d4d77491d7586ef5e2d5b",
@@ -9875,7 +9875,7 @@
     "INSTALLER": "e6184ce10e266134fdcfa401e8f1a95005bcd4f18d16b62b757323e2833fe9a9"
   },
   "portable_runtime_entry_count": 12500,
-  "portable_runtime_tree_sha256": "18aa5b582e37a255ec81a47d05ce233c9ab8545842dd501e0a4734fca1c01358",
+  "portable_runtime_tree_sha256": "e410556eefcdeaad17045d484fd0ac4f1f0b3f0b528132bdbf9ed3810b8bffa0",
   "runtime_identity": {
     "base_executable_sha256": "a395f264e5612a2819662ed3e37fd30d39ed61179b98e5f86c3c783a008d8623",
     "build_config_sha256": "7e22edc1eb1361984fffd2a19848c34f17422afc558e1537c8f170e5b397384c",
@@ -9904,7 +9904,7 @@
     "stdlib_merkle_sha256": "4b5fbca306f77f90f681de7c548500bab825596e6358bd758c5cddd35d110cc4"
   },
   "schema_version": "5",
-  "source_build_sha256": "ecb70bb9f35690f78633937c6650bf1d94d858bcd1d9abed1eb434f7462e1e9f",
+  "source_build_sha256": "ed2d6b3fba0650c63a8bd4745ffa20fbb7b59c2afbfe7006351b964f16e1788a",
   "source_contract_catalog_sha256": "ca5c53480842bb6c3e48dc16bac10f43c49edf73a09b206eacf3af40f0b20038",
   "source_exclusions": [
     "data/analytics/source_matrix_candidate.json"
@@ -10056,7 +10056,7 @@
     "src/saxo_bank_mcp/py.typed": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "src/saxo_bank_mcp/qa.py": "da95f58696f0dd1aa1f3f1fc136a4d20724379d1f0528c1ec49106541250fa61",
     "src/saxo_bank_mcp/qa_account.py": "9ffaba581878a9f44a1144a19ac64ba65b74738141909298c26bf195fe9c59fa",
-    "src/saxo_bank_mcp/qa_analytics_source_matrix.py": "0e24cfd3708bb3a60e356662b533d251ca7c32dfb4af5945956689dd3ba9d85b",
+    "src/saxo_bank_mcp/qa_analytics_source_matrix.py": "0dcc64c64e08d3160b4e63e95b58f014baa8d7c416e86e1c541afc6f4d557110",
     "src/saxo_bank_mcp/qa_auth_probes.py": "169f07ccb4e30d5259c631d6f774b663d48f2f715c7556ec0d30f0f269a8bdcf",
     "src/saxo_bank_mcp/qa_events.py": "603e18f383acc162687c946673270f054a8ee387489e9ad020648609a27d51c3",
     "src/saxo_bank_mcp/qa_exact_tool_probe.py": "3a5e204a2eeaae8e64c93410d3fe11331b2ebd16dd8d4d77491d7586ef5e2d5b",

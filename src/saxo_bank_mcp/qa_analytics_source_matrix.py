@@ -947,10 +947,19 @@ def execute_analytics_source_matrix_once(
     """Run one installed, process-bound source matrix and publish immutable evidence."""
     try:
         return anyio.run(
-            _execute_official_source_matrix,
+            _execute_official_source_matrix_for_cli,
             fixtures or SourceMatrixFixtures(),
         )
     except Exception:  # noqa: BLE001 - the official CLI emits no private traceback
+        return 1
+
+
+async def _execute_official_source_matrix_for_cli(
+    fixtures: SourceMatrixFixtures,
+) -> int:
+    try:
+        return await _execute_official_source_matrix(fixtures)
+    except anyio.get_cancelled_exc_class():
         return 1
 
 

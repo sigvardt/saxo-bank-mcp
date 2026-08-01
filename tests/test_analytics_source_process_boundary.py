@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import hashlib
 import importlib
 import importlib.util
@@ -58,14 +59,14 @@ from saxo_bank_mcp.analytics_source_process import (
     RegisteredResponseMode,
     build_child_launch_config,
 )
-from saxo_bank_mcp.analytics_source_runtime import SourceMatrixCandidateIdentity
+from saxo_bank_mcp.analytics_source_runtime import (
+    CandidateRuntimeSeal,
+    ExternalRunLayout,
+    SourceMatrixCandidateIdentity,
+)
 from saxo_bank_mcp.qa_analytics_source_matrix import process_boundary_receipt
 
 if TYPE_CHECKING:
-    from saxo_bank_mcp.analytics_source_runtime import (
-        CandidateRuntimeSeal,
-        ExternalRunLayout,
-    )
     from saxo_bank_mcp.qa_analytics_source_matrix import PreparedMatrix
 
 _NONZERO_FIXTURE_EXIT_CODE: Final = 17
@@ -75,6 +76,10 @@ _SEALED_FILE_MODE: Final = 0o400
 _SHA256_HEX_LENGTH: Final = 64
 _SOURCE_MATRIX_CHILD_TOOL_COUNT: Final = 6
 _ROOT: Final = Path(__file__).parents[1]
+_FIXTURE_EXECUTABLE: Final = Path(sys.executable).resolve(strict=True)
+_MATRIX_FIXTURE_SERVER: Final = (
+    _ROOT / "tests/fixtures/analytics/source_matrix_fixture_server.py"
+).resolve(strict=True)
 QA_MATRIX_PATH: Final = Path("src/saxo_bank_mcp/qa_analytics_source_matrix.py")
 ROUND7_PATH: Final = Path("tests/test_area_b_review_round7.py")
 
@@ -494,7 +499,7 @@ def exact_sim_env(tmp_path: Path) -> dict[str, str]:
         "SAXO_MCP_ENVIRONMENT": "SIM",
         "SAXO_MCP_ENABLE_LIVE_READS": "0",
         "SAXO_MCP_ENABLE_LIVE_WRITES": "",
-        "SAXO_MCP_SIM_APP_KEY": "fixture-app-key",
+        "SAXO_MCP_SIM_APP_KEY": "sim-app-key",
         "SAXO_MCP_SIM_REDIRECT_URI": "http://localhost:8080/callback",
         "SAXO_MCP_TOKEN_CACHE_PATH": str(tmp_path / "token-cache.json"),
     }
@@ -611,6 +616,96 @@ def _fixture_scenario(config: ChildLaunchConfig, scenario: str) -> ChildLaunchCo
     return replace(config, command=(*config.command[:-1], scenario))
 
 
+async def _run_full_fixture_child_then_cancel(root: Path) -> None:
+    state_root = root / "state"
+    runtime_root = root / "runtime"
+    payload = runtime_root / "payload.py"
+    run_root = root / "run"
+    state_root.mkdir(parents=True, mode=0o700)
+    runtime_root.mkdir(mode=0o700)
+    payload.write_text("VALUE = 1\n", encoding="utf-8")
+    payload.chmod(0o400)
+    run_paths = tuple(
+        run_root / name
+        for name in (
+            "coordinator-cache",
+            "coordinator-work",
+            "coordinator-tmp",
+            "child-cache",
+            "child-work",
+            "child-tmp",
+        )
+    )
+    for path in run_paths:
+        path.mkdir(parents=True, mode=0o700)
+    identity = SourceMatrixCandidateIdentity(
+        source_contract_catalog_sha256=source_contract_catalog_sha256(),
+        harness_build_sha256="b" * 64,
+        candidate_identity_sha256="c" * 64,
+    )
+    root_descriptor = os.open(runtime_root, os.O_RDONLY | os.O_DIRECTORY)
+    seal = CandidateRuntimeSeal(
+        identity=identity,
+        portable_identity_sha256="d" * 64,
+        instance_identity_sha256="e" * 64,
+        runtime_root=runtime_root,
+        executable=payload,
+        site_packages=runtime_root,
+        root_descriptor=root_descriptor,
+        ancestor_descriptors=(),
+        entry_snapshot=(),
+    )
+    layout = ExternalRunLayout(run_root, *run_paths)
+    child_env = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SAXO_MCP_ENABLE_LIVE_READS": "0",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_EVAL_TOOL_FILTER": "1",
+        "SAXO_MCP_EVAL_ALLOWED_TOOLS": ",".join(SOURCE_MATRIX_CHILD_TOOLS),
+    }
+    session = OneShotProcessSession(
+        ChildLaunchConfig(
+            command=(
+                str(_FIXTURE_EXECUTABLE),
+                "-I",
+                "-B",
+                "-S",
+                str(_MATRIX_FIXTURE_SERVER),
+            ),
+            environment=child_env,
+            cwd=run_paths[4],
+            executable_identity_sha256=hashlib.sha256(
+                _FIXTURE_EXECUTABLE.read_bytes(),
+            ).hexdigest(),
+        ),
+    )
+
+    def cancel_after_postexit_validation() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+
+    try:
+        await qa_analytics_source_matrix._execute_source_matrix_with_events(  # noqa: SLF001
+            fixtures=qa_analytics_source_matrix.SourceMatrixFixtures(),
+            env={
+                "SAXO_MCP_ENVIRONMENT": "SIM",
+                "SAXO_MCP_ENABLE_LIVE_READS": "0",
+                "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+            },
+            seal=seal,
+            layout=layout,
+            session=session,
+            state_root=state_root,
+            captured_at=datetime.now(tz=UTC),
+            postexit_revalidate=cancel_after_postexit_validation,
+        )
+    finally:
+        os.close(root_descriptor)
+
+
 async def _emergency_cleanup_cancelled_session(session: OneShotProcessSession) -> None:
     """Keep an intended RED cancellation failure from leaking its fixture child."""
     task_group = session._task_group  # noqa: SLF001
@@ -723,6 +818,51 @@ async def test_process_session_abort_cancellation_reaps_child_and_exits(
     assert cancelled
     assert state_after_cancellation == "exited"
     assert not child_running_after_cancellation
+
+
+def test_installed_cli_hides_final_cancellation_after_full_child_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    direct_root = tmp_path / "direct-private-runtime"
+    with pytest.raises(asyncio.CancelledError):
+        anyio.run(_run_full_fixture_child_then_cancel, direct_root)
+    direct_evidence = qa_analytics_source_matrix.candidate_evidence_path(
+        direct_root / "state",
+        "c" * 64,
+    )
+    assert json.loads(direct_evidence.read_text(encoding="utf-8")) == {
+        "reason": "child_process_failed",
+        "status": "failed",
+    }
+
+    cli_root = tmp_path / "cli-private-runtime"
+
+    async def cancelled_official_run(
+        _fixtures: qa_analytics_source_matrix.SourceMatrixFixtures,
+    ) -> int:
+        await _run_full_fixture_child_then_cancel(cli_root)
+        raise AssertionError("fixture cancellation was not propagated")
+
+    monkeypatch.setattr(
+        qa_analytics_source_matrix,
+        "_execute_official_source_matrix",
+        cancelled_official_run,
+    )
+    assert qa_analytics_source_matrix.main([]) != 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Traceback" not in captured.err
+    assert str(cli_root) not in captured.err
+    cli_evidence = qa_analytics_source_matrix.candidate_evidence_path(
+        cli_root / "state",
+        "c" * 64,
+    )
+    assert json.loads(cli_evidence.read_text(encoding="utf-8")) == {
+        "reason": "child_process_failed",
+        "status": "failed",
+    }
 
 
 @pytest.mark.anyio
