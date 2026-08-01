@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import duckdb
 import httpx2
 import pytest
+from analytics_legacy_alias_support import migrate_v2_store_with_unbound_alias
 from pydantic import SecretStr, ValidationError
 
 from saxo_bank_mcp.analytics_account_data import (
@@ -539,6 +540,128 @@ async def test_account_alias_binding_rejects_changed_account_or_client_before_so
     finally:
         connection.close()
     assert counts_after == counts_before
+
+
+@pytest.mark.anyio
+async def test_migrated_v2_alias_refuses_wrong_first_selectors_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    alias = new_account_alias()
+    migrate_v2_store_with_unbound_alias(config, alias, data_kind="transaction")
+    scope = AccountScope(
+        alias=alias,
+        account_key=SecretStr("wrong-first-account-key"),
+        client_key=SecretStr("wrong-first-client-key"),
+    )
+    executor = _PayloadExecutor((_transactions(),))
+
+    with pytest.raises(AccountSyncValidationError) as raised:
+        await sync_transactions(
+            scope,
+            _START,
+            _END,
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    message = str(raised.value)
+    assert "explicit deletion and reimport or an approved rebinding workflow" in message
+    assert alias not in message
+    assert scope.account_key.get_secret_value() not in message
+    assert scope.client_key.get_secret_value() not in message
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM account_scope_bindings),
+                (SELECT count(*) FROM transactions WHERE account_scope = ?),
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM datasets)
+            """,
+            (alias,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 1, 0, 0)
+
+
+@pytest.mark.anyio
+async def test_migrated_v2_alias_refuses_original_first_selectors_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    alias = new_account_alias()
+    migrate_v2_store_with_unbound_alias(config, alias, data_kind="transaction")
+    scope = _scope(alias)
+    executor = _PayloadExecutor((_transactions(),))
+
+    with pytest.raises(AccountSyncValidationError) as raised:
+        await sync_transactions(
+            scope,
+            _START,
+            _END,
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    message = str(raised.value)
+    assert "explicit deletion and reimport or an approved rebinding workflow" in message
+    assert alias not in message
+    assert scope.account_key.get_secret_value() not in message
+    assert scope.client_key.get_secret_value() not in message
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM account_scope_bindings),
+                (SELECT count(*) FROM transactions WHERE account_scope = ?),
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM datasets)
+            """,
+            (alias,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 1, 0, 0)
+
+
+@pytest.mark.anyio
+async def test_new_alias_binds_when_migrated_store_has_an_unbound_legacy_alias(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    legacy_alias = new_account_alias()
+    migrate_v2_store_with_unbound_alias(config, legacy_alias, data_kind="transaction")
+    scope = _scope()
+    executor = _PayloadExecutor((_transactions(),))
+
+    result = await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert result.status == "complete"
+    assert len(executor.calls) == 1
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        bindings = connection.execute(
+            "SELECT account_scope FROM account_scope_bindings ORDER BY account_scope",
+        ).fetchall()
+    finally:
+        connection.close()
+    assert bindings == [(scope.alias,)]
+    assert scope.alias != legacy_alias
 
 
 @pytest.mark.anyio

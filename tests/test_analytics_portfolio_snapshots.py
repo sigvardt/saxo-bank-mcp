@@ -13,10 +13,15 @@ from urllib.parse import urlencode
 import duckdb
 import httpx2
 import pytest
+from analytics_legacy_alias_support import migrate_v2_store_with_unbound_alias
 from pydantic import SecretStr
 
 import saxo_bank_mcp.analytics_portfolio_snapshots as snapshot_module
-from saxo_bank_mcp.analytics_account_data import AccountScope, new_account_alias
+from saxo_bank_mcp.analytics_account_data import (
+    AccountScope,
+    bind_account_scope,
+    new_account_alias,
+)
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_models import HandleKind, VisibilityMode, new_safe_handle
 from saxo_bank_mcp.analytics_portfolio_snapshots import (
@@ -335,6 +340,51 @@ async def test_snapshot_rejects_rebound_account_alias_before_source_access(
 
 
 @pytest.mark.anyio
+async def test_snapshot_refuses_migrated_v2_unbound_alias_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    alias = new_account_alias()
+    migrate_v2_store_with_unbound_alias(config, alias, data_kind="snapshot")
+    scope = AccountScope(
+        alias=alias,
+        account_key=SecretStr("legacy-snapshot-account-key"),
+        client_key=SecretStr("legacy-snapshot-client-key"),
+    )
+    executor = _PayloadExecutor(_snapshot_payloads(5000.0))
+
+    with pytest.raises(PortfolioSnapshotValidationError) as raised:
+        await capture_portfolio_snapshot(
+            scope,
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _LATER,
+        )
+
+    message = str(raised.value)
+    assert "explicit deletion and reimport or an approved rebinding workflow" in message
+    assert alias not in message
+    assert scope.account_key.get_secret_value() not in message
+    assert scope.client_key.get_secret_value() not in message
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM account_scope_bindings),
+                (SELECT count(*) FROM account_snapshots WHERE account_scope = ?),
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM datasets)
+            """,
+            (alias,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 1, 0, 0)
+
+
+@pytest.mark.anyio
 async def test_snapshot_caps_public_and_private_positions_across_source_pages(
     tmp_path: Path,
 ) -> None:
@@ -529,6 +579,7 @@ async def test_equal_as_of_recency_uses_committed_order_instead_of_snapshot_id(
     )
     connection = duckdb.connect(str(config.paths.store_path))
     try:
+        bind_account_scope(connection, scope)
         connection.execute(
             """
             INSERT INTO account_snapshots (

@@ -69,6 +69,20 @@ _JSON_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAdapt
 _DATA_KINDS: Final = frozenset(
     {"transactions", "bookings", "closed_positions", "costs"},
 )
+_ACCOUNT_SCOPE_DATA_TABLES: Final = (
+    "source_pages",
+    "datasets",
+    "account_snapshots",
+    "transactions",
+    "bookings",
+    "closed_positions",
+    "costs",
+    "analyses",
+)
+_UNBOUND_EXISTING_ALIAS_MESSAGE: Final = (
+    "account alias binding is unavailable for existing local data; "
+    "explicit deletion and reimport or an approved rebinding workflow is required"
+)
 
 type Clock = Callable[[], datetime]
 type AccountDataKind = Literal["transactions", "bookings", "closed_positions", "costs"]
@@ -544,11 +558,12 @@ def assert_persisted_account_scope_binding(
                 (scope.alias,),
             ).fetchone()
         except duckdb.CatalogException:
+            row = None
+        if row is None:
+            _refuse_unbound_account_scope_with_persisted_data(connection, scope.alias)
             return
     finally:
         connection.close()
-    if row is None:
-        return
     expected_account, expected_client = _selector_fingerprints(scope)
     if (
         not isinstance(row[0], str)
@@ -575,6 +590,7 @@ def bind_account_scope(
         (scope.alias,),
     ).fetchone()
     if row is None:
+        _refuse_unbound_account_scope_with_persisted_data(connection, scope.alias)
         connection.execute(
             """
             INSERT INTO account_scope_bindings (
@@ -594,6 +610,29 @@ def bind_account_scope(
         raise AccountSyncValidationError(
             "account alias binding does not match the supplied selectors",
         )
+
+
+def _refuse_unbound_account_scope_with_persisted_data(
+    connection: duckdb.DuckDBPyConnection,
+    alias: str,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT table_name
+        FROM information_schema.columns
+        WHERE table_schema = 'main' AND column_name = 'account_scope'
+        """,
+    ).fetchall()
+    existing_tables = {row[0] for row in rows if isinstance(row[0], str)}
+    for table_name in _ACCOUNT_SCOPE_DATA_TABLES:
+        if table_name not in existing_tables:
+            continue
+        row = connection.execute(
+            f'SELECT TRUE FROM "{table_name}" WHERE account_scope = ? LIMIT 1',  # noqa: S608
+            (alias,),
+        ).fetchone()
+        if row is not None:
+            raise AccountSyncValidationError(_UNBOUND_EXISTING_ALIAS_MESSAGE)
 
 
 def conservative_ingestion_reservation(

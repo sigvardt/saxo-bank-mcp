@@ -255,9 +255,7 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
     try:
         assert_persisted_account_scope_binding(config, validated_scope)
     except AccountSyncValidationError as error:
-        raise PortfolioSnapshotValidationError(
-            "account alias binding does not match the supplied selectors",
-        ) from error
+        raise PortfolioSnapshotValidationError(str(error)) from error
     budget = _source_budget(config, request_budget)
     request_count_start = budget.used
     captured_at = _require_utc_clock(clock())
@@ -565,9 +563,7 @@ def _persist_snapshot(  # noqa: PLR0913
                 try:
                     bind_account_scope(connection, scope)
                 except AccountSyncValidationError as error:
-                    raise PortfolioSnapshotValidationError(
-                        "account alias binding does not match the supplied selectors",
-                    ) from error
+                    raise PortfolioSnapshotValidationError(str(error)) from error
                 page_ids = _persist_source_pages(store, pages, alias)
                 for position in values.positions:
                     _put_safe_position(
