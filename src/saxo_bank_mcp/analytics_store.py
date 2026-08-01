@@ -717,6 +717,20 @@ class AnalyticsStore:
                 writer.close()
 
     @contextmanager
+    def market_ingestion_transaction(
+        self,
+        normalized_bytes: int,
+    ) -> Generator[duckdb.DuckDBPyConnection]:
+        """Atomically reserve and persist one raw-plus-normalized market capture."""
+        if type(normalized_bytes) is not int or normalized_bytes < 0:
+            raise StoreValidationError("normalized market byte estimate is invalid")
+        with self.transaction():
+            self._ensure_capacity(normalized_bytes)
+            if self._active_writer is None:
+                raise StoreError("analytics writer transaction is missing")
+            yield self._active_writer
+
+    @contextmanager
     def _writer_lock(self) -> Generator[None]:
         with self._thread_lock:
             self._require_open()

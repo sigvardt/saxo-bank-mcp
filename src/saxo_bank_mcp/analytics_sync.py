@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
-import os
-from collections.abc import Callable, Generator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -25,7 +22,6 @@ from saxo_bank_mcp.analytics_market_data import (
     normalize_price_series,
     normalize_quote,
 )
-from saxo_bank_mcp.analytics_migrations import store_writer_lock_path
 from saxo_bank_mcp.analytics_models import (
     DatasetId,
     HandleKind,
@@ -36,8 +32,11 @@ from saxo_bank_mcp.analytics_models import (
 from saxo_bank_mcp.analytics_provider import (
     SaxoAnalyticsProvider,
     SourceEntitlementError,
+    SourceRequestBudget,
+    SourceRequestBudgetError,
 )
 from saxo_bank_mcp.analytics_source_contracts import (
+    SourceCaptureContext,
     SourcePage,
     build_source_capture_context,
     build_source_capture_envelope,
@@ -247,6 +246,62 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _source_request_budget(
+    config: AnalyticsConfig,
+    budget: SourceRequestBudget | None,
+) -> SourceRequestBudget:
+    if budget is None:
+        return SourceRequestBudget(config.limits.sync_instruments)
+    if type(budget) is not SourceRequestBudget:
+        raise TypeError("source request budget is invalid")
+    if budget.limit != config.limits.sync_instruments:
+        raise SyncLimitError("source request budget must use the fixed synchronous limit")
+    return budget
+
+
+async def _fetch_source_pages(
+    provider: SaxoAnalyticsProvider,
+    contract_id: str,
+    request: Mapping[str, object],
+    capture: SourceCaptureContext,
+    budget: SourceRequestBudget,
+) -> tuple[SourcePage, ...]:
+    try:
+        return tuple(
+            [
+                page
+                async for page in provider.fetch(
+                    contract_id,
+                    request,
+                    capture=capture,
+                    budget=budget,
+                )
+            ],
+        )
+    except SourceRequestBudgetError as error:
+        raise SyncLimitError("synchronous source request budget exceeded") from error
+
+
+def _combine_sync_results(
+    results: Sequence[SyncResult],
+    *,
+    source_request_count: int,
+) -> SyncResult:
+    statuses = {result.status for result in results}
+    status = (
+        SyncStatus.COMPLETE
+        if statuses == {SyncStatus.COMPLETE}
+        else SyncStatus.REFUSED
+        if statuses == {SyncStatus.REFUSED}
+        else SyncStatus.DEGRADED
+    )
+    return SyncResult(
+        status=status,
+        source_request_count=source_request_count,
+        datasets=tuple(dataset for result in results for dataset in result.datasets),
+    )
+
+
 async def sync_price_bars(  # noqa: PLR0913
     handle: str,
     interval: ChartInterval,
@@ -256,10 +311,13 @@ async def sync_price_bars(  # noqa: PLR0913
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
     clock: Clock = _utc_now,
+    request_budget: SourceRequestBudget | None = None,
 ) -> SyncResult:
     """Fetch one bounded chart window from Saxo and persist it on demand."""
     if type(provider) is not SaxoAnalyticsProvider:
         raise TypeError("market sync requires SaxoAnalyticsProvider")
+    budget = _source_request_budget(config, request_budget)
+    request_count_start = budget.used
     instrument_handle = _validate_instrument_handle(handle)
     _require_utc_range(start, end)
     requested_rows = _row_bound(start, end, interval)
@@ -289,23 +347,28 @@ async def sync_price_bars(  # noqa: PLR0913
         {_CHART_CONTRACT_ID: request},
         captured_at=capture_time,
     )
-    pages = tuple(
-        [
-            page
-            async for page in provider.fetch(
-                _CHART_CONTRACT_ID,
-                request,
-                capture=capture,
-            )
-        ],
+    pages = await _fetch_source_pages(
+        provider,
+        _CHART_CONTRACT_ID,
+        request,
+        capture,
+        budget,
     )
     envelope = build_source_capture_envelope(capture, pages)
-    series = normalize_price_series(
+    refreshed_series = normalize_price_series(
         rows=tuple(row for page in envelope.pages for row in page.rows),
         instrument_handle=instrument_handle,
         interval=interval,
         start=refresh_start,
         end=end,
+    )
+    series = _merged_price_series(
+        config,
+        instrument_handle,
+        interval,
+        start,
+        end,
+        refreshed_series,
     )
     correction_state = {
         "prior_coverage": (
@@ -327,6 +390,7 @@ async def sync_price_bars(  # noqa: PLR0913
         envelope.pages,
         series.fingerprint_sha256,
         correction_state,
+        retained_page_ids=prior_page_ids,
     )
     quality_state = (
         QualityState.MISSING
@@ -335,7 +399,7 @@ async def sync_price_bars(  # noqa: PLR0913
         if series.warnings
         else QualityState.COMPLETE
     )
-    stored_pages, dataset_id = _persist_chart_capture(
+    _stored_pages, dataset_id = _persist_chart_capture(
         config=config,
         pages=envelope.pages,
         instrument_handle=instrument_handle,
@@ -346,12 +410,7 @@ async def sync_price_bars(  # noqa: PLR0913
         fingerprints=fingerprints,
         correction_state=correction_state,
         prior_page_ids=prior_page_ids,
-    )
-    _persist_normalized_bars(
-        config=config,
-        pages=envelope.pages,
-        stored_page_ids=stored_pages,
-        series=series,
+        normalized_series=refreshed_series,
     )
     summary = PriceBarDatasetSummary(
         dataset_id=dataset_id,
@@ -371,23 +430,27 @@ async def sync_price_bars(  # noqa: PLR0913
         status=(
             SyncStatus.COMPLETE if quality_state is QualityState.COMPLETE else SyncStatus.DEGRADED
         ),
-        source_request_count=1,
+        source_request_count=budget.used - request_count_start,
         datasets=(summary,),
     )
 
 
-async def capture_quote(
+async def capture_quote(  # noqa: PLR0913
     handle: str,
     *,
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
     clock: Clock = _utc_now,
     max_age: timedelta = timedelta(minutes=5),
+    request_budget: SourceRequestBudget | None = None,
 ) -> SyncResult:
     """Capture one quality-bound Saxo quote and return only its dataset handle."""
     if type(provider) is not SaxoAnalyticsProvider:
         raise TypeError("market sync requires SaxoAnalyticsProvider")
+    budget = _source_request_budget(config, request_budget)
+    request_count_start = budget.used
     instrument_handle = _validate_instrument_handle(handle)
+    _validate_max_age(max_age)
     selector = _instrument_selector(config, instrument_handle)
     captured_at = _require_utc_clock(clock())
     request: dict[str, object] = {
@@ -398,15 +461,12 @@ async def capture_quote(
         {"info_price_v1": request},
         captured_at=captured_at,
     )
-    pages = tuple(
-        [
-            page
-            async for page in provider.fetch(
-                "info_price_v1",
-                request,
-                capture=capture,
-            )
-        ],
+    pages = await _fetch_source_pages(
+        provider,
+        "info_price_v1",
+        request,
+        capture,
+        budget,
     )
     envelope = build_source_capture_envelope(capture, pages)
     rows = tuple(row for page in envelope.pages for row in page.rows)
@@ -451,6 +511,12 @@ async def capture_quote(
         if source_limited
         else "available"
     )
+    warnings = set(quote.warnings)
+    if source_limited and not has_price:
+        warnings.add("quote_entitlement_limited")
+    if not has_price:
+        warnings.add("quote_values_missing")
+    sorted_warnings = tuple(sorted(warnings))
     sync_metadata = {
         "capture_revision": capture.capture_revision,
         "captured_at": captured_at.isoformat(),
@@ -461,9 +527,9 @@ async def capture_quote(
         "fingerprints": fingerprints.model_dump(mode="json"),
         "freshness": quote.freshness,
         "instrument_handle": instrument_handle,
-        "warnings": list(quote.warnings),
+        "warnings": list(sorted_warnings),
     }
-    stored_pages, dataset_id = _persist_market_capture(
+    _stored_pages, dataset_id = _persist_market_capture(
         config=config,
         pages=envelope.pages,
         instrument_handle=instrument_handle,
@@ -471,12 +537,13 @@ async def capture_quote(
         coverage_end=captured_at,
         quality_state=quality_state,
         sync_metadata=sync_metadata,
-    )
-    _persist_normalized_quote(
-        config=config,
-        pages=envelope.pages,
-        stored_page_ids=stored_pages,
-        quote=quote,
+        normalized_bytes=128,
+        persist_normalized=lambda connection, stored_page_ids: _persist_normalized_quote(
+            connection=connection,
+            pages=envelope.pages,
+            stored_page_ids=stored_page_ids,
+            quote=quote,
+        ),
     )
     summary = QuoteDatasetSummary(
         dataset_id=dataset_id,
@@ -488,113 +555,127 @@ async def capture_quote(
         row_count=1,
         freshness=quote.freshness,
         delayed_by_minutes=quote.delayed_by_minutes,
-        warnings=quote.warnings,
+        warnings=sorted_warnings,
         fingerprints=fingerprints,
     )
     return SyncResult(
         status=(
             SyncStatus.COMPLETE if quality_state is QualityState.COMPLETE else SyncStatus.DEGRADED
         ),
-        source_request_count=1,
+        source_request_count=budget.used - request_count_start,
         datasets=(summary,),
     )
 
 
-async def capture_option_chain(
+async def capture_option_chain(  # noqa: PLR0913
     handle: str,
     expiries: Sequence[date],
     *,
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
     clock: Clock = _utc_now,
+    request_budget: SourceRequestBudget | None = None,
 ) -> SyncResult:
-    """Capture one bounded Saxo option-chain request with entitlement proof."""
+    """Capture bounded single-expiry option-chain requests with entitlement proof."""
     if type(provider) is not SaxoAnalyticsProvider:
         raise TypeError("market sync requires SaxoAnalyticsProvider")
+    budget = _source_request_budget(config, request_budget)
+    request_count_start = budget.used
     instrument_handle = _validate_instrument_handle(handle)
     requested_expiries = _validate_expiries(expiries, config)
     selector = _instrument_selector(config, instrument_handle)
     captured_at = _require_utc_clock(clock())
-    request: dict[str, object] = {
-        "ExpiryDates": [expiry.isoformat() for expiry in requested_expiries],
-        "OptionRootId": selector.identifier,
-    }
-    capture = build_source_capture_context(
-        {"options_chain_reference_v1": request},
-        captured_at=captured_at,
-    )
-    try:
-        pages = tuple(
-            [
-                page
-                async for page in provider.fetch(
-                    "options_chain_reference_v1",
-                    request,
-                    capture=capture,
-                )
-            ],
-        )
-    except SourceEntitlementError as error:
-        correction_state = {
-            "capture_kind": "point",
-            "captured_at": captured_at.isoformat(),
-            "requested_expiries": [expiry.isoformat() for expiry in requested_expiries],
+    results: list[SyncResult] = []
+    for expiry in requested_expiries:
+        request: dict[str, object] = {
+            "ExpiryDates": [expiry.isoformat()],
+            "OptionRootId": selector.identifier,
         }
-        entitlement = {
-            "error_code": error.error_code,
-            "http_status": error.http_status,
-            "state": "denied",
-        }
-        contract = source_contracts_by_id()["options_chain_reference_v1"]
-        contract_sha256 = source_contract_fingerprint(contract)
-        fingerprints = IngestionFingerprints(
-            raw_pages_sha256=_fingerprint(entitlement),
-            normalized_rows_sha256=_fingerprint([]),
-            source_contract_sha256=_fingerprint([contract_sha256]),
-            entitlements_sha256=_fingerprint(entitlement),
-            correction_state_sha256=_fingerprint(correction_state),
-        )
-        dataset_id = _persist_entitlement_refusal(
-            config=config,
-            capture_revision=capture.capture_revision,
+        capture = build_source_capture_context(
+            {"options_chain_reference_v1": request},
             captured_at=captured_at,
-            instrument_handle=instrument_handle,
-            instrument_scope_sha256=capture.instrument_scope_sha256,
-            request_fingerprint_sha256=capture.request_fingerprints["options_chain_reference_v1"],
-            entitlement=entitlement,
-            correction_state=correction_state,
-            fingerprints=fingerprints,
         )
-        summary = OptionChainDatasetSummary(
-            dataset_id=dataset_id,
-            data_kind="option_chain",
-            instrument_handle=instrument_handle,
-            quality_state=QualityState.MISSING,
-            coverage_start=captured_at,
-            coverage_end=captured_at,
-            row_count=0,
-            expiries=requested_expiries,
-            entitlement_state="denied",
-            entitlement_error_code=error.error_code,
-            warnings=("option_entitlement_denied",),
-            fingerprints=fingerprints,
+        try:
+            pages = await _fetch_source_pages(
+                provider,
+                "options_chain_reference_v1",
+                request,
+                capture,
+                budget,
+            )
+        except SourceEntitlementError as error:
+            correction_state = {
+                "capture_kind": "point",
+                "captured_at": captured_at.isoformat(),
+                "requested_expiries": [expiry.isoformat()],
+            }
+            entitlement = {
+                "error_code": error.error_code,
+                "http_status": error.http_status,
+                "state": "denied",
+            }
+            contract = source_contracts_by_id()["options_chain_reference_v1"]
+            contract_sha256 = source_contract_fingerprint(contract)
+            fingerprints = IngestionFingerprints(
+                raw_pages_sha256=_fingerprint(entitlement),
+                normalized_rows_sha256=_fingerprint([]),
+                source_contract_sha256=_fingerprint([contract_sha256]),
+                entitlements_sha256=_fingerprint(entitlement),
+                correction_state_sha256=_fingerprint(correction_state),
+            )
+            dataset_id = _persist_entitlement_refusal(
+                config=config,
+                capture_revision=capture.capture_revision,
+                captured_at=captured_at,
+                instrument_handle=instrument_handle,
+                instrument_scope_sha256=capture.instrument_scope_sha256,
+                request_fingerprint_sha256=(
+                    capture.request_fingerprints["options_chain_reference_v1"]
+                ),
+                entitlement=entitlement,
+                correction_state=correction_state,
+                fingerprints=fingerprints,
+            )
+            summary = OptionChainDatasetSummary(
+                dataset_id=dataset_id,
+                data_kind="option_chain",
+                instrument_handle=instrument_handle,
+                quality_state=QualityState.MISSING,
+                coverage_start=captured_at,
+                coverage_end=captured_at,
+                row_count=0,
+                expiries=(expiry,),
+                entitlement_state="denied",
+                entitlement_error_code=error.error_code,
+                warnings=("option_entitlement_denied",),
+                fingerprints=fingerprints,
+            )
+            results.append(
+                SyncResult(
+                    status=SyncStatus.REFUSED,
+                    source_request_count=0,
+                    datasets=(summary,),
+                ),
+            )
+            continue
+        envelope = build_source_capture_envelope(capture, pages)
+        results.append(
+            _persist_available_option_chain(
+                config=config,
+                envelope_pages=envelope.pages,
+                instrument_handle=instrument_handle,
+                expected_root_id=selector.identifier,
+                requested_expiry=expiry,
+                captured_at=captured_at,
+            ),
         )
-        return SyncResult(
-            status=SyncStatus.REFUSED,
-            source_request_count=1,
-            datasets=(summary,),
-        )
-    envelope = build_source_capture_envelope(capture, pages)
-    return _persist_available_option_chain(
-        config=config,
-        envelope_pages=envelope.pages,
-        instrument_handle=instrument_handle,
-        requested_expiries=requested_expiries,
-        captured_at=captured_at,
+    return _combine_sync_results(
+        results,
+        source_request_count=budget.used - request_count_start,
     )
 
 
-async def sync_research_data(
+async def sync_research_data(  # noqa: C901
     request: SyncResearchRequest,
     *,
     provider: SaxoAnalyticsProvider,
@@ -614,8 +695,13 @@ async def sync_research_data(
         if isinstance(item, PriceBarSyncSpec):
             _require_utc_range(item.start, item.end)
             projected_rows += _row_bound(item.start, item.end, item.interval)
+        elif isinstance(item, QuoteSyncSpec):
+            _validate_max_age(item.max_age)
+        else:
+            _validate_expiries(item.expiries, config)
     if projected_rows > config.limits.sync_rows:
         raise SyncLimitError("synchronous market data row limit exceeded")
+    budget = SourceRequestBudget(config.limits.sync_instruments)
     results: list[SyncResult] = []
     for item in request.items:
         if isinstance(item, PriceBarSyncSpec):
@@ -627,6 +713,7 @@ async def sync_research_data(
                 provider=provider,
                 config=config,
                 clock=clock,
+                request_budget=budget,
             )
         elif isinstance(item, QuoteSyncSpec):
             result = await capture_quote(
@@ -635,6 +722,7 @@ async def sync_research_data(
                 config=config,
                 clock=clock,
                 max_age=item.max_age,
+                request_budget=budget,
             )
         else:
             result = await capture_option_chain(
@@ -643,20 +731,12 @@ async def sync_research_data(
                 provider=provider,
                 config=config,
                 clock=clock,
+                request_budget=budget,
             )
         results.append(result)
-    statuses = {result.status for result in results}
-    status = (
-        SyncStatus.COMPLETE
-        if statuses == {SyncStatus.COMPLETE}
-        else SyncStatus.REFUSED
-        if statuses == {SyncStatus.REFUSED}
-        else SyncStatus.DEGRADED
-    )
-    return SyncResult(
-        status=status,
-        source_request_count=sum(result.source_request_count for result in results),
-        datasets=tuple(dataset for result in results for dataset in result.datasets),
+    return _combine_sync_results(
+        results,
+        source_request_count=budget.used,
     )
 
 
@@ -940,6 +1020,11 @@ def _validate_expiries(
     return values
 
 
+def _validate_max_age(max_age: timedelta) -> None:
+    if type(max_age) is not timedelta or max_age <= timedelta(0):
+        raise SyncValidationError("quote maximum age must be positive")
+
+
 def _instrument_selector(
     config: AnalyticsConfig,
     instrument_handle: str,
@@ -1002,6 +1087,119 @@ def _existing_bar_state(
     )
 
 
+def _merged_price_series(  # noqa: PLR0913
+    config: AnalyticsConfig,
+    instrument_handle: str,
+    interval: ChartInterval,
+    start: datetime,
+    end: datetime,
+    refreshed: NormalizedPriceSeries,
+) -> NormalizedPriceSeries:
+    retained_rows = _latest_stored_price_rows(
+        config,
+        instrument_handle,
+        interval,
+        start,
+        end,
+    )
+    if not retained_rows:
+        return refreshed
+    rows_by_time = {
+        _parse_source_time(_required_text(row.get("Time"), "stored price-bar time")): row
+        for row in retained_rows
+    }
+    for bar in refreshed.bars:
+        row: dict[str, object] = {
+            "CloseBid": bar.close_value,
+            "Time": bar.bar_time.isoformat(),
+        }
+        row.update(
+            {
+                field_name: value
+                for field_name, value in (
+                    ("OpenBid", bar.open_value),
+                    ("HighBid", bar.high_value),
+                    ("LowBid", bar.low_value),
+                    ("Volume", bar.volume_value),
+                    ("PriceType", bar.price_type),
+                )
+                if value is not None
+            },
+        )
+        rows_by_time[bar.bar_time] = row
+    return normalize_price_series(
+        rows=tuple(rows_by_time[key] for key in sorted(rows_by_time)),
+        instrument_handle=instrument_handle,
+        interval=interval,
+        start=start,
+        end=end,
+    )
+
+
+def _latest_stored_price_rows(
+    config: AnalyticsConfig,
+    instrument_handle: str,
+    interval: ChartInterval,
+    start: datetime,
+    end: datetime,
+) -> tuple[dict[str, object], ...]:
+    connection = _connect(config, read_only=True)
+    try:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        epoch_us(b.bar_time) AS bar_time_us,
+                        b.open_value,
+                        b.high_value,
+                        b.low_value,
+                        b.close_value,
+                        b.volume_value,
+                        row_number() OVER (
+                            PARTITION BY b.instrument_handle, b.bar_time, b.duration
+                            ORDER BY
+                                p.source_timestamp DESC,
+                                p.ingested_at DESC,
+                                b.page_id DESC
+                        ) AS revision_rank
+                    FROM price_bars AS b
+                    JOIN source_pages AS p ON p.page_id = b.page_id
+                    WHERE
+                        b.instrument_handle = ?
+                        AND b.duration = ?
+                        AND b.bar_time BETWEEN ? AND ?
+                )
+                SELECT
+                    bar_time_us,
+                    open_value,
+                    high_value,
+                    low_value,
+                    close_value,
+                    volume_value
+                FROM ranked
+                WHERE revision_rank = 1
+                ORDER BY bar_time_us
+                """,
+                (instrument_handle, interval.value, start, end),
+            ).fetchall(),
+        )
+    finally:
+        connection.close()
+    return tuple(
+        {
+            "CloseBid": _required_float(row[4]),
+            "HighBid": _optional_float(row[2]),
+            "LowBid": _optional_float(row[3]),
+            "OpenBid": _optional_float(row[1]),
+            "Time": _epoch_us(row[0]).isoformat(),
+            "Volume": _optional_float(row[5]),
+        }
+        for row in rows
+    )
+
+
 def _latest_bar_page_ids(
     config: AnalyticsConfig,
     instrument_handle: str,
@@ -1046,19 +1244,46 @@ def _capture_fingerprints(
     pages: Sequence[SourcePage],
     normalized_rows_sha256: str,
     correction_state: Mapping[str, object],
+    *,
+    retained_page_ids: Sequence[str] = (),
 ) -> IngestionFingerprints:
+    visible_dataset_sha256 = _fingerprint(
+        {
+            "normalized_rows_sha256": normalized_rows_sha256,
+            "retained_page_ids": sorted(set(retained_page_ids)),
+        },
+    )
     return IngestionFingerprints(
         raw_pages_sha256=_fingerprint(
-            [page.page_fingerprint_sha256 for page in pages],
+            {
+                "current_pages": [page.page_fingerprint_sha256 for page in pages],
+                "visible_dataset_sha256": visible_dataset_sha256,
+            },
         ),
-        normalized_rows_sha256=normalized_rows_sha256,
+        normalized_rows_sha256=_fingerprint(
+            {
+                "normalized_rows_sha256": normalized_rows_sha256,
+                "visible_dataset_sha256": visible_dataset_sha256,
+            },
+        ),
         source_contract_sha256=_fingerprint(
-            sorted({page.contract_sha256 for page in pages}),
+            {
+                "contracts": sorted({page.contract_sha256 for page in pages}),
+                "visible_dataset_sha256": visible_dataset_sha256,
+            },
         ),
         entitlements_sha256=_fingerprint(
-            [page.source_quality.model_dump(mode="json") for page in pages],
+            {
+                "source_quality": [page.source_quality.model_dump(mode="json") for page in pages],
+                "visible_dataset_sha256": visible_dataset_sha256,
+            },
         ),
-        correction_state_sha256=_fingerprint(dict(correction_state)),
+        correction_state_sha256=_fingerprint(
+            {
+                "correction_state": dict(correction_state),
+                "visible_dataset_sha256": visible_dataset_sha256,
+            },
+        ),
     )
 
 
@@ -1074,6 +1299,7 @@ def _persist_chart_capture(  # noqa: PLR0913
     fingerprints: IngestionFingerprints,
     correction_state: Mapping[str, object],
     prior_page_ids: Sequence[str],
+    normalized_series: NormalizedPriceSeries,
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("chart capture contains no source page")
@@ -1099,6 +1325,13 @@ def _persist_chart_capture(  # noqa: PLR0913
         coverage_end=end,
         quality_state=quality_state,
         sync_metadata=sync_metadata,
+        normalized_bytes=len(normalized_series.bars) * 128,
+        persist_normalized=lambda connection, stored_page_ids: _persist_normalized_bars(
+            connection=connection,
+            pages=pages,
+            stored_page_ids=stored_page_ids,
+            series=normalized_series,
+        ),
     )
 
 
@@ -1111,61 +1344,65 @@ def _persist_market_capture(  # noqa: PLR0913
     coverage_end: datetime,
     quality_state: QualityState,
     sync_metadata: Mapping[str, object],
+    normalized_bytes: int,
+    persist_normalized: Callable[
+        [duckdb.DuckDBPyConnection, Mapping[int, str]],
+        None,
+    ],
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("market capture contains no source page")
-    normalized_bytes = sum(page.row_count for page in pages) * 128
-    try:
-        AnalyticsStore.ensure_owner_capacity(config, normalized_bytes)
-    except StoreQuotaError as error:
-        raise SyncLimitError("analytics store quota refuses market ingestion") from error
     store = AnalyticsStore.open(config)
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
     stored_page_ids: dict[int, str] = {}
     try:
-        with store.transaction():
-            for source_page in pages:
-                serialized = source_page.model_dump(mode="json")
-                rows = serialized["rows"]
-                stored = store.put_source_page(
-                    source_kind=source_page.source_kind,
-                    page_key=(
-                        f"{source_page.contract_id}:{source_page.page_number}:"
-                        f"{source_page.capture_revision.removeprefix('capture:')}"
-                    ),
-                    source_revision=source_page.capture_revision,
-                    source_native_revision=source_page.source_revision,
-                    contract_name=source_page.contract_id,
-                    contract_sha256=source_page.contract_sha256,
-                    payload={
-                        "contract_id": source_page.contract_id,
-                        "data_version": source_page.data_version,
-                        "page_fingerprint_sha256": source_page.page_fingerprint_sha256,
-                        "page_number": source_page.page_number,
-                        "request_fingerprint_sha256": (source_page.request_fingerprint_sha256),
-                        "rows": rows,
-                        "source_native_revision": source_page.source_revision,
-                        "source_quality": source_page.source_quality.model_dump(mode="json"),
-                        "sync_metadata": dict(sync_metadata),
-                    },
-                    row_count=source_page.row_count,
-                    source_timestamp=source_page.source_timestamp,
-                    account_scope=source_page.account_scope,
-                    instrument_handle=instrument_handle,
-                    instrument_scope_sha256=source_page.instrument_scope_sha256,
+        try:
+            with store.market_ingestion_transaction(normalized_bytes) as connection:
+                for source_page in pages:
+                    serialized = source_page.model_dump(mode="json")
+                    rows = serialized["rows"]
+                    stored = store.put_source_page(
+                        source_kind=source_page.source_kind,
+                        page_key=(
+                            f"{source_page.contract_id}:{source_page.page_number}:"
+                            f"{source_page.capture_revision.removeprefix('capture:')}"
+                        ),
+                        source_revision=source_page.capture_revision,
+                        source_native_revision=source_page.source_revision,
+                        contract_name=source_page.contract_id,
+                        contract_sha256=source_page.contract_sha256,
+                        payload={
+                            "contract_id": source_page.contract_id,
+                            "data_version": source_page.data_version,
+                            "page_fingerprint_sha256": source_page.page_fingerprint_sha256,
+                            "page_number": source_page.page_number,
+                            "request_fingerprint_sha256": (source_page.request_fingerprint_sha256),
+                            "rows": rows,
+                            "source_native_revision": source_page.source_revision,
+                            "source_quality": source_page.source_quality.model_dump(mode="json"),
+                            "sync_metadata": dict(sync_metadata),
+                        },
+                        row_count=source_page.row_count,
+                        source_timestamp=source_page.source_timestamp,
+                        account_scope=source_page.account_scope,
+                        instrument_handle=instrument_handle,
+                        instrument_scope_sha256=source_page.instrument_scope_sha256,
+                    )
+                    stored_page_ids[source_page.page_number] = stored.page_id
+                persist_normalized(connection, stored_page_ids)
+                store.create_dataset(
+                    dataset_id=dataset_id,
+                    account_scope=pages[0].account_scope,
+                    source_scope="saxo_openapi",
+                    source_revision=pages[0].capture_revision,
+                    source_page_ids=tuple(stored_page_ids.values()),
+                    created_at=pages[0].source_timestamp,
+                    coverage_start=coverage_start,
+                    coverage_end=coverage_end,
+                    quality_state=quality_state,
                 )
-                stored_page_ids[source_page.page_number] = stored.page_id
-            store.create_dataset(
-                dataset_id=dataset_id,
-                account_scope=pages[0].account_scope,
-                source_scope="saxo_openapi",
-                source_revision=pages[0].capture_revision,
-                source_page_ids=tuple(stored_page_ids.values()),
-                created_at=pages[0].source_timestamp,
-                coverage_start=coverage_start,
-                coverage_end=coverage_end,
-                quality_state=quality_state,
-            )
+        except StoreQuotaError as error:
+            raise SyncLimitError("analytics store quota refuses market ingestion") from error
     finally:
         store.close()
     return stored_page_ids, dataset_id
@@ -1251,36 +1488,27 @@ def _persist_entitlement_refusal(  # noqa: PLR0913
     return dataset_id
 
 
-def _persist_available_option_chain(
+def _persist_available_option_chain(  # noqa: PLR0913
     *,
     config: AnalyticsConfig,
     envelope_pages: Sequence[SourcePage],
     instrument_handle: str,
-    requested_expiries: tuple[date, ...],
+    expected_root_id: int,
+    requested_expiry: date,
     captured_at: datetime,
 ) -> SyncResult:
     rows = tuple(row for page in envelope_pages for row in page.rows)
     if len(rows) != 1:
         raise SyncError("option-chain capture did not return exactly one source row")
-    if len(requested_expiries) == 1:
-        selector = _instrument_selector(config, instrument_handle)
-        chain = normalize_option_chain(
-            row=rows[0],
-            expected_root_id=selector.identifier,
-            expiry=requested_expiries[0],
-        )
-    else:
-        chain = NormalizedOptionChain(
-            option_root_id=_instrument_selector(config, instrument_handle).identifier,
-            expiry=requested_expiries[0],
-            options=(),
-            warnings=("option_expiry_mapping_unavailable",),
-            fingerprint_sha256=_fingerprint([]),
-        )
+    chain = normalize_option_chain(
+        row=rows[0],
+        expected_root_id=expected_root_id,
+        expiry=requested_expiry,
+    )
     correction_state = {
         "capture_kind": "point",
         "captured_at": captured_at.isoformat(),
-        "requested_expiries": [expiry.isoformat() for expiry in requested_expiries],
+        "requested_expiries": [requested_expiry.isoformat()],
         "source_native_revisions": sorted(
             {page.source_revision for page in envelope_pages},
         ),
@@ -1309,13 +1537,13 @@ def _persist_available_option_chain(
         "data_kind": "option_chain",
         "entitlement_error_code": None,
         "entitlement_state": "available",
-        "expiries": [expiry.isoformat() for expiry in requested_expiries],
+        "expiries": [requested_expiry.isoformat()],
         "fingerprints": fingerprints.model_dump(mode="json"),
         "instrument_handle": instrument_handle,
         "normalized_rows": [option.model_dump(mode="json") for option in chain.options],
         "warnings": list(sorted_warnings),
     }
-    stored_pages, dataset_id = _persist_market_capture(
+    _stored_pages, dataset_id = _persist_market_capture(
         config=config,
         pages=envelope_pages,
         instrument_handle=instrument_handle,
@@ -1323,13 +1551,14 @@ def _persist_available_option_chain(
         coverage_end=captured_at,
         quality_state=quality_state,
         sync_metadata=sync_metadata,
-    )
-    _persist_normalized_options(
-        config=config,
-        pages=envelope_pages,
-        stored_page_ids=stored_pages,
-        underlying_handle=instrument_handle,
-        chain=chain,
+        normalized_bytes=len(chain.options) * 128,
+        persist_normalized=lambda connection, stored_page_ids: _persist_normalized_options(
+            connection=connection,
+            pages=envelope_pages,
+            stored_page_ids=stored_page_ids,
+            underlying_handle=instrument_handle,
+            chain=chain,
+        ),
     )
     summary = OptionChainDatasetSummary(
         dataset_id=dataset_id,
@@ -1339,7 +1568,7 @@ def _persist_available_option_chain(
         coverage_start=captured_at,
         coverage_end=captured_at,
         row_count=len(chain.options),
-        expiries=requested_expiries,
+        expiries=(requested_expiry,),
         entitlement_state="available",
         entitlement_error_code=None,
         warnings=sorted_warnings,
@@ -1356,7 +1585,7 @@ def _persist_available_option_chain(
 
 def _persist_normalized_bars(
     *,
-    config: AnalyticsConfig,
+    connection: duckdb.DuckDBPyConnection,
     pages: Sequence[SourcePage],
     stored_page_ids: Mapping[int, str],
     series: NormalizedPriceSeries,
@@ -1391,36 +1620,35 @@ def _persist_normalized_bars(
         )
     if not values:
         return
-    with _write_transaction(config) as connection:
-        connection.executemany(
-            """
-            INSERT INTO price_bars (
-                page_id,
-                instrument_handle,
-                source_revision,
-                bar_time,
-                duration,
-                open_value,
-                high_value,
-                low_value,
-                close_value,
-                volume_value,
-                currency,
-                adjusted
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
-            """,
-            values,
+    connection.executemany(
+        """
+        INSERT INTO price_bars (
+            page_id,
+            instrument_handle,
+            source_revision,
+            bar_time,
+            duration,
+            open_value,
+            high_value,
+            low_value,
+            close_value,
+            volume_value,
+            currency,
+            adjusted
         )
-        connection.execute(
-            "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
-        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        """,
+        values,
+    )
+    connection.execute(
+        "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
+    )
 
 
 def _persist_normalized_quote(
     *,
-    config: AnalyticsConfig,
+    connection: duckdb.DuckDBPyConnection,
     pages: Sequence[SourcePage],
     stored_page_ids: Mapping[int, str],
     quote: NormalizedQuote,
@@ -1435,45 +1663,44 @@ def _persist_normalized_quote(
             "quote_fingerprint": quote.fingerprint_sha256,
         },
     )
-    with _write_transaction(config) as connection:
-        connection.execute(
-            """
-            INSERT INTO quotes (
-                quote_id,
-                page_id,
-                instrument_handle,
-                source_revision,
-                captured_at,
-                bid_value,
-                ask_value,
-                mid_value,
-                currency,
-                fingerprint_sha256
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
-            """,
-            (
-                quote_id,
-                stored_page_ids[source_page.page_number],
-                quote.instrument_handle,
-                source_page.source_revision,
-                quote.captured_at,
-                quote.bid_value,
-                quote.ask_value,
-                quote.mid_value,
-                None,
-                quote.fingerprint_sha256,
-            ),
+    connection.execute(
+        """
+        INSERT INTO quotes (
+            quote_id,
+            page_id,
+            instrument_handle,
+            source_revision,
+            captured_at,
+            bid_value,
+            ask_value,
+            mid_value,
+            currency,
+            fingerprint_sha256
         )
-        connection.execute(
-            "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
-        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            quote_id,
+            stored_page_ids[source_page.page_number],
+            quote.instrument_handle,
+            source_page.source_revision,
+            quote.captured_at,
+            quote.bid_value,
+            quote.ask_value,
+            quote.mid_value,
+            None,
+            quote.fingerprint_sha256,
+        ),
+    )
+    connection.execute(
+        "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
+    )
 
 
 def _persist_normalized_options(
     *,
-    config: AnalyticsConfig,
+    connection: duckdb.DuckDBPyConnection,
     pages: Sequence[SourcePage],
     stored_page_ids: Mapping[int, str],
     underlying_handle: str,
@@ -1484,68 +1711,67 @@ def _persist_normalized_options(
     if len(pages) != 1:
         raise SyncError("option-chain capture contains an invalid source-page count")
     source_page = pages[0]
-    with _write_transaction(config) as connection:
-        option_handles = _option_handles(
-            connection,
-            chain.options,
-            source_page,
+    option_handles = _option_handles(
+        connection,
+        chain.options,
+        source_page,
+    )
+    for option in chain.options:
+        option_handle = option_handles[option.source_identifier]
+        snapshot_id = "option:" + _fingerprint(
+            {
+                "capture_revision": source_page.capture_revision,
+                "option_fingerprint": option.fingerprint_sha256,
+                "underlying_handle": underlying_handle,
+            },
         )
-        for option in chain.options:
-            option_handle = option_handles[option.source_identifier]
-            snapshot_id = "option:" + _fingerprint(
-                {
-                    "capture_revision": source_page.capture_revision,
-                    "option_fingerprint": option.fingerprint_sha256,
-                    "underlying_handle": underlying_handle,
-                },
-            )
-            payload = json.dumps(
-                {
-                    "currency": None,
-                    "currency_state": "unavailable",
-                    "option_reference_sha256": option.fingerprint_sha256,
-                },
-                allow_nan=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            )
-            connection.execute(
-                """
-                INSERT INTO option_snapshots (
-                    option_snapshot_id,
-                    page_id,
-                    instrument_handle,
-                    underlying_handle,
-                    source_revision,
-                    captured_at,
-                    expiry_date,
-                    strike_value,
-                    currency,
-                    put_call,
-                    fingerprint_sha256,
-                    payload_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    snapshot_id,
-                    stored_page_ids[source_page.page_number],
-                    option_handle,
-                    underlying_handle,
-                    source_page.source_revision,
-                    source_page.source_timestamp,
-                    option.expiry,
-                    option.strike_value,
-                    _MISSING_CURRENCY,
-                    option.put_call,
-                    option.fingerprint_sha256,
-                    payload,
-                ),
-            )
+        payload = json.dumps(
+            {
+                "currency": None,
+                "currency_state": "unavailable",
+                "option_reference_sha256": option.fingerprint_sha256,
+            },
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         connection.execute(
-            "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
+            """
+            INSERT INTO option_snapshots (
+                option_snapshot_id,
+                page_id,
+                instrument_handle,
+                underlying_handle,
+                source_revision,
+                captured_at,
+                expiry_date,
+                strike_value,
+                currency,
+                put_call,
+                fingerprint_sha256,
+                payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                snapshot_id,
+                stored_page_ids[source_page.page_number],
+                option_handle,
+                underlying_handle,
+                source_page.source_revision,
+                source_page.source_timestamp,
+                option.expiry,
+                option.strike_value,
+                _MISSING_CURRENCY,
+                option.put_call,
+                option.fingerprint_sha256,
+                payload,
+            ),
         )
+    connection.execute(
+        "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
+    )
 
 
 def _option_handles(
@@ -1653,42 +1879,6 @@ def _dataset_sync_metadata(
     if not isinstance(sync_metadata, dict):
         raise SyncError("stored dataset metadata is invalid")
     return cast("dict[str, object]", sync_metadata)
-
-
-@contextmanager
-def _writer_lock(config: AnalyticsConfig) -> Generator[None]:
-    lock_path = store_writer_lock_path(config.paths.store_path)
-    descriptor = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise SyncError("another analytics writer owns the writer lock") from error
-        yield
-    finally:
-        with suppress(OSError):
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
-
-
-@contextmanager
-def _write_transaction(
-    config: AnalyticsConfig,
-) -> Generator[duckdb.DuckDBPyConnection]:
-    with _writer_lock(config):
-        connection = _connect(config, read_only=False)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                yield connection
-            except BaseException:
-                with suppress(duckdb.Error):
-                    connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
-        finally:
-            connection.close()
 
 
 def _connect(

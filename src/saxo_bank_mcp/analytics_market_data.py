@@ -137,7 +137,7 @@ def normalize_price_series(
     """Normalize bounded Saxo chart rows without inventing missing values."""
     handle = _validate_instrument_handle(instrument_handle)
     _require_utc_range(start, end)
-    normalized: list[tuple[datetime, datetime, NormalizedPriceBar]] = []
+    normalized: list[tuple[datetime, NormalizedPriceBar]] = []
     for row in rows:
         source_time = _required_timestamp(row.get("Time"))
         _require_interval_boundary(source_time, interval)
@@ -146,7 +146,6 @@ def normalize_price_series(
             continue
         normalized.append(
             (
-                source_time.replace(tzinfo=None),
                 bar_time,
                 NormalizedPriceBar(
                     instrument_handle=handle,
@@ -161,15 +160,15 @@ def normalize_price_series(
                 ),
             ),
         )
-    normalized.sort(key=lambda item: item[1])
-    utc_times = tuple(item[1] for item in normalized)
+    normalized.sort(key=lambda item: item[0])
+    utc_times = tuple(item[0] for item in normalized)
     if len(set(utc_times)) != len(utc_times):
         raise MarketDataValidationError("chart rows contain a duplicate bar timestamp")
     missing_intervals = _missing_intervals(
-        tuple(item[0] for item in normalized),
+        utc_times,
         interval,
     )
-    bars = tuple(item[2] for item in normalized)
+    bars = tuple(item[1] for item in normalized)
     warnings: set[str] = set()
     if missing_intervals:
         warnings.add("observed_interval_gap")

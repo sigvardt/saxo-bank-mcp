@@ -68,6 +68,32 @@ def test_chart_gap_and_missing_volume_remain_explicit() -> None:
     assert set(series.warnings) == {"observed_interval_gap", "volume_missing"}
 
 
+def test_chart_gap_math_uses_absolute_instants_across_spring_forward() -> None:
+    handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+
+    series = normalize_price_series(
+        rows=(
+            {
+                "CloseBid": 101.0,
+                "Time": "2026-03-29T01:00:00+01:00",
+                "Volume": 12,
+            },
+            {
+                "CloseBid": 102.0,
+                "Time": "2026-03-29T03:00:00+02:00",
+                "Volume": 13,
+            },
+        ),
+        instrument_handle=handle,
+        interval=ChartInterval.ONE_HOUR,
+        start=datetime(2026, 3, 29, 0, tzinfo=UTC),
+        end=datetime(2026, 3, 29, 1, tzinfo=UTC),
+    )
+
+    assert series.missing_interval_count == 0
+    assert "observed_interval_gap" not in series.warnings
+
+
 def test_chart_time_off_the_requested_interval_boundary_is_refused() -> None:
     handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
 

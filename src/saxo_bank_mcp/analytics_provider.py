@@ -218,6 +218,39 @@ class SourceRequestError(SourceProviderError):
     """Raised before transport when a source request is not contract-bound."""
 
 
+class SourceRequestBudgetError(SourceProviderError):
+    """Raised before transport when the shared source-attempt budget is exhausted."""
+
+    def __init__(self, contract_id: str) -> None:
+        """Retain only the contract whose next source attempt was refused."""
+        super().__init__(
+            "source_request_budget_exhausted",
+            "shared source request budget is exhausted",
+            contract_id=contract_id,
+        )
+
+
+@dataclass(slots=True)
+class SourceRequestBudget:
+    """Count and cap every actual source page or retry attempt."""
+
+    limit: int
+    used: int = 0
+
+    def __post_init__(self) -> None:
+        """Require a positive fixed limit and a valid initial count."""
+        if type(self.limit) is not int or self.limit < 1:
+            raise ValueError("source request budget limit must be positive")
+        if type(self.used) is not int or not 0 <= self.used <= self.limit:
+            raise ValueError("source request budget usage is invalid")
+
+    def consume(self, contract_id: str) -> None:
+        """Reserve one attempt before the registered read boundary is called."""
+        if self.used >= self.limit:
+            raise SourceRequestBudgetError(contract_id)
+        self.used += 1
+
+
 class SourcePayloadError(SourceProviderError):
     """Raised when a Saxo response cannot be parsed as a safe JSON object."""
 
@@ -399,6 +432,7 @@ class SaxoAnalyticsProvider:
         request: Mapping[str, object],
         *,
         capture: SourceCaptureContext | None = None,
+        budget: SourceRequestBudget | None = None,
     ) -> AsyncIterator[SourcePage]:
         """Fetch all bounded pages for one frozen source contract."""
         contract = self._contracts.get(contract_id)
@@ -426,6 +460,7 @@ class SaxoAnalyticsProvider:
             operation,
             request_target,
             params,
+            budget,
         )
         first_comparison = self._require_compatible(contract, first_page)
         initial_path = urlparse(request_target).path
@@ -450,6 +485,7 @@ class SaxoAnalyticsProvider:
                 next_operation,
                 next_target,
                 next_params,
+                budget,
             )
             if (
                 "DataVersion" in contract.revision_fields
@@ -577,6 +613,7 @@ class SaxoAnalyticsProvider:
         operation: EndpointOperation,
         request_target: str,
         params: Mapping[str, str],
+        budget: SourceRequestBudget | None,
     ) -> dict[str, SourceJsonValue]:
         attempts = (
             contract.retry_attempts
@@ -584,6 +621,8 @@ class SaxoAnalyticsProvider:
             else min(contract.retry_attempts, self._retry_attempts)
         )
         for attempt in range(1, attempts + 1):
+            if budget is not None:
+                budget.consume(contract.contract_id)
             try:
                 outcome = await self._request_once(
                     operation,
