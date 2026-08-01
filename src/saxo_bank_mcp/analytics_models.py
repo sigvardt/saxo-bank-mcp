@@ -718,6 +718,10 @@ class AnalysisProvenance(_StrictAnalyticsModel):
     engine_name: EngineName
     engine_version: EngineVersion
     code_commit: CodeCommit
+    analysis_input_sha256: Sha256Fingerprint
+    analysis_engine_sha256: Sha256Fingerprint
+    analysis_seed_sha256: Sha256Fingerprint
+    random_seed: int | None = Field(default=None, ge=0, lt=2**64)
 
     @model_validator(mode="after")
     def _validate_proof_lists(self) -> Self:

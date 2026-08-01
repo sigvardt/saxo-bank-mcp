@@ -296,6 +296,8 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
     selected: list[Path] = [
         repository_root / "pyproject.toml",
         repository_root / "uv.lock",
+        repository_root / "data" / "analytics" / "metric_definitions.json",
+        repository_root / "data" / "analytics" / "proof_profiles.json",
         repository_root / "data" / "analytics" / "source_contracts.json",
         repository_root / "data" / "saxo" / "openapi_inventory.json",
         *(repository_root / runner for runner in _SOURCE_RUNNERS),

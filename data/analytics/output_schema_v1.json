@@ -55,6 +55,15 @@
     "AnalysisProvenance": {
       "additionalProperties": false,
       "properties": {
+        "analysis_engine_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
+        "analysis_input_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
+        "analysis_seed_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
         "code_commit": {
           "$ref": "#/$defs/CodeCommit"
         },
@@ -74,6 +83,20 @@
           "minItems": 1,
           "title": "Proof Receipts",
           "type": "array"
+        },
+        "random_seed": {
+          "anyOf": [
+            {
+              "exclusiveMaximum": 18446744073709551616,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Random Seed"
         },
         "source_contract_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
@@ -107,7 +130,10 @@
         "proof_receipts",
         "engine_name",
         "engine_version",
-        "code_commit"
+        "code_commit",
+        "analysis_input_sha256",
+        "analysis_engine_sha256",
+        "analysis_seed_sha256"
       ],
       "title": "AnalysisProvenance",
       "type": "object"

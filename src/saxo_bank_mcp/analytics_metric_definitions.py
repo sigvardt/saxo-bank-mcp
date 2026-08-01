@@ -95,6 +95,32 @@ class MetricDefinitionBinding(_StrictModel):
         return self
 
 
+class MetricInputBinding(_StrictModel):
+    """One exact source-field input or one explicit derived input."""
+
+    input_id: str
+    unit: str = Field(min_length=1, max_length=128)
+    source_contract_id: str | None = None
+    field_paths: tuple[str, ...] = ()
+    derived_input: str | None = Field(default=None, min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        _require_safe_name(self.input_id, "metric input identifier")
+        if self.source_contract_id is None:
+            if self.field_paths or self.derived_input is None:
+                raise ValueError("derived metric inputs require only an exact definition")
+        else:
+            _require_safe_name(self.source_contract_id, "source contract identifier")
+            if not self.field_paths or self.derived_input is not None:
+                raise ValueError("source metric inputs require only exact field paths")
+            if len(set(self.field_paths)) != len(self.field_paths):
+                raise ValueError("metric source field paths must be unique")
+            if any(not path.strip() for path in self.field_paths):
+                raise ValueError("metric source field paths must be non-empty")
+        return self
+
+
 class MetricDefinition(_StrictModel):
     """Complete versioned meaning of one material analytics metric."""
 
@@ -102,6 +128,7 @@ class MetricDefinition(_StrictModel):
     definition_version: str
     meaning: str = Field(min_length=1, max_length=2_000)
     formula: str = Field(min_length=1, max_length=4_000)
+    input_bindings: tuple[MetricInputBinding, ...] = Field(min_length=1)
     input_units: tuple[str, ...] = Field(min_length=1)
     output_unit: str = Field(min_length=1, max_length=128)
     unit_class: ValueUnitClass
@@ -126,6 +153,10 @@ class MetricDefinition(_StrictModel):
             raise ValueError("metric input units must be unique")
         if any(not value.strip() for value in self.input_units):
             raise ValueError("metric input units must be non-empty")
+        if len({binding.input_id for binding in self.input_bindings}) != len(
+            self.input_bindings,
+        ):
+            raise ValueError("metric input bindings must be unique")
         if len(set(self.analysis_kinds)) != len(self.analysis_kinds):
             raise ValueError("metric analysis kinds must be unique")
         for kind in self.analysis_kinds:
@@ -199,6 +230,7 @@ class MetricDefinitionCatalog(_StrictModel):
 
 class _MetricPolicy(_StrictModel):
     policy_id: str
+    input_bindings: tuple[MetricInputBinding, ...] = Field(min_length=1)
     input_units: tuple[str, ...] = Field(min_length=1)
     output_unit: str
     unit_class: ValueUnitClass
@@ -224,6 +256,7 @@ class _MetricEntry(_StrictModel):
     metric_id: str
     meaning: str
     formula: str
+    input_bindings: tuple[MetricInputBinding, ...] = ()
     analysis_kinds: tuple[str, ...] = ()
     output_unit: str | None = None
     unit_class: ValueUnitClass | None = None
@@ -284,6 +317,7 @@ def load_metric_definition_catalog(path: Path | None = None) -> MetricDefinition
                     definition_version=group.definition_version,
                     meaning=entry.meaning,
                     formula=entry.formula,
+                    input_bindings=entry.input_bindings or policy.input_bindings,
                     input_units=policy.input_units,
                     output_unit=entry.output_unit or policy.output_unit,
                     unit_class=entry.unit_class or policy.unit_class,

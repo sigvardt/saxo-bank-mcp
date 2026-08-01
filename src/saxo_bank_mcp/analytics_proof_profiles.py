@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
+import tempfile
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from importlib.resources import files
 from pathlib import Path
-from threading import RLock
 from types import MappingProxyType
 from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from saxo_bank_mcp.analytics_config import (
+    AnalyticsConfig,
+    AnalyticsConfigError,
+    prepare_owner_only_path,
+)
 from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinitionBinding,
     MetricDefinitionCatalog,
@@ -34,8 +43,8 @@ _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _FIELD_PATH_PATTERN: Final = re.compile(
     r"^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$",
 )
-_QUARANTINE_LOCK: Final = RLock()
-_RUNTIME_QUARANTINES: dict[str, str] = {}
+_QUARANTINE_STORE_NAME: Final = "proof-quarantines.json"
+_QUARANTINE_LOCK_NAME: Final = "proof-quarantines.lock"
 _MAX_REASON_CODE_LENGTH: Final = 127
 _PUBLIC_QUARANTINE_REASONS: Final = frozenset(
     {
@@ -136,8 +145,17 @@ class ProofProfile(_StrictModel):
         for artifact_id in self.artifact_template_ids:
             _require_safe_name(artifact_id, "artifact template identifier")
         if self.activation_state is ProfileActivationState.ACTIVE:
-            if self.quarantine_reason is not None or not self.engines:
-                raise ValueError("active proof profiles require engines and no quarantine")
+            if (
+                self.quarantine_reason is not None
+                or not self.source_contracts
+                or self.source_revision is None
+                or not self.engines
+                or self.valid_until is None
+            ):
+                raise ValueError(
+                    "active proof profiles require exact sources, a source revision, "
+                    "engines, expiry, and no quarantine",
+                )
         elif self.quarantine_reason is None:
             raise ValueError("quarantined proof profiles require a reason code")
         if self.quarantine_reason is not None:
@@ -149,6 +167,17 @@ class ProofProfile(_StrictModel):
         return self
 
 
+class ArtifactOwnerBinding(_StrictModel):
+    template_id: str
+    analysis_kind: str
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        _require_safe_name(self.template_id, "artifact template identifier")
+        _require_safe_name(self.analysis_kind, "artifact analysis kind")
+        return self
+
+
 class ProofProfileCatalog(_StrictModel):
     schema_version: Literal["1"]
     catalog_version: str
@@ -157,6 +186,7 @@ class ProofProfileCatalog(_StrictModel):
     production_metric_ids: tuple[str, ...]
     production_analysis_kinds: tuple[str, ...]
     production_artifact_template_ids: tuple[str, ...]
+    artifact_owners: tuple[ArtifactOwnerBinding, ...] = ()
     source_field_coverage: tuple[SourceContractProofBinding, ...]
     profiles: tuple[ProofProfile, ...]
 
@@ -185,6 +215,10 @@ class ProofProfileCatalog(_StrictModel):
             (profile.analysis_kind for profile in self.profiles),
             "proof profile analysis kinds",
         )
+        _require_unique(
+            (binding.template_id for binding in self.artifact_owners),
+            "artifact owner bindings",
+        )
         return self
 
 
@@ -200,6 +234,11 @@ class CoverageMatrix(_StrictModel):
     missing_analysis_kinds: tuple[str, ...]
     missing_artifact_template_ids: tuple[str, ...]
     missing_source_fields: tuple[str, ...]
+    inactive_metric_ids: tuple[str, ...] = ()
+    inactive_analysis_kinds: tuple[str, ...] = ()
+    inactive_artifact_template_ids: tuple[str, ...] = ()
+    inactive_source_fields: tuple[str, ...] = ()
+    misassigned_artifact_template_ids: tuple[str, ...] = ()
 
 
 class CoverageError(RuntimeError):
@@ -212,6 +251,40 @@ class CoverageError(RuntimeError):
 class _ArtifactBinding(_StrictModel):
     analysis_kind: str
     template_ids: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        _require_safe_name(self.analysis_kind, "artifact analysis kind")
+        _require_unique(self.template_ids, "artifact template identifiers")
+        for template_id in self.template_ids:
+            _require_safe_name(template_id, "artifact template identifier")
+        return self
+
+
+class _RuntimeQuarantine(_StrictModel):
+    analysis_kind: str
+    source_revision: str
+    reason_code: str
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        _require_safe_name(self.analysis_kind, "analysis kind")
+        _require_version(self.source_revision, "source revision")
+        _require_safe_name(self.reason_code, "quarantine reason")
+        if self.reason_code not in _PUBLIC_QUARANTINE_REASONS | {"runtime_quarantine"}:
+            raise ValueError("quarantine reason is not public")
+        return self
+
+
+class _RuntimeQuarantineDocument(_StrictModel):
+    schema_version: Literal["1"]
+    quarantines: tuple[_RuntimeQuarantine, ...]
+
+    @model_validator(mode="after")
+    def _validate_document(self) -> Self:
+        keys = tuple(f"{item.analysis_kind}\0{item.source_revision}" for item in self.quarantines)
+        _require_unique(keys, "runtime quarantines")
+        return self
 
 
 class _ProofCatalogDocument(_StrictModel):
@@ -235,13 +308,21 @@ class ProofRegistry:
         *,
         definitions: MetricDefinitionCatalog,
         catalog: ProofProfileCatalog,
+        config: AnalyticsConfig | None = None,
     ) -> None:
         """Index immutable definition and profile catalogs by analysis kind."""
         self.definitions = definitions
         self.catalog = catalog
+        self.config = (
+            None if config is None else AnalyticsConfig.model_validate(config, strict=True)
+        )
         self._profiles = MappingProxyType(
             {profile.analysis_kind: profile for profile in catalog.profiles},
         )
+
+    def profile(self, analysis_kind: str) -> ProofProfile | None:
+        """Return the exact immutable registration for one analysis kind."""
+        return self._profiles.get(analysis_kind)
 
     def status(  # noqa: C901, PLR0911, PLR0912, PLR0913
         self,
@@ -256,8 +337,11 @@ class ProofRegistry:
         profile = self._profiles.get(analysis_kind)
         if profile is None:
             return _status(ProofState.REFUSED, "missing_proof_profile", None)
-        with _QUARANTINE_LOCK:
-            runtime_reason = _RUNTIME_QUARANTINES.get(analysis_kind)
+        runtime_reason = _runtime_quarantine_reason(
+            analysis_kind,
+            source_revision,
+            self.config,
+        )
         if runtime_reason is not None:
             return _status(ProofState.QUARANTINED, runtime_reason, profile)
         if profile.activation_state is ProfileActivationState.QUARANTINED:
@@ -281,6 +365,26 @@ class ProofRegistry:
             for binding in profile.metric_definitions
         ):
             return _status(ProofState.STALE, "metric_definition_changed", profile)
+        profile_source_fields = {
+            binding.contract_id: frozenset(binding.field_paths)
+            for binding in profile.source_contracts
+        }
+        if any(
+            input_binding.source_contract_id is not None
+            and (
+                input_binding.source_contract_id not in profile_source_fields
+                or not set(input_binding.field_paths).issubset(
+                    profile_source_fields[input_binding.source_contract_id],
+                )
+            )
+            for metric_binding in profile.metric_definitions
+            for input_binding in current_definitions[metric_binding.metric_id].input_bindings
+        ):
+            return _status(
+                ProofState.STALE,
+                "metric_source_binding_changed",
+                profile,
+            )
         if self.catalog.source_catalog_sha256 != profile.source_catalog_sha256:
             return _status(ProofState.STALE, "source_catalog_changed", profile)
         if self.catalog.source_catalog_sha256 != source_contract_catalog_sha256():
@@ -302,14 +406,29 @@ class ProofRegistry:
         checked_at = at or datetime.now(UTC)
         if checked_at.tzinfo is None or checked_at.utcoffset() != datetime.now(UTC).utcoffset():
             return _status(ProofState.REFUSED, "non_utc_proof_time", profile)
-        if profile.valid_until is not None and checked_at > profile.valid_until:
+        if profile.valid_until is not None and checked_at >= profile.valid_until:
             return _status(ProofState.STALE, "proof_expired", profile)
         return _status(ProofState.ACTIVE, "active", profile)
 
 
-def quarantine_analysis_kind(kind: str, reason: str) -> None:
-    """Fail closed for a kind while retaining only a bounded reason code."""
+def quarantine_store_path(config: AnalyticsConfig) -> Path:
+    """Return the owner-only persistent runtime-quarantine store."""
+    validated = AnalyticsConfig.model_validate(config, strict=True)
+    return prepare_owner_only_path(
+        validated.paths.analytics_root / _QUARANTINE_STORE_NAME,
+    )
+
+
+def quarantine_analysis_kind(
+    kind: str,
+    reason: str,
+    *,
+    source_revision: str,
+    config: AnalyticsConfig,
+) -> None:
+    """Persist an exact kind/revision quarantine with only a public reason code."""
     _require_safe_name(kind, "analysis kind")
+    _require_version(source_revision, "source revision")
     reason_code = re.sub(r"[^a-z0-9]+", "_", reason.strip().lower()).strip("_")
     if (
         not reason_code
@@ -318,8 +437,28 @@ def quarantine_analysis_kind(kind: str, reason: str) -> None:
     ):
         reason_code = "runtime_quarantine"
     _require_safe_name(reason_code, "quarantine reason")
-    with _QUARANTINE_LOCK:
-        _RUNTIME_QUARANTINES[kind] = reason_code
+    validated = AnalyticsConfig.model_validate(config, strict=True)
+    store_path = quarantine_store_path(validated)
+    lock_path = prepare_owner_only_path(
+        validated.paths.analytics_root / _QUARANTINE_LOCK_NAME,
+    )
+    with lock_path.open("r+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        document = _read_quarantine_document(store_path)
+        by_key = {(item.analysis_kind, item.source_revision): item for item in document.quarantines}
+        by_key[(kind, source_revision)] = _RuntimeQuarantine(
+            analysis_kind=kind,
+            source_revision=source_revision,
+            reason_code=reason_code,
+        )
+        _write_quarantine_document(
+            store_path,
+            _RuntimeQuarantineDocument(
+                schema_version="1",
+                quarantines=tuple(by_key[key] for key in sorted(by_key)),
+            ),
+        )
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def generate_coverage_matrix(
@@ -327,36 +466,73 @@ def generate_coverage_matrix(
     definitions: MetricDefinitionCatalog,
     catalog: ProofProfileCatalog,
 ) -> CoverageMatrix:
-    """Generate the production coverage matrix and fail on every missing surface."""
+    """Require every declared production surface to have an active proof profile."""
+    return _generate_coverage_matrix(
+        definitions=definitions,
+        catalog=catalog,
+        require_active=True,
+    )
+
+
+def generate_declared_coverage_matrix(
+    *,
+    definitions: MetricDefinitionCatalog,
+    catalog: ProofProfileCatalog,
+) -> CoverageMatrix:
+    """Require complete source-controlled registration, regardless of activation."""
+    return _generate_coverage_matrix(
+        definitions=definitions,
+        catalog=catalog,
+        require_active=False,
+    )
+
+
+def _generate_coverage_matrix(
+    *,
+    definitions: MetricDefinitionCatalog,
+    catalog: ProofProfileCatalog,
+    require_active: bool,
+) -> CoverageMatrix:
     defined = set(definitions.by_id())
-    bound_metrics = {
+    declared_metrics = {
         binding.metric_id for profile in catalog.profiles for binding in profile.metric_definitions
     }
+    profiles_by_kind = {profile.analysis_kind: profile for profile in catalog.profiles}
     missing_metrics = sorted(
         (set(definitions.production_metric_ids) - defined)
-        | (set(definitions.production_metric_ids) - bound_metrics)
-        | (set(catalog.production_metric_ids) - bound_metrics)
+        | (set(definitions.production_metric_ids) - declared_metrics)
+        | (set(catalog.production_metric_ids) - declared_metrics)
         | {
             definition.metric_id
             for definition in definitions.definitions
             for kind in definition.analysis_kinds
-            if not any(
-                profile.analysis_kind == kind
-                and any(
+            if (
+                kind not in profiles_by_kind
+                or not any(
                     binding.metric_id == definition.metric_id
-                    for binding in profile.metric_definitions
+                    for binding in profiles_by_kind[kind].metric_definitions
                 )
-                for profile in catalog.profiles
             )
         },
     )
-    profiled_kinds = {profile.analysis_kind for profile in catalog.profiles}
+    profiled_kinds = set(profiles_by_kind)
     missing_kinds = sorted(set(catalog.production_analysis_kinds) - profiled_kinds)
-    bound_artifacts = {
-        artifact_id for profile in catalog.profiles for artifact_id in profile.artifact_template_ids
-    }
+    artifact_assignees: dict[str, set[str]] = {}
+    for profile in catalog.profiles:
+        for artifact_id in profile.artifact_template_ids:
+            artifact_assignees.setdefault(artifact_id, set()).add(profile.analysis_kind)
+    bound_artifacts = set(artifact_assignees)
     missing_artifacts = sorted(
         set(catalog.production_artifact_template_ids) - bound_artifacts,
+    )
+    expected_artifact_owners = {
+        binding.template_id: binding.analysis_kind for binding in catalog.artifact_owners
+    }
+    misassigned_artifacts = sorted(
+        artifact_id
+        for artifact_id, expected_kind in expected_artifact_owners.items()
+        if artifact_assignees.get(artifact_id)
+        and artifact_assignees[artifact_id] != {expected_kind}
     )
     supplied_fields = {
         f"{binding.contract_id}.{path}"
@@ -369,12 +545,73 @@ def generate_coverage_matrix(
         for path in _source_field_paths(contract.fields)
     }
     missing_fields = sorted(required_fields - supplied_fields)
+    inactive_metrics: list[str] = []
+    inactive_kinds: list[str] = []
+    inactive_artifacts: list[str] = []
+    inactive_fields: list[str] = []
+    if require_active:
+        active_profiles = tuple(
+            profile
+            for profile in catalog.profiles
+            if profile.activation_state is ProfileActivationState.ACTIVE
+        )
+        active_by_kind = {profile.analysis_kind: profile for profile in active_profiles}
+        inactive_kinds = sorted(
+            set(catalog.production_analysis_kinds) - set(active_by_kind),
+        )
+        inactive_metrics = sorted(
+            {
+                definition.metric_id
+                for definition in definitions.definitions
+                for kind in definition.analysis_kinds
+                if kind in profiles_by_kind
+                and (
+                    kind not in active_by_kind
+                    or not any(
+                        binding.metric_id == definition.metric_id
+                        for binding in active_by_kind[kind].metric_definitions
+                    )
+                )
+            },
+        )
+        inactive_artifacts = sorted(
+            artifact_id
+            for artifact_id in catalog.production_artifact_template_ids
+            if (
+                expected_artifact_owners.get(artifact_id) not in active_by_kind
+                or artifact_id
+                not in active_by_kind[expected_artifact_owners[artifact_id]].artifact_template_ids
+            )
+        )
+        active_source_fields = {
+            f"{binding.contract_id}.{path}"
+            for profile in active_profiles
+            for binding in profile.source_contracts
+            for path in binding.field_paths
+        }
+        inactive_fields = sorted(required_fields - active_source_fields)
+    incomplete_items = (
+        missing_metrics,
+        missing_kinds,
+        missing_artifacts,
+        missing_fields,
+        inactive_metrics,
+        inactive_kinds,
+        inactive_artifacts,
+        inactive_fields,
+        misassigned_artifacts,
+    )
     matrix = CoverageMatrix(
-        complete=not (missing_metrics or missing_kinds or missing_artifacts or missing_fields),
+        complete=not any(incomplete_items),
         missing_metric_ids=tuple(missing_metrics),
         missing_analysis_kinds=tuple(missing_kinds),
         missing_artifact_template_ids=tuple(missing_artifacts),
         missing_source_fields=tuple(missing_fields),
+        inactive_metric_ids=tuple(inactive_metrics),
+        inactive_analysis_kinds=tuple(inactive_kinds),
+        inactive_artifact_template_ids=tuple(inactive_artifacts),
+        inactive_source_fields=tuple(inactive_fields),
+        misassigned_artifact_template_ids=tuple(misassigned_artifacts),
     )
     if not matrix.complete:
         raise CoverageError(matrix)
@@ -415,10 +652,18 @@ def load_proof_profile_catalog(
     if set(document.production_analysis_kinds) != definition_kinds | source_kinds:
         raise ProofProfileError("proof profile analysis-kind inventory is incomplete")
     artifacts_by_kind: dict[str, tuple[str, ...]] = {}
+    artifact_owners: list[ArtifactOwnerBinding] = []
     for binding in document.artifact_bindings:
         if binding.analysis_kind in artifacts_by_kind:
             raise ProofProfileError("artifact analysis-kind bindings must be unique")
         artifacts_by_kind[binding.analysis_kind] = binding.template_ids
+        artifact_owners.extend(
+            ArtifactOwnerBinding(
+                template_id=template_id,
+                analysis_kind=binding.analysis_kind,
+            )
+            for template_id in binding.template_ids
+        )
     profiles: list[ProofProfile] = []
     for kind in document.production_analysis_kinds:
         metric_bindings = tuple(
@@ -476,11 +721,88 @@ def load_proof_profile_catalog(
             for binding in document.artifact_bindings
             for template_id in binding.template_ids
         ),
+        artifact_owners=tuple(artifact_owners),
         source_field_coverage=source_coverage,
         profiles=tuple(profiles),
     )
-    generate_coverage_matrix(definitions=definitions, catalog=catalog)
+    generate_declared_coverage_matrix(definitions=definitions, catalog=catalog)
     return catalog
+
+
+def _runtime_quarantine_reason(
+    analysis_kind: str,
+    source_revision: str | None,
+    config: AnalyticsConfig | None,
+) -> str | None:
+    if config is None or source_revision is None:
+        return None
+    try:
+        document = _read_quarantine_document(quarantine_store_path(config))
+    except (AnalyticsConfigError, OSError, ProofProfileError, ValidationError):
+        return "runtime_quarantine"
+    for quarantine in document.quarantines:
+        if (
+            quarantine.analysis_kind == analysis_kind
+            and quarantine.source_revision == source_revision
+        ):
+            return quarantine.reason_code
+    return None
+
+
+def _read_quarantine_document(path: Path) -> _RuntimeQuarantineDocument:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ProofProfileError("runtime quarantine store cannot be read") from error
+    if not raw.strip():
+        return _RuntimeQuarantineDocument(schema_version="1", quarantines=())
+    try:
+        return _RuntimeQuarantineDocument.model_validate_json(raw, strict=True)
+    except ValidationError as error:
+        raise ProofProfileError("runtime quarantine store is invalid") from error
+
+
+def _write_quarantine_document(
+    path: Path,
+    document: _RuntimeQuarantineDocument,
+) -> None:
+    payload = json.dumps(
+        document.model_dump(mode="json"),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".proof-quarantines-",
+            dir=path.parent,
+        )
+        temporary_path = Path(temporary_name)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as temporary_file:
+            descriptor = -1
+            temporary_file.write(payload)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        temporary_path.replace(path)
+        path.chmod(0o600)
+        temporary_path = None
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except OSError as error:
+        raise ProofProfileError("runtime quarantine store cannot be written") from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary_path is not None:
+            with suppress(FileNotFoundError):
+                temporary_path.unlink()
 
 
 def _source_field_paths(fields: Sequence[SourceField]) -> tuple[str, ...]:

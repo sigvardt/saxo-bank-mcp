@@ -133,6 +133,10 @@ def _provenance(dataset_id: str) -> AnalysisProvenance:
         engine_name="saxo-analytics",
         engine_version="1",
         code_commit=_COMMIT,
+        analysis_input_sha256="d" * 64,
+        analysis_engine_sha256="e" * 64,
+        analysis_seed_sha256="f" * 64,
+        random_seed=None,
     )
 
 

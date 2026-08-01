@@ -57,6 +57,22 @@
   "policies": [
     {
       "policy_id": "instrument_return",
+      "input_bindings": [
+        {
+          "input_id": "ordered_price_observations",
+          "unit": "price_and_utc_timestamp",
+          "source_contract_id": "chart_v3",
+          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "derived_input": null
+        },
+        {
+          "input_id": "return_series_state",
+          "unit": "ratio_series",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "A profile-bound ordered return series derived only from the bound chart observations, including the exact endpoint, adjustment, distribution, and calendar rules."
+        }
+      ],
       "input_units": ["ordered Saxo prices", "UTC timestamps"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -78,6 +94,29 @@
     },
     {
       "policy_id": "portfolio_return",
+      "input_bindings": [
+        {
+          "input_id": "portfolio_valuations",
+          "unit": "reporting_currency_and_utc_timestamp",
+          "source_contract_id": "performance_timeseries_v4",
+          "field_paths": ["Date", "EndOfDayBalance", "TimeWeightedReturn", "Benchmark"],
+          "derived_input": null
+        },
+        {
+          "input_id": "portfolio_summary",
+          "unit": "reporting_currency_and_ratio",
+          "source_contract_id": "performance_summary_v4",
+          "field_paths": ["AccountValue", "TimeWeightedReturn", "TotalCashBalance"],
+          "derived_input": null
+        },
+        {
+          "input_id": "external_cash_flows",
+          "unit": "reporting_currency_and_year_fraction",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "A complete profile-bound cash-flow ledger where deposits are negative investor cash flows and withdrawals are positive investor cash flows, ordered by UTC economic timestamp."
+        }
+      ],
       "input_units": ["reporting-currency account values", "external cash flows", "UTC timestamps"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -95,6 +134,22 @@
     },
     {
       "policy_id": "risk_ratio",
+      "input_bindings": [
+        {
+          "input_id": "verified_return_series",
+          "unit": "ratio_series",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound price-return or cash-flow-normalized portfolio-return series, including its calendar and missing-period decisions."
+        },
+        {
+          "input_id": "risk_parameters",
+          "unit": "typed_parameters",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound annualization count, confidence level, tail convention, benchmark series, risk-free series, window, and degrees-of-freedom choices used by the named metric."
+        }
+      ],
       "input_units": ["ordered return ratios", "periods per year"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -112,6 +167,29 @@
     },
     {
       "policy_id": "money",
+      "input_bindings": [
+        {
+          "input_id": "account_balances",
+          "unit": "source_currency_amounts",
+          "source_contract_id": "balances_v1",
+          "field_paths": ["TotalValue", "CashBalance", "CashAvailableForTrading", "MarginAvailableForTrading", "FundsAvailableForSettlement", "FundsReservedForSettlement", "Currency"],
+          "derived_input": null
+        },
+        {
+          "input_id": "position_money_components",
+          "unit": "source_currency_amounts",
+          "source_contract_id": "positions_v1",
+          "field_paths": ["PositionBase.Amount", "PositionBase.ExecutionTimeOpen", "PositionBase.OpenPrice", "PositionView.CurrentPrice", "PositionView.Exposure", "PositionView.ProfitLossOnTrade"],
+          "derived_input": null
+        },
+        {
+          "input_id": "normalized_money_ledger",
+          "unit": "reporting_currency_ledger",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "A deduplicated profile-bound ledger of monetary source rows with exact event class, source sign, currency, eligible FX observation, and UTC economic timestamp."
+        }
+      ],
       "input_units": ["Saxo monetary rows", "ISO 4217 currency", "UTC timestamps"],
       "output_unit": "reporting_currency",
       "unit_class": "monetary",
@@ -129,6 +207,15 @@
     },
     {
       "policy_id": "count",
+      "input_bindings": [
+        {
+          "input_id": "eligible_normalized_rows",
+          "unit": "immutable_row_identity_set",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The complete profile-bound set of normalized rows after exact paging, stable-key deduplication, scope, revision, and eligibility checks."
+        }
+      ],
       "input_units": ["immutable normalized rows"],
       "output_unit": "count",
       "unit_class": "count",
@@ -146,6 +233,15 @@
     },
     {
       "policy_id": "duration",
+      "input_bindings": [
+        {
+          "input_id": "ordered_utc_instants",
+          "unit": "utc_timestamp_pair_or_series",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound UTC instants and exchange economic dates used as the duration endpoints."
+        }
+      ],
       "input_units": ["UTC timestamps"],
       "output_unit": "days",
       "unit_class": "duration",
@@ -163,6 +259,15 @@
     },
     {
       "policy_id": "quantity",
+      "input_bindings": [
+        {
+          "input_id": "sizing_constraints",
+          "unit": "typed_quantity_constraints",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound position, quote, contract size, lot size, unit risk, buying-power, margin, FX, and risk-budget constraints used by the named quantity metric."
+        }
+      ],
       "input_units": ["Saxo quantity", "instrument contract size"],
       "output_unit": "units",
       "unit_class": "quantity",
@@ -180,6 +285,22 @@
     },
     {
       "policy_id": "price",
+      "input_bindings": [
+        {
+          "input_id": "captured_quote",
+          "unit": "price_currency_and_utc_timestamp",
+          "source_contract_id": "info_price_v1",
+          "field_paths": ["Quote.Ask", "Quote.Bid", "Quote.Mid", "Quote.DelayedByMinutes", "Quote.PriceType"],
+          "derived_input": null
+        },
+        {
+          "input_id": "eligible_price_bars",
+          "unit": "price_volume_and_utc_timestamp",
+          "source_contract_id": "chart_v3",
+          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "derived_input": null
+        }
+      ],
       "input_units": ["Saxo price", "ISO 4217 currency", "UTC timestamp"],
       "output_unit": "price_currency",
       "unit_class": "monetary",
@@ -197,6 +318,15 @@
     },
     {
       "policy_id": "percentage",
+      "input_bindings": [
+        {
+          "input_id": "verified_ratio_components",
+          "unit": "typed_numerator_and_denominator",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound numerator, denominator, eligibility predicate, currency normalization, sign convention, and measurement interval used by the named percentage metric."
+        }
+      ],
       "input_units": ["verified numerator", "verified denominator"],
       "output_unit": "percent",
       "unit_class": "percentage",
@@ -214,6 +344,15 @@
     },
     {
       "policy_id": "model_probability",
+      "input_bindings": [
+        {
+          "input_id": "seeded_model_state",
+          "unit": "versioned_model_inputs",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound calibration dataset fingerprint, model parameters, future cash-flow schedule, horizon, sample count, engine version, and unsigned 64-bit random seed."
+        }
+      ],
       "input_units": ["frozen model parameters", "verified source series", "explicit random seed"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -231,6 +370,22 @@
     },
     {
       "policy_id": "technical",
+      "input_bindings": [
+        {
+          "input_id": "technical_price_bars",
+          "unit": "ohlcv_and_utc_timestamp",
+          "source_contract_id": "chart_v3",
+          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "derived_input": null
+        },
+        {
+          "input_id": "indicator_parameters",
+          "unit": "typed_indicator_parameters",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound lookback, smoothing, warm-up, price-field, comparison instrument, and tie rules required by the named indicator."
+        }
+      ],
       "input_units": ["ordered Saxo price bars", "declared lookback"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -248,6 +403,29 @@
     },
     {
       "policy_id": "derivative",
+      "input_bindings": [
+        {
+          "input_id": "option_contract_terms",
+          "unit": "strike_expiry_and_contract_identity",
+          "source_contract_id": "options_chain_reference_v1",
+          "field_paths": ["OptionRootId", "ExpiryDates", "SpecificOptions"],
+          "derived_input": null
+        },
+        {
+          "input_id": "underlying_quote",
+          "unit": "price_currency_and_utc_timestamp",
+          "source_contract_id": "info_price_v1",
+          "field_paths": ["Quote.Ask", "Quote.Bid", "Quote.Mid", "Quote.DelayedByMinutes", "Quote.PriceType"],
+          "derived_input": null
+        },
+        {
+          "input_id": "derivative_pricing_parameters",
+          "unit": "typed_pricing_parameters",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound strike, time-to-expiry convention, volatility, rate, carry, option type, exercise style, contract quantity, and pricing-engine version."
+        }
+      ],
       "input_units": ["spot or futures price", "strike", "time in years", "volatility", "rate", "contract quantity"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -265,6 +443,15 @@
     },
     {
       "policy_id": "optimization",
+      "input_bindings": [
+        {
+          "input_id": "optimizer_problem",
+          "unit": "versioned_objective_constraints_and_inputs",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound asset order, expected-return vector, covariance matrix, current weights, objective, equality and inequality constraints, bounds, transaction-cost model, numerical tolerances, and lexicographic tie-break rule."
+        }
+      ],
       "input_units": ["expected return ratios", "covariance", "current weights", "typed constraints"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -282,6 +469,15 @@
     },
     {
       "policy_id": "fixed_income",
+      "input_bindings": [
+        {
+          "input_id": "fixed_income_cashflows",
+          "unit": "cashflow_time_and_compounding_schedule",
+          "source_contract_id": null,
+          "field_paths": [],
+          "derived_input": "The exact profile-bound contractual cash-flow amounts and times, dirty price, yield, compounding frequency, day-count basis, settlement date, and curve inputs."
+        }
+      ],
       "input_units": ["cash-flow schedule", "clean or dirty price", "rate", "time in years"],
       "output_unit": "ratio",
       "unit_class": "ratio",
@@ -304,10 +500,36 @@
       "definition_version": "1",
       "analysis_kinds": ["instrument_price_return", "instrument_risk", "market_comparison", "multi_instrument_comparison"],
       "metrics": [
-        {"metric_id": "price_return", "meaning": "Unadjusted Saxo price change over the declared interval.", "formula": "P_end / P_start - 1; P_start and P_end are the first and last eligible unadjusted prices."},
+        {
+          "metric_id": "price_return",
+          "meaning": "Unadjusted Saxo price change over the declared interval.",
+          "formula": "P_end / P_start - 1; P_start and P_end are the first and last eligible unadjusted prices.",
+          "input_bindings": [
+            {
+              "input_id": "price_return_endpoints",
+              "unit": "price_and_utc_timestamp",
+              "source_contract_id": "chart_v3",
+              "field_paths": ["Time", "CloseBid"],
+              "derived_input": null
+            }
+          ]
+        },
         {"metric_id": "adjusted_price_return", "meaning": "Return from a Saxo series explicitly proved adjusted for the declared corporate actions.", "formula": "AP_end / AP_start - 1 over the proved adjusted-price series."},
         {"metric_id": "total_return", "meaning": "Growth including distributions and supported corporate actions.", "formula": "V_end / V_start - 1 for an explicitly distribution-inclusive source series; otherwise refuse."},
-        {"metric_id": "daily_return", "meaning": "One trading-day labeled return.", "formula": "P_t / P_previous_eligible_close - 1."},
+        {
+          "metric_id": "daily_return",
+          "meaning": "One trading-day labeled return.",
+          "formula": "P_t / P_previous_eligible_close - 1.",
+          "input_bindings": [
+            {
+              "input_id": "daily_return_closes",
+              "unit": "price_and_utc_timestamp",
+              "source_contract_id": "chart_v3",
+              "field_paths": ["Time", "CloseBid"],
+              "derived_input": null
+            }
+          ]
+        },
         {"metric_id": "weekly_return", "meaning": "Return between declared weekly cutoffs.", "formula": "P_week_end / P_previous_week_end - 1."},
         {"metric_id": "monthly_return", "meaning": "Return between declared month-end cutoffs.", "formula": "P_month_end / P_previous_month_end - 1."},
         {"metric_id": "quarterly_return", "meaning": "Return between declared quarter-end cutoffs.", "formula": "P_quarter_end / P_previous_quarter_end - 1."},
@@ -325,8 +547,34 @@
       "analysis_kinds": ["portfolio_performance", "portfolio_attribution", "portfolio_overview", "portfolio_time_machine"],
       "metrics": [
         {"metric_id": "time_weighted_return", "meaning": "Cash-flow-neutral compounded portfolio return.", "formula": "product_i(1 + r_i) - 1, where r_i = (V_i - CF_i) / V_(i-1) - 1 at defined external-flow boundaries."},
-        {"metric_id": "money_weighted_return", "meaning": "Periodic internal rate that discounts all external flows and ending value to zero.", "formula": "Solve sum_i CF_i / (1+r)^t_i + V_end/(1+r)^t_end = 0 using the declared periodic time scale."},
-        {"metric_id": "xirr", "meaning": "Annualized money-weighted return using exact day fractions.", "formula": "Solve sum_i CF_i / (1+r)^((date_i-date_0)/365) = 0 with ending value as the final positive flow."},
+        {
+          "metric_id": "money_weighted_return",
+          "meaning": "Periodic internal rate that discounts starting value, external flows, and ending value to zero.",
+          "formula": "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / (1+r)^t_i) + V_end/(1+r)^t_end; deposits are negative investor cash flows, withdrawals and terminal value are positive.",
+          "input_bindings": [
+            {
+              "input_id": "mwr_cashflow_equation",
+              "unit": "reporting_currency_and_period_fraction",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "The exact starting value V_start at t=0, ending value V_end at t_end, and complete ordered external-flow ledger with nonnegative deposit_i and withdrawal_i magnitudes at exact periodic exponents t_i."
+            }
+          ]
+        },
+        {
+          "metric_id": "xirr",
+          "meaning": "Annualized money-weighted return using exact UTC economic dates and ACT/365 exponents.",
+          "formula": "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / (1+r)^((date_i-date_0).days/365)) + V_end/(1+r)^((date_end-date_0).days/365); deposits are negative and withdrawals plus terminal value are positive.",
+          "input_bindings": [
+            {
+              "input_id": "xirr_cashflow_equation",
+              "unit": "reporting_currency_and_utc_economic_date",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "The exact starting value V_start at date_0, ending value V_end at date_end, and complete ordered external-flow ledger with nonnegative deposit_i and withdrawal_i magnitudes at each UTC economic date_i."
+            }
+          ]
+        },
         {"metric_id": "cagr", "meaning": "Compound annual growth rate over a positive elapsed year fraction.", "formula": "(V_end / V_start)^(1/years) - 1 after the named cash-flow method; refuse nonpositive ratio or years."},
         {"metric_id": "contribution_withdrawal_aware_growth", "meaning": "Portfolio growth after explicit external contributions and withdrawals.", "formula": "V_end - V_start - net_external_flows, with flows converted at their economic timestamps."},
         {"metric_id": "tracking_error", "meaning": "Annualized sample standard deviation of aligned active returns.", "formula": "sample_std(R_subject_i - R_proxy_i) * sqrt(periods_per_year)."},
@@ -508,7 +756,34 @@
       "metrics": [
         {"metric_id": "spread_quality", "meaning": "Spread relative to quote midpoint.", "formula": "100 * (ask-bid)/midpoint; refuse nonpositive midpoint."},
         {"metric_id": "depth_imbalance", "meaning": "Normalized bid-versus-ask market-depth imbalance.", "formula": "100 * (bid_depth-ask_depth)/(bid_depth+ask_depth); refuse absent or zero total depth."},
-        {"metric_id": "liquidity_score", "meaning": "Transparent normalized score from declared spread, depth, and volume components.", "formula": "100 * weighted_sum(normalized declared components), with weights and component bounds stored in parameters."}
+        {
+          "metric_id": "liquidity_score",
+          "meaning": "A fixed 0-to-100 score from spread, eligible depth quantity, and interval volume.",
+          "formula": "100 * (0.50 * clamp(1 - spread_bps/100, 0, 1) + 0.30 * clamp(total_depth_units/10000, 0, 1) + 0.20 * clamp(interval_volume/100000, 0, 1)).",
+          "input_bindings": [
+            {
+              "input_id": "liquidity_quote",
+              "unit": "quote_price_and_delay_minutes",
+              "source_contract_id": "info_price_v1",
+              "field_paths": ["Quote.Ask", "Quote.Bid", "Quote.Mid", "Quote.DelayedByMinutes", "Quote.PriceType"],
+              "derived_input": null
+            },
+            {
+              "input_id": "liquidity_volume",
+              "unit": "units_per_analysis_interval",
+              "source_contract_id": "chart_v3",
+              "field_paths": ["Time", "Volume"],
+              "derived_input": null
+            },
+            {
+              "input_id": "eligible_depth_quantities",
+              "unit": "instrument_units",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "All nonnegative bid and ask depth quantities from the exact authoritative depth source named by an active proof profile; refuse while no such source field is bound."
+            }
+          ]
+        }
       ]
     },
     {
@@ -516,7 +791,20 @@
       "definition_version": "1",
       "analysis_kinds": ["market_microstructure"],
       "metrics": [
-        {"metric_id": "market_depth", "meaning": "Count of eligible quoted depth units or levels under the declared field.", "formula": "sum eligible depth quantity or count eligible levels, as named by output parameters."}
+        {
+          "metric_id": "market_depth",
+          "meaning": "Total eligible quoted bid and ask quantity from an authoritative depth source.",
+          "formula": "sum(q_i for q_i in eligible_bid_ask_depth_quantities where q_i >= 0); refuse when no authoritative depth quantity field is bound.",
+          "input_bindings": [
+            {
+              "input_id": "eligible_bid_ask_depth_quantities",
+              "unit": "instrument_units",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "All bid and ask depth quantities from the exact authoritative source fields named by an active proof profile, after timestamp, staleness, entitlement, and nonnegative-quantity checks."
+            }
+          ]
+        }
       ]
     },
     {
@@ -651,7 +939,20 @@
       "metrics": [
         {"metric_id": "minimum_variance_objective", "meaning": "Portfolio variance at the feasible target weights.", "formula": "w^T Sigma w."},
         {"metric_id": "risk_parity_contribution", "meaning": "Normalized component risk contribution for one target asset.", "formula": "component_risk_i / sum_j(component_risk_j)."},
-        {"metric_id": "target_weight", "meaning": "Proposed feasible portfolio weight for one safe instrument.", "formula": "solver decision variable after exact constraint verification."},
+        {
+          "metric_id": "target_weight",
+          "meaning": "Proposed feasible portfolio weight from a fully bound deterministic optimization problem.",
+          "formula": "w_i from the feasible optimum of the exact profile-bound objective, equality constraints, inequality constraints, and bounds; select the lexicographically smallest asset-ordered weight vector among optima within objective tolerance, and refuse infeasibility or residual above tolerance.",
+          "input_bindings": [
+            {
+              "input_id": "target_weight_problem",
+              "unit": "versioned_objective_constraints_and_inputs",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "The exact asset order, objective, expected-return vector, covariance matrix, current weights, equality and inequality constraints, bounds, transaction costs, objective tolerance, residual tolerance, and lexicographic tie-break rule."
+            }
+          ]
+        },
         {"metric_id": "current_weight", "meaning": "Current position exposure divided by the declared current portfolio denominator.", "formula": "current_exposure_i/current_total_exposure."},
         {"metric_id": "current_to_target_delta", "meaning": "Required change from current to target weight.", "formula": "target_weight_i-current_weight_i."},
         {"metric_id": "optimizer_turnover", "meaning": "One-way portfolio turnover implied by target weights.", "formula": "0.5*sum_i(abs(target_weight_i-current_weight_i))."},
@@ -665,7 +966,20 @@
       "metrics": [
         {"metric_id": "yield_to_maturity", "meaning": "Rate that discounts authoritative future cash flows to the declared price basis.", "formula": "Solve sum cashflow_i/(1+y/frequency)^(frequency*time_i) - declared_price = 0."},
         {"metric_id": "modified_duration", "meaning": "First-order price sensitivity to yield.", "formula": "MacaulayDuration/(1+yield/frequency), with MacaulayDuration=sum(time_i*PV_i)/price."},
-        {"metric_id": "convexity", "meaning": "Second-order price sensitivity to yield.", "formula": "sum(PV-weighted time curvature terms)/price under the declared compounding convention."},
+        {
+          "metric_id": "convexity",
+          "meaning": "Second-order dirty-price sensitivity to yield for periodic compounding.",
+          "formula": "sum_i(CF_i * t_i * (t_i + 1/m) / (1 + y/m)^(m*t_i + 2)) / dirty_price, where m is compounding periods per year and t_i is years from settlement.",
+          "input_bindings": [
+            {
+              "input_id": "convexity_cashflows",
+              "unit": "cashflow_year_fraction_and_periodic_yield",
+              "source_contract_id": null,
+              "field_paths": [],
+              "derived_input": "The exact contractual cash flows CF_i, ACT-profile year fractions t_i from settlement, periodic yield y, integer compounding frequency m greater than zero, and positive dirty_price."
+            }
+          ]
+        },
         {"metric_id": "bond_carry", "meaning": "Expected supported coupon and accrual effect over the explicit horizon with unchanged yield.", "formula": "coupon_cashflows + accrued_interest_change - financing_cost over the horizon."},
         {"metric_id": "roll_down", "meaning": "Modeled price effect of moving down an unchanged supported curve.", "formula": "price_at_shorter_remaining_maturity_same_curve - current_price."},
         {"metric_id": "curve_shock_effect", "meaning": "Modeled money price change under an explicit curve shock.", "formula": "reprice authoritative cash flows at shocked curve - current modeled price."}

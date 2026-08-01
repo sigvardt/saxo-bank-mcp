@@ -42,6 +42,12 @@ def _digest(value: object) -> str:
 
 def _source_path_for_wheel_path(name: str) -> str | None:
     resource_paths = {
+        "saxo_bank_mcp/_analytics_metric_definitions/metric_definitions.json": (
+            "data/analytics/metric_definitions.json"
+        ),
+        "saxo_bank_mcp/_analytics_proof_profiles/proof_profiles.json": (
+            "data/analytics/proof_profiles.json"
+        ),
         "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json": (
             "data/analytics/source_contracts.json"
         ),
@@ -117,6 +123,8 @@ def _installed_files(
             )
             or name
             in {
+                "data/analytics/metric_definitions.json",
+                "data/analytics/proof_profiles.json",
                 "data/analytics/source_contracts.json",
                 "data/saxo/openapi_inventory.json",
             }

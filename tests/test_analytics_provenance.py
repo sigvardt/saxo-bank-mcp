@@ -10,6 +10,7 @@ from uuid import RFC_4122, UUID
 import duckdb
 import pytest
 
+from saxo_bank_mcp import analytics_provenance as provenance_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinitionBinding,
@@ -57,6 +58,7 @@ _ANALYSIS_ID_LENGTH = 35
 _OPAQUE_UUID_VERSION = 4
 _DISTINCT_ID_COUNT = 4
 _OWNER_FILE_MODE = 0o600
+_SHA256_LENGTH = 64
 
 
 def _sha256(value: str) -> str:
@@ -67,9 +69,27 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     return load_analytics_config({"XDG_STATE_HOME": str(tmp_path / "state")})
 
 
-def _registry(*, engine_version: str = "1") -> tuple[ProofRegistry, ProofProfile]:
+def _registry(
+    *,
+    engine_version: str = "1",
+    required_metric_ids: tuple[str, ...] = ("price_return",),
+    definition_output_unit: str | None = None,
+    config: AnalyticsConfig | None = None,
+) -> tuple[ProofRegistry, ProofProfile]:
     definitions = load_metric_definition_catalog()
-    definition = definitions.by_id()["price_return"]
+    if definition_output_unit is not None:
+        changed = definitions.by_id()["price_return"].model_copy(
+            update={"output_unit": definition_output_unit},
+        )
+        definitions = definitions.from_definitions(
+            catalog_version="replay-unit-test-definition",
+            production_metric_ids=definitions.production_metric_ids,
+            definitions=tuple(
+                changed if definition.metric_id == changed.metric_id else definition
+                for definition in definitions.definitions
+            ),
+        )
+    definitions_by_id = definitions.by_id()
     source = SourceContractProofBinding(
         contract_id="chart_v3",
         contract_sha256=_SOURCE_SHA,
@@ -82,11 +102,12 @@ def _registry(*, engine_version: str = "1") -> tuple[ProofRegistry, ProofProfile
         quarantine_reason=None,
         analysis_kind="replay_unit_test",
         schema_version="1",
-        metric_definitions=(
+        metric_definitions=tuple(
             MetricDefinitionBinding(
-                metric_id=definition.metric_id,
-                definition_version=definition.definition_version,
-            ),
+                metric_id=metric_id,
+                definition_version=definitions_by_id[metric_id].definition_version,
+            )
+            for metric_id in required_metric_ids
         ),
         source_contracts=(source,),
         source_revision="revision-a",
@@ -107,24 +128,25 @@ def _registry(*, engine_version: str = "1") -> tuple[ProofRegistry, ProofProfile
         catalog_version="replay-unit-test-1",
         definition_catalog_sha256=definitions.fingerprint_sha256,
         source_catalog_sha256=source_contract_catalog_sha256(),
-        production_metric_ids=(definition.metric_id,),
+        production_metric_ids=required_metric_ids,
         production_analysis_kinds=(profile.analysis_kind,),
         production_artifact_template_ids=(),
         source_field_coverage=(source,),
         profiles=(profile,),
     )
-    return ProofRegistry(definitions=definitions, catalog=catalog), profile
+    registry = (
+        ProofRegistry(definitions=definitions, catalog=catalog)
+        if config is None
+        else ProofRegistry(definitions=definitions, catalog=catalog, config=config)
+    )
+    return registry, profile
 
 
 def _analysis_result() -> AnalysisResult:
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
-    analysis_id = build_analysis_id(
-        {
-            "dataset_fingerprint_sha256": _DATASET_FINGERPRINT,
-            "dataset_id": dataset_id,
-            "source_revision": "revision-a",
-        },
-        {"saxo_analytics": {"version": "1", "code_commit": "abcdef0"}},
+    identity = provenance_module.build_analysis_identity(
+        _identity_inputs(dataset_id),
+        _engine_versions(),
         None,
     )
     source_binding = ProofSourceBinding(
@@ -141,7 +163,7 @@ def _analysis_result() -> AnalysisResult:
     return AnalysisResult(
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         tool_name="saxo_analyze_market",
-        analysis_id=analysis_id,
+        analysis_id=identity.analysis_id,
         analysis_kind="replay_unit_test",
         request=MarketAnalysisRequest(
             request_kind="market",
@@ -203,6 +225,10 @@ def _analysis_result() -> AnalysisResult:
             engine_name="saxo_analytics",
             engine_version="1",
             code_commit="abcdef0",
+            analysis_input_sha256=identity.input_sha256,
+            analysis_engine_sha256=identity.engine_sha256,
+            analysis_seed_sha256=identity.seed_sha256,
+            random_seed=None,
         ),
         assumptions=(),
         is_not_advice=True,
@@ -213,6 +239,18 @@ def _analysis_result() -> AnalysisResult:
         replayable=True,
         next_actions=(),
     )
+
+
+def _identity_inputs(dataset_id: str) -> dict[str, object]:
+    return {
+        "dataset_fingerprint_sha256": _DATASET_FINGERPRINT,
+        "dataset_id": dataset_id,
+        "source_revision": "revision-a",
+    }
+
+
+def _engine_versions() -> dict[str, object]:
+    return {"saxo_analytics": {"version": "1", "code_commit": "abcdef0"}}
 
 
 def _seed_store(config: AnalyticsConfig, result: AnalysisResult) -> None:
@@ -297,10 +335,11 @@ def _seed_store(config: AnalyticsConfig, result: AnalysisResult) -> None:
 
 
 def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
     inputs_a = {
         "dataset_fingerprint_sha256": "1" * 64,
+        "dataset_id": dataset_id,
         "source_revision": "revision-a",
-        "private_balance": "123456.78 DKK",
     }
     inputs_b = dict(reversed(tuple(inputs_a.items())))
     engines = {"saxo_analytics": {"version": "1", "code_commit": "abcdef0"}}
@@ -322,7 +361,6 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
     assert first == reordered
     assert len(first) == _ANALYSIS_ID_LENGTH
     assert first.startswith("an_")
-    assert "123456" not in first
     opaque_uuid = UUID(hex=first.removeprefix("an_"))
     assert opaque_uuid.version == _OPAQUE_UUID_VERSION
     assert opaque_uuid.variant == RFC_4122
@@ -333,12 +371,42 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
 
 @pytest.mark.parametrize("seed", [True, -1, 2**64])
 def test_analysis_id_refuses_invalid_random_seed(seed: int) -> None:
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
     with pytest.raises(ValueError, match="seed"):
         build_analysis_id(
-            {"dataset_fingerprint_sha256": "1" * 64},
-            {"saxo_analytics": {"version": "1", "code_commit": "abcdef0"}},
+            {
+                "dataset_fingerprint_sha256": "1" * 64,
+                "dataset_id": dataset_id,
+                "source_revision": "revision-a",
+            },
+            _engine_versions(),
             seed,
         )
+
+
+def test_analysis_id_refuses_empty_or_private_identity_material() -> None:
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    with pytest.raises(ValueError, match="identity inputs"):
+        build_analysis_id({}, {}, None)
+    with pytest.raises(ValueError, match="engine"):
+        build_analysis_id(_identity_inputs(dataset_id), {}, None)
+    with pytest.raises(ValueError, match="identity input"):
+        build_analysis_id(
+            _identity_inputs(dataset_id) | {"private_balance": "123456.78 DKK"},
+            _engine_versions(),
+            None,
+        )
+
+
+def test_analysis_result_persists_only_value_free_identity_fingerprints() -> None:
+    result = _analysis_result()
+
+    assert len(result.provenance.analysis_input_sha256) == _SHA256_LENGTH
+    assert len(result.provenance.analysis_engine_sha256) == _SHA256_LENGTH
+    assert len(result.provenance.analysis_seed_sha256) == _SHA256_LENGTH
+    serialized = result.model_dump_json()
+    assert _DATASET_FINGERPRINT not in serialized
+    assert "123456" not in serialized
 
 
 def test_replay_reads_owner_store_and_returns_byte_equal_result(tmp_path: Path) -> None:
@@ -404,7 +472,7 @@ def test_replay_refuses_invalidated_or_revised_source(tmp_path: Path) -> None:
 def test_replay_refuses_missing_or_changed_proof_and_quarantine(tmp_path: Path) -> None:
     config = _config(tmp_path)
     result = _analysis_result()
-    registry, profile = _registry()
+    registry, profile = _registry(config=config)
     _seed_store(config, result)
 
     missing_catalog = registry.catalog.model_copy(update={"profiles": ()})
@@ -421,7 +489,7 @@ def test_replay_refuses_missing_or_changed_proof_and_quarantine(tmp_path: Path) 
         )
     assert missing.value.reason_code == "missing_proof_profile"
 
-    changed_registry, _ = _registry(engine_version="2")
+    changed_registry, _ = _registry(engine_version="2", config=config)
     with pytest.raises(AnalysisReplayRefused) as changed:
         replay_analysis(
             result.analysis_id,
@@ -431,10 +499,94 @@ def test_replay_refuses_missing_or_changed_proof_and_quarantine(tmp_path: Path) 
         )
     assert changed.value.reason_code == "engine_binding_changed"
 
-    quarantine_analysis_kind(profile.analysis_kind, "reconciliation mismatch")
+    quarantine_analysis_kind(
+        profile.analysis_kind,
+        "reconciliation mismatch",
+        source_revision="revision-a",
+        config=config,
+    )
     with pytest.raises(AnalysisReplayRefused) as quarantined:
         replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
     assert quarantined.value.reason_code == "reconciliation_mismatch"
+
+
+def test_replay_refuses_unknown_unbound_or_missing_required_metrics(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    registry, _ = _registry()
+    original = result.metrics[0]
+    unknown_result = result.model_copy(
+        update={
+            "metrics": (original.model_copy(update={"metric_id": "unknown_metric"}),),
+        },
+    )
+    _seed_store(config, unknown_result)
+    with pytest.raises(AnalysisReplayRefused) as unknown:
+        replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
+    assert unknown.value.reason_code == "metric_definition_missing"
+
+    second_config = _config(tmp_path / "unbound")
+    extra_result = result.model_copy(
+        update={
+            "metrics": (
+                original,
+                original.model_copy(update={"metric_id": "daily_return"}),
+            ),
+        },
+    )
+    _seed_store(second_config, extra_result)
+    with pytest.raises(AnalysisReplayRefused) as unbound:
+        replay_analysis(
+            result.analysis_id,
+            config=second_config,
+            registry=registry,
+            at=_NOW,
+        )
+    assert unbound.value.reason_code == "metric_not_bound"
+
+    third_config = _config(tmp_path / "missing")
+    required_registry, _ = _registry(
+        required_metric_ids=("price_return", "daily_return"),
+    )
+    _seed_store(third_config, result)
+    with pytest.raises(AnalysisReplayRefused) as missing:
+        replay_analysis(
+            result.analysis_id,
+            config=third_config,
+            registry=required_registry,
+            at=_NOW,
+        )
+    assert missing.value.reason_code == "required_metric_missing"
+
+
+def test_replay_refuses_metric_unit_or_identity_fingerprint_change(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    unit_registry, _ = _registry(definition_output_unit="decimal_ratio")
+    _seed_store(config, result)
+    with pytest.raises(AnalysisReplayRefused) as unit:
+        replay_analysis(result.analysis_id, config=config, registry=unit_registry, at=_NOW)
+    assert unit.value.reason_code == "metric_unit_mismatch"
+
+    identity_config = _config(tmp_path / "identity")
+    registry, _ = _registry()
+    _seed_store(identity_config, result)
+    connection = duckdb.connect(str(identity_config.paths.store_path))
+    try:
+        connection.execute(
+            "UPDATE datasets SET fingerprint_sha256 = ? WHERE dataset_id = ?",
+            ("f" * 64, result.provenance.dataset_id),
+        )
+    finally:
+        connection.close()
+    with pytest.raises(AnalysisReplayRefused) as identity:
+        replay_analysis(
+            result.analysis_id,
+            config=identity_config,
+            registry=registry,
+            at=_NOW,
+        )
+    assert identity.value.reason_code == "analysis_identity_changed"
 
 
 def test_replay_refuses_non_owner_store_permissions(tmp_path: Path) -> None:
