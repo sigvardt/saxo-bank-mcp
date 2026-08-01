@@ -776,14 +776,26 @@ class AnalyticsStore:
         if self._closed:
             raise StoreError("analytics store is closed")
 
-    def _current_storage_bytes(self) -> int:
-        return sum(path.stat().st_size for path in self._owner_managed_files())
+    @classmethod
+    def ensure_owner_capacity(
+        cls,
+        config: AnalyticsConfig,
+        incoming_bytes: int,
+    ) -> None:
+        """Refuse a write when all owner-managed analytics files exceed quota."""
+        validated = AnalyticsConfig.model_validate(config)
+        current_bytes = sum(path.stat().st_size for path in cls._owner_managed_files_for(validated))
+        if not validated.limits.can_accept_ingestion(current_bytes, incoming_bytes):
+            raise StoreQuotaError(
+                "analytics store quota refuses the write without deleting data",
+            )
 
-    def _owner_managed_files(self) -> set[Path]:
+    @classmethod
+    def _owner_managed_files_for(cls, config: AnalyticsConfig) -> set[Path]:
         paths: set[Path] = set()
         for root in {
-            self._config.paths.analytics_root,
-            self._config.paths.artifacts_dir,
+            config.paths.analytics_root,
+            config.paths.artifacts_dir,
         }:
             paths.update(
                 path.resolve(strict=True)
@@ -791,12 +803,12 @@ class AnalyticsStore:
                 if path.is_file() and not path.is_symlink()
             )
 
-        store_path = self._config.paths.store_path
+        store_path = config.paths.store_path
         candidates = {
             store_path,
             Path(f"{store_path}.wal"),
             store_writer_lock_path(store_path),
-            *self._migration_resource_files(store_path),
+            *cls._migration_resource_files(store_path),
         }
         paths.update(
             path.resolve(strict=True)
@@ -834,13 +846,10 @@ class AnalyticsStore:
         reserved_bytes = (
             self._transaction_reserved_bytes if self._transaction_owner == get_ident() else 0
         )
-        if not self._config.limits.can_accept_ingestion(
-            self._current_storage_bytes(),
+        self.ensure_owner_capacity(
+            self._config,
             reserved_bytes + incoming_bytes,
-        ):
-            raise StoreQuotaError(
-                "analytics store quota refuses the write without deleting data",
-            )
+        )
         if self._transaction_owner == get_ident():
             self._transaction_reserved_bytes += incoming_bytes
 
@@ -1297,9 +1306,8 @@ class AnalyticsStore:
                 raise StoreValidationError(
                     "persisted source quality metadata is invalid",
                 ) from error
-            if (
-                is_info_price
-                and proof != AnalyticsStore._canonical_persisted_info_price_quality(row, payload)
+            if is_info_price and proof != AnalyticsStore._canonical_persisted_info_price_quality(
+                row, payload
             ):
                 raise StoreValidationError(
                     "persisted source quality metadata is invalid",

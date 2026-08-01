@@ -22,7 +22,7 @@ from saxo_bank_mcp.analytics_models import (
     UniverseId,
     new_safe_handle,
 )
-from saxo_bank_mcp.analytics_store import AnalyticsStore
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _MAX_UNIVERSE_NAME_LENGTH: Final = 100
@@ -232,6 +232,7 @@ class ResearchUniverseStore:
             next_handles = (
                 tuple(handle for handle in current_handles if handle not in set(remove)) + add
             )
+            self._require_capacity(current.name, next_handles)
             next_revision = _new_revision(validated_id, next_handles)
             connection.execute(
                 """
@@ -290,11 +291,12 @@ class ResearchUniverseStore:
 
     def _require_capacity(self, name: str, handles: Sequence[str]) -> None:
         incoming_bytes = len(name.encode()) + len(handles) * 64
-        current_bytes = self._config.paths.store_path.stat().st_size
-        if not self._config.limits.can_accept_ingestion(current_bytes, incoming_bytes):
+        try:
+            AnalyticsStore.ensure_owner_capacity(self._config, incoming_bytes)
+        except StoreQuotaError as error:
             raise UniverseValidationError(
                 "analytics store quota refuses the universe write",
-            )
+            ) from error
 
     @staticmethod
     def _require_expected_revision(

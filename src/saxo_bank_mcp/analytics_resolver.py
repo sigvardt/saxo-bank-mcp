@@ -5,13 +5,13 @@ import hashlib
 import os
 import re
 import unicodedata
-from collections.abc import AsyncIterator, Generator, Mapping, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, Protocol, cast
+from typing import Final, cast
 
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -19,9 +19,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_migrations import store_writer_lock_path
 from saxo_bank_mcp.analytics_models import HandleKind, InstrumentHandle, new_safe_handle
-from saxo_bank_mcp.analytics_store import AnalyticsStore
+from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_source_contracts import (
+    source_contract_fingerprint,
+    source_contracts_by_id,
+)
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 
 _REFERENCE_CONTRACT: Final = "reference_instruments_v1"
+_REFERENCE_RECEIPT: Final = source_contracts_by_id()[_REFERENCE_CONTRACT]
+_REFERENCE_CONTRACT_SHA256: Final = source_contract_fingerprint(_REFERENCE_RECEIPT)
 _MAX_QUERY_LENGTH: Final = 200
 _MAX_FILTERS: Final = 25
 _SAFE_FILTER_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+ -]{1,64}$")
@@ -88,25 +95,6 @@ class ResolutionResult(_StrictModel):
     status: ResolutionStatus
     matches: tuple[ResolvedInstrument, ...]
     issues: tuple[ResolutionIssue, ...]
-
-
-class InstrumentSourcePage(Protocol):
-    @property
-    def rows(self) -> tuple[Mapping[str, object], ...]: ...
-
-    @property
-    def source_revision(self) -> str: ...
-
-    @property
-    def source_timestamp(self) -> datetime: ...
-
-
-class InstrumentSource(Protocol):
-    def fetch(
-        self,
-        contract_id: str,
-        request: Mapping[str, object],
-    ) -> AsyncIterator[InstrumentSourcePage]: ...
 
 
 class _SourceInstrument(BaseModel):
@@ -216,6 +204,28 @@ def _display_label(instrument: _SourceInstrument) -> tuple[str | None, str | Non
     return (None if safe_symbol == "Unnamed" else safe_symbol, safe_exchange, label)
 
 
+def _stored_metadata(
+    instrument: _SourceInstrument,
+    current: _CatalogEntry | None,
+) -> _StoredInstrumentMetadata:
+    safe_symbol, safe_exchange, label = _display_label(instrument)
+    new_aliases = {
+        _normalize_alias(value)
+        for value in (instrument.symbol, instrument.description)
+        if value and value.strip()
+    }
+    if current is not None:
+        new_aliases.update(current.metadata.aliases)
+    return _StoredInstrumentMetadata(
+        identifier=instrument.identifier,
+        asset_type=instrument.asset_type,
+        symbol=safe_symbol,
+        exchange=safe_exchange,
+        display_label=label,
+        aliases=tuple(sorted(new_aliases)),
+    )
+
+
 class _InstrumentCatalog:
     def __init__(self, config: AnalyticsConfig) -> None:
         self._config = config
@@ -265,6 +275,24 @@ class _InstrumentCatalog:
         with _write_transaction(self._config) as connection:
             existing = self._entries_in_connection(connection)
             by_identity = {entry.identity: entry for entry in existing}
+            incoming_bytes = 0
+            for instrument in instruments:
+                current = by_identity.get(
+                    (instrument.asset_type, instrument.identifier),
+                )
+                metadata = _stored_metadata(instrument, current)
+                if current is None or metadata != current.metadata:
+                    incoming_bytes += len(metadata.model_dump_json().encode())
+            if incoming_bytes:
+                try:
+                    AnalyticsStore.ensure_owner_capacity(
+                        self._config,
+                        incoming_bytes,
+                    )
+                except StoreQuotaError as error:
+                    raise ResolutionError(
+                        "analytics store quota refuses the instrument write",
+                    ) from error
             results: list[ResolvedInstrument] = []
             changed = False
             for instrument in instruments:
@@ -318,21 +346,7 @@ class _InstrumentCatalog:
         source_timestamp: datetime,
     ) -> tuple[ResolvedInstrument, bool]:
         safe_symbol, safe_exchange, label = _display_label(instrument)
-        new_aliases = {
-            _normalize_alias(value)
-            for value in (instrument.symbol, instrument.description)
-            if value and value.strip()
-        }
-        if current is not None:
-            new_aliases.update(current.metadata.aliases)
-        metadata = _StoredInstrumentMetadata(
-            identifier=instrument.identifier,
-            asset_type=instrument.asset_type,
-            symbol=safe_symbol,
-            exchange=safe_exchange,
-            display_label=label,
-            aliases=tuple(sorted(new_aliases)),
-        )
+        metadata = _stored_metadata(instrument, current)
         metadata_json = metadata.model_dump_json()
         fingerprint = _sha256(metadata_json)
         handle = (
@@ -343,10 +357,6 @@ class _InstrumentCatalog:
         renamed = current is not None and current.metadata != metadata
         changed = current is None or renamed
         if changed:
-            incoming_bytes = len(metadata_json.encode())
-            current_bytes = self._config.paths.store_path.stat().st_size
-            if not self._config.limits.can_accept_ingestion(current_bytes, incoming_bytes):
-                raise ResolutionError("analytics store quota refuses the instrument write")
             connection.execute(
                 """
                 INSERT OR REPLACE INTO safe_instruments (
@@ -432,7 +442,7 @@ def _source_request(query: str, asset_types: tuple[str, ...]) -> dict[str, objec
 
 
 async def _fetch_instruments(
-    source: InstrumentSource,
+    source: SaxoAnalyticsProvider,
     request: Mapping[str, object],
 ) -> tuple[tuple[_SourceInstrument, ...], str | None, datetime | None]:
     pages = [
@@ -442,6 +452,14 @@ async def _fetch_instruments(
             request,
         )
     ]
+    if any(
+        page.contract_id != _REFERENCE_CONTRACT
+        or page.source_kind != "reference_instruments"
+        or page.operation_id != _REFERENCE_RECEIPT.operation_id
+        or page.contract_sha256 != _REFERENCE_CONTRACT_SHA256
+        for page in pages
+    ):
+        raise ResolutionError("Saxo instrument source receipt is invalid")
     rows = _parse_source_rows(tuple(row for page in pages for row in page.rows))
     if not pages:
         return rows, None, None
@@ -514,8 +532,10 @@ def _resolution_status(
 class InstrumentResolver:
     """Resolve Saxo reference rows into stable owner-local safe handles."""
 
-    def __init__(self, source: InstrumentSource, config: AnalyticsConfig) -> None:
+    def __init__(self, source: SaxoAnalyticsProvider, config: AnalyticsConfig) -> None:
         """Bind the Saxo-only source and owner-local instrument catalog."""
+        if type(source) is not SaxoAnalyticsProvider:
+            raise TypeError("instrument resolver requires SaxoAnalyticsProvider")
         self._source = source
         self._catalog = _InstrumentCatalog(config)
 
@@ -530,7 +550,12 @@ class InstrumentResolver:
             raise ValueError("instrument query is empty or too long")
         selected_asset_types = _normalized_filters(asset_types, field_name="asset type")
         selected_exchanges = _normalized_filters(exchanges, field_name="exchange")
-        prior = self._catalog.entries_for_alias(clean_query)
+        prior = tuple(
+            entry
+            for entry in self._catalog.entries_for_alias(clean_query)
+            if (not selected_asset_types or entry.metadata.asset_type in selected_asset_types)
+            and (not selected_exchanges or entry.metadata.exchange in selected_exchanges)
+        )
         rows, source_revision, source_timestamp = await _fetch_instruments(
             self._source,
             _source_request(clean_query, selected_asset_types),
@@ -577,8 +602,6 @@ class InstrumentResolver:
 
 __all__ = (
     "InstrumentResolver",
-    "InstrumentSource",
-    "InstrumentSourcePage",
     "InstrumentState",
     "ResolutionError",
     "ResolutionIssue",

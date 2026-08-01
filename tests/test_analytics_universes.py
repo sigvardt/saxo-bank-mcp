@@ -1,62 +1,60 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
+import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
 
+import httpx2
 import pytest
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_models import HandleKind, new_safe_handle
-from saxo_bank_mcp.analytics_resolver import (
-    InstrumentResolver,
-    InstrumentSource,
-    InstrumentSourcePage,
-)
+from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_resolver import InstrumentResolver
 from saxo_bank_mcp.analytics_universes import (
     ResearchUniverseStore,
     UniverseConflictError,
     UniverseNotFoundError,
     UniverseValidationError,
 )
-
-_SOURCE_AT = datetime(2026, 7, 30, 8, tzinfo=UTC)
-
-
-@dataclass(frozen=True, slots=True)
-class _Page:
-    rows: tuple[Mapping[str, object], ...]
-    source_revision: str = "fetch:fixture"
-    source_timestamp: datetime = _SOURCE_AT
+from saxo_bank_mcp.endpoint_registry import EndpointOperation
 
 
-class _Provider:
+class _Executor:
     def __init__(self, identifier: int, symbol: str) -> None:
         self._identifier = identifier
         self._symbol = symbol
 
-    async def fetch(
+    async def __call__(
         self,
-        contract_id: str,
-        request: Mapping[str, object],
-    ) -> AsyncIterator[InstrumentSourcePage]:
-        del contract_id, request
-        yield cast(
-            "InstrumentSourcePage",
-            _Page(
-                rows=(
-                    {
-                        "Identifier": self._identifier,
-                        "AssetType": "Stock",
-                        "Description": "Fixture instrument",
-                        "Symbol": self._symbol,
-                        "ExchangeId": "XNAS",
-                    },
-                ),
-            ),
+        operation: EndpointOperation,
+        request_target: str,
+        params: Mapping[str, str],
+    ) -> httpx2.Response:
+        del operation, request_target, params
+        return httpx2.Response(
+            200,
+            content=json.dumps(
+                {
+                    "Data": [
+                        {
+                            "Identifier": self._identifier,
+                            "AssetType": "Stock",
+                            "Description": "Fixture instrument",
+                            "Symbol": self._symbol,
+                            "ExchangeId": "XNAS",
+                        },
+                    ],
+                },
+            ).encode(),
+            request=httpx2.Request("GET", "https://unit.test/registered"),
         )
+
+
+def _provider(identifier: int, symbol: str) -> SaxoAnalyticsProvider:
+    return SaxoAnalyticsProvider(
+        request_executor=_Executor(identifier, symbol),
+    )
 
 
 def _config(tmp_path: Path) -> AnalyticsConfig:
@@ -69,10 +67,7 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
 
 
 async def _handle(config: AnalyticsConfig, identifier: int, symbol: str) -> str:
-    resolver = InstrumentResolver(
-        cast("InstrumentSource", _Provider(identifier, symbol)),
-        config,
-    )
+    resolver = InstrumentResolver(_provider(identifier, symbol), config)
     result = await resolver.resolve_instruments(symbol, (), ())
     return result.matches[0].instrument_handle
 
@@ -159,3 +154,38 @@ async def test_delete_is_revision_guarded(tmp_path: Path) -> None:
     assert universes.list_universes() == ()
     with pytest.raises(UniverseNotFoundError):
         universes.delete_universe(created.universe_id, created.revision)
+
+
+@pytest.mark.anyio
+async def test_sparse_owner_artifact_refuses_universe_create(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    handle = await _handle(config, 101, "ONE")
+    universes = ResearchUniverseStore(config)
+    artifact = config.paths.artifacts_dir / "quota.bin"
+    with artifact.open("wb") as quota_file:
+        quota_file.truncate(config.limits.store_quota_bytes)
+    artifact.chmod(0o600)
+
+    with pytest.raises(UniverseValidationError, match="quota"):
+        universes.create_universe("Core", (handle,))
+
+
+@pytest.mark.anyio
+async def test_sparse_owner_artifact_refuses_universe_update(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first_handle = await _handle(config, 101, "ONE")
+    second_handle = await _handle(config, 202, "TWO")
+    universes = ResearchUniverseStore(config)
+    created = universes.create_universe("Core", (first_handle,))
+    artifact = config.paths.artifacts_dir / "quota.bin"
+    with artifact.open("wb") as quota_file:
+        quota_file.truncate(config.limits.store_quota_bytes)
+    artifact.chmod(0o600)
+
+    with pytest.raises(UniverseValidationError, match="quota"):
+        universes.update_universe(
+            created.universe_id,
+            additions=(second_handle,),
+            removals=(),
+            expected_revision=created.revision,
+        )
