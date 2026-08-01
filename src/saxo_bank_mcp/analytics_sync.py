@@ -337,16 +337,27 @@ async def sync_price_bars(  # noqa: PLR0913
         raise SyncLimitError("synchronous market data row limit exceeded")
     _preflight_market_capacity(config, requested_rows)
     selector = _instrument_selector(config, instrument_handle)
-    prior = _existing_bar_state(config, instrument_handle, interval, start, end)
-    prior_page_ids = _latest_bar_page_ids(
+    prior_bar_revisions = _latest_visible_bar_revisions(
         config,
         instrument_handle,
         interval,
         start,
         end,
     )
+    prior = _existing_bar_state(prior_bar_revisions, start, end)
     refresh_start = (
         start if prior is None or prior.coverage_start > start else max(start, prior.refresh_start)
+    )
+    retained_bar_revisions = {
+        bar_time: revision
+        for bar_time, revision in prior_bar_revisions.items()
+        if start <= bar_time < refresh_start
+    }
+    prior_page_ids = _latest_bar_page_ids(
+        config,
+        instrument_handle,
+        interval,
+        prior_bar_revisions,
     )
     refresh_rows = _row_bound(refresh_start, end, interval)
     capture_time = _require_utc_clock(clock())
@@ -386,8 +397,14 @@ async def sync_price_bars(  # noqa: PLR0913
         end,
         refreshed_series,
         source_rows,
-        refresh_start,
+        retained_bar_revisions,
     )
+    visible_bar_revisions = dict(retained_bar_revisions)
+    visible_bar_revisions.update(
+        {bar.bar_time: pages[0].capture_revision for bar in refreshed_series.bars},
+    )
+    if set(visible_bar_revisions) != {bar.bar_time for bar in series.bars}:
+        raise SyncError("visible price-bar lineage does not match normalized rows")
     coverage = _price_series_coverage(series, start, end)
     correction_state = {
         "prior_coverage": (
@@ -431,6 +448,7 @@ async def sync_price_bars(  # noqa: PLR0913
         prior_page_ids=prior_page_ids,
         normalized_series=refreshed_series,
         coverage=coverage,
+        visible_bar_revisions=visible_bar_revisions,
     )
     summary = PriceBarDatasetSummary(
         dataset_id=dataset_id,
@@ -821,19 +839,11 @@ def get_dataset(
         raise SyncValidationError("dataset kind is not supported")
     instrument_handle = _validate_instrument_handle(metadata.get("instrument_handle"))
     interval = ChartInterval(_required_text(metadata.get("interval"), "dataset interval"))
-    start = _required_utc_text(metadata.get("requested_start"), "dataset coverage")
-    end = _required_utc_text(metadata.get("requested_end"), "dataset coverage")
-    refresh_start = _required_utc_text(
-        metadata.get("refresh_start"),
-        "dataset refresh coverage",
+    visible_bar_revisions = _stored_visible_bar_revisions(
+        metadata.get("visible_bar_revisions"),
     )
-    capture_revision = _required_text(
-        metadata.get("capture_revision"),
-        "dataset capture revision",
-    )
-    prior_page_ids = _stored_text_tuple(
-        metadata.get("prior_page_ids"),
-        "dataset prior source pages",
+    bar_times_us, capture_revisions = _bar_lineage_query_values(
+        visible_bar_revisions,
     )
     offset = (page - 1) * limit
     connection = _connect(config, read_only=True)
@@ -841,14 +851,10 @@ def get_dataset(
         total_row = connection.execute(
             _PRICE_BAR_COUNT_SQL,
             (
-                capture_revision,
+                bar_times_us,
+                capture_revisions,
                 instrument_handle,
                 interval.value,
-                start,
-                end,
-                capture_revision,
-                list(prior_page_ids),
-                refresh_start,
             ),
         ).fetchone()
         rows = cast(
@@ -856,14 +862,10 @@ def get_dataset(
             connection.execute(
                 _PRICE_BAR_PAGE_SQL,
                 (
-                    capture_revision,
+                    bar_times_us,
+                    capture_revisions,
                     instrument_handle,
                     interval.value,
-                    start,
-                    end,
-                    capture_revision,
-                    list(prior_page_ids),
-                    refresh_start,
                     limit,
                     offset,
                 ),
@@ -874,6 +876,8 @@ def get_dataset(
     if total_row is None or not isinstance(total_row[0], int):
         raise SyncError("dataset row count is invalid")
     total_rows = total_row[0]
+    if total_rows != len(visible_bar_revisions):
+        raise SyncError("stored visible price-bar lineage is invalid")
     parsed_rows = tuple(
         PriceBarDatasetRow(
             instrument_handle=_required_text(row[0], "stored instrument handle"),
@@ -1108,13 +1112,13 @@ def _instrument_selector(
         raise SyncError("stored instrument selector is invalid") from error
 
 
-def _existing_bar_state(
+def _latest_visible_bar_revisions(
     config: AnalyticsConfig,
     instrument_handle: str,
     interval: ChartInterval,
     start: datetime,
     end: datetime,
-) -> _ExistingBarState | None:
+) -> dict[datetime, str]:
     connection = _connect(config, read_only=True)
     try:
         candidates = cast(
@@ -1140,7 +1144,6 @@ def _existing_bar_state(
                 (instrument_handle, _CHART_CONTRACT_ID, end, start),
             ).fetchall(),
         )
-        metadata: dict[str, object] | None = None
         for row in candidates:
             candidate = _stored_sync_metadata(row[0])
             if (
@@ -1148,56 +1151,28 @@ def _existing_bar_state(
                 and candidate.get("instrument_handle") == instrument_handle
                 and candidate.get("interval") == interval.value
             ):
-                metadata = candidate
-                break
-        if metadata is None:
-            return None
-        capture_revision = _required_text(
-            metadata.get("capture_revision"),
-            "dataset capture revision",
-        )
-        prior_page_ids = _stored_text_tuple(
-            metadata.get("prior_page_ids"),
-            "dataset prior source pages",
-        )
-        dataset_refresh_start = _required_utc_text(
-            metadata.get("refresh_start"),
-            "dataset refresh coverage",
-        )
-        visible_rows = cast(
-            "list[tuple[object, ...]]",
-            connection.execute(
-                _PRICE_BAR_RANKED_SQL
-                + """
-                    SELECT
-                        bar_time_us,
-                        min(bar_time_us) OVER (),
-                        max(bar_time_us) OVER ()
-                    FROM ranked
-                    WHERE revision_rank = 1
-                    ORDER BY bar_time_us DESC
-                    LIMIT 2
-                """,
-                (
-                    capture_revision,
-                    instrument_handle,
-                    interval.value,
-                    start,
-                    end,
-                    capture_revision,
-                    list(prior_page_ids),
-                    dataset_refresh_start,
-                ),
-            ).fetchall(),
-        )
+                return _stored_visible_bar_revisions(
+                    candidate.get("visible_bar_revisions"),
+                )
     finally:
         connection.close()
-    if not visible_rows:
+    return {}
+
+
+def _existing_bar_state(
+    visible_bar_revisions: Mapping[datetime, str],
+    start: datetime,
+    end: datetime,
+) -> _ExistingBarState | None:
+    visible_times = sorted(
+        bar_time for bar_time in visible_bar_revisions if start <= bar_time <= end
+    )
+    if not visible_times:
         return None
     return _ExistingBarState(
-        coverage_start=_epoch_us(visible_rows[0][1]),
-        coverage_end=_epoch_us(visible_rows[0][2]),
-        refresh_start=_epoch_us(visible_rows[-1][0]),
+        coverage_start=visible_times[0],
+        coverage_end=visible_times[-1],
+        refresh_start=(visible_times[-2] if len(visible_times) > 1 else visible_times[-1]),
     )
 
 
@@ -1217,6 +1192,21 @@ def _stored_sync_metadata(payload_json: object) -> dict[str, object]:
     return cast("dict[str, object]", sync_metadata)
 
 
+def _stored_visible_bar_revisions(value: object) -> dict[datetime, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SyncError("stored visible price-bar lineage is invalid")
+    revisions: dict[datetime, str] = {}
+    for raw_time, raw_revision in cast("dict[str, object]", value).items():
+        bar_time = _required_utc_text(raw_time, "stored visible price-bar time")
+        revisions[bar_time] = _required_text(
+            raw_revision,
+            "stored visible price-bar revision",
+        )
+    return revisions
+
+
 def _merged_price_series(  # noqa: PLR0913
     config: AnalyticsConfig,
     instrument_handle: str,
@@ -1225,14 +1215,13 @@ def _merged_price_series(  # noqa: PLR0913
     end: datetime,
     refreshed: NormalizedPriceSeries,
     refreshed_rows: Sequence[Mapping[str, object]],
-    refresh_start: datetime,
+    retained_bar_revisions: Mapping[datetime, str],
 ) -> NormalizedPriceSeries:
     retained_rows = _latest_stored_price_rows(
         config,
         instrument_handle,
         interval,
-        start,
-        end,
+        retained_bar_revisions,
     )
     if not retained_rows:
         return refreshed
@@ -1241,8 +1230,7 @@ def _merged_price_series(  # noqa: PLR0913
         bar_time = _parse_source_time(
             _required_text(row.get("Time"), "stored price-bar time"),
         )
-        if bar_time < refresh_start:
-            rows_by_time[bar_time] = row
+        rows_by_time[bar_time] = row
     for row in refreshed_rows:
         bar_time = _parse_source_time(
             _required_text(row.get("Time"), "refreshed price-bar time"),
@@ -1271,55 +1259,43 @@ def _latest_stored_price_rows(
     config: AnalyticsConfig,
     instrument_handle: str,
     interval: ChartInterval,
-    start: datetime,
-    end: datetime,
+    visible_bar_revisions: Mapping[datetime, str],
 ) -> tuple[dict[str, object], ...]:
+    if not visible_bar_revisions:
+        return ()
+    bar_times_us, capture_revisions = _bar_lineage_query_values(
+        visible_bar_revisions,
+    )
     connection = _connect(config, read_only=True)
     try:
         rows = cast(
             "list[tuple[object, ...]]",
             connection.execute(
-                """
-                WITH ranked AS (
+                _VISIBLE_PRICE_BAR_SQL
+                + """
                     SELECT
-                        epoch_us(b.bar_time) AS bar_time_us,
-                        b.open_value,
-                        b.high_value,
-                        b.low_value,
-                        b.close_value,
-                        b.volume_value,
-                        p.payload_json,
-                        row_number() OVER (
-                            PARTITION BY b.instrument_handle, b.bar_time, b.duration
-                            ORDER BY
-                                p.source_timestamp DESC,
-                                p.ingested_at DESC,
-                                b.page_id DESC
-                        ) AS revision_rank
-                    FROM price_bars AS b
-                    JOIN source_pages AS p ON p.page_id = b.page_id
-                    WHERE
-                        b.instrument_handle = ?
-                        AND b.duration = ?
-                        AND b.bar_time BETWEEN ? AND ?
-                )
-                SELECT
-                    bar_time_us,
-                    open_value,
-                    high_value,
-                    low_value,
-                    close_value,
-                    volume_value,
-                    payload_json
-                FROM ranked
-                WHERE revision_rank = 1
-                ORDER BY bar_time_us
+                        bar_time_us,
+                        open_value,
+                        high_value,
+                        low_value,
+                        close_value,
+                        volume_value,
+                        payload_json
+                    FROM visible
+                    ORDER BY bar_time_us
                 """,
-                (instrument_handle, interval.value, start, end),
+                (
+                    bar_times_us,
+                    capture_revisions,
+                    instrument_handle,
+                    interval.value,
+                ),
             ).fetchall(),
         )
     finally:
         connection.close()
+    if len(rows) != len(visible_bar_revisions):
+        raise SyncError("stored visible price-bar lineage is invalid")
     return tuple(
         {
             "CloseBid": _required_float(row[4]),
@@ -1363,40 +1339,31 @@ def _latest_bar_page_ids(
     config: AnalyticsConfig,
     instrument_handle: str,
     interval: ChartInterval,
-    start: datetime,
-    end: datetime,
+    visible_bar_revisions: Mapping[datetime, str],
 ) -> tuple[str, ...]:
+    if not visible_bar_revisions:
+        return ()
+    bar_times_us, capture_revisions = _bar_lineage_query_values(
+        visible_bar_revisions,
+    )
     connection = _connect(config, read_only=True)
     try:
         rows = connection.execute(
-            """
-            WITH ranked AS (
-                SELECT
-                    b.page_id,
-                    row_number() OVER (
-                        PARTITION BY b.instrument_handle, b.bar_time, b.duration
-                        ORDER BY
-                            p.source_timestamp DESC,
-                            p.ingested_at DESC,
-                            b.page_id DESC
-                    ) AS revision_rank
-                FROM price_bars AS b
-                JOIN source_pages AS p ON p.page_id = b.page_id
-                WHERE
-                    b.instrument_handle = ?
-                    AND b.duration = ?
-                    AND b.bar_time BETWEEN ? AND ?
-            )
-            SELECT DISTINCT page_id
-            FROM ranked
-            WHERE revision_rank = 1
-            ORDER BY page_id
-            """,
-            (instrument_handle, interval.value, start, end),
+            _PRICE_BAR_PAGE_ID_SQL,
+            (
+                bar_times_us,
+                capture_revisions,
+                instrument_handle,
+                interval.value,
+            ),
         ).fetchall()
     finally:
         connection.close()
-    return tuple(_required_text(row[0], "stored source page ID") for row in rows)
+    if len(rows) != len(visible_bar_revisions):
+        raise SyncError("stored visible price-bar lineage is invalid")
+    return tuple(
+        sorted({_required_text(row[1], "stored source page ID") for row in rows}),
+    )
 
 
 def _capture_fingerprints(
@@ -1460,6 +1427,7 @@ def _persist_chart_capture(  # noqa: PLR0913
     prior_page_ids: Sequence[str],
     normalized_series: NormalizedPriceSeries,
     coverage: tuple[datetime, datetime],
+    visible_bar_revisions: Mapping[datetime, str],
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("chart capture contains no source page")
@@ -1477,6 +1445,10 @@ def _persist_chart_capture(  # noqa: PLR0913
         "requested_end": end.isoformat(),
         "requested_start": start.isoformat(),
         "return_series_label": "price_return",
+        "visible_bar_revisions": {
+            bar_time.isoformat(): revision
+            for bar_time, revision in sorted(visible_bar_revisions.items())
+        },
     }
     return _persist_market_capture(
         config=config,
@@ -2126,19 +2098,27 @@ def _warning_tuple(value: object) -> tuple[str, ...]:
     return tuple(warnings)
 
 
-def _stored_text_tuple(value: object, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise SyncError(f"{label} is invalid")
-    items = cast("list[object]", value)
-    if any(not isinstance(item, str) or not item for item in items):
-        raise SyncError(f"{label} is invalid")
-    return tuple(cast("list[str]", items))
-
-
 def _epoch_us(value: object) -> datetime:
     if type(value) is not int:
         raise SyncError("stored dataset timestamp is invalid")
     return datetime.fromtimestamp(value / 1_000_000, UTC)
+
+
+def _datetime_epoch_us(value: datetime) -> int:
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise SyncError("visible price-bar timestamp is invalid")
+    elapsed = value - datetime(1970, 1, 1, tzinfo=UTC)
+    return (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
+
+
+def _bar_lineage_query_values(
+    visible_bar_revisions: Mapping[datetime, str],
+) -> tuple[list[int], list[str]]:
+    entries = sorted(visible_bar_revisions.items())
+    return (
+        [_datetime_epoch_us(bar_time) for bar_time, _revision in entries],
+        [revision for _bar_time, revision in entries],
+    )
 
 
 def _optional_float(value: object) -> float | None:
@@ -2153,45 +2133,47 @@ def _required_float(value: object) -> float:
     return float(value)
 
 
-_PRICE_BAR_RANKED_SQL: Final = """
-    WITH ranked AS (
+_VISIBLE_PRICE_BAR_SQL: Final = """
+    WITH lineage AS (
+        SELECT
+            unnest(?::BIGINT[]) AS bar_time_us,
+            unnest(?::VARCHAR[]) AS capture_revision
+    ),
+    visible AS (
         SELECT
             b.instrument_handle,
-            epoch_us(b.bar_time) AS bar_time_us,
+            lineage.bar_time_us,
             b.open_value,
             b.high_value,
             b.low_value,
             b.close_value,
             b.volume_value,
-            row_number() OVER (
-                PARTITION BY b.instrument_handle, b.bar_time, b.duration
-                ORDER BY
-                    (p.source_revision = ?) DESC,
-                    p.source_timestamp DESC,
-                    p.ingested_at DESC,
-                    b.page_id DESC
-            ) AS revision_rank
-        FROM price_bars AS b
-        JOIN source_pages AS p ON p.page_id = b.page_id
+            p.payload_json,
+            b.page_id
+        FROM lineage
+        JOIN price_bars AS b ON epoch_us(b.bar_time) = lineage.bar_time_us
+        JOIN source_pages AS p ON
+            p.page_id = b.page_id
+            AND p.source_revision = lineage.capture_revision
         WHERE
             b.instrument_handle = ?
             AND b.duration = ?
-            AND b.bar_time BETWEEN ? AND ?
-            AND (
-                p.source_revision = ?
-                OR (
-                    p.page_id = ANY(?)
-                    AND b.bar_time < ?
-                )
-            )
     )
 """
 _PRICE_BAR_COUNT_SQL: Final = (
-    _PRICE_BAR_RANKED_SQL  # noqa: S608
-    + "SELECT count(*) FROM ranked WHERE revision_rank = 1"
+    _VISIBLE_PRICE_BAR_SQL  # noqa: S608
+    + "SELECT count(*) FROM visible"
+)
+_PRICE_BAR_PAGE_ID_SQL: Final = (
+    _VISIBLE_PRICE_BAR_SQL  # noqa: S608
+    + """
+        SELECT bar_time_us, page_id
+        FROM visible
+        ORDER BY bar_time_us
+    """
 )
 _PRICE_BAR_PAGE_SQL: Final = (
-    _PRICE_BAR_RANKED_SQL
+    _VISIBLE_PRICE_BAR_SQL
     + """
         SELECT
             instrument_handle,
@@ -2201,8 +2183,7 @@ _PRICE_BAR_PAGE_SQL: Final = (
             low_value,
             close_value,
             volume_value
-        FROM ranked
-        WHERE revision_rank = 1
+        FROM visible
         ORDER BY bar_time_us
         LIMIT ? OFFSET ?
     """

@@ -489,6 +489,73 @@ async def test_chart_request_backfills_missing_leading_history_and_reports_actua
     )
 
 
+@pytest.mark.parametrize(
+    ("source_hours", "expected_coverage", "expected_warning"),
+    [
+        pytest.param(
+            tuple(range(2, 14)),
+            (
+                datetime(2026, 3, 30, 2, tzinfo=UTC),
+                datetime(2026, 3, 30, 13, tzinfo=UTC),
+            ),
+            "leading_coverage_missing",
+            id="leading",
+        ),
+        pytest.param(
+            tuple(range(12)),
+            (
+                datetime(2026, 3, 30, 0, tzinfo=UTC),
+                datetime(2026, 3, 30, 11, tzinfo=UTC),
+            ),
+            "trailing_coverage_missing",
+            id="trailing",
+        ),
+    ],
+)
+@pytest.mark.anyio
+async def test_chart_edge_coverage_is_partial_without_internal_gaps(
+    tmp_path: Path,
+    source_hours: tuple[int, ...],
+    expected_coverage: tuple[datetime, datetime],
+    expected_warning: str,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": float(hour),
+                        "Time": f"2026-03-30T{hour + 2:02d}:00:00+02:00",
+                        "Volume": 1,
+                    }
+                    for hour in source_hours
+                ],
+                "DataVersion": 1,
+            },
+        ),
+    )
+
+    result = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_HOUR,
+        datetime(2026, 3, 30, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 13, tzinfo=UTC),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert result.status == "degraded"
+    summary = result.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    assert summary.quality_state == "partial"
+    assert (summary.coverage_start, summary.coverage_end) == expected_coverage
+    assert summary.missing_interval_count == 0
+    assert summary.warnings == (expected_warning,)
+
+
 @pytest.mark.anyio
 async def test_complete_chart_refresh_replaces_its_window_and_exposes_removed_bar_gap(
     tmp_path: Path,
@@ -733,6 +800,102 @@ async def test_later_chart_refresh_anchors_to_latest_visible_dataset_after_remov
 
 
 @pytest.mark.anyio
+async def test_chart_refresh_lineage_never_resurrects_a_removed_nontrailing_bar(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 100.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 1,
+                    }
+                    for minute in (0, 5, 9)
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 200.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 2,
+                    }
+                    for minute in (7, 8, 9)
+                ],
+                "DataVersion": 2,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 300.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 3,
+                    }
+                    for minute in (8, 9)
+                ],
+                "DataVersion": 3,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    start = datetime(2026, 3, 30, 7, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 30, 7, 9, tzinfo=UTC)
+
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    latest = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert executor.calls[1][2]["Time"] == "2026-03-30T07:05:00+00:00"
+    assert executor.calls[2][2]["Time"] == "2026-03-30T07:08:00+00:00"
+    summary = latest.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    page = get_dataset(summary.dataset_id, 1, 500, config=config)
+    bars = [row for row in page.rows if row.row_kind == "price_bar"]
+    assert [bar.bar_time.minute for bar in bars] == [0, 7, 8, 9]
+    assert [bar.close_value for bar in bars] == [100.0, 207.0, 308.0, 309.0]
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        historical_rows = connection.execute("SELECT count(*) FROM price_bars").fetchone()
+        removed_rows = connection.execute(
+            "SELECT count(*) FROM price_bars WHERE minute(bar_time) = 5",
+        ).fetchone()
+    finally:
+        connection.close()
+    assert historical_rows == (8,)
+    assert removed_rows == (1,)
+
+
+@pytest.mark.anyio
 async def test_every_chart_fingerprint_binds_retained_and_refreshed_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -817,7 +980,8 @@ async def test_every_chart_fingerprint_binds_retained_and_refreshed_rows(
     changed = await scenario(tmp_path / "changed", 999.0)
 
     assert baseline.keys() == changed.keys()
-    assert all(baseline[name] != changed[name] for name in baseline)
+    unchanged = {name for name in baseline if baseline[name] == changed[name]}
+    assert not unchanged, unchanged
 
 
 @pytest.mark.anyio

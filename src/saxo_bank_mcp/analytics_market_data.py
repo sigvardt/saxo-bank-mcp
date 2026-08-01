@@ -173,6 +173,10 @@ def normalize_price_series(
     warnings: set[str] = set()
     if missing_intervals:
         warnings.add("observed_interval_gap")
+    if bars and bars[0].bar_time > start:
+        warnings.add("leading_coverage_missing")
+    if bars and bars[-1].bar_time < end:
+        warnings.add("trailing_coverage_missing")
     if any(bar.volume_value is None for bar in bars):
         warnings.add("volume_missing")
     fingerprint = _fingerprint(
