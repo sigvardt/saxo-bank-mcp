@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 import httpx2
 import pytest
@@ -10,6 +11,7 @@ from fastmcp import Client
 
 import saxo_bank_mcp.analytics_source_receipt as receipt_module
 import saxo_bank_mcp.read_tools as read_tools_module
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_receipt import analytics_contract_receipt
 from saxo_bank_mcp.endpoint_registry import find_registered_endpoint
 from saxo_bank_mcp.read_tool_types import ReadExecutionContext
@@ -86,6 +88,70 @@ async def test_server_receipt_validates_raw_pages_but_returns_only_safe_proof(
         "DataVersion",
     ):
         assert private not in serialized
+
+
+@pytest.mark.anyio
+async def test_quote_receipt_preserves_only_value_free_field_quality_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_payload = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": "NoAccess",
+        "PriceTypeBid": "NoAccess",
+        "Quote": {
+            "Ask": 101.2,
+            "Bid": 101.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.1,
+            "PriceType": "Realtime",
+        },
+        "Uic": 1001,
+    }
+
+    async def execute(
+        _operation: object,
+        _request_target: str,
+        _params: Mapping[str, str],
+        **_kwargs: object,
+    ) -> RegisteredReadResponse:
+        response = httpx2.Response(
+            200,
+            content=json.dumps(raw_payload).encode(),
+            request=httpx2.Request("GET", "https://registered.invalid"),
+        )
+        return RegisteredReadResponse(
+            context=ReadExecutionContext(
+                environment="SIM",
+                rest_base_url="https://registered.invalid",
+                token=None,
+            ),
+            response=response,
+        )
+
+    monkeypatch.setattr(receipt_module, "execute_registered_get", execute)
+    registered = find_registered_endpoint("GET", "/trade/v1/infoprices")
+    assert registered is not None
+    receipt = await analytics_contract_receipt(
+        registered,
+        contract_id="info_price_v1",
+        params={"AssetType": "Stock", "Uic": "1001"},
+    )
+    expected_quality: dict[str, JsonValue] = {
+        "state": "limited",
+        "entitlement_limited_fields": ["PriceTypeAsk", "PriceTypeBid"],
+        "delayed_fields": [],
+        "missing_fields": [],
+    }
+
+    assert receipt["source_quality"] == expected_quality
+    pages = receipt["page_receipts"]
+    assert isinstance(pages, list)
+    first_page = cast("dict[str, JsonValue]", pages[0])
+    assert first_page["source_quality"] == expected_quality
+    serialized = json.dumps(receipt, sort_keys=True)
+    assert "NoAccess" not in serialized
+    assert "101.2" not in serialized
+    assert "101.0" not in serialized
 
 
 @pytest.mark.anyio

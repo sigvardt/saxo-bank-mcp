@@ -37,6 +37,7 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_fingerprint,
     source_contracts_by_id,
     source_page_fingerprint,
+    source_quality_proof,
 )
 from saxo_bank_mcp.endpoint_registry import (
     EndpointOperation,
@@ -529,6 +530,11 @@ class SaxoAnalyticsProvider:
                         ),
                         page_fingerprint_sha256=page_fingerprint,
                         schema_comparison=comparison,
+                        source_quality=source_quality_proof(
+                            contract,
+                            rows,
+                            comparison,
+                        ),
                     ),
                 )
         except (

@@ -958,6 +958,12 @@ def _source_payload(
     operation = find_registered_operation("GET", profile.path)
     assert operation is not None
     page_count = 2 if contract.contract_id == "chart_v3" else 1
+    quality: dict[str, JsonValue] = {
+        "state": "complete" if contract.source_kind == "info_prices" else "not_applicable",
+        "entitlement_limited_fields": [],
+        "delayed_fields": [],
+        "missing_fields": [],
+    }
     pages: list[dict[str, JsonValue]] = [
         {
             "page_number": page_number,
@@ -967,6 +973,7 @@ def _source_payload(
             "schema_fingerprint_sha256": "f" * 64,
             "timestamp_value_count": 1 if page_number == 1 else 0,
             "timestamp_fingerprint_sha256": "9" * 64,
+            "source_quality": dict(quality),
         }
         for page_number in range(1, page_count + 1)
     ]
@@ -1005,6 +1012,7 @@ def _source_payload(
         "row_count": 1,
         "continuation_call_count": page_count - 1,
         "page_receipts": cast("list[JsonValue]", pages),
+        "source_quality": quality,
         "source_revision_fingerprint_sha256": canonical_digest(["e" * 64] * page_count),
         "timestamp_value_count": 1,
         "timestamp_fingerprint_sha256": canonical_digest(["9" * 64] * page_count),

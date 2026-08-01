@@ -21,6 +21,7 @@ from saxo_bank_mcp.analytics_provider import (
 from saxo_bank_mcp.analytics_source_contracts import (
     FrozenSourceJsonValue,
     SourcePage,
+    aggregate_source_quality,
     build_source_capture_context,
     source_contract_fingerprint,
     source_contracts_by_id,
@@ -218,8 +219,13 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
                 ),
                 "timestamp_value_count": len(timestamps),
                 "timestamp_fingerprint_sha256": _digest(sorted(timestamps)),
+                "source_quality": page.source_quality.model_dump(mode="json"),
             },
         )
+    source_quality = aggregate_source_quality(
+        contract,
+        tuple(page.source_quality for page in pages),
+    ).model_dump(mode="json")
     response_fingerprint = _digest(page_receipts)
     timestamp_value_count = sum(
         cast("int", page["timestamp_value_count"]) for page in page_receipts
@@ -267,6 +273,7 @@ async def analytics_contract_receipt(  # noqa: C901, PLR0911
         "row_count": sum(page.row_count for page in pages),
         "continuation_call_count": executor.continuation_call_count,
         "page_receipts": page_receipts,
+        "source_quality": source_quality,
         "source_revision_fingerprint_sha256": _digest(
             [page["source_revision_sha256"] for page in page_receipts],
         ),

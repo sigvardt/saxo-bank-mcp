@@ -473,6 +473,12 @@ def _source_request_fingerprint() -> str:
 
 def _source_success_payload(*, page_count: int = 1) -> dict[str, JsonValue]:
     contract = source_contracts_by_id()["chart_v3"]
+    quality: dict[str, JsonValue] = {
+        "state": "not_applicable",
+        "entitlement_limited_fields": [],
+        "delayed_fields": [],
+        "missing_fields": [],
+    }
     pages: list[dict[str, JsonValue]] = [
         {
             "page_number": page_number,
@@ -482,6 +488,7 @@ def _source_success_payload(*, page_count: int = 1) -> dict[str, JsonValue]:
             "schema_fingerprint_sha256": "3" * 64,
             "timestamp_value_count": 1,
             "timestamp_fingerprint_sha256": "4" * 64,
+            "source_quality": dict(quality),
         }
         for page_number in range(1, page_count + 1)
     ]
@@ -520,6 +527,7 @@ def _source_success_payload(*, page_count: int = 1) -> dict[str, JsonValue]:
         "row_count": page_count,
         "continuation_call_count": page_count - 1,
         "page_receipts": cast("list[JsonValue]", pages),
+        "source_quality": quality,
         "source_revision_fingerprint_sha256": _digest(["2" * 64] * page_count),
         "timestamp_value_count": page_count,
         "timestamp_fingerprint_sha256": _digest(["4" * 64] * page_count),

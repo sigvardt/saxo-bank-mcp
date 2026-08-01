@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 import saxo_bank_mcp.analytics_store as store_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
+from saxo_bank_mcp.analytics_models import QualityState
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceCaptureEnvelope,
@@ -101,6 +102,39 @@ async def _provider_capture() -> SourceCaptureEnvelope:
     return build_source_capture_envelope(capture, pages)
 
 
+async def _quote_capture(price_type_bid: str) -> SourceCaptureEnvelope:
+    request = {"AssetType": "Stock", "Uic": 1001}
+    capture = build_source_capture_context(
+        {"info_price_v1": request},
+        captured_at=_CAPTURED_AT,
+    )
+    payload = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": price_type_bid,
+        "PriceTypeBid": price_type_bid,
+        "Quote": {
+            "Ask": 101.2,
+            "Bid": 101.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.1,
+            "PriceType": "Realtime",
+        },
+        "Uic": 1001,
+    }
+    provider = SaxoAnalyticsProvider(
+        request_executor=_Executor([json.dumps(payload).encode()]),
+    )
+    pages = [
+        page
+        async for page in provider.fetch(
+            "info_price_v1",
+            request,
+            capture=capture,
+        )
+    ]
+    return build_source_capture_envelope(capture, pages)
+
+
 @pytest.mark.anyio
 async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
     tmp_path: Path,
@@ -152,6 +186,43 @@ async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
         for contract_id, payload in stored_rows
     }
     assert actual_rows == expected_rows
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("price_type_bid", "expected_quality_state"),
+    [("NoAccess", QualityState.PARTIAL), ("Realtime", QualityState.COMPLETE)],
+)
+async def test_quote_quality_is_persisted_and_derives_replay_safe_dataset_quality(
+    tmp_path: Path,
+    price_type_bid: str,
+    expected_quality_state: QualityState,
+) -> None:
+    envelope = await _quote_capture(price_type_bid)
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        first = store.ingest_source_capture(envelope)
+        replay = store.ingest_source_capture(envelope)
+    finally:
+        store.close()
+
+    assert first.dataset.dataset_id == replay.dataset.dataset_id
+    assert first.dataset.quality_state is expected_quality_state
+    assert replay.dataset.quality_state is expected_quality_state
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        stored_payload = connection.execute(
+            "SELECT payload_json FROM source_pages WHERE page_id = ?",
+            (first.pages[0].page_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored_payload is not None
+    persisted = json.loads(str(stored_payload[0]))
+    assert persisted["source_quality"] == envelope.pages[0].model_dump(mode="json")[
+        "source_quality"
+    ]
 
 
 @pytest.mark.anyio

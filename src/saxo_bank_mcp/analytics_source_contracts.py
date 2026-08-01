@@ -582,6 +582,188 @@ class SchemaComparison(BaseModel):
         return self
 
 
+class SourceQualityProof(BaseModel):
+    """Value-free field availability proof for one source page."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    state: Literal["not_applicable", "complete", "limited"]
+    entitlement_limited_fields: tuple[str, ...] = ()
+    delayed_fields: tuple[str, ...] = ()
+    missing_fields: tuple[str, ...] = ()
+
+    @field_validator(
+        "entitlement_limited_fields",
+        "delayed_fields",
+        "missing_fields",
+        mode="before",
+    )
+    @classmethod
+    def normalize_json_arrays(cls, value: object) -> object:
+        if isinstance(value, list):
+            return tuple(cast("list[object]", value))
+        return value
+
+    @field_validator(
+        "entitlement_limited_fields",
+        "delayed_fields",
+        "missing_fields",
+    )
+    @classmethod
+    def validate_field_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if (
+            tuple(sorted(set(value))) != value
+            or any(_FIELD_PATH_PATTERN.fullmatch(path) is None for path in value)
+        ):
+            raise ValueError("source quality field paths must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        has_limitation = any(
+            (
+                self.entitlement_limited_fields,
+                self.delayed_fields,
+                self.missing_fields,
+            ),
+        )
+        if (self.state == "limited") != has_limitation:
+            raise PydanticCustomError(
+                "source_quality_state_invalid",
+                "source quality state does not match its field limitations",
+            )
+        return self
+
+
+_QUOTE_QUALITY_FIELDS: Final[Mapping[str, frozenset[str]]] = MappingProxyType(
+    {
+        "info_price_v1": frozenset(
+            {
+                "PriceTypeAsk",
+                "PriceTypeBid",
+                "Quote",
+                "Quote.Ask",
+                "Quote.Bid",
+                "Quote.DelayedByMinutes",
+                "Quote.Mid",
+                "Quote.PriceType",
+            },
+        ),
+        "info_prices_list_v1": frozenset(
+            {
+                "Quote",
+                "Quote.Ask",
+                "Quote.Bid",
+                "Quote.DelayedByMinutes",
+                "Quote.Mid",
+                "Quote.PriceType",
+            },
+        ),
+    },
+)
+_QUOTE_PRICE_TYPE_FIELDS: Final = (
+    "PriceTypeAsk",
+    "PriceTypeBid",
+    "Quote.PriceType",
+)
+
+
+def source_quality_proof(
+    contract: SourceContract,
+    rows: Sequence[Mapping[str, object]],
+    comparison: SchemaComparison,
+) -> SourceQualityProof:
+    """Derive value-free quote field quality from already validated rows."""
+    quality_fields = _QUOTE_QUALITY_FIELDS.get(contract.contract_id)
+    if quality_fields is None:
+        return SourceQualityProof(state="not_applicable")
+
+    unavailable = {
+        path
+        for path in (*comparison.missing_optional_fields, *comparison.null_optional_fields)
+        if path in quality_fields
+    }
+    if not rows:
+        unavailable.add("Quote")
+    entitlement_limited: set[str] = set()
+    delayed: set[str] = set()
+    for row in rows:
+        for path in _QUOTE_PRICE_TYPE_FIELDS:
+            if path not in quality_fields:
+                continue
+            value = _source_path_value(row, path)
+            if not isinstance(value, str):
+                continue
+            normalized = value.replace(" ", "").casefold()
+            if normalized == "noaccess":
+                entitlement_limited.add(path)
+            elif normalized.startswith("delayed"):
+                delayed.add(path)
+        delayed_minutes = _source_path_value(row, "Quote.DelayedByMinutes")
+        if (
+            "Quote.DelayedByMinutes" in quality_fields
+            and isinstance(delayed_minutes, int | float)
+            and not isinstance(delayed_minutes, bool)
+            and delayed_minutes > 0
+        ):
+            delayed.add("Quote.DelayedByMinutes")
+
+    state: Literal["complete", "limited"] = (
+        "limited" if entitlement_limited or delayed or unavailable else "complete"
+    )
+    return SourceQualityProof(
+        state=state,
+        entitlement_limited_fields=tuple(sorted(entitlement_limited)),
+        delayed_fields=tuple(sorted(delayed)),
+        missing_fields=tuple(sorted(unavailable)),
+    )
+
+
+def aggregate_source_quality(
+    contract: SourceContract,
+    proofs: Sequence[SourceQualityProof],
+) -> SourceQualityProof:
+    """Combine page proofs without introducing source values."""
+    if not proofs:
+        raise ValueError("source quality aggregation requires at least one page")
+    expected_state = (
+        "complete" if contract.contract_id in _QUOTE_QUALITY_FIELDS else "not_applicable"
+    )
+    entitlement_limited = {
+        path for proof in proofs for path in proof.entitlement_limited_fields
+    }
+    delayed = {path for proof in proofs for path in proof.delayed_fields}
+    missing = {path for proof in proofs for path in proof.missing_fields}
+    if expected_state == "not_applicable" and any(
+        proof.state != "not_applicable" for proof in proofs
+    ):
+        raise ValueError("non-quote source quality must be not applicable")
+    if expected_state == "complete" and any(
+        proof.state == "not_applicable" for proof in proofs
+    ):
+        raise ValueError("quote source quality must be proved")
+    state: Literal["not_applicable", "complete", "limited"] = (
+        "limited"
+        if entitlement_limited or delayed or missing
+        else expected_state
+    )
+    return SourceQualityProof(
+        state=state,
+        entitlement_limited_fields=tuple(sorted(entitlement_limited)),
+        delayed_fields=tuple(sorted(delayed)),
+        missing_fields=tuple(sorted(missing)),
+    )
+
+
+def _source_path_value(row: Mapping[str, object], path: str) -> object:
+    value: object = row
+    for component in path.split("."):
+        if not isinstance(value, Mapping) or component not in value:
+            return None
+        value = cast("Mapping[str, object]", value)[component]  # pyright: ignore[reportUnnecessaryCast]
+    return value
+
+
 class SourceCaptureContext(BaseModel):
     """One immutable provider capture shared by every contract and page."""
 
@@ -658,6 +840,7 @@ class SourcePage(BaseModel):
     source_revision: str
     page_fingerprint_sha256: str
     schema_comparison: SchemaComparison
+    source_quality: SourceQualityProof
 
     @field_validator("contract_id")
     @classmethod
@@ -763,6 +946,16 @@ class SourcePage(BaseModel):
             raise PydanticCustomError(
                 "source_page_contract_mismatch",
                 "source page metadata does not match its frozen contract",
+            )
+        expected_quality = source_quality_proof(
+            contract,
+            self.rows,
+            self.schema_comparison,
+        )
+        if self.source_quality != expected_quality:
+            raise PydanticCustomError(
+                "source_page_quality_mismatch",
+                "source page quality does not match its validated fields",
             )
         return self
 

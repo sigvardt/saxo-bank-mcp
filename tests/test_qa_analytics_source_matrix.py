@@ -119,6 +119,21 @@ def _set_history_rows(session: ScriptedMatrixSession, rows: int) -> None:
         payload["response_fingerprint"] = canonical_digest(pages)
 
 
+def _set_source_quality(
+    session: ScriptedMatrixSession,
+    contract_id: str,
+    quality: dict[str, JsonValue],
+) -> None:
+    payload = _payload_for_contract(session, contract_id)
+    pages = payload["page_receipts"]
+    assert isinstance(pages, list)
+    first = pages[0]
+    assert isinstance(first, dict)
+    first["source_quality"] = quality
+    payload["source_quality"] = quality
+    payload["response_fingerprint"] = canonical_digest(pages)
+
+
 def _ledger_readback(session: ScriptedMatrixSession) -> dict[str, JsonValue]:
     return session.payloads["saxo_get_safe_request_ledger"][-1]
 
@@ -164,6 +179,86 @@ async def test_matrix_claims_after_readiness_and_uses_safe_receipts_for_all_sour
         for tool, arguments in session.events
         if tool == "saxo_call_registered_endpoint"
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    (
+        "quality",
+        "expected_reason",
+        "expected_entitlement",
+    ),
+    [
+        (
+            {
+                "state": "limited",
+                "entitlement_limited_fields": ["PriceTypeAsk", "PriceTypeBid"],
+                "delayed_fields": [],
+                "missing_fields": [],
+            },
+            "source_field_entitlement_limited",
+            "denied",
+        ),
+        (
+            {
+                "state": "limited",
+                "entitlement_limited_fields": [],
+                "delayed_fields": ["PriceTypeAsk", "PriceTypeBid"],
+                "missing_fields": [],
+            },
+            "source_quote_delayed",
+            "observed",
+        ),
+    ],
+)
+async def test_matrix_reduces_value_free_quote_quality_limitations(
+    quality: dict[str, JsonValue],
+    expected_reason: str,
+    expected_entitlement: str,
+) -> None:
+    prepared = _prepared()
+    session = _session(prepared)
+    _set_source_quality(session, "info_price_v1", quality)
+
+    receipt = await _run(prepared, session)
+
+    assert isinstance(receipt, ClaimedMatrixDraft)
+    assert receipt.status == "reduced"
+    source = next(
+        item for item in receipt.source_receipts if item.contract_id == "info_price_v1"
+    )
+    assert source.source_status == "reduced"
+    assert source.outcome_reason == expected_reason
+    assert source.entitlement_state == expected_entitlement
+    assert source.source_quality is not None
+    assert source.source_quality.model_dump(mode="json") == quality
+
+
+@pytest.mark.anyio
+async def test_matrix_refuses_internally_inconsistent_quote_quality_metadata() -> None:
+    prepared = _prepared()
+    session = _session(prepared)
+    _set_source_quality(
+        session,
+        "info_price_v1",
+        {
+            "state": "limited",
+            "entitlement_limited_fields": [],
+            "delayed_fields": [],
+            "missing_fields": [],
+        },
+    )
+
+    receipt = await _run(prepared, session)
+
+    assert isinstance(receipt, ClaimedMatrixDraft)
+    source = next(
+        item for item in receipt.source_receipts if item.contract_id == "info_price_v1"
+    )
+    assert source.source_status == "refused"
+    assert source.outcome_reason == "analytics_contract_receipt_invalid"
+    assert source.entitlement_state == "unverified"
+    assert source.source_quality is None
 
 
 @pytest.mark.anyio

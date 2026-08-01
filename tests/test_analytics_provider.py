@@ -8,7 +8,7 @@ from typing import Any, cast
 
 import httpx2
 import pytest
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp.analytics_pagination import (
     DuplicateSourcePageError,
@@ -1010,6 +1010,125 @@ async def test_entitlement_failure_is_sanitized_and_never_retried() -> None:
     assert caught.value.error_code == "NoAccess"
     assert "synthetic entitlement unavailable" not in str(caught.value)
     assert len(executor.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("price_type_bid", "expected_state", "expected_entitlement", "expected_delayed"),
+    [
+        ("NoAccess", "limited", ("PriceTypeAsk", "PriceTypeBid"), ()),
+        ("Delayed", "limited", (), ("PriceTypeAsk", "PriceTypeBid")),
+        ("Realtime", "complete", (), ()),
+    ],
+)
+async def test_quote_quality_tracks_price_type_limitations_without_values(
+    price_type_bid: str,
+    expected_state: str,
+    expected_entitlement: tuple[str, ...],
+    expected_delayed: tuple[str, ...],
+) -> None:
+    payload = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": price_type_bid,
+        "PriceTypeBid": price_type_bid,
+        "Quote": {
+            "Ask": 101.2,
+            "Bid": 101.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.1,
+            "PriceType": "Realtime",
+        },
+        "Uic": _SYNTHETIC_UIC,
+    }
+    provider = _provider(FakeExecutor([_json_response(200, payload)]))
+
+    pages = [
+        page
+        async for page in provider.fetch(
+            "info_price_v1",
+            {"AssetType": "Stock", "Uic": _SYNTHETIC_UIC},
+        )
+    ]
+
+    quality = getattr(pages[0], "source_quality", None)
+    assert quality is not None
+    assert quality.state == expected_state
+    assert quality.entitlement_limited_fields == expected_entitlement
+    assert quality.delayed_fields == expected_delayed
+    assert quality.missing_fields == ()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("missing_value", [pytest.param("absent"), pytest.param(None)])
+async def test_quote_quality_tracks_missing_or_null_optional_quote_fields(
+    missing_value: str | None,
+) -> None:
+    payload: dict[str, Any] = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": "Realtime",
+        "Quote": {
+            "Ask": 101.2,
+            "Bid": 101.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.1,
+            "PriceType": "Realtime",
+        },
+        "Uic": _SYNTHETIC_UIC,
+    }
+    if missing_value is None:
+        payload["PriceTypeBid"] = None
+    provider = _provider(FakeExecutor([_json_response(200, payload)]))
+
+    pages = [
+        page
+        async for page in provider.fetch(
+            "info_price_v1",
+            {"AssetType": "Stock", "Uic": _SYNTHETIC_UIC},
+        )
+    ]
+
+    quality = getattr(pages[0], "source_quality", None)
+    assert quality is not None
+    assert quality.state == "limited"
+    assert quality.entitlement_limited_fields == ()
+    assert quality.delayed_fields == ()
+    assert quality.missing_fields == ("PriceTypeBid",)
+
+
+@pytest.mark.anyio
+async def test_quote_quality_metadata_rejects_internally_inconsistent_state() -> None:
+    payload = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": "Realtime",
+        "PriceTypeBid": "Realtime",
+        "Quote": {
+            "Ask": 101.2,
+            "Bid": 101.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.1,
+            "PriceType": "Realtime",
+        },
+        "Uic": _SYNTHETIC_UIC,
+    }
+    provider = _provider(FakeExecutor([_json_response(200, payload)]))
+    pages = [
+        item
+        async for item in provider.fetch(
+            "info_price_v1",
+            {"AssetType": "Stock", "Uic": _SYNTHETIC_UIC},
+        )
+    ]
+    page = pages[0]
+    page_payload = page.model_dump(mode="json")
+    page_payload["source_quality"] = {
+        "state": "limited",
+        "entitlement_limited_fields": [],
+        "delayed_fields": [],
+        "missing_fields": [],
+    }
+
+    with pytest.raises(ValidationError):
+        page.__class__.model_validate(page_payload, strict=True)
 
 
 @pytest.mark.anyio

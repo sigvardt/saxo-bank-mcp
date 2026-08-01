@@ -557,7 +557,17 @@ def _source_payload(source: _SourceCall, arguments: dict[str, object]) -> dict[s
     if source.contract_id == "options_chain_reference_v1":
         request["OptionRootId"] = "120"
     page_count = 2 if source.contract_id == "chart_v3" else 1
-    pages = [
+    quality: dict[str, object] = {
+        "state": (
+            "complete"
+            if source.contract_id in {"info_price_v1", "info_prices_list_v1"}
+            else "not_applicable"
+        ),
+        "entitlement_limited_fields": [],
+        "delayed_fields": [],
+        "missing_fields": [],
+    }
+    pages: list[dict[str, object]] = [
         {
             "page_number": page_number,
             "row_count": 1 if page_number == 1 else 0,
@@ -566,6 +576,7 @@ def _source_payload(source: _SourceCall, arguments: dict[str, object]) -> dict[s
             "schema_fingerprint_sha256": "f" * 64,
             "timestamp_value_count": 1 if page_number == 1 else 0,
             "timestamp_fingerprint_sha256": "9" * 64,
+            "source_quality": dict(quality),
         }
         for page_number in range(1, page_count + 1)
     ]
@@ -606,6 +617,7 @@ def _source_payload(source: _SourceCall, arguments: dict[str, object]) -> dict[s
         "row_count": 1,
         "continuation_call_count": page_count - 1,
         "page_receipts": pages,
+        "source_quality": quality,
         "source_revision_fingerprint_sha256": _canonical_digest(["e" * 64] * page_count),
         "timestamp_value_count": 1,
         "timestamp_fingerprint_sha256": _canonical_digest(["9" * 64] * page_count),

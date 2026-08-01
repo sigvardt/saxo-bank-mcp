@@ -397,6 +397,7 @@ class StoredDataset:
     row_count: int
     byte_count: int
     created_at: datetime
+    quality_state: QualityState
 
 
 @dataclass(frozen=True, slots=True)
@@ -1077,6 +1078,10 @@ class AnalyticsStore:
                     "request_fingerprint_sha256": page.request_fingerprint_sha256,
                     "rows": cast("list[SourceJsonValue]", rows),
                     "source_native_revision": page.source_revision,
+                    "source_quality": cast(
+                        "dict[str, SourceJsonValue]",
+                        page.source_quality.model_dump(mode="json"),
+                    ),
                 }
                 provider_identity_sha256 = _fingerprint(
                     _canonical_json(
@@ -1124,7 +1129,11 @@ class AnalyticsStore:
                 created_at=captured_at,
                 coverage_start=captured_at,
                 coverage_end=captured_at,
-                quality_state=QualityState.COMPLETE,
+                quality_state=(
+                    QualityState.PARTIAL
+                    if any(page.source_quality.state == "limited" for page in source_pages)
+                    else QualityState.COMPLETE
+                ),
             )
         return StoredSourceCapture(pages=tuple(stored_pages), dataset=dataset)
 
@@ -1372,7 +1381,8 @@ class AnalyticsStore:
                 fingerprint_sha256,
                 row_count,
                 byte_count,
-                epoch_us(created_at)
+                epoch_us(created_at),
+                quality_state
             FROM datasets
             WHERE dataset_id = ?
             """,
@@ -1387,6 +1397,7 @@ class AnalyticsStore:
             row_count=_require_int(row[3]),
             byte_count=_require_int(row[4]),
             created_at=_require_datetime(row[5]),
+            quality_state=QualityState(_require_str(row[6])),
         )
 
     @staticmethod

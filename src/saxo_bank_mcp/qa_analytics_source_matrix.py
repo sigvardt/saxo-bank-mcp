@@ -32,6 +32,8 @@ from saxo_bank_mcp import analytics_source_runtime as _source_runtime
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceContract,
+    SourceQualityProof,
+    aggregate_source_quality,
     source_contract_catalog_sha256,
     source_contract_fingerprint,
     source_contracts_by_id,
@@ -147,6 +149,7 @@ _SOURCE_RECEIPT_COMMON_FIELDS: Final = frozenset(
 )
 _SOURCE_SUCCESS_FIELDS: Final = _SOURCE_RECEIPT_COMMON_FIELDS | {
     "page_receipts",
+    "source_quality",
     "source_revision_fingerprint_sha256",
     "timestamp_value_count",
     "timestamp_fingerprint_sha256",
@@ -317,6 +320,7 @@ class SourceContractReceipt(BaseModel):
     timestamp_value_count: int = Field(ge=0)
     timestamp_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     http_status: int | None = Field(default=None, ge=100, le=599)
+    source_quality: SourceQualityProof | None = None
 
 
 class _SourcePageProof(BaseModel):
@@ -329,6 +333,7 @@ class _SourcePageProof(BaseModel):
     schema_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     timestamp_value_count: int = Field(ge=0)
     timestamp_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    source_quality: SourceQualityProof
 
 
 class _AuthStatusReceipt(BaseModel):
@@ -1485,6 +1490,7 @@ async def _run_provider_source(
     operation = find_registered_operation("GET", path)
     status = _safe_status(payload)
     page_proofs = _source_page_proofs(payload.get("page_receipts"))
+    declared_quality = _source_quality_proof(payload.get("source_quality"))
     expected_request_fingerprint = _request_fingerprint(contract, request)
     expected_fields: frozenset[str] = (
         _SOURCE_SUCCESS_FIELDS
@@ -1522,8 +1528,10 @@ async def _run_provider_source(
         and status == "passed"
         and payload.get("call_class") == "sim_read_succeeded"
         and _source_success_proof_valid(
+            contract,
             payload,
             page_proofs,
+            declared_quality,
             expected_request_fingerprint,
         )
     )
@@ -1535,8 +1543,11 @@ async def _run_provider_source(
         and _source_failure_proof_valid(payload)
     )
     raw_reason = payload.get("reason")
+    source_quality = declared_quality if proof_valid else None
     reason = (
-        ""
+        _source_quality_reason(source_quality)
+        if source_quality is not None and source_quality.state == "limited"
+        else ""
         if proof_valid
         else (
             _safe_source_reason(raw_reason)
@@ -1545,7 +1556,13 @@ async def _run_provider_source(
         )
     )
     source_status: SourceStatus = (
-        "observed" if proof_valid else "reduced" if failure_valid else "refused"
+        "reduced"
+        if proof_valid and source_quality is not None and source_quality.state == "limited"
+        else "observed"
+        if proof_valid
+        else "reduced"
+        if failure_valid
+        else "refused"
     )
     page_count = _safe_count(payload.get("page_count")) if proof_valid else 0
     row_count = _safe_count(payload.get("row_count")) if proof_valid else 0
@@ -1589,7 +1606,11 @@ async def _run_provider_source(
         ),
         entitlement_state=(
             "denied"
-            if reason == "source_entitlement_unavailable"
+            if reason
+            in {
+                "source_entitlement_unavailable",
+                "source_field_entitlement_limited",
+            }
             else "observed"
             if proof_valid
             else "unverified"
@@ -1610,6 +1631,7 @@ async def _run_provider_source(
             _safe_fingerprint(payload.get("timestamp_fingerprint_sha256")) or _digest([])
         ),
         http_status=_safe_http_status(payload.get("http_status")),
+        source_quality=source_quality,
     )
 
 
@@ -1624,12 +1646,38 @@ def _source_page_proofs(
         return None
 
 
+def _source_quality_proof(value: JsonValue | None) -> SourceQualityProof | None:
+    try:
+        return SourceQualityProof.model_validate(value, strict=True)
+    except ValidationError:
+        return None
+
+
+def _source_quality_reason(quality: SourceQualityProof) -> str:
+    if quality.entitlement_limited_fields:
+        return "source_field_entitlement_limited"
+    if quality.delayed_fields:
+        return "source_quote_delayed"
+    if quality.missing_fields:
+        return "source_quote_fields_missing"
+    return ""
+
+
 def _source_success_proof_valid(
+    contract: SourceContract,
     payload: Mapping[str, JsonValue],
     pages: tuple[_SourcePageProof, ...] | None,
+    declared_quality: SourceQualityProof | None,
     expected_request_fingerprint: str,
 ) -> bool:
-    if pages is None or not pages:
+    if pages is None or not pages or declared_quality is None:
+        return False
+    try:
+        aggregate_quality = aggregate_source_quality(
+            contract,
+            tuple(page.source_quality for page in pages),
+        )
+    except (TypeError, ValidationError, ValueError):
         return False
     page_material = [page.model_dump(mode="json") for page in pages]
     declared_counts = _strict_counts(
@@ -1681,6 +1729,7 @@ def _source_success_proof_valid(
         and payload.get("timestamp_fingerprint_sha256")
         == _digest([page.timestamp_fingerprint_sha256 for page in pages])
         and payload.get("http_status") == _HTTP_STATUS_OK
+        and declared_quality == aggregate_quality
     )
 
 
