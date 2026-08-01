@@ -14,7 +14,8 @@ missing, and null optional quote fields also derive `partial`. Only a fully prov
 The first post-review correction prevents a caller from upgrading a persisted limited quote page to
 a `complete` dataset and binds every quality-proof field path to the exact quote contract. The
 second closes the public low-level store path by requiring the persisted `info_price_v1` proof to
-equal the canonical quality recomputed from its exact stored contract and rows.
+equal the canonical quality recomputed from its exact stored contract and rows. The final narrow
+correction makes the contract name and SHA an inseparable identity pair.
 
 ## RED evidence
 
@@ -42,6 +43,14 @@ The second post-review direct-store reproduction then failed twice as expected:
 
 The valid Realtime/complete and NoAccess/limited controls both passed before the correction.
 
+The final identity reproduction failed twice before the symmetric guard:
+
+- the exact `info_price_v1` SHA stored under `info_price_alias_v1` bypassed quote quality entirely.
+- the exact `info_price_v1` name with a wrong SHA reached quality validation instead of refusing the
+  mismatched contract identity first.
+
+The exact name/SHA pair and unrelated low-level page controls remained valid.
+
 The pre-change full suite also had one unrelated existing failure at 8 percent:
 `tests/test_agent_skill_evidence_fail_closed.py::test_install_normal_mode_runs_instrumented_real_producer_path`.
 It expected return code 0 and received 1. This task did not change that surface.
@@ -64,6 +73,8 @@ It expected return code 0 and received 1. This task did not change that surface.
   required their union to be a subset of the selected contract's exact field paths.
 - Required direct `info_price_v1` pages to carry the checked-in contract SHA, exactly one stored row
   matching `row_count`, a compatible schema, and a quality proof equal to canonical recomputation.
+- Applied quote identity when either the canonical name or SHA matches, and required both to match
+  before parsing or accepting any persisted quality metadata.
 - Preserved the existing opaque low-level page behavior for non-quote and non-analytics contracts.
 - Kept transport, retry, pagination, schema quarantine, store replay, and privacy boundaries intact.
 
@@ -73,7 +84,8 @@ It expected return code 0 and received 1. This task did not change that surface.
   passed.
 - Post-review focused regressions: 4 passed after 4 expected RED failures.
 - Direct-store regressions: 4 passed after 2 expected RED failures and 2 valid control passes.
-- Source and Area B regression command: 238 passed across source contracts, provider, receipt,
+- Contract-identity regressions and controls: 5 passed after 2 expected RED failures.
+- Source and Area B regression command: 240 passed across source contracts, provider, receipt,
   store, store bridge, matrix, and Area B review rounds 2 through 6.
 - `uv run ruff check .`: passed.
 - Exact `uv run basedpyright`: 0 errors, 0 warnings, 0 notes.
@@ -86,20 +98,20 @@ It expected return code 0 and received 1. This task did not change that surface.
 
 ## Offline candidate and sealed runtimes
 
-- Candidate identity: `b766b2c2a9be0525085d2738126701d41fb928e2282c556b6dd10f22139ab719`
-- Checked manifest SHA-256: `8bce95c3f294db7cd2581a68001dae6af4cf8c7546ee1bf7e63d5dc4651ef080`
-- Final manifest A SHA-256: `8bce95c3f294db7cd2581a68001dae6af4cf8c7546ee1bf7e63d5dc4651ef080`
-- Final manifest B SHA-256: `8bce95c3f294db7cd2581a68001dae6af4cf8c7546ee1bf7e63d5dc4651ef080`
-- Portable runtime tree SHA-256: `b312ac3dc4a8d565a7e5c4c96aae3b2aeb0c7b08cc8f9239eb99933883bcbcaf`
-- Harness build SHA-256: `2f80f32e16534abc2320a939eff4f6e13832f295b52630c84b45db9f8f45209f`
-- Source build SHA-256: `582ca18fa57f36b6a12f4c48c629ef4bfcf11f3acbc393e2c72b5786ec8fcdef`
-- Installed build SHA-256: `d7e5a3853e0abf4125b9e1f6dd899ffbafa629044989288fe94fecff37419eb5`
+- Candidate identity: `0a3d3acdc2fe284416662a6da769b012c35471427a2bc9fd0fe8aab08f1f9d08`
+- Checked manifest SHA-256: `1eb28aacd205b264260a7072cc3b558da03356e335a75b060cb5b4cf99177cf5`
+- Final manifest A SHA-256: `1eb28aacd205b264260a7072cc3b558da03356e335a75b060cb5b4cf99177cf5`
+- Final manifest B SHA-256: `1eb28aacd205b264260a7072cc3b558da03356e335a75b060cb5b4cf99177cf5`
+- Portable runtime tree SHA-256: `f749835d2573acb52df99a75b2a9ef46946dd8513d6d2b17a712795b563eb021`
+- Harness build SHA-256: `8086d9d68e4c9a6dbc85187534679f9e1c67de34ee04cf6042813d9a4878aa78`
+- Source build SHA-256: `7e555f5315fda29c24a3381bd86f2b8a5fbb80d4d4fcc3662205744595d1dfa8`
+- Installed build SHA-256: `be2877debd717d0396d2d63098bde93a27a59a4df509d8b461ad2f2b55eef2a2`
 - Source contract catalog SHA-256:
   `ca5c53480842bb6c3e48dc16bac10f43c49edf73a09b206eacf3af40f0b20038`
 - Source wheel projection SHA-256:
   `fef8e0194a557009293a4ce573a33ba6e312a3118d61739f7797c95afabbc39f`
-- Final wheel SHA-256: `93e3e884d15ac3f4e934c474187addf86dd902fb4a5ff185d0b68dbc9e944199`
-- Retained runtime root: `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-store-fix.nU8G7s`
+- Final wheel SHA-256: `ae8883d7c333f775ef7dbf1a1ee93b8aefeea8bb4e960461dfd9e04ffaec4939`
+- Retained runtime root: `/Volumes/ssd_1/codex/tmp/area-b-quote-identity-fix.WQpPDH`
 
 The checked, A, and B manifests are byte-identical. Both final runtimes returned the same identity.
 Both local preflights returned `closure=sealed`, `dont_write_bytecode=true`,
@@ -115,6 +127,6 @@ contain its own final SHA.
 ## Retained local evidence
 
 - Changed-file privacy report:
-  `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-store-fix-final-privacy.AHkF0q/secret-scan.json`
+  `/Volumes/ssd_1/codex/tmp/area-b-quote-identity-fix-final-privacy.nwtjOF/secret-scan.json`
 - Offline checked and final manifests:
-  `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-store-fix.nU8G7s`
+  `/Volumes/ssd_1/codex/tmp/area-b-quote-identity-fix.WQpPDH`

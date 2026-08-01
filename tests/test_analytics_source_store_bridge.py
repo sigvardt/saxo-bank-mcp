@@ -142,8 +142,13 @@ def _direct_info_price_page(
     page_key: str,
     price_type: str,
     source_quality: dict[str, object] | None,
+    contract_identity: tuple[str, str] | None = None,
 ) -> store_module.StoredSourcePage:
     contract = source_contracts_by_id()["info_price_v1"]
+    contract_name, contract_sha256 = contract_identity or (
+        contract.contract_id,
+        source_contract_fingerprint(contract),
+    )
     payload: dict[str, object] = {
         "rows": [
             {
@@ -167,8 +172,8 @@ def _direct_info_price_page(
         source_kind=contract.source_kind,
         page_key=page_key,
         source_revision="quote-rev-1",
-        contract_name=contract.contract_id,
-        contract_sha256=source_contract_fingerprint(contract),
+        contract_name=contract_name,
+        contract_sha256=contract_sha256,
         payload=payload,
         row_count=1,
         source_timestamp=_CAPTURED_AT,
@@ -322,6 +327,50 @@ def test_direct_quote_page_without_quality_proof_cannot_create_dataset(
         )
 
         with pytest.raises(StoreValidationError):
+            _complete_dataset_from_direct_quote(store, page)
+    finally:
+        store.close()
+
+
+def test_info_price_contract_hash_cannot_hide_behind_alias(tmp_path: Path) -> None:
+    contract = source_contracts_by_id()["info_price_v1"]
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _direct_info_price_page(
+            store,
+            page_key="direct-info-price-aliased-contract",
+            price_type="NoAccess",
+            source_quality=None,
+            contract_identity=(
+                "info_price_alias_v1",
+                source_contract_fingerprint(contract),
+            ),
+        )
+
+        with pytest.raises(
+            StoreValidationError,
+            match="persisted source contract metadata is invalid",
+        ):
+            _complete_dataset_from_direct_quote(store, page)
+    finally:
+        store.close()
+
+
+def test_info_price_contract_name_cannot_bind_wrong_hash(tmp_path: Path) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _direct_info_price_page(
+            store,
+            page_key="direct-info-price-wrong-contract-hash",
+            price_type="NoAccess",
+            source_quality=None,
+            contract_identity=("info_price_v1", "f" * 64),
+        )
+
+        with pytest.raises(
+            StoreValidationError,
+            match="persisted source contract metadata is invalid",
+        ):
             _complete_dataset_from_direct_quote(store, page)
     finally:
         store.close()

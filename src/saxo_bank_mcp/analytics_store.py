@@ -1272,6 +1272,7 @@ class AnalyticsStore:
     ) -> QualityState:
         has_limited_source = False
         for row in rows:
+            is_info_price = AnalyticsStore._is_exact_info_price_contract(row)
             try:
                 raw_payload = json.loads(_require_str(row[9]))
             except (TypeError, ValueError) as error:
@@ -1285,7 +1286,7 @@ class AnalyticsStore:
             payload = cast("dict[str, object]", raw_payload)
             source_quality = payload.get("source_quality")
             if source_quality is None:
-                if _require_str(row[10]) == _INFO_PRICE_CONTRACT_ID:
+                if is_info_price:
                     raise StoreValidationError(
                         "persisted source quality metadata is invalid",
                     )
@@ -1296,9 +1297,8 @@ class AnalyticsStore:
                 raise StoreValidationError(
                     "persisted source quality metadata is invalid",
                 ) from error
-            contract_name = _require_str(row[10])
             if (
-                contract_name == _INFO_PRICE_CONTRACT_ID
+                is_info_price
                 and proof != AnalyticsStore._canonical_persisted_info_price_quality(row, payload)
             ):
                 raise StoreValidationError(
@@ -1308,6 +1308,17 @@ class AnalyticsStore:
         if has_limited_source and requested is QualityState.COMPLETE:
             return QualityState.PARTIAL
         return requested
+
+    @staticmethod
+    def _is_exact_info_price_contract(row: tuple[object, ...]) -> bool:
+        contract = source_contracts_by_id()[_INFO_PRICE_CONTRACT_ID]
+        name_matches = _require_str(row[10]) == contract.contract_id
+        sha_matches = _require_str(row[6]) == source_contract_fingerprint(contract)
+        if name_matches != sha_matches:
+            raise StoreValidationError(
+                "persisted source contract metadata is invalid",
+            )
+        return name_matches
 
     @staticmethod
     def _canonical_persisted_info_price_quality(
