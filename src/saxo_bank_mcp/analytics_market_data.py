@@ -137,7 +137,7 @@ def normalize_price_series(
     """Normalize bounded Saxo chart rows without inventing missing values."""
     handle = _validate_instrument_handle(instrument_handle)
     _require_utc_range(start, end)
-    normalized: list[tuple[datetime, NormalizedPriceBar]] = []
+    normalized: list[tuple[datetime, datetime, NormalizedPriceBar]] = []
     for row in rows:
         source_time = _required_timestamp(row.get("Time"))
         _require_interval_boundary(source_time, interval)
@@ -146,6 +146,7 @@ def normalize_price_series(
             continue
         normalized.append(
             (
+                source_time,
                 bar_time,
                 NormalizedPriceBar(
                     instrument_handle=handle,
@@ -160,15 +161,15 @@ def normalize_price_series(
                 ),
             ),
         )
-    normalized.sort(key=lambda item: item[0])
-    utc_times = tuple(item[0] for item in normalized)
+    normalized.sort(key=lambda item: item[1])
+    utc_times = tuple(item[1] for item in normalized)
     if len(set(utc_times)) != len(utc_times):
         raise MarketDataValidationError("chart rows contain a duplicate bar timestamp")
     missing_intervals = _missing_intervals(
-        utc_times,
+        tuple(item[0] for item in normalized),
         interval,
     )
-    bars = tuple(item[1] for item in normalized)
+    bars = tuple(item[2] for item in normalized)
     warnings: set[str] = set()
     if missing_intervals:
         warnings.add("observed_interval_gap")
@@ -434,12 +435,17 @@ def _optional_nonnegative_integer(value: object) -> int | None:
 
 
 def _missing_intervals(
-    local_times: Sequence[datetime],
+    exchange_times: Sequence[datetime],
     interval: ChartInterval,
 ) -> int:
     missing = 0
-    for previous, current in pairwise(local_times):
-        elapsed = current - previous
+    for previous, current in pairwise(exchange_times):
+        if interval is ChartInterval.ONE_DAY:
+            calendar_steps = (current.date() - previous.date()).days
+            if calendar_steps > 1:
+                missing += calendar_steps - 1
+            continue
+        elapsed = current.astimezone(UTC) - previous.astimezone(UTC)
         if elapsed > interval.delta:
             missing += max(1, int(elapsed / interval.delta) - 1)
     return missing

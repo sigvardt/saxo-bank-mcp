@@ -21,10 +21,12 @@ from saxo_bank_mcp.analytics_market_data import ChartInterval
 from saxo_bank_mcp.analytics_models import HandleKind
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_resolver import InstrumentResolver
-from saxo_bank_mcp.analytics_store import AnalyticsStore
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 from saxo_bank_mcp.analytics_sync import (
+    OptionChainSyncSpec,
     PriceBarDatasetSummary,
     PriceBarSyncSpec,
+    QuoteDatasetRow,
     QuoteSyncSpec,
     SyncLimitError,
     SyncResearchRequest,
@@ -350,17 +352,18 @@ async def test_chart_refresh_recomputes_gaps_over_the_full_visible_dataset(
             {
                 "Data": [
                     {
-                        "CloseBid": 100.0,
-                        "Time": "2026-03-30T09:00:00+02:00",
-                    },
+                        "CloseBid": 100.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                    }
+                    for minute in range(3)
                 ],
                 "DataVersion": 1,
             },
             {
                 "Data": [
                     {
-                        "CloseBid": 102.0,
-                        "Time": "2026-03-30T09:02:00+02:00",
+                        "CloseBid": 104.0,
+                        "Time": "2026-03-30T09:04:00+02:00",
                         "Volume": 1,
                     },
                 ],
@@ -374,7 +377,7 @@ async def test_chart_refresh_recomputes_gaps_over_the_full_visible_dataset(
         handle,
         ChartInterval.ONE_MINUTE,
         datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
-        datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, 2, tzinfo=UTC),
         provider=provider,
         config=config,
         clock=lambda: _CAPTURED_AT,
@@ -383,7 +386,7 @@ async def test_chart_refresh_recomputes_gaps_over_the_full_visible_dataset(
         handle,
         ChartInterval.ONE_MINUTE,
         datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
-        datetime(2026, 3, 30, 7, 2, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, 4, tzinfo=UTC),
         provider=provider,
         config=config,
         clock=lambda: _CAPTURED_AT,
@@ -393,12 +396,166 @@ async def test_chart_refresh_recomputes_gaps_over_the_full_visible_dataset(
     assert isinstance(summary, PriceBarDatasetSummary)
     assert result.status == "degraded"
     assert summary.row_count == 2
-    assert summary.missing_interval_count == 1
+    assert summary.missing_interval_count == 3
     assert set(summary.warnings) == {"observed_interval_gap", "volume_missing"}
     page = get_dataset(summary.dataset_id, 1, 500, config=config)
     assert [row.close_value for row in page.rows if row.row_kind == "price_bar"] == [
         100.0,
-        102.0,
+        104.0,
+    ]
+
+
+@pytest.mark.anyio
+async def test_chart_request_backfills_missing_leading_history_and_reports_actual_coverage(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": float(hour),
+                        "Time": f"2026-03-30T{hour + 2:02d}:00:00+02:00",
+                        "Volume": 1,
+                    }
+                    for hour in range(10, 13)
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": float(hour),
+                        "Time": f"2026-03-30T{hour + 2:02d}:00:00+02:00",
+                        "Volume": 1,
+                    }
+                    for hour in range(2, 14)
+                ],
+                "DataVersion": 2,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_HOUR,
+        datetime(2026, 3, 30, 10, tzinfo=UTC),
+        datetime(2026, 3, 30, 12, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    result = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_HOUR,
+        datetime(2026, 3, 30, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 13, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert executor.calls[1][2]["Time"] == "2026-03-30T00:00:00+00:00"
+    assert executor.calls[1][2]["Count"] == "14"
+    summary = result.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    assert summary.coverage_start == datetime(2026, 3, 30, 2, tzinfo=UTC)
+    assert summary.coverage_end == datetime(2026, 3, 30, 13, tzinfo=UTC)
+    assert summary.row_count == 12
+    page = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert page.total_rows == 12
+    bars = [row for row in page.rows if row.row_kind == "price_bar"]
+    assert bars[0].bar_time == datetime(2026, 3, 30, 2, tzinfo=UTC)
+    assert bars[-1].bar_time == datetime(2026, 3, 30, 13, tzinfo=UTC)
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        stored_coverage = connection.execute(
+            """
+            SELECT epoch_us(coverage_start), epoch_us(coverage_end)
+            FROM datasets
+            WHERE dataset_id = ?
+            """,
+            (summary.dataset_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert stored_coverage == (
+        1_774_836_000_000_000,
+        1_774_875_600_000_000,
+    )
+
+
+@pytest.mark.anyio
+async def test_complete_chart_refresh_replaces_its_window_and_exposes_removed_bar_gap(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 100.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 1,
+                    }
+                    for minute in range(3)
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:01:00+02:00",
+                        "Volume": 1,
+                    },
+                    {
+                        "CloseBid": 103.0,
+                        "Time": "2026-03-30T09:03:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 2,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, 2, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    result = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, 3, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    summary = result.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    assert summary.row_count == 3
+    assert summary.missing_interval_count == 1
+    assert "observed_interval_gap" in summary.warnings
+    page = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert [row.close_value for row in page.rows if row.row_kind == "price_bar"] == [
+        100.0,
+        101.0,
+        103.0,
     ]
 
 
@@ -614,6 +771,108 @@ async def test_quote_capture_keeps_a_missing_value_row_without_inventing_prices(
         "quote_entitlement_limited",
         "quote_values_missing",
     ]
+
+
+@pytest.mark.anyio
+async def test_partial_noaccess_quote_preserves_a_safe_entitlement_warning(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "AssetType": "Stock",
+                "PriceTypeAsk": "NoAccess",
+                "PriceTypeBid": "RealTime",
+                "Quote": {
+                    "Ask": None,
+                    "Bid": 100.0,
+                    "DelayedByMinutes": 0,
+                    "Mid": 100.0,
+                    "PriceType": "RealTime",
+                },
+                "Uic": 1001,
+            },
+        ),
+    )
+
+    result = await capture_quote(
+        handle,
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    summary = result.datasets[0]
+    assert summary.quality_state == "partial"
+    assert summary.warnings == ("quote_entitlement_limited",)
+    page = get_dataset(summary.dataset_id, 1, 500, config=config)
+    row = page.rows[0]
+    assert isinstance(row, QuoteDatasetRow)
+    assert row.bid_value == 100.0
+    assert row.ask_value is None
+
+
+@pytest.mark.anyio
+async def test_market_quota_refusal_happens_before_chart_source_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:00:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 1,
+            },
+        ),
+    )
+
+    def refuse_capacity(
+        _store_type: type[AnalyticsStore],
+        _config_value: AnalyticsConfig,
+        _incoming_bytes: int,
+    ) -> None:
+        raise StoreQuotaError("fixture quota refusal")
+
+    monkeypatch.setattr(
+        AnalyticsStore,
+        "ensure_owner_capacity",
+        classmethod(refuse_capacity),
+    )
+    with pytest.raises(SyncLimitError, match="store quota"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM price_bars),
+                (SELECT count(*) FROM datasets)
+            """,
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 0, 0)
 
 
 @pytest.mark.anyio
@@ -1059,6 +1318,55 @@ async def test_batch_shares_one_fixed_budget_across_requests_and_retries(
         )
 
     assert len(executor.calls) == config.limits.sync_instruments
+
+
+@pytest.mark.anyio
+async def test_batch_preflights_expanded_option_requests_before_calls_or_writes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    expiries = tuple(date(2026, 9, 1) + timedelta(days=index) for index in range(25))
+    executor = _PayloadExecutor(
+        tuple(
+            {
+                "ExpiryDates": [expiry.isoformat()],
+                "OptionRootId": 1001,
+                "SpecificOptions": [],
+            }
+            for expiry in expiries
+        ),
+    )
+    request = SyncResearchRequest(
+        items=(
+            OptionChainSyncSpec(handle=handle, expiries=expiries),
+            QuoteSyncSpec(handle=handle),
+        ),
+    )
+
+    with pytest.raises(SyncLimitError, match="source request budget"):
+        await sync_research_data(
+            request,
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM option_snapshots),
+                (SELECT count(*) FROM quotes),
+                (SELECT count(*) FROM datasets)
+            """,
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 0, 0, 0)
 
 
 @pytest.mark.anyio

@@ -47,6 +47,7 @@ from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 
 _CHART_CONTRACT_ID: Final = "chart_v3"
 _MISSING_CURRENCY: Final = "__unavailable__"
+_NORMALIZED_ROW_ESTIMATE_BYTES: Final = 128
 _CONNECTION_CONFIG: Final = MappingProxyType(
     {
         "allow_unsigned_extensions": "false",
@@ -259,6 +260,17 @@ def _source_request_budget(
     return budget
 
 
+def _preflight_market_capacity(
+    config: AnalyticsConfig,
+    projected_rows: int,
+) -> None:
+    incoming_bytes = max(1, projected_rows) * _NORMALIZED_ROW_ESTIMATE_BYTES
+    try:
+        AnalyticsStore.ensure_owner_capacity(config, incoming_bytes)
+    except StoreQuotaError as error:
+        raise SyncLimitError("analytics store quota refuses market ingestion") from error
+
+
 async def _fetch_source_pages(
     provider: SaxoAnalyticsProvider,
     contract_id: str,
@@ -323,6 +335,7 @@ async def sync_price_bars(  # noqa: PLR0913
     requested_rows = _row_bound(start, end, interval)
     if requested_rows > config.limits.sync_rows:
         raise SyncLimitError("synchronous market data row limit exceeded")
+    _preflight_market_capacity(config, requested_rows)
     selector = _instrument_selector(config, instrument_handle)
     prior = _existing_bar_state(config, instrument_handle, interval, start, end)
     prior_page_ids = _latest_bar_page_ids(
@@ -332,7 +345,9 @@ async def sync_price_bars(  # noqa: PLR0913
         start,
         end,
     )
-    refresh_start = start if prior is None else max(start, prior.coverage_end - interval.delta)
+    refresh_start = (
+        start if prior is None or prior.coverage_start > start else max(start, prior.refresh_start)
+    )
     refresh_rows = _row_bound(refresh_start, end, interval)
     capture_time = _require_utc_clock(clock())
     request: dict[str, object] = {
@@ -369,7 +384,9 @@ async def sync_price_bars(  # noqa: PLR0913
         start,
         end,
         refreshed_series,
+        refresh_start,
     )
+    coverage = _price_series_coverage(series, start, end)
     correction_state = {
         "prior_coverage": (
             None
@@ -411,14 +428,15 @@ async def sync_price_bars(  # noqa: PLR0913
         correction_state=correction_state,
         prior_page_ids=prior_page_ids,
         normalized_series=refreshed_series,
+        coverage=coverage,
     )
     summary = PriceBarDatasetSummary(
         dataset_id=dataset_id,
         data_kind="price_bars",
         instrument_handle=instrument_handle,
         quality_state=quality_state,
-        coverage_start=start,
-        coverage_end=end,
+        coverage_start=coverage[0],
+        coverage_end=coverage[1],
         row_count=len(series.bars),
         missing_interval_count=series.missing_interval_count,
         return_series_label=series.return_series_label,
@@ -451,6 +469,7 @@ async def capture_quote(  # noqa: PLR0913
     request_count_start = budget.used
     instrument_handle = _validate_instrument_handle(handle)
     _validate_max_age(max_age)
+    _preflight_market_capacity(config, 1)
     selector = _instrument_selector(config, instrument_handle)
     captured_at = _require_utc_clock(clock())
     request: dict[str, object] = {
@@ -492,6 +511,9 @@ async def capture_quote(  # noqa: PLR0913
         correction_state,
     )
     source_limited = any(page.source_quality.state == "limited" for page in envelope.pages)
+    entitlement_limited = any(
+        page.source_quality.entitlement_limited_fields for page in envelope.pages
+    )
     has_price = any(
         value is not None for value in (quote.bid_value, quote.ask_value, quote.mid_value)
     )
@@ -512,7 +534,7 @@ async def capture_quote(  # noqa: PLR0913
         else "available"
     )
     warnings = set(quote.warnings)
-    if source_limited and not has_price:
+    if entitlement_limited:
         warnings.add("quote_entitlement_limited")
     if not has_price:
         warnings.add("quote_values_missing")
@@ -537,7 +559,7 @@ async def capture_quote(  # noqa: PLR0913
         coverage_end=captured_at,
         quality_state=quality_state,
         sync_metadata=sync_metadata,
-        normalized_bytes=128,
+        normalized_bytes=_NORMALIZED_ROW_ESTIMATE_BYTES,
         persist_normalized=lambda connection, stored_page_ids: _persist_normalized_quote(
             connection=connection,
             pages=envelope.pages,
@@ -583,6 +605,7 @@ async def capture_option_chain(  # noqa: PLR0913
     request_count_start = budget.used
     instrument_handle = _validate_instrument_handle(handle)
     requested_expiries = _validate_expiries(expiries, config)
+    _preflight_market_capacity(config, len(requested_expiries))
     selector = _instrument_selector(config, instrument_handle)
     captured_at = _require_utc_clock(clock())
     results: list[SyncResult] = []
@@ -675,7 +698,7 @@ async def capture_option_chain(  # noqa: PLR0913
     )
 
 
-async def sync_research_data(  # noqa: C901
+async def sync_research_data(
     request: SyncResearchRequest,
     *,
     provider: SaxoAnalyticsProvider,
@@ -685,22 +708,7 @@ async def sync_research_data(  # noqa: C901
     """Run one bounded batch immediately and return dataset handles only."""
     if type(request) is not SyncResearchRequest:
         raise TypeError("research sync requires SyncResearchRequest")
-    if len(request.items) > config.limits.sync_instruments:
-        raise SyncLimitError("synchronous research instrument limit exceeded")
-    handles = {item.handle for item in request.items}
-    if len(handles) > config.limits.sync_instruments:
-        raise SyncLimitError("synchronous research instrument limit exceeded")
-    projected_rows = 0
-    for item in request.items:
-        if isinstance(item, PriceBarSyncSpec):
-            _require_utc_range(item.start, item.end)
-            projected_rows += _row_bound(item.start, item.end, item.interval)
-        elif isinstance(item, QuoteSyncSpec):
-            _validate_max_age(item.max_age)
-        else:
-            _validate_expiries(item.expiries, config)
-    if projected_rows > config.limits.sync_rows:
-        raise SyncLimitError("synchronous market data row limit exceeded")
+    _preflight_research_request(request, config)
     budget = SourceRequestBudget(config.limits.sync_instruments)
     results: list[SyncResult] = []
     for item in request.items:
@@ -738,6 +746,40 @@ async def sync_research_data(  # noqa: C901
         results,
         source_request_count=budget.used,
     )
+
+
+def _preflight_research_request(
+    request: SyncResearchRequest,
+    config: AnalyticsConfig,
+) -> None:
+    if len(request.items) > config.limits.sync_instruments:
+        raise SyncLimitError("synchronous research instrument limit exceeded")
+    handles = {item.handle for item in request.items}
+    if len(handles) > config.limits.sync_instruments:
+        raise SyncLimitError("synchronous research instrument limit exceeded")
+    projected_rows = 0
+    projected_source_requests = 0
+    projected_storage_rows = 0
+    for item in request.items:
+        if isinstance(item, PriceBarSyncSpec):
+            _require_utc_range(item.start, item.end)
+            item_rows = _row_bound(item.start, item.end, item.interval)
+            projected_rows += item_rows
+            projected_storage_rows += item_rows
+            projected_source_requests += 1
+        elif isinstance(item, QuoteSyncSpec):
+            _validate_max_age(item.max_age)
+            projected_storage_rows += 1
+            projected_source_requests += 1
+        else:
+            item_expiries = _validate_expiries(item.expiries, config)
+            projected_storage_rows += len(item_expiries)
+            projected_source_requests += len(item_expiries)
+    if projected_rows > config.limits.sync_rows:
+        raise SyncLimitError("synchronous market data row limit exceeded")
+    if projected_source_requests > config.limits.sync_instruments:
+        raise SyncLimitError("synchronous source request budget exceeded")
+    _preflight_market_capacity(config, projected_storage_rows)
 
 
 def get_dataset(
@@ -779,6 +821,10 @@ def get_dataset(
     interval = ChartInterval(_required_text(metadata.get("interval"), "dataset interval"))
     start = _required_utc_text(metadata.get("requested_start"), "dataset coverage")
     end = _required_utc_text(metadata.get("requested_end"), "dataset coverage")
+    refresh_start = _required_utc_text(
+        metadata.get("refresh_start"),
+        "dataset refresh coverage",
+    )
     capture_revision = _required_text(
         metadata.get("capture_revision"),
         "dataset capture revision",
@@ -800,6 +846,7 @@ def get_dataset(
                 end,
                 capture_revision,
                 list(prior_page_ids),
+                refresh_start,
             ),
         ).fetchone()
         rows = cast(
@@ -814,6 +861,7 @@ def get_dataset(
                     end,
                     capture_revision,
                     list(prior_page_ids),
+                    refresh_start,
                     limit,
                     offset,
                 ),
@@ -1002,6 +1050,7 @@ class _InstrumentSelector(_StrictModel):
 class _ExistingBarState(_StrictModel):
     coverage_start: datetime
     coverage_end: datetime
+    refresh_start: datetime
 
 
 def _validate_expiries(
@@ -1077,13 +1126,28 @@ def _existing_bar_state(
             """,
             (instrument_handle, interval.value, start, end),
         ).fetchone()
+        trailing_rows = connection.execute(
+            """
+            SELECT epoch_us(bar_time)
+            FROM price_bars
+            WHERE
+                instrument_handle = ?
+                AND duration = ?
+                AND bar_time BETWEEN ? AND ?
+            GROUP BY bar_time
+            ORDER BY bar_time DESC
+            LIMIT 2
+            """,
+            (instrument_handle, interval.value, start, end),
+        ).fetchall()
     finally:
         connection.close()
-    if row is None or row[0] is None or row[1] is None:
+    if row is None or row[0] is None or row[1] is None or not trailing_rows:
         return None
     return _ExistingBarState(
         coverage_start=_epoch_us(row[0]),
         coverage_end=_epoch_us(row[1]),
+        refresh_start=_epoch_us(trailing_rows[-1][0]),
     )
 
 
@@ -1094,6 +1158,7 @@ def _merged_price_series(  # noqa: PLR0913
     start: datetime,
     end: datetime,
     refreshed: NormalizedPriceSeries,
+    refresh_start: datetime,
 ) -> NormalizedPriceSeries:
     retained_rows = _latest_stored_price_rows(
         config,
@@ -1104,10 +1169,13 @@ def _merged_price_series(  # noqa: PLR0913
     )
     if not retained_rows:
         return refreshed
-    rows_by_time = {
-        _parse_source_time(_required_text(row.get("Time"), "stored price-bar time")): row
-        for row in retained_rows
-    }
+    rows_by_time: dict[datetime, Mapping[str, object]] = {}
+    for row in retained_rows:
+        bar_time = _parse_source_time(
+            _required_text(row.get("Time"), "stored price-bar time"),
+        )
+        if bar_time < refresh_start:
+            rows_by_time[bar_time] = row
     for bar in refreshed.bars:
         row: dict[str, object] = {
             "CloseBid": bar.close_value,
@@ -1134,6 +1202,16 @@ def _merged_price_series(  # noqa: PLR0913
         start=start,
         end=end,
     )
+
+
+def _price_series_coverage(
+    series: NormalizedPriceSeries,
+    requested_start: datetime,
+    requested_end: datetime,
+) -> tuple[datetime, datetime]:
+    if not series.bars:
+        return requested_start, requested_end
+    return series.bars[0].bar_time, series.bars[-1].bar_time
 
 
 def _latest_stored_price_rows(
@@ -1300,6 +1378,7 @@ def _persist_chart_capture(  # noqa: PLR0913
     correction_state: Mapping[str, object],
     prior_page_ids: Sequence[str],
     normalized_series: NormalizedPriceSeries,
+    coverage: tuple[datetime, datetime],
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("chart capture contains no source page")
@@ -1313,6 +1392,7 @@ def _persist_chart_capture(  # noqa: PLR0913
         "instrument_handle": instrument_handle,
         "interval": interval.value,
         "prior_page_ids": list(prior_page_ids),
+        "refresh_start": correction_state.get("refresh_start"),
         "requested_end": end.isoformat(),
         "requested_start": start.isoformat(),
         "return_series_label": "price_return",
@@ -1321,11 +1401,11 @@ def _persist_chart_capture(  # noqa: PLR0913
         config=config,
         pages=pages,
         instrument_handle=instrument_handle,
-        coverage_start=start,
-        coverage_end=end,
+        coverage_start=coverage[0],
+        coverage_end=coverage[1],
         quality_state=quality_state,
         sync_metadata=sync_metadata,
-        normalized_bytes=len(normalized_series.bars) * 128,
+        normalized_bytes=(len(normalized_series.bars) * _NORMALIZED_ROW_ESTIMATE_BYTES),
         persist_normalized=lambda connection, stored_page_ids: _persist_normalized_bars(
             connection=connection,
             pages=pages,
@@ -1551,7 +1631,7 @@ def _persist_available_option_chain(  # noqa: PLR0913
         coverage_end=captured_at,
         quality_state=quality_state,
         sync_metadata=sync_metadata,
-        normalized_bytes=len(chain.options) * 128,
+        normalized_bytes=(len(chain.options) * _NORMALIZED_ROW_ESTIMATE_BYTES),
         persist_normalized=lambda connection, stored_page_ids: _persist_normalized_options(
             connection=connection,
             pages=envelope_pages,
@@ -1926,6 +2006,8 @@ def _require_utc_clock(value: datetime) -> datetime:
 
 
 def _row_bound(start: datetime, end: datetime, interval: ChartInterval) -> int:
+    if interval is ChartInterval.ONE_DAY:
+        return (end.date() - start.date()).days + 1
     return int((end - start) / interval.delta) + 1
 
 
@@ -2028,7 +2110,10 @@ _PRICE_BAR_RANKED_SQL: Final = """
             AND b.bar_time BETWEEN ? AND ?
             AND (
                 p.source_revision = ?
-                OR p.page_id = ANY(?)
+                OR (
+                    p.page_id = ANY(?)
+                    AND b.bar_time < ?
+                )
             )
     )
 """

@@ -94,6 +94,32 @@ def test_chart_gap_math_uses_absolute_instants_across_spring_forward() -> None:
     assert "observed_interval_gap" not in series.warnings
 
 
+def test_daily_gap_math_uses_exchange_calendar_days_across_spring_forward() -> None:
+    handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+
+    series = normalize_price_series(
+        rows=(
+            {
+                "CloseBid": 101.0,
+                "Time": "2026-03-27T00:00:00+01:00",
+                "Volume": 12,
+            },
+            {
+                "CloseBid": 103.0,
+                "Time": "2026-03-30T00:00:00+02:00",
+                "Volume": 13,
+            },
+        ),
+        instrument_handle=handle,
+        interval=ChartInterval.ONE_DAY,
+        start=datetime(2026, 3, 26, 23, tzinfo=UTC),
+        end=datetime(2026, 3, 29, 22, tzinfo=UTC),
+    )
+
+    assert series.missing_interval_count == 2
+    assert "observed_interval_gap" in series.warnings
+
+
 def test_chart_time_off_the_requested_interval_boundary_is_refused() -> None:
     handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
 
