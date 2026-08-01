@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
@@ -52,10 +53,16 @@ _TRANSACTIONS_CONTRACT: Final = "transactions_v1"
 _BOOKINGS_CONTRACT: Final = "bookings_v1"
 _CLOSED_POSITIONS_CONTRACT: Final = "closed_positions_history_v1"
 _COSTS_CONTRACT: Final = "costs_v1"
-_NORMALIZED_ROW_ESTIMATE_BYTES: Final = 256
+_NORMALIZED_ROW_ESTIMATE_BYTES: Final = 512
 _SOURCE_PAGE_SIZE: Final = 500
 _ACCOUNT_ALIAS_VERSION: Final = 4
 _MAX_SOURCE_TEXT_LENGTH: Final = 1_000
+_DUCKDB_ALLOCATION_RESERVE_BYTES: Final = 16 * 1024 * 1024
+_DUCKDB_BLOCK_BYTES: Final = 256 * 1024
+_SOURCE_PAGE_INDEX_OVERHEAD_BYTES: Final = 64 * 1024
+_DATASET_INDEX_OVERHEAD_BYTES: Final = 64 * 1024
+_ACCOUNT_BINDING_INDEX_OVERHEAD_BYTES: Final = 64 * 1024
+_SNAPSHOT_INDEX_OVERHEAD_BYTES: Final = 64 * 1024
 _JSON_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAdapter(
     dict[str, SourceJsonValue],
 )
@@ -357,6 +364,7 @@ async def sync_cost_sources(  # noqa: PLR0913
         visibility,
         trusted_local_host=trusted_local_host,
     )
+    assert_persisted_account_scope_binding(config, validated_scope)
     handles = tuple(instruments)
     if not handles or len(handles) > config.limits.sync_instruments:
         raise AccountSyncValidationError("cost sync instrument count exceeds its fixed limit")
@@ -404,7 +412,7 @@ async def sync_cost_sources(  # noqa: PLR0913
         )
     summaries, invalidated = _persist_prepared(
         config,
-        validated_scope.alias,
+        validated_scope,
         tuple(prepared),
     )
     return _result(
@@ -414,6 +422,7 @@ async def sync_cost_sources(  # noqa: PLR0913
         request_count=budget.used - request_count_start,
         visibility=visibility,
         prepared=prepared,
+        response_rows=config.limits.response_rows,
     )
 
 
@@ -436,6 +445,7 @@ async def _sync_history_contracts(  # noqa: PLR0913
         visibility,
         trusted_local_host=trusted_local_host,
     )
+    assert_persisted_account_scope_binding(config, validated_scope)
     _require_utc_range(start, end)
     budget = _source_budget(config, request_budget)
     request_count_start = budget.used
@@ -472,7 +482,7 @@ async def _sync_history_contracts(  # noqa: PLR0913
     )
     summaries, invalidated = _persist_prepared(
         config,
-        validated_scope.alias,
+        validated_scope,
         prepared,
     )
     return _result(
@@ -482,6 +492,7 @@ async def _sync_history_contracts(  # noqa: PLR0913
         request_count=budget.used - request_count_start,
         visibility=visibility,
         prepared=prepared,
+        response_rows=config.limits.response_rows,
     )
 
 
@@ -503,6 +514,106 @@ def _preflight(
             "private_user_result requires the trusted local host",
         )
     return validated_scope
+
+
+def _selector_fingerprints(scope: AccountScope) -> tuple[str, str]:
+    account_selector = scope.account_key.get_secret_value().encode()
+    client_selector = scope.client_key.get_secret_value().encode()
+    return (
+        hashlib.sha256(b"saxo-analytics-account-selector-v1\0" + account_selector).hexdigest(),
+        hashlib.sha256(b"saxo-analytics-client-selector-v1\0" + client_selector).hexdigest(),
+    )
+
+
+def assert_persisted_account_scope_binding(
+    config: AnalyticsConfig,
+    scope: AccountScope,
+) -> None:
+    store_path = config.paths.store_path
+    if not store_path.is_file() or store_path.stat().st_size == 0:
+        return
+    connection = duckdb.connect(str(store_path), read_only=True)
+    try:
+        try:
+            row = connection.execute(
+                """
+                SELECT account_selector_sha256, client_selector_sha256
+                FROM account_scope_bindings
+                WHERE account_scope = ?
+                """,
+                (scope.alias,),
+            ).fetchone()
+        except duckdb.CatalogException:
+            return
+    finally:
+        connection.close()
+    if row is None:
+        return
+    expected_account, expected_client = _selector_fingerprints(scope)
+    if (
+        not isinstance(row[0], str)
+        or not isinstance(row[1], str)
+        or not hmac.compare_digest(row[0], expected_account)
+        or not hmac.compare_digest(row[1], expected_client)
+    ):
+        raise AccountSyncValidationError(
+            "account alias binding does not match the supplied selectors",
+        )
+
+
+def bind_account_scope(
+    connection: duckdb.DuckDBPyConnection,
+    scope: AccountScope,
+) -> None:
+    expected_account, expected_client = _selector_fingerprints(scope)
+    row = connection.execute(
+        """
+        SELECT account_selector_sha256, client_selector_sha256
+        FROM account_scope_bindings
+        WHERE account_scope = ?
+        """,
+        (scope.alias,),
+    ).fetchone()
+    if row is None:
+        connection.execute(
+            """
+            INSERT INTO account_scope_bindings (
+                account_scope, account_selector_sha256, client_selector_sha256
+            )
+            VALUES (?, ?, ?)
+            """,
+            (scope.alias, expected_account, expected_client),
+        )
+        return
+    if (
+        not isinstance(row[0], str)
+        or not isinstance(row[1], str)
+        or not hmac.compare_digest(row[0], expected_account)
+        or not hmac.compare_digest(row[1], expected_client)
+    ):
+        raise AccountSyncValidationError(
+            "account alias binding does not match the supplied selectors",
+        )
+
+
+def conservative_ingestion_reservation(
+    *,
+    raw_payload_bytes: int,
+    normalized_rows: int,
+    source_pages: int,
+    datasets: int,
+    snapshots: int = 0,
+) -> int:
+    estimated = (
+        _DUCKDB_ALLOCATION_RESERVE_BYTES
+        + raw_payload_bytes
+        + (normalized_rows * _NORMALIZED_ROW_ESTIMATE_BYTES)
+        + (source_pages * _SOURCE_PAGE_INDEX_OVERHEAD_BYTES)
+        + (datasets * _DATASET_INDEX_OVERHEAD_BYTES)
+        + _ACCOUNT_BINDING_INDEX_OVERHEAD_BYTES
+        + (snapshots * _SNAPSHOT_INDEX_OVERHEAD_BYTES)
+    )
+    return math.ceil(estimated / _DUCKDB_BLOCK_BYTES) * _DUCKDB_BLOCK_BYTES
 
 
 def _source_budget(
@@ -583,6 +694,7 @@ def _prepare_history_dataset(
     start: datetime,
     end: datetime,
 ) -> _PreparedDataset:
+    dataset_warnings: tuple[str, ...] | None = None
     if contract_id == _TRANSACTIONS_CONTRACT:
         records = _normalize_transactions(pages, alias)
         data_kind: AccountDataKind = "transactions"
@@ -590,7 +702,19 @@ def _prepare_history_dataset(
         records = _normalize_bookings(pages, alias)
         data_kind = "bookings"
     elif contract_id == _CLOSED_POSITIONS_CONTRACT:
-        records = _normalize_closed_positions(pages, alias)
+        observed_records = _normalize_closed_positions(pages, alias)
+        warnings = set(_record_warnings(observed_records, pages))
+        if any(
+            record.effective_at is not None and not start <= record.effective_at <= end
+            for record in observed_records
+        ):
+            warnings.add("closed_position_rows_outside_requested_utc_range")
+        records = tuple(
+            record
+            for record in observed_records
+            if record.effective_at is not None and start <= record.effective_at <= end
+        )
+        dataset_warnings = tuple(sorted(warnings))
         data_kind = "closed_positions"
     else:
         raise AccountSyncValidationError("account history contract is unsupported")
@@ -601,7 +725,7 @@ def _prepare_history_dataset(
         records=records,
         coverage_start=start,
         coverage_end=end,
-        warnings=_record_warnings(records, pages),
+        warnings=(dataset_warnings or _record_warnings(records, pages)),
     )
 
 
@@ -779,18 +903,33 @@ def _record_warnings(
 
 def _persist_prepared(
     config: AnalyticsConfig,
-    alias: str,
+    scope: AccountScope,
     prepared: tuple[_PreparedDataset, ...],
 ) -> tuple[tuple[AccountDatasetSummary, ...], int]:
+    alias = scope.alias
     normalized_count = sum(len(item.records) for item in prepared)
+    pages = tuple(page for item in prepared for page in item.pages)
+    reservation = conservative_ingestion_reservation(
+        raw_payload_bytes=sum(len(page.model_dump_json().encode()) for page in pages),
+        normalized_rows=normalized_count,
+        source_pages=len(pages),
+        datasets=len(prepared),
+    )
+    try:
+        AnalyticsStore.ensure_owner_capacity(config, reservation)
+    except StoreQuotaError as error:
+        raise AccountSyncValidationError(
+            "analytics store quota refuses account ingestion",
+        ) from error
     store = AnalyticsStore.open(config)
     summaries: list[AccountDatasetSummary] = []
     invalidated_total = 0
     try:
         try:
             with store.market_ingestion_transaction(
-                normalized_count * _NORMALIZED_ROW_ESTIMATE_BYTES,
+                reservation,
             ) as connection:
+                bind_account_scope(connection, scope)
                 for item in prepared:
                     summary, invalidated = _persist_one_dataset(
                         store,
@@ -854,19 +993,23 @@ def _persist_one_dataset(
     existing = _existing_record_versions(connection, prepared.data_kind, alias)
     duplicate_count = 0
     correction_count = 0
+    inserted_count = 0
     for record in prepared.records:
         versions = existing.setdefault(record.source_identity_sha256, set())
         if record.source_row_sha256 in versions:
             duplicate_count += 1
             continue
-        if versions:
-            correction_count += 1
+        is_correction = bool(versions)
         _ensure_closed_position_instrument(
             connection,
             prepared,
             record,
         )
-        _insert_record(connection, alias, page_ids[record.page_number], record)
+        if not _insert_record(connection, alias, page_ids[record.page_number], record):
+            continue
+        inserted_count += 1
+        if is_correction:
+            correction_count += 1
         versions.add(record.source_row_sha256)
     invalidated = (
         _invalidate_dependent_analyses(
@@ -874,7 +1017,7 @@ def _persist_one_dataset(
             alias,
             prepared.contract_id,
         )
-        if correction_count
+        if inserted_count
         else 0
     )
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
@@ -960,11 +1103,11 @@ def _insert_record(
     alias: str,
     page_id: str,
     record: _NormalizedRecord,
-) -> None:
+) -> bool:
     if record.effective_at is None or (
         record.data_kind == "closed_positions" and record.instrument_handle is None
     ):
-        return
+        return False
     record_id = _opaque_row_id(
         record.data_kind,
         alias,
@@ -1070,6 +1213,7 @@ def _insert_record(
         )
     else:
         raise AccountSyncError("normalized account data kind is unsupported")
+    return True
 
 
 def _ensure_closed_position_instrument(
@@ -1195,16 +1339,41 @@ def _result(  # noqa: PLR0913
     request_count: int,
     visibility: VisibilityMode,
     prepared: Sequence[_PreparedDataset],
+    response_rows: int,
 ) -> SyncResult:
+    all_private_records = tuple(
+        record.private_record() for item in prepared for record in item.records
+    )
+    truncated = (
+        visibility is VisibilityMode.PRIVATE_USER_RESULT
+        and len(all_private_records) > response_rows
+    )
+    if truncated:
+        summaries = tuple(
+            summary.model_copy(
+                update={
+                    "warnings": tuple(
+                        sorted(
+                            {
+                                *summary.warnings,
+                                "private_result_truncated_to_response_limit",
+                            },
+                        ),
+                    ),
+                },
+            )
+            for summary in summaries
+        )
     private_records = (
-        tuple(record.private_record() for item in prepared for record in item.records)
+        all_private_records[:response_rows]
         if visibility is VisibilityMode.PRIVATE_USER_RESULT
         else None
     )
     return AccountSyncResult(
         status=(
             "degraded"
-            if any(summary.quality_state is not QualityState.COMPLETE for summary in summaries)
+            if truncated
+            or any(summary.quality_state is not QualityState.COMPLETE for summary in summaries)
             else "complete"
         ),
         account_alias=alias,

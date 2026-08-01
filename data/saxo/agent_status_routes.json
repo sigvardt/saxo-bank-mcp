@@ -3,6 +3,14 @@
   "status_module_classification": {
     "excluded": [
       {
+        "module": "src/saxo_bank_mcp/analytics_account_data.py",
+        "reason": "Owner-requested account analytics domain result statuses, not registered MCP tool response truth."
+      },
+      {
+        "module": "src/saxo_bank_mcp/analytics_portfolio_snapshots.py",
+        "reason": "Owner-requested portfolio snapshot domain result statuses, not registered MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/agent_skill_eval_execution.py",
         "reason": "Agent eval execution status, not production MCP tool response truth."
       },

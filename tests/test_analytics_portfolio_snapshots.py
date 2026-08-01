@@ -8,12 +8,14 @@ import stat
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 import duckdb
 import httpx2
 import pytest
 from pydantic import SecretStr
 
+import saxo_bank_mcp.analytics_portfolio_snapshots as snapshot_module
 from saxo_bank_mcp.analytics_account_data import AccountScope, new_account_alias
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_models import HandleKind, VisibilityMode, new_safe_handle
@@ -22,6 +24,7 @@ from saxo_bank_mcp.analytics_portfolio_snapshots import (
     capture_portfolio_snapshot,
 )
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_store import AnalyticsStore
 from saxo_bank_mcp.endpoint_registry import EndpointOperation
 
 _CAPTURED_AT = datetime(2026, 8, 1, 8, tzinfo=UTC)
@@ -57,6 +60,10 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
             "SAXO_MCP_ANALYTICS_STORE_QUOTA_GIB": "1",
         },
     )
+
+
+def _all_local_bytes(root: Path) -> int:
+    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
 
 def _scope() -> AccountScope:
@@ -120,6 +127,24 @@ def _snapshot_payloads(
             ],
         },
     )
+
+
+def _position_payload(index: int) -> Mapping[str, object]:
+    return {
+        "PositionBase": {
+            "Amount": 2.0,
+            "AssetType": "Stock",
+            "ExecutionTimeOpen": "2026-07-01T08:00:00Z",
+            "OpenPrice": 100.0,
+            "Uic": 1000 + index,
+        },
+        "PositionId": f"synthetic-position-{index}",
+        "PositionView": {
+            "CurrentPrice": 110.0,
+            "Exposure": 220.0,
+            "ProfitLossOnTrade": 20.0,
+        },
+    }
 
 
 def _seed_analysis(
@@ -268,6 +293,143 @@ async def test_private_snapshot_exposes_unsettled_financing_tax_and_missing_basi
 
 
 @pytest.mark.anyio
+async def test_snapshot_rejects_rebound_account_alias_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    first = await capture_portfolio_snapshot(
+        scope,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(_snapshot_payloads(5000.0)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    rebound = AccountScope(
+        alias=scope.alias,
+        account_key=scope.account_key,
+        client_key=SecretStr("different-client-key"),
+    )
+    executor = _PayloadExecutor(_snapshot_payloads(5000.0))
+
+    with pytest.raises(PortfolioSnapshotValidationError, match="account alias binding"):
+        await capture_portfolio_snapshot(
+            rebound,
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _LATER,
+        )
+
+    assert executor.calls == []
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            "SELECT count(*) FROM account_snapshots WHERE account_scope = ?",
+            (scope.alias,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (1,)
+    assert first.account_alias == scope.alias
+
+
+@pytest.mark.anyio
+async def test_snapshot_caps_public_and_private_positions_across_source_pages(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    first_positions = tuple(
+        _position_payload(index) for index in range(config.limits.response_rows)
+    )
+    final_position = _position_payload(config.limits.response_rows)
+    next_query = urlencode(
+        {
+            "$skip": config.limits.response_rows,
+            "$top": config.limits.response_rows,
+            "AccountKey": scope.account_key.get_secret_value(),
+            "ClientKey": scope.client_key.get_secret_value(),
+        },
+    )
+    balance, _positions, _orders = _snapshot_payloads(5000.0)
+    executor = _PayloadExecutor(
+        (
+            balance,
+            {
+                "Data": list(first_positions),
+                "__next": f"/port/v1/positions?{next_query}",
+            },
+            {"Data": [final_position]},
+            {"Data": []},
+        ),
+    )
+
+    result = await capture_portfolio_snapshot(
+        scope,
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert result.status == "degraded"
+    assert result.position_count == config.limits.response_rows + 1
+    assert len(result.position_handles) == config.limits.response_rows
+    assert result.private_values is not None
+    assert len(result.private_values.positions) == config.limits.response_rows
+    assert "position_result_truncated_to_response_limit" in result.warnings
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        stored_count = connection.execute("SELECT count(*) FROM safe_instruments").fetchone()
+    finally:
+        connection.close()
+    assert stored_count == (config.limits.response_rows + 1,)
+
+
+@pytest.mark.anyio
+async def test_snapshot_reserves_shared_store_overhead_before_any_write(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    store.close()
+    reserved = config.paths.artifacts_dir / "reserved.bin"
+    reserved.touch(mode=0o600)
+    current_bytes = _all_local_bytes(config.paths.analytics_root)
+    with reserved.open("r+b") as handle:
+        handle.truncate(config.limits.store_quota_bytes - current_bytes - 1024 * 1024)
+
+    with pytest.raises(PortfolioSnapshotValidationError, match="store quota"):
+        await capture_portfolio_snapshot(
+            _scope(),
+            provider=SaxoAnalyticsProvider(
+                request_executor=_PayloadExecutor(_snapshot_payloads(5000.0)),
+            ),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM safe_instruments),
+                (SELECT count(*) FROM datasets),
+                (SELECT count(*) FROM account_snapshots),
+                (SELECT count(*) FROM account_scope_bindings)
+            """,
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 0, 0, 0, 0)
+    assert _all_local_bytes(config.paths.analytics_root) <= config.limits.store_quota_bytes
+
+
+@pytest.mark.anyio
 async def test_snapshots_are_immutable_and_only_material_revisions_invalidate_dependents(
     tmp_path: Path,
 ) -> None:
@@ -346,6 +508,91 @@ async def test_snapshots_are_immutable_and_only_material_revisions_invalidate_de
     assert len(snapshots) == 3
     assert '"cash_balance":5000.0' in str(snapshots[0][0])
     assert '"cash_balance":5001.0' in str(snapshots[1][0])
+
+
+@pytest.mark.anyio
+async def test_equal_as_of_recency_uses_committed_order_instead_of_snapshot_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    store = AnalyticsStore.open(config)
+    store.close()
+    high_snapshot_id = "ps_ffffffffffff4fff8fffffffffffffff"
+    low_snapshot_id = "ps_00000000000040008000000000000000"
+    repeat_snapshot_id = "ps_11111111111141118111111111111111"
+    legacy_payload = json.dumps(
+        {"material_fingerprint_sha256": "a" * 64},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute(
+            """
+            INSERT INTO account_snapshots (
+                snapshot_id, dataset_id, page_id, snapshot_kind, account_scope,
+                source_revision, as_of, byte_count, fingerprint_sha256, payload_json
+            )
+            VALUES (?, ?, NULL, 'portfolio', ?, 'legacy-revision', ?, ?, ?, ?)
+            """,
+            (
+                high_snapshot_id,
+                "ds_22222222222242228222222222222222",
+                scope.alias,
+                _CAPTURED_AT,
+                len(legacy_payload.encode()),
+                "b" * 64,
+                legacy_payload,
+            ),
+        )
+    finally:
+        connection.close()
+
+    original_new_handle = snapshot_module.new_safe_handle
+    snapshot_ids = iter((low_snapshot_id, repeat_snapshot_id))
+
+    def controlled_handle(kind: HandleKind) -> str:
+        if kind is HandleKind.PORTFOLIO_SNAPSHOT_ID:
+            return next(snapshot_ids)
+        return original_new_handle(kind)
+
+    monkeypatch.setattr(snapshot_module, "new_safe_handle", controlled_handle)
+    current = await capture_portfolio_snapshot(
+        scope,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(_snapshot_payloads(5001.0)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    analysis_id = _seed_analysis(
+        config,
+        dataset_id=current.dataset_id,
+        account_alias=scope.alias,
+        analysis_kind="portfolio_overview",
+    )
+
+    repeated = await capture_portfolio_snapshot(
+        scope,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(_snapshot_payloads(5001.0)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert repeated.invalidated_analysis_count == 0
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        status = connection.execute(
+            "SELECT status FROM analyses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert status == ("verified",)
 
 
 @pytest.mark.anyio

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 import duckdb
 import httpx2
@@ -19,6 +20,7 @@ from saxo_bank_mcp.analytics_account_data import (
     AccountSyncValidationError,
     new_account_alias,
     sync_account_history,
+    sync_closed_positions,
     sync_cost_sources,
     sync_transactions,
 )
@@ -63,6 +65,10 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     )
 
 
+def _all_local_bytes(root: Path) -> int:
+    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+
+
 def _scope(alias: str | None = None) -> AccountScope:
     return AccountScope(
         alias=alias or new_account_alias(),
@@ -87,6 +93,25 @@ def _transaction(
         "ExecutionTime": execution_time,
         "TransactionId": transaction_id,
         "TransactionType": transaction_type,
+    }
+
+
+def _closed_position(
+    position_id: str,
+    *,
+    closed_at: str | None,
+    uic: int | None,
+) -> Mapping[str, object]:
+    closed: dict[str, object] = {"ClosedProfitLoss": 8.0}
+    if closed_at is not None:
+        closed["ExecutionTimeClose"] = closed_at
+    closing: dict[str, object] = {"Amount": 1.0, "AssetType": "Stock"}
+    if uic is not None:
+        closing["Uic"] = uic
+    return {
+        "ClosedPosition": closed,
+        "ClosedPositionId": position_id,
+        "ClosingPosition": closing,
     }
 
 
@@ -313,6 +338,364 @@ async def test_duplicate_retry_is_a_no_op_but_correction_is_retained_and_invalid
         connection.close()
     assert count == (2,)
     assert status == ("invalidated",)
+
+
+@pytest.mark.anyio
+async def test_new_transaction_invalidates_dependents_but_its_duplicate_does_not(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    original = _transaction("synthetic-existing", "Trade", -10.0)
+    added = _transaction("synthetic-added", "Fee", -2.0)
+    first = await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor((_transactions(original),)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    changed_analysis = _seed_analysis(
+        config,
+        dataset_id=first.datasets[0].dataset_id,
+        account_alias=scope.alias,
+        analysis_kind="portfolio_performance",
+    )
+
+    changed = await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor((_transactions(original, added),)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT + timedelta(minutes=1),
+    )
+    duplicate_analysis = _seed_analysis(
+        config,
+        dataset_id=changed.datasets[0].dataset_id,
+        account_alias=scope.alias,
+        analysis_kind="portfolio_performance",
+    )
+    duplicate = await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor((_transactions(original, added),)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT + timedelta(minutes=2),
+    )
+
+    assert changed.datasets[0].correction_count == 0
+    assert changed.invalidated_analysis_count == 1
+    assert duplicate.datasets[0].duplicate_count == 2
+    assert duplicate.invalidated_analysis_count == 0
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        statuses = dict(
+            connection.execute(
+                "SELECT analysis_id, status FROM analyses WHERE analysis_id = ANY(?)",
+                ([changed_analysis, duplicate_analysis],),
+            ).fetchall(),
+        )
+    finally:
+        connection.close()
+    assert statuses == {
+        changed_analysis: "invalidated",
+        duplicate_analysis: "verified",
+    }
+
+
+@pytest.mark.anyio
+async def test_newly_valid_closed_position_invalidates_dependent_analysis(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    unavailable = _closed_position(
+        "synthetic-late-valid",
+        closed_at="2026-07-17T10:00:00Z",
+        uic=None,
+    )
+    first = await sync_closed_positions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(({"Data": [unavailable]},)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    analysis_id = _seed_analysis(
+        config,
+        dataset_id=first.datasets[0].dataset_id,
+        account_alias=scope.alias,
+        analysis_kind="portfolio_performance",
+    )
+
+    valid = _closed_position(
+        "synthetic-late-valid",
+        closed_at="2026-07-17T10:00:00Z",
+        uic=1001,
+    )
+    changed = await sync_closed_positions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(({"Data": [valid]},)),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT + timedelta(minutes=1),
+    )
+
+    assert changed.datasets[0].correction_count == 0
+    assert changed.invalidated_analysis_count == 1
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        normalized = connection.execute("SELECT count(*) FROM closed_positions").fetchone()
+        status = connection.execute(
+            "SELECT status FROM analyses WHERE analysis_id = ?",
+            (analysis_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert normalized == (1,)
+    assert status == ("invalidated",)
+
+
+@pytest.mark.anyio
+async def test_account_alias_binding_rejects_changed_account_or_client_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(request_executor=_PayloadExecutor((_transactions(),))),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        binding = connection.execute(
+            """
+            SELECT account_selector_sha256, client_selector_sha256
+            FROM account_scope_bindings
+            WHERE account_scope = ?
+            """,
+            (scope.alias,),
+        ).fetchone()
+        counts_before = connection.execute(
+            "SELECT (SELECT count(*) FROM source_pages), (SELECT count(*) FROM datasets)",
+        ).fetchone()
+    finally:
+        connection.close()
+    assert binding is not None
+    assert all(isinstance(value, str) and _SHA256.fullmatch(value) for value in binding)
+    assert scope.account_key.get_secret_value() not in str(binding)
+    assert scope.client_key.get_secret_value() not in str(binding)
+
+    changed_scopes = (
+        AccountScope(
+            alias=scope.alias,
+            account_key=SecretStr("changed-account-key"),
+            client_key=scope.client_key,
+        ),
+        AccountScope(
+            alias=scope.alias,
+            account_key=scope.account_key,
+            client_key=SecretStr("changed-client-key"),
+        ),
+    )
+    for changed_scope in changed_scopes:
+        executor = _PayloadExecutor((_transactions(),))
+        with pytest.raises(AccountSyncValidationError, match="account alias binding"):
+            await sync_transactions(
+                changed_scope,
+                _START,
+                _END,
+                provider=SaxoAnalyticsProvider(request_executor=executor),
+                config=config,
+                clock=lambda: _CAPTURED_AT + timedelta(minutes=1),
+            )
+        assert executor.calls == []
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts_after = connection.execute(
+            "SELECT (SELECT count(*) FROM source_pages), (SELECT count(*) FROM datasets)",
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts_after == counts_before
+
+
+@pytest.mark.anyio
+async def test_private_account_result_caps_records_across_all_source_pages(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    first_rows = tuple(
+        _transaction(
+            f"synthetic-page-one-{index}",
+            "Trade",
+            float(-index),
+            execution_time=(
+                datetime(2026, 7, 1, tzinfo=UTC) + timedelta(seconds=index)
+            ).isoformat(),
+        )
+        for index in range(config.limits.response_rows)
+    )
+    second_row = _transaction(
+        "synthetic-page-two",
+        "Fee",
+        -1.0,
+        execution_time="2026-07-02T00:00:00Z",
+    )
+    next_query = urlencode(
+        {
+            "$skip": config.limits.response_rows,
+            "$top": config.limits.response_rows,
+            "AccountKeys": scope.account_key.get_secret_value(),
+            "ClientKey": scope.client_key.get_secret_value(),
+            "FromDate": _START.isoformat(),
+            "ToDate": _END.isoformat(),
+        },
+    )
+    executor = _PayloadExecutor(
+        (
+            {"Data": list(first_rows), "__next": f"/hist/v1/transactions?{next_query}"},
+            {"Data": [second_row]},
+        ),
+    )
+
+    result = await sync_transactions(
+        scope,
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert result.status == "degraded"
+    assert result.private_records is not None
+    assert len(result.private_records) == config.limits.response_rows
+    assert result.datasets[0].row_count == config.limits.response_rows + 1
+    assert "private_result_truncated_to_response_limit" in result.datasets[0].warnings
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        stored_count = connection.execute("SELECT count(*) FROM transactions").fetchone()
+    finally:
+        connection.close()
+    assert stored_count == (config.limits.response_rows + 1,)
+
+
+@pytest.mark.anyio
+async def test_account_ingestion_reserves_duckdb_and_index_overhead_before_writes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    store.close()
+    reserved = config.paths.artifacts_dir / "reserved.bin"
+    reserved.touch(mode=0o600)
+    current_bytes = _all_local_bytes(config.paths.analytics_root)
+    with reserved.open("r+b") as handle:
+        handle.truncate(config.limits.store_quota_bytes - current_bytes - 1024 * 1024)
+    scope = _scope()
+
+    with pytest.raises(AccountSyncValidationError, match="store quota"):
+        await sync_transactions(
+            scope,
+            _START,
+            _END,
+            provider=SaxoAnalyticsProvider(
+                request_executor=_PayloadExecutor(
+                    (_transactions(_transaction("synthetic-quota", "Trade", -1.0)),),
+                ),
+            ),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM transactions),
+                (SELECT count(*) FROM datasets),
+                (SELECT count(*) FROM account_scope_bindings)
+            """,
+        ).fetchone()
+    finally:
+        connection.close()
+    assert counts == (0, 0, 0, 0)
+    assert _all_local_bytes(config.paths.analytics_root) <= config.limits.store_quota_bytes
+
+
+@pytest.mark.anyio
+async def test_closed_positions_filter_date_granularity_to_exact_utc_coverage(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    end = datetime(2026, 7, 2, 12, tzinfo=UTC)
+    rows = (
+        _closed_position("synthetic-before", closed_at="2026-07-01T11:59:59Z", uic=1001),
+        _closed_position("synthetic-inside", closed_at="2026-07-01T12:00:00Z", uic=1002),
+        _closed_position("synthetic-after", closed_at="2026-07-02T12:00:01Z", uic=1003),
+        _closed_position("synthetic-unknown-time", closed_at=None, uic=1004),
+    )
+
+    result = await sync_closed_positions(
+        scope,
+        start,
+        end,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(({"Data": list(rows)},)),
+        ),
+        config=config,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    summary = result.datasets[0]
+    assert summary.coverage_start == start
+    assert summary.coverage_end == end
+    assert summary.row_count == 1
+    assert result.private_records is not None
+    assert tuple(record.effective_at for record in result.private_records) == (start,)
+    assert set(summary.warnings) >= {
+        "closed_position_rows_outside_requested_utc_range",
+        "closed_position_time_unavailable",
+    }
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        normalized = connection.execute("SELECT count(*) FROM closed_positions").fetchone()
+        raw = connection.execute("SELECT row_count FROM source_pages").fetchone()
+    finally:
+        connection.close()
+    assert normalized == (1,)
+    assert raw == (4,)
 
 
 @pytest.mark.anyio

@@ -77,6 +77,7 @@ _SOURCE_AT = datetime(2026, 7, 30, 8, tzinfo=UTC)
 _PROJECT_ROOT = Path(__file__).parents[1]
 _FIXTURE = Path(__file__).parent / "fixtures" / "analytics" / "store_v0.duckdb"
 _REQUIRED_TABLES = {
+    "account_scope_bindings",
     "account_snapshots",
     "analyses",
     "artifacts",
@@ -553,8 +554,7 @@ def test_open_creates_the_normalized_schema_and_owner_only_database(tmp_path: Pa
         names = {
             row[0]
             for row in connection.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'main'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'",
             ).fetchall()
         }
         version = connection.execute(
@@ -598,8 +598,7 @@ def test_v0_fixture_contains_only_schema_metadata_and_no_private_rows() -> None:
         names = {
             row[0]
             for row in connection.execute(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'main'",
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'",
             ).fetchall()
         }
         rows = connection.execute("SELECT * FROM analytics_schema").fetchall()
@@ -635,6 +634,10 @@ def test_clean_wheel_contains_and_loads_the_fixed_migration_catalog(
         assert (
             "saxo_bank_mcp/_analytics_migrations/0002_source_page_identity.sql"
             in archive.namelist()
+        )
+        assert (
+            "saxo_bank_mcp/_analytics_migrations/"
+            "0003_account_scope_binding_and_snapshot_order.sql" in archive.namelist()
         )
 
     isolated_state = tmp_path / "isolated-state"
@@ -701,13 +704,10 @@ def test_failed_migration_keeps_v0_byte_identical_and_readable(
     assert _sha256(target) == before
     with duckdb.connect(str(target), read_only=True) as connection:
         assert connection.execute("SELECT version FROM analytics_schema").fetchone() == (0,)
-        assert (
-            connection.execute(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_name = 'migration_must_rollback'",
-            ).fetchone()
-            == (0,)
-        )
+        assert connection.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'migration_must_rollback'",
+        ).fetchone() == (0,)
 
 
 def test_failed_v2_migration_keeps_historical_v1_byte_identical_and_readable(
@@ -750,6 +750,71 @@ def test_failed_v2_migration_keeps_historical_v1_byte_identical_and_readable(
         }
     assert "logical_key_sha256" not in columns
     assert "fingerprint_sha256" not in columns
+
+
+def test_v3_migration_orders_existing_snapshots_and_adds_selector_bindings(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "store.duckdb"
+    connection = duckdb.connect(str(target))
+    try:
+        connection.execute(
+            Path("data/analytics/migrations/0001_initial.sql").read_text(
+                encoding="utf-8",
+            ),
+        )
+        connection.execute(
+            Path("data/analytics/migrations/0002_source_page_identity.sql").read_text(
+                encoding="utf-8",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations VALUES (1, 'initial', ?, current_timestamp)",
+            ("0" * 64,),
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations
+            VALUES (2, 'source_page_identity', ?, current_timestamp)
+            """,
+            ("1" * 64,),
+        )
+        connection.execute("INSERT INTO analytics_schema VALUES (TRUE, 2)")
+        connection.execute(
+            """
+            INSERT INTO account_snapshots (
+                snapshot_id, dataset_id, page_id, snapshot_kind, account_scope,
+                source_revision, as_of, byte_count, fingerprint_sha256, payload_json
+            )
+            VALUES (?, ?, NULL, 'portfolio', ?, ?, ?, 2, ?, '{}')
+            """,
+            (
+                "ps_00000000000040008000000000000000",
+                "ds_00000000000040008000000000000000",
+                "aa_00000000000040008000000000000000",
+                f"capture:{'0' * 64}",
+                _SOURCE_AT,
+                "2" * 64,
+            ),
+        )
+    finally:
+        connection.close()
+    target.chmod(_OWNER_FILE_MODE)
+
+    result = migrate_store(target, 3)
+
+    with duckdb.connect(str(target), read_only=True) as migrated:
+        version = migrated.execute("SELECT version FROM analytics_schema").fetchone()
+        created_order = migrated.execute(
+            "SELECT created_order FROM account_snapshots",
+        ).fetchone()
+        binding_count = migrated.execute(
+            "SELECT count(*) FROM account_scope_bindings",
+        ).fetchone()
+    assert result.to_version == LATEST_SCHEMA_VERSION
+    assert version == (LATEST_SCHEMA_VERSION,)
+    assert created_order == (1,)
+    assert binding_count == (0,)
 
 
 def test_migration_rejects_unknown_target_without_changing_fixture(tmp_path: Path) -> None:
@@ -846,11 +911,14 @@ def test_reads_use_a_connection_separate_from_the_uncommitted_writer(tmp_path: P
                 == ()
             )
 
-        assert len(
-            store.list_storage(
-                StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
-            ),
-        ) == 1
+        assert (
+            len(
+                store.list_storage(
+                    StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
+                ),
+            )
+            == 1
+        )
     finally:
         store.close()
 
@@ -1424,10 +1492,7 @@ def test_alternate_store_resources_count_toward_transaction_quota(
             external_bytes = sum(path.stat().st_size for path in managed_external)
             with sparse.open("r+b") as reserved:
                 reserved.truncate(
-                    config.limits.store_quota_bytes
-                    - analytics_bytes
-                    - external_bytes
-                    - 12_000,
+                    config.limits.store_quota_bytes - analytics_bytes - external_bytes - 12_000,
                 )
             sparse.chmod(_OWNER_FILE_MODE)
 
@@ -1565,10 +1630,7 @@ def test_delete_preview_is_exact_and_does_not_delete(tmp_path: Path) -> None:
             store_module.TableCount("source_pages", 1),
         )
         assert preview.estimated_bytes > 0
-        assert {
-            entry.object_id
-            for entry in store.list_storage(StorageScope())
-        } >= {
+        assert {entry.object_id for entry in store.list_storage(StorageScope())} >= {
             page.page_id,
             dataset.dataset_id,
             analysis.analysis_id,

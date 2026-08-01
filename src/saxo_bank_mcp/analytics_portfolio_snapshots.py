@@ -12,7 +12,13 @@ from uuid import RFC_4122, UUID
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
-from saxo_bank_mcp.analytics_account_data import AccountScope
+from saxo_bank_mcp.analytics_account_data import (
+    AccountScope,
+    AccountSyncValidationError,
+    assert_persisted_account_scope_binding,
+    bind_account_scope,
+    conservative_ingestion_reservation,
+)
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_models import (
     DatasetId,
@@ -186,7 +192,7 @@ class _SnapshotValues:
     positions: tuple[_Position, ...]
     order_identity_sha256s: tuple[str, ...]
 
-    def private_values(self) -> PrivatePortfolioValues:
+    def private_values(self, response_rows: int) -> PrivatePortfolioValues:
         return PrivatePortfolioValues(
             currency=self.currency,
             cash_balance=self.cash_balance,
@@ -200,7 +206,9 @@ class _SnapshotValues:
             deposit_value=self.deposit_value,
             withdrawal_value=self.withdrawal_value,
             total_value=self.total_value,
-            positions=tuple(position.private_value() for position in self.positions),
+            positions=tuple(
+                position.private_value() for position in self.positions[:response_rows]
+            ),
             fx_timestamp=None,
             tax_lot_basis_available=False,
         )
@@ -244,6 +252,12 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
         visibility,
         trusted_local_host=trusted_local_host,
     )
+    try:
+        assert_persisted_account_scope_binding(config, validated_scope)
+    except AccountSyncValidationError as error:
+        raise PortfolioSnapshotValidationError(
+            "account alias binding does not match the supplied selectors",
+        ) from error
     budget = _source_budget(config, request_budget)
     request_count_start = budget.used
     captured_at = _require_utc_clock(clock())
@@ -267,9 +281,14 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
     values = _normalize_snapshot(pages_by_contract, validated_scope.alias)
     material_fingerprint = _material_fingerprint(pages_by_contract)
     warnings = _snapshot_warnings(values, envelope.pages)
+    truncated = len(values.positions) > config.limits.response_rows
+    if truncated:
+        warnings = tuple(
+            sorted({*warnings, "position_result_truncated_to_response_limit"}),
+        )
     snapshot_id, dataset_id, invalidated = _persist_snapshot(
         config=config,
-        alias=validated_scope.alias,
+        scope=validated_scope,
         pages=envelope.pages,
         values=values,
         material_fingerprint_sha256=material_fingerprint,
@@ -282,7 +301,7 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
     return PortfolioSnapshot(
         status=(
             "degraded"
-            if any(page.source_quality.state == "limited" for page in envelope.pages)
+            if truncated or any(page.source_quality.state == "limited" for page in envelope.pages)
             else "complete"
         ),
         snapshot_id=snapshot_id,
@@ -293,13 +312,17 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
         balance_row_count=sum(page.row_count for page in pages_by_contract[_BALANCES_CONTRACT]),
         position_count=len(values.positions),
         order_count=len(values.order_identity_sha256s),
-        position_handles=tuple(position.handle for position in values.positions),
+        position_handles=tuple(
+            position.handle for position in values.positions[: config.limits.response_rows]
+        ),
         invalidated_analysis_count=invalidated,
         warnings=warnings,
         fingerprints=fingerprints,
         visibility=visibility,
         private_values=(
-            values.private_values() if visibility is VisibilityMode.PRIVATE_USER_RESULT else None
+            values.private_values(config.limits.response_rows)
+            if visibility is VisibilityMode.PRIVATE_USER_RESULT
+            else None
         ),
     )
 
@@ -506,7 +529,7 @@ def _material_fingerprint(
 def _persist_snapshot(  # noqa: PLR0913
     *,
     config: AnalyticsConfig,
-    alias: str,
+    scope: AccountScope,
     pages: Sequence[SourcePage],
     values: _SnapshotValues,
     material_fingerprint_sha256: str,
@@ -514,15 +537,37 @@ def _persist_snapshot(  # noqa: PLR0913
 ) -> tuple[str, str, int]:
     if not pages:
         raise PortfolioSnapshotError("portfolio capture contains no source page")
+    alias = scope.alias
     payload = values.stored_payload(material_fingerprint_sha256)
     payload_bytes = len(_canonical_json(payload).encode())
+    reservation = conservative_ingestion_reservation(
+        raw_payload_bytes=(
+            payload_bytes + sum(len(page.model_dump_json().encode()) for page in pages)
+        ),
+        normalized_rows=sum(page.row_count for page in pages),
+        source_pages=len(pages),
+        datasets=1,
+        snapshots=1,
+    )
+    try:
+        AnalyticsStore.ensure_owner_capacity(config, reservation)
+    except StoreQuotaError as error:
+        raise PortfolioSnapshotValidationError(
+            "analytics store quota refuses portfolio snapshot",
+        ) from error
     store = AnalyticsStore.open(config)
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
     snapshot_id = new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID)
     invalidated = 0
     try:
         try:
-            with store.market_ingestion_transaction(payload_bytes) as connection:
+            with store.market_ingestion_transaction(reservation) as connection:
+                try:
+                    bind_account_scope(connection, scope)
+                except AccountSyncValidationError as error:
+                    raise PortfolioSnapshotValidationError(
+                        "account alias binding does not match the supplied selectors",
+                    ) from error
                 page_ids = _persist_source_pages(store, pages, alias)
                 for position in values.positions:
                     _put_safe_position(
@@ -664,7 +709,7 @@ def _latest_material_fingerprint(
         SELECT payload_json
         FROM account_snapshots
         WHERE account_scope = ? AND snapshot_kind = 'portfolio'
-        ORDER BY as_of DESC, snapshot_id DESC
+        ORDER BY as_of DESC, created_order DESC NULLS LAST, rowid DESC
         LIMIT 1
         """,
         (alias,),

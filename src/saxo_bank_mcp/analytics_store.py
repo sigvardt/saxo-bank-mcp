@@ -1740,6 +1740,7 @@ class AnalyticsStore:
                     "snapshot source revision does not match its dataset",
                 )
             self._ensure_capacity(byte_count)
+            created_order = self._revision(connection) + 1
             connection.execute(
                 """
                 INSERT INTO account_snapshots (
@@ -1750,11 +1751,12 @@ class AnalyticsStore:
                     account_scope,
                     source_revision,
                     as_of,
+                    created_order,
                     byte_count,
                     fingerprint_sha256,
                     payload_json
                 )
-                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_id,
@@ -1763,6 +1765,7 @@ class AnalyticsStore:
                     account_scope,
                     source_revision,
                     as_of,
+                    created_order,
                     byte_count,
                     fingerprint_sha256,
                     payload_json,

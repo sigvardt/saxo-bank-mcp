@@ -18,8 +18,9 @@ import duckdb
 
 from saxo_bank_mcp.analytics_config import prepare_owner_only_path
 
-LATEST_SCHEMA_VERSION: Final = 2
+LATEST_SCHEMA_VERSION: Final = 3
 _SOURCE_PAGE_IDENTITY_SCHEMA_VERSION: Final = 2
+_ACCOUNT_SCOPE_BINDING_SCHEMA_VERSION: Final = 3
 _SOURCE_MIGRATIONS_DIR: Final = (
     Path(__file__).resolve().parents[2] / "data" / "analytics" / "migrations"
 )
@@ -61,6 +62,7 @@ def _read_migration(version: int) -> str:
     filename = {
         1: "0001_initial.sql",
         2: "0002_source_page_identity.sql",
+        3: "0003_account_scope_binding_and_snapshot_order.sql",
     }.get(version)
     if filename is None:
         msg = f"schema migration {version} is not installed"
@@ -80,6 +82,8 @@ def _migration_name(version: int) -> str:
         return "initial"
     if version == _SOURCE_PAGE_IDENTITY_SCHEMA_VERSION:
         return "source_page_identity"
+    if version == _ACCOUNT_SCOPE_BINDING_SCHEMA_VERSION:
+        return "account_scope_binding_and_snapshot_order"
     msg = f"schema migration {version} is not installed"
     raise MigrationError(msg)
 
@@ -266,9 +270,7 @@ def _migrate_store_locked(path: Path, target_version: int) -> MigrationResult:
 def migrate_store(path: Path, target_version: int) -> MigrationResult:
     """Migrate one owner-only store from a fixed catalog through an atomic replacement."""
     if not 0 <= target_version <= LATEST_SCHEMA_VERSION:
-        msg = (
-            f"target schema version must be between 0 and {LATEST_SCHEMA_VERSION}"
-        )
+        msg = f"target schema version must be between 0 and {LATEST_SCHEMA_VERSION}"
         raise MigrationError(msg)
 
     lock_path = prepare_owner_only_path(store_writer_lock_path(path))

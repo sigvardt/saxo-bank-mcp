@@ -72,6 +72,12 @@ SECOND_FIX_STATUS_SOURCES: Final = {
     "tool_error": "fastmcp_logging_safety.generic_tool_error_result",
     "unknown_tool": "fastmcp_logging_safety.SafeFastMCP.call_tool",
 }
+TASK_9_STATUS_MODULES: Final = frozenset(
+    {
+        "src/saxo_bank_mcp/analytics_account_data.py",
+        "src/saxo_bank_mcp/analytics_portfolio_snapshots.py",
+    },
+)
 
 
 @pytest.fixture
@@ -177,6 +183,7 @@ def test_status_discovery_classifies_every_candidate_module() -> None:
     # Given: production package scanning finds literal status emission candidates.
     discovery = status_discovery(ROOT)
     included = frozenset(item.module for item in discovery.included)
+    excluded = frozenset(item.module for item in discovery.excluded)
 
     # When: classification is checked for unreviewed or stale modules.
     unclassified = tuple(item.module for item in discovery.unclassified)
@@ -187,6 +194,7 @@ def test_status_discovery_classifies_every_candidate_module() -> None:
     assert "src/saxo_bank_mcp/live_mode.py" in included
     assert "src/saxo_bank_mcp/mcp_live_trade_tools.py" in included
     assert "src/saxo_bank_mcp/mcp_live_account_tools.py" in included
+    assert excluded >= TASK_9_STATUS_MODULES
 
 
 def test_generated_source_hashes_are_checkout_path_independent(tmp_path: Path) -> None:
@@ -277,6 +285,7 @@ def _copy_worktree(target: Path) -> Path:
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
+        ".superpowers",
         ".venv",
         "__pycache__",
     )
