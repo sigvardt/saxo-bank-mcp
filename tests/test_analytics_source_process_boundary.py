@@ -1421,6 +1421,86 @@ def test_process_boundary_receipt_binds_pid_stdio_tools_and_zero_reconnects() ->
     assert receipt.reconnect_count == receipt.restart_count == 0
 
 
+def test_privacy_filter_uses_forbidden_names_and_strings_not_integer_collisions(
+    sealed_runtime: SealedRuntimeFixture,
+) -> None:
+    runtime_module = importlib.import_module("saxo_bank_mcp.analytics_source_runtime")
+    seal = sealed_runtime.open_seal()
+    facts = ProcessSessionFacts(
+        coordinator_pid=1,
+        child_pid=2,
+        executable_identity_sha256="d" * 64,
+        stdin_identity=PipeIdentity("fifo", 0, 1, 0, 1),
+        stdout_identity=PipeIdentity("fifo", 1, 0, 1, 0),
+        stderr_byte_count=0,
+        listed_tool_names=SOURCE_MATRIX_CHILD_TOOLS,
+        child_spawn_count=1,
+        mcp_session_count=1,
+        mcp_initialize_count=1,
+        tool_list_count=1,
+        reconnect_count=0,
+        restart_count=0,
+        child_exit_code=0,
+        stdout_protocol_only=True,
+    )
+    private_account = "private-" + "account"
+    private_client = "private-" + "client"
+    private_app = "private-" + "app-key"
+    fixtures = qa_analytics_source_matrix.SourceMatrixFixtures(
+        private_account,
+        private_client,
+    )
+    private_env_key = next(
+        key
+        for key in qa_analytics_source_matrix._PRIVATE_CHILD_ENV_KEYS  # noqa: SLF001
+        if key.endswith("_" + "KEY")
+    )
+    env = {private_env_key: private_app}
+    identity = SourceMatrixCandidateIdentity(
+        source_contract_catalog_sha256="a" * 64,
+        harness_build_sha256="b" * 64,
+        candidate_identity_sha256="c" * 64,
+    )
+    safe_text = json.dumps(
+        {
+            "count": 0,
+            "other": 1,
+            "process_boundary": process_boundary_receipt(facts, identity).model_dump(
+                mode="json",
+            ),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    retains_private = (
+        qa_analytics_source_matrix._published_receipt_retains_private_values  # noqa: SLF001
+    )
+    try:
+        assert retains_private(
+            safe_text,
+            fixtures=fixtures,
+            env=env,
+            seal=seal,
+            layout=sealed_runtime.layout,
+        ) is False
+        assert retains_private(
+            '{"child_pid":999}',
+            fixtures=fixtures,
+            env=env,
+            seal=seal,
+            layout=sealed_runtime.layout,
+        ) is True
+        assert retains_private(
+            json.dumps({"value": private_app}),
+            fixtures=fixtures,
+            env=env,
+            seal=seal,
+            layout=sealed_runtime.layout,
+        ) is True
+    finally:
+        runtime_module.close_candidate_runtime_seal(seal)
+
+
 @pytest.mark.parametrize(
     "scenario",
     ("success", "preclaim", "postclaim", "stderr"),  # noqa: PT007 - exact matrix

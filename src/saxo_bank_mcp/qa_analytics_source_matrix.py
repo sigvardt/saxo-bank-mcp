@@ -1234,7 +1234,6 @@ async def _execute_source_matrix_with_events(  # noqa: C901, PLR0912, PLR0913, P
         if reason is None and text is not None:
             if _published_receipt_retains_private_values(
                 text,
-                facts=cast("ProcessSessionFacts", facts),
                 fixtures=fixtures,
                 env=env,
                 seal=seal,
@@ -1283,10 +1282,9 @@ def _postclaim_failure_text(reason: PostclaimFailureReason) -> str:
     )
 
 
-def _published_receipt_retains_private_values(  # noqa: PLR0913
+def _published_receipt_retains_private_values(
     text: str,
     *,
-    facts: ProcessSessionFacts,
     fixtures: SourceMatrixFixtures,
     env: Mapping[str, str],
     seal: CandidateRuntimeSeal,
@@ -1298,14 +1296,6 @@ def _published_receipt_retains_private_values(  # noqa: PLR0913
         return True
     field_names = _recursive_field_names(document)
     if field_names & {"child_pid", "coordinator_pid", "descriptor", "inode", "stderr"}:
-        return True
-    raw_integer_values = {
-        facts.child_pid,
-        facts.coordinator_pid,
-        *facts.stdin_identity.canonical_private_material().values(),
-        *facts.stdout_identity.canonical_private_material().values(),
-    }
-    if raw_integer_values & _recursive_integer_values(document):
         return True
     private_strings = {
         fixtures.account_key,
