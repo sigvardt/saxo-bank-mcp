@@ -1022,6 +1022,26 @@ def test_prelaunch_static_runtime_change_refuses_before_child(
     spawn.assert_not_called()
 
 
+def test_postlaunch_ancestor_entry_churn_does_not_change_runtime_identity(
+    sealed_runtime: SealedRuntimeFixture,
+) -> None:
+    runtime_module = importlib.import_module("saxo_bank_mcp.analytics_source_runtime")
+    seal = sealed_runtime.open_seal()
+    unrelated = sealed_runtime.ancestor / "unrelated-sibling"
+    try:
+        unrelated.mkdir(mode=0o700)
+        runtime_module.revalidate_candidate_runtime(seal, sealed_runtime.layout)
+        sealed_runtime.ancestor.chmod(0o777)
+        with pytest.raises(
+            runtime_module.CandidateRuntimeError,
+            match="runtime_identity_mismatch",
+        ):
+            runtime_module.revalidate_candidate_runtime(seal, sealed_runtime.layout)
+    finally:
+        sealed_runtime.ancestor.chmod(0o700)
+        runtime_module.close_candidate_runtime_seal(seal)
+
+
 def test_runtime_is_owner_only_nonwritable_and_uses_external_empty_caches(
     two_prepared_runtimes: tuple[PreparedRuntimeFixture, PreparedRuntimeFixture],
 ) -> None:

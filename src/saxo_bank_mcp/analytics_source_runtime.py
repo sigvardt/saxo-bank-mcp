@@ -858,6 +858,15 @@ def _metadata_identity(metadata: os.stat_result) -> dict[str, int]:
     }
 
 
+def _ancestor_identity(metadata: os.stat_result) -> dict[str, int]:
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "uid": metadata.st_uid,
+    }
+
+
 def _snapshot_identity(snapshot: RuntimeEntrySnapshot) -> dict[str, object]:
     return {
         "content_sha256": snapshot.content_sha256,
@@ -880,7 +889,7 @@ def _instance_identity(
     snapshots: tuple[RuntimeEntrySnapshot, ...],
 ) -> str:
     try:
-        ancestors = [_metadata_identity(os.fstat(item)) for item in ancestor_descriptors]
+        ancestors = [_ancestor_identity(os.fstat(item)) for item in ancestor_descriptors]
         root = _metadata_identity(os.fstat(root_descriptor))
     except OSError as error:
         raise CandidateRuntimeError("runtime_ancestor_mismatch") from error
