@@ -744,6 +744,46 @@ async def test_process_session_spawns_one_distinct_child_over_stdio(
 
 
 @pytest.mark.anyio
+async def test_process_session_returns_structured_refusal_and_closes_normally(
+    stdio_fixture_config: ChildLaunchConfig,
+) -> None:
+    session = OneShotProcessSession(
+        _fixture_scenario(stdio_fixture_config, "structured_refusal"),
+    )
+    await session.spawn()
+    await session.initialize()
+    assert await session.list_tools_once() == SOURCE_MATRIX_CHILD_TOOLS
+    try:
+        payload = await session.call_tool(
+            "saxo_call_registered_endpoint",
+            {
+                "method": "GET",
+                "path": "/port/v1/orders",
+                "response_mode": "analytics_contract_receipt",
+                "analytics_contract_id": "orders_v1",
+            },
+        )
+    except ProcessSessionError as error:
+        await session.abort()
+        pytest.fail(f"structured refusal rejected as {error.reason}")
+    facts = await session.close()
+
+    assert payload == {
+        "status": "refused",
+        "reason": "source_access_unavailable",
+        "call_class": "sim_read_refused",
+        "environment": "SIM",
+        "network_call_made": False,
+        "network_call_count": 0,
+        "response": None,
+    }
+    assert facts.child_spawn_count == facts.mcp_session_count == 1
+    assert facts.mcp_initialize_count == facts.tool_list_count == 1
+    assert facts.reconnect_count == facts.restart_count == 0
+    assert facts.child_exit_code == 0
+
+
+@pytest.mark.anyio
 async def test_process_session_cannot_initialize_connect_or_spawn_twice(
     stdio_fixture_config: ChildLaunchConfig,
 ) -> None:

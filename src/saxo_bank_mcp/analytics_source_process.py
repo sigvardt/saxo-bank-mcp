@@ -1025,8 +1025,6 @@ def _validated_json_object(value: object) -> dict[str, JsonValue]:
 
 
 def _validated_tool_result(result: types.CallToolResult) -> dict[str, JsonValue]:
-    if result.isError is True:
-        raise ValueError("tool_result_error")
     return _validated_json_object(result.structuredContent)
 
 

@@ -13,7 +13,14 @@ SOURCE_MATRIX_CHILD_TOOLS_LITERAL: Final[tuple[str, ...]] = (
     "saxo_call_registered_endpoint",
 )
 _SCENARIOS: Final[frozenset[str]] = frozenset(
-    {"normal", "early_exit", "malformed", "truncated", "nonzero"},
+    {
+        "normal",
+        "early_exit",
+        "malformed",
+        "truncated",
+        "nonzero",
+        "structured_refusal",
+    },
 )
 _EXPECTED_ARG_COUNT: Final = 2
 
@@ -35,7 +42,10 @@ def _object_mapping(value: object) -> dict[str, object] | None:
     return result
 
 
-def _result_for(message: dict[str, object]) -> dict[str, object] | None:
+def _result_for(
+    message: dict[str, object],
+    scenario: str,
+) -> dict[str, object] | None:
     method = message.get("method")
     if method == "notifications/initialized":
         return None
@@ -59,10 +69,23 @@ def _result_for(message: dict[str, object]) -> dict[str, object] | None:
             ],
         }
     elif method == "tools/call":
+        structured_content = (
+            {
+                "status": "refused",
+                "reason": "source_access_unavailable",
+                "call_class": "sim_read_refused",
+                "environment": "SIM",
+                "network_call_made": False,
+                "network_call_count": 0,
+                "response": None,
+            }
+            if scenario == "structured_refusal"
+            else {"status": "passed"}
+        )
         result = {
             "content": [],
-            "structuredContent": {"status": "passed"},
-            "isError": False,
+            "structuredContent": structured_content,
+            "isError": scenario == "structured_refusal",
         }
     else:
         return {
@@ -91,7 +114,7 @@ def main() -> int:
             sys.stdout.buffer.write(b'{"jsonrpc":"2.0"')
             sys.stdout.buffer.flush()
             return 0
-        response = _result_for(message)
+        response = _result_for(message, scenario)
         if response is not None:
             _write_json(response)
     return 17 if scenario == "nonzero" else 0
