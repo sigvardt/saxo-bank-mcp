@@ -78,6 +78,14 @@
         "source_contract_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
         },
+        "source_contract_sha256s": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Sha256Fingerprint"
+          },
+          "title": "Source Contract Sha256S",
+          "type": "array"
+        },
         "source_revision": {
           "$ref": "#/$defs/SourceRevision"
         },
@@ -1132,6 +1140,14 @@
       "properties": {
         "source_contract_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
+        },
+        "source_contract_sha256s": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Sha256Fingerprint"
+          },
+          "title": "Source Contract Sha256S",
+          "type": "array"
         },
         "source_revision": {
           "$ref": "#/$defs/SourceRevision"
