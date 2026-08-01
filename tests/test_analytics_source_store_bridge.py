@@ -20,6 +20,7 @@ from saxo_bank_mcp.analytics_source_contracts import (
     SourcePage,
     build_source_capture_context,
     build_source_capture_envelope,
+    source_contract_fingerprint,
     source_contracts_by_id,
 )
 from saxo_bank_mcp.analytics_store import (
@@ -135,6 +136,64 @@ async def _quote_capture(price_type_bid: str) -> SourceCaptureEnvelope:
     return build_source_capture_envelope(capture, pages)
 
 
+def _direct_info_price_page(
+    store: AnalyticsStore,
+    *,
+    page_key: str,
+    price_type: str,
+    source_quality: dict[str, object] | None,
+) -> store_module.StoredSourcePage:
+    contract = source_contracts_by_id()["info_price_v1"]
+    payload: dict[str, object] = {
+        "rows": [
+            {
+                "AssetType": "Stock",
+                "PriceTypeAsk": price_type,
+                "PriceTypeBid": price_type,
+                "Quote": {
+                    "Ask": 101.2,
+                    "Bid": 101.0,
+                    "DelayedByMinutes": 0,
+                    "Mid": 101.1,
+                    "PriceType": "Realtime",
+                },
+                "Uic": 1001,
+            },
+        ],
+    }
+    if source_quality is not None:
+        payload["source_quality"] = source_quality
+    return store.put_source_page(
+        source_kind=contract.source_kind,
+        page_key=page_key,
+        source_revision="quote-rev-1",
+        contract_name=contract.contract_id,
+        contract_sha256=source_contract_fingerprint(contract),
+        payload=payload,
+        row_count=1,
+        source_timestamp=_CAPTURED_AT,
+        account_scope="aggregate",
+        instrument_handle=None,
+    )
+
+
+def _complete_dataset_from_direct_quote(
+    store: AnalyticsStore,
+    page: store_module.StoredSourcePage,
+) -> store_module.StoredDataset:
+    return store.create_dataset(
+        dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+        account_scope="aggregate",
+        source_scope="saxo_openapi",
+        source_revision="quote-rev-1",
+        source_page_ids=(page.page_id,),
+        created_at=_CAPTURED_AT,
+        coverage_start=_CAPTURED_AT,
+        coverage_end=_CAPTURED_AT,
+        quality_state=QualityState.COMPLETE,
+    )
+
+
 @pytest.mark.anyio
 async def test_provider_capture_is_immutable_and_persisted_exactly_with_replay(
     tmp_path: Path,
@@ -248,6 +307,93 @@ async def test_create_dataset_cannot_upgrade_persisted_limited_quote_quality(
         store.close()
 
     assert upgraded.quality_state is QualityState.PARTIAL
+
+
+def test_direct_quote_page_without_quality_proof_cannot_create_dataset(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _direct_info_price_page(
+            store,
+            page_key="direct-info-price-omitted-quality",
+            price_type="NoAccess",
+            source_quality=None,
+        )
+
+        with pytest.raises(StoreValidationError):
+            _complete_dataset_from_direct_quote(store, page)
+    finally:
+        store.close()
+
+
+def test_direct_quote_page_with_forged_complete_proof_cannot_create_dataset(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _direct_info_price_page(
+            store,
+            page_key="direct-info-price-forged-quality",
+            price_type="NoAccess",
+            source_quality={
+                "state": "complete",
+                "entitlement_limited_fields": [],
+                "delayed_fields": [],
+                "missing_fields": [],
+            },
+        )
+
+        with pytest.raises(StoreValidationError):
+            _complete_dataset_from_direct_quote(store, page)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("price_type", "source_quality", "expected_quality"),
+    [
+        (
+            "Realtime",
+            {
+                "state": "complete",
+                "entitlement_limited_fields": [],
+                "delayed_fields": [],
+                "missing_fields": [],
+            },
+            QualityState.COMPLETE,
+        ),
+        (
+            "NoAccess",
+            {
+                "state": "limited",
+                "entitlement_limited_fields": ["PriceTypeAsk", "PriceTypeBid"],
+                "delayed_fields": [],
+                "missing_fields": [],
+            },
+            QualityState.PARTIAL,
+        ),
+    ],
+)
+def test_direct_quote_page_quality_must_match_exact_rows(
+    tmp_path: Path,
+    price_type: str,
+    source_quality: dict[str, object],
+    expected_quality: QualityState,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _direct_info_price_page(
+            store,
+            page_key=f"direct-info-price-valid-{price_type.casefold()}",
+            price_type=price_type,
+            source_quality=source_quality,
+        )
+        dataset = _complete_dataset_from_direct_quote(store, page)
+    finally:
+        store.close()
+
+    assert dataset.quality_state is expected_quality
 
 
 @pytest.mark.anyio

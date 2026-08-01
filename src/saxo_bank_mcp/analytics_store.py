@@ -41,9 +41,11 @@ from saxo_bank_mcp.analytics_source_contracts import (
     SourceCaptureEnvelope,
     SourceJsonValue,
     SourceQualityProof,
+    compare_source_schema,
     source_contract_fingerprint,
     source_contracts_by_id,
     source_page_fingerprint,
+    source_quality_proof,
 )
 
 _OWNER_FILE_MODE: Final = 0o600
@@ -69,6 +71,7 @@ _ACCOUNT_ALIAS_PATTERN: Final = re.compile(
     r"^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$",
 )
 _SAFE_ACCOUNT_SCOPES: Final = frozenset({"aggregate", "selected SIM account"})
+_INFO_PRICE_CONTRACT_ID: Final = "info_price_v1"
 _SOURCE_KINDS: Final = frozenset(
     {
         "account_snapshots",
@@ -1231,7 +1234,8 @@ class AnalyticsStore:
                     c.contract_sha256,
                     p.instrument_handle,
                     i.instrument_handle,
-                    p.payload_json
+                    p.payload_json,
+                    c.contract_name
                 FROM source_pages AS p
                 LEFT JOIN source_contracts AS c ON c.contract_id = p.contract_id
                 LEFT JOIN safe_instruments AS i
@@ -1281,6 +1285,10 @@ class AnalyticsStore:
             payload = cast("dict[str, object]", raw_payload)
             source_quality = payload.get("source_quality")
             if source_quality is None:
+                if _require_str(row[10]) == _INFO_PRICE_CONTRACT_ID:
+                    raise StoreValidationError(
+                        "persisted source quality metadata is invalid",
+                    )
                 continue
             try:
                 proof = SourceQualityProof.model_validate(source_quality, strict=True)
@@ -1288,10 +1296,47 @@ class AnalyticsStore:
                 raise StoreValidationError(
                     "persisted source quality metadata is invalid",
                 ) from error
+            contract_name = _require_str(row[10])
+            if (
+                contract_name == _INFO_PRICE_CONTRACT_ID
+                and proof != AnalyticsStore._canonical_persisted_info_price_quality(row, payload)
+            ):
+                raise StoreValidationError(
+                    "persisted source quality metadata is invalid",
+                )
             has_limited_source = has_limited_source or proof.state == "limited"
         if has_limited_source and requested is QualityState.COMPLETE:
             return QualityState.PARTIAL
         return requested
+
+    @staticmethod
+    def _canonical_persisted_info_price_quality(
+        row: tuple[object, ...],
+        payload: Mapping[str, object],
+    ) -> SourceQualityProof:
+        contract = source_contracts_by_id()[_INFO_PRICE_CONTRACT_ID]
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list):
+            raise StoreValidationError(
+                "persisted source quality metadata is invalid",
+            )
+        stored_rows = cast("list[object]", raw_rows)
+        if (
+            _require_str(row[6]) != source_contract_fingerprint(contract)
+            or len(stored_rows) != _require_int(row[2])
+            or len(stored_rows) != 1
+            or not isinstance(stored_rows[0], dict)
+        ):
+            raise StoreValidationError(
+                "persisted source quality metadata is invalid",
+            )
+        quote_row = cast("dict[str, object]", stored_rows[0])
+        comparison = compare_source_schema(contract, quote_row)
+        if not comparison.compatible:
+            raise StoreValidationError(
+                "persisted source quality metadata is invalid",
+            )
+        return source_quality_proof(contract, (quote_row,), comparison)
 
     def create_dataset(  # noqa: PLR0913
         self,
