@@ -1241,7 +1241,7 @@ class AnalyticsStore:
         connection: duckdb.DuckDBPyConnection,
         page_ids: Sequence[str],
         account_scope: str,
-        source_revision: str,
+        source_revision: str | None,
     ) -> list[tuple[object, ...]]:
         rows = cast(
             "list[tuple[object, ...]]",
@@ -1282,7 +1282,9 @@ class AnalyticsStore:
             raise StoreValidationError(
                 "dataset account scope does not match its source pages",
             )
-        if any(_require_str(row[5]) != source_revision for row in rows):
+        if source_revision is not None and any(
+            _require_str(row[5]) != source_revision for row in rows
+        ):
             raise StoreValidationError(
                 "dataset source revision does not match its source pages",
             )
@@ -1379,6 +1381,7 @@ class AnalyticsStore:
         source_scope: str,
         source_revision: str,
         source_page_ids: Sequence[str],
+        lineage_source_page_ids: Sequence[str] = (),
         created_at: datetime,
         coverage_start: datetime,
         coverage_end: datetime,
@@ -1395,19 +1398,30 @@ class AnalyticsStore:
         _validate_utc(coverage_end)
         if coverage_end < coverage_start:
             raise StoreValidationError("dataset coverage end precedes its start")
-        page_ids = tuple(sorted(set(source_page_ids)))
-        if not page_ids:
+        current_page_ids = tuple(sorted(set(source_page_ids)))
+        lineage_page_ids = tuple(
+            sorted(set(lineage_source_page_ids).difference(current_page_ids)),
+        )
+        page_ids = tuple(sorted((*current_page_ids, *lineage_page_ids)))
+        if not current_page_ids:
             raise StoreValidationError("dataset requires at least one source page")
         if any(re.fullmatch(r"sp_[a-f0-9]{64}", page_id) is None for page_id in page_ids):
             raise StoreValidationError("dataset source page identifier is invalid")
 
         with self._write_connection() as connection:
-            rows = self._validated_dataset_source_rows(
+            current_rows = self._validated_dataset_source_rows(
                 connection,
-                page_ids,
+                current_page_ids,
                 account_scope,
                 source_revision,
             )
+            lineage_rows = self._validated_dataset_source_rows(
+                connection,
+                lineage_page_ids,
+                account_scope,
+                None,
+            )
+            rows = sorted((*current_rows, *lineage_rows), key=lambda row: _require_str(row[0]))
             bound_quality_state = self._bound_dataset_quality_state(rows, quality_state)
             row_count = sum(_require_int(row[2]) for row in rows)
             byte_count = sum(_require_int(row[3]) for row in rows)

@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 import duckdb
@@ -28,6 +29,7 @@ from saxo_bank_mcp.analytics_sync import (
     PriceBarSyncSpec,
     QuoteDatasetRow,
     QuoteSyncSpec,
+    SyncError,
     SyncLimitError,
     SyncResearchRequest,
     SyncValidationError,
@@ -317,8 +319,9 @@ async def test_chart_sync_refreshes_a_trailing_window_and_keeps_corrections(
             """
             SELECT p.payload_json
             FROM dataset_source_pages AS dsp
+            JOIN datasets AS d ON d.dataset_id = dsp.dataset_id
             JOIN source_pages AS p ON p.page_id = dsp.page_id
-            WHERE dsp.dataset_id = ?
+            WHERE dsp.dataset_id = ? AND p.source_revision = d.source_revision
             ORDER BY p.source_timestamp DESC
             LIMIT 1
             """,
@@ -326,7 +329,7 @@ async def test_chart_sync_refreshes_a_trailing_window_and_keeps_corrections(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (2, 6, 1)
+    assert counts == (2, 6, 2)
     assert metadata_row is not None
     correction_state = json.loads(str(metadata_row[0]))["sync_metadata"]["correction_state"]
     assert correction_state == {
@@ -893,6 +896,273 @@ async def test_chart_refresh_lineage_never_resurrects_a_removed_nontrailing_bar(
         connection.close()
     assert historical_rows == (8,)
     assert removed_rows == (1,)
+
+
+async def _lineage_integrity_fixture(
+    tmp_path: Path,
+) -> tuple[
+    AnalyticsConfig,
+    str,
+    _PayloadExecutor,
+    SaxoAnalyticsProvider,
+    PriceBarDatasetSummary,
+]:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 100.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 1,
+                    }
+                    for minute in (0, 5, 9)
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 200.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 2,
+                    }
+                    for minute in (7, 8, 9)
+                ],
+                "DataVersion": 2,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 300.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 3,
+                    }
+                    for minute in (8, 9)
+                ],
+                "DataVersion": 3,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    start = datetime(2026, 3, 30, 7, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 30, 7, 9, tzinfo=UTC)
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    second = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    summary = second.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    return config, handle, executor, provider, summary
+
+
+def _integrity_store_counts(config: AnalyticsConfig) -> tuple[int, int, int, int]:
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM source_pages),
+                (SELECT count(*) FROM price_bars),
+                (SELECT count(*) FROM datasets),
+                (SELECT count(*) FROM dataset_source_pages)
+            """,
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    return int(row[0]), int(row[1]), int(row[2]), int(row[3])
+
+
+@pytest.mark.anyio
+async def test_chart_payload_tamper_fails_closed_before_read_or_refresh(
+    tmp_path: Path,
+) -> None:
+    config, handle, executor, provider, summary = await _lineage_integrity_fixture(tmp_path)
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        row = connection.execute(
+            """
+            SELECT p.page_id, p.payload_json
+            FROM datasets AS d
+            JOIN dataset_source_pages AS dsp ON dsp.dataset_id = d.dataset_id
+            JOIN source_pages AS p ON p.page_id = dsp.page_id
+            WHERE d.dataset_id = ? AND p.source_revision = d.source_revision
+            """,
+            (summary.dataset_id,),
+        ).fetchone()
+        historical_revision = connection.execute(
+            """
+            SELECT p.source_revision
+            FROM price_bars AS b
+            JOIN source_pages AS p ON p.page_id = b.page_id
+            WHERE b.instrument_handle = ? AND minute(b.bar_time) = 5
+            """,
+            (handle,),
+        ).fetchone()
+        assert row is not None
+        assert historical_revision is not None
+        loaded_payload = json.loads(str(row[1]))
+        assert isinstance(loaded_payload, dict)
+        payload = cast("dict[str, object]", loaded_payload)
+        metadata = payload.get("sync_metadata")
+        assert isinstance(metadata, dict)
+        typed_metadata = cast("dict[str, object]", metadata)
+        lineage = typed_metadata.get("visible_bar_revisions")
+        assert isinstance(lineage, dict)
+        typed_lineage = cast("dict[str, object]", lineage)
+        typed_lineage["2026-03-30T07:05:00+00:00"] = str(historical_revision[0])
+        connection.execute(
+            "UPDATE source_pages SET payload_json = ? WHERE page_id = ?",
+            (
+                json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
+                str(row[0]),
+            ),
+        )
+    finally:
+        connection.close()
+    counts_after_tamper = _integrity_store_counts(config)
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+    with pytest.raises(SyncError, match="integrity"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, 9, tzinfo=UTC),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert len(executor.calls) == 2
+    assert _integrity_store_counts(config) == counts_after_tamper
+
+
+@pytest.mark.anyio
+async def test_chart_lineage_page_injection_fails_closed_without_writes(
+    tmp_path: Path,
+) -> None:
+    config, handle, executor, provider, summary = await _lineage_integrity_fixture(tmp_path)
+    extra = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        datetime(2026, 3, 30, 8, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 8, 0, tzinfo=UTC),
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "Data": [
+                            {
+                                "CloseBid": 999.0,
+                                "Time": "2026-03-30T10:00:00+02:00",
+                                "Volume": 9,
+                            },
+                        ],
+                        "DataVersion": 99,
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        extra_page = connection.execute(
+            "SELECT page_id FROM dataset_source_pages WHERE dataset_id = ?",
+            (extra.datasets[0].dataset_id,),
+        ).fetchone()
+        assert extra_page is not None
+        connection.execute(
+            "INSERT INTO dataset_source_pages (dataset_id, page_id) VALUES (?, ?)",
+            (summary.dataset_id, str(extra_page[0])),
+        )
+    finally:
+        connection.close()
+    counts_after_injection = _integrity_store_counts(config)
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+    with pytest.raises(SyncError, match="integrity"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, 9, tzinfo=UTC),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert len(executor.calls) == 2
+    assert _integrity_store_counts(config) == counts_after_injection
+
+
+@pytest.mark.anyio
+async def test_chart_lineage_authentication_allows_normal_replay(
+    tmp_path: Path,
+) -> None:
+    config, handle, executor, provider, second = await _lineage_integrity_fixture(tmp_path)
+
+    second_page = get_dataset(second.dataset_id, 1, 500, config=config)
+    assert [row.bar_time.minute for row in second_page.rows if row.row_kind == "price_bar"] == [
+        0,
+        7,
+        8,
+        9,
+    ]
+    latest = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        datetime(2026, 3, 30, 7, 0, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, 9, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    latest_page = get_dataset(latest.datasets[0].dataset_id, 1, 500, config=config)
+    assert [row.bar_time.minute for row in latest_page.rows if row.row_kind == "price_bar"] == [
+        0,
+        7,
+        8,
+        9,
+    ]
+    assert [row.close_value for row in latest_page.rows if row.row_kind == "price_bar"] == [
+        100.0,
+        207.0,
+        308.0,
+        309.0,
+    ]
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        binding_count = connection.execute(
+            "SELECT count(*) FROM dataset_source_pages WHERE dataset_id = ?",
+            (latest.datasets[0].dataset_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert binding_count == (3,)
+    assert len(executor.calls) == 3
 
 
 @pytest.mark.anyio

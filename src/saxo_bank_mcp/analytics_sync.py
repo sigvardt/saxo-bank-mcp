@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from types import MappingProxyType
@@ -42,12 +43,15 @@ from saxo_bank_mcp.analytics_source_contracts import (
     build_source_capture_envelope,
     source_contract_fingerprint,
     source_contracts_by_id,
+    source_page_fingerprint,
 )
 from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 
 _CHART_CONTRACT_ID: Final = "chart_v3"
 _MISSING_CURRENCY: Final = "__unavailable__"
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 128
+_DATASET_INTEGRITY_COLUMN_COUNT: Final = 9
+_SOURCE_PAGE_INTEGRITY_COLUMN_COUNT: Final = 19
 _CONNECTION_CONFIG: Final = MappingProxyType(
     {
         "allow_unsigned_extensions": "false",
@@ -337,27 +341,27 @@ async def sync_price_bars(  # noqa: PLR0913
         raise SyncLimitError("synchronous market data row limit exceeded")
     _preflight_market_capacity(config, requested_rows)
     selector = _instrument_selector(config, instrument_handle)
-    prior_bar_revisions = _latest_visible_bar_revisions(
+    prior_bar_lineage = _latest_visible_bar_lineage(
         config,
         instrument_handle,
         interval,
         start,
         end,
     )
-    prior = _existing_bar_state(prior_bar_revisions, start, end)
+    prior = _existing_bar_state(prior_bar_lineage, start, end)
     refresh_start = (
         start if prior is None or prior.coverage_start > start else max(start, prior.refresh_start)
     )
-    retained_bar_revisions = {
-        bar_time: revision
-        for bar_time, revision in prior_bar_revisions.items()
+    retained_bar_lineage = {
+        bar_time: reference
+        for bar_time, reference in prior_bar_lineage.items()
         if start <= bar_time < refresh_start
     }
-    prior_page_ids = _latest_bar_page_ids(
-        config,
-        instrument_handle,
-        interval,
-        prior_bar_revisions,
+    prior_page_ids = tuple(
+        sorted({reference.page_id for reference in prior_bar_lineage.values()}),
+    )
+    retained_page_ids = tuple(
+        sorted({reference.page_id for reference in retained_bar_lineage.values()}),
     )
     refresh_rows = _row_bound(refresh_start, end, interval)
     capture_time = _require_utc_clock(clock())
@@ -397,9 +401,11 @@ async def sync_price_bars(  # noqa: PLR0913
         end,
         refreshed_series,
         source_rows,
-        retained_bar_revisions,
+        retained_bar_lineage,
     )
-    visible_bar_revisions = dict(retained_bar_revisions)
+    visible_bar_revisions = {
+        bar_time: reference.capture_revision for bar_time, reference in retained_bar_lineage.items()
+    }
     visible_bar_revisions.update(
         {bar.bar_time: pages[0].capture_revision for bar in refreshed_series.bars},
     )
@@ -446,6 +452,7 @@ async def sync_price_bars(  # noqa: PLR0913
         fingerprints=fingerprints,
         correction_state=correction_state,
         prior_page_ids=prior_page_ids,
+        retained_page_ids=retained_page_ids,
         normalized_series=refreshed_series,
         coverage=coverage,
         visible_bar_revisions=visible_bar_revisions,
@@ -815,7 +822,24 @@ def get_dataset(
         raise SyncValidationError("dataset page must be at least one")
     if not 1 <= limit <= config.limits.response_rows:
         raise SyncLimitError("dataset response row limit exceeded")
-    metadata = _dataset_sync_metadata(config, validated_id)
+    connection = _connect(config, read_only=True)
+    try:
+        metadata, source_pages, source_revision = _authenticated_dataset_metadata(
+            connection,
+            validated_id,
+        )
+        if metadata.get("data_kind") == "price_bars":
+            return _price_bar_dataset_page(
+                connection,
+                validated_id,
+                metadata,
+                source_pages,
+                source_revision,
+                page,
+                limit,
+            )
+    finally:
+        connection.close()
     if metadata.get("data_kind") == "option_chain":
         if metadata.get("entitlement_state") == "denied":
             return DatasetPage(
@@ -835,48 +859,58 @@ def get_dataset(
             metadata,
             config,
         )
-    if metadata.get("data_kind") != "price_bars":
-        raise SyncValidationError("dataset kind is not supported")
+    raise SyncValidationError("dataset kind is not supported")
+
+
+def _price_bar_dataset_page(  # noqa: PLR0913
+    connection: duckdb.DuckDBPyConnection,
+    dataset_id: str,
+    metadata: Mapping[str, object],
+    source_pages: Sequence[_AuthenticatedSourcePage],
+    source_revision: str,
+    page: int,
+    limit: int,
+) -> DatasetPage:
     instrument_handle = _validate_instrument_handle(metadata.get("instrument_handle"))
     interval = ChartInterval(_required_text(metadata.get("interval"), "dataset interval"))
-    visible_bar_revisions = _stored_visible_bar_revisions(
-        metadata.get("visible_bar_revisions"),
+    visible_bar_lineage = _authenticated_chart_lineage(
+        connection,
+        dataset_id,
+        instrument_handle,
+        interval,
+        metadata,
+        source_pages,
+        source_revision,
     )
-    bar_times_us, capture_revisions = _bar_lineage_query_values(
-        visible_bar_revisions,
-    )
+    bar_times_us, page_ids = _bar_page_query_values(visible_bar_lineage)
     offset = (page - 1) * limit
-    connection = _connect(config, read_only=True)
-    try:
-        total_row = connection.execute(
-            _PRICE_BAR_COUNT_SQL,
+    total_row = connection.execute(
+        _PRICE_BAR_COUNT_SQL,
+        (
+            bar_times_us,
+            page_ids,
+            instrument_handle,
+            interval.value,
+        ),
+    ).fetchone()
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            _PRICE_BAR_PAGE_SQL,
             (
                 bar_times_us,
-                capture_revisions,
+                page_ids,
                 instrument_handle,
                 interval.value,
+                limit,
+                offset,
             ),
-        ).fetchone()
-        rows = cast(
-            "list[tuple[object, ...]]",
-            connection.execute(
-                _PRICE_BAR_PAGE_SQL,
-                (
-                    bar_times_us,
-                    capture_revisions,
-                    instrument_handle,
-                    interval.value,
-                    limit,
-                    offset,
-                ),
-            ).fetchall(),
-        )
-    finally:
-        connection.close()
+        ).fetchall(),
+    )
     if total_row is None or not isinstance(total_row[0], int):
         raise SyncError("dataset row count is invalid")
     total_rows = total_row[0]
-    if total_rows != len(visible_bar_revisions):
+    if total_rows != len(visible_bar_lineage):
         raise SyncError("stored visible price-bar lineage is invalid")
     parsed_rows = tuple(
         PriceBarDatasetRow(
@@ -893,7 +927,7 @@ def get_dataset(
         for row in rows
     )
     return DatasetPage(
-        dataset_id=validated_id,
+        dataset_id=dataset_id,
         page=page,
         limit=limit,
         total_rows=total_rows,
@@ -1059,6 +1093,31 @@ class _ExistingBarState(_StrictModel):
     refresh_start: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedSourcePage:
+    page_id: str
+    source_revision: str
+    source_timestamp: datetime
+    account_scope: str | None
+    instrument_handle: str | None
+    contract_name: str
+    contract_sha256: str
+    fingerprint_sha256: str
+    row_count: int
+    byte_count: int
+    payload: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleBarReference:
+    page_id: str
+    capture_revision: str
+    source_row: dict[str, object]
+
+
+type _VisibleBarLineage = dict[datetime, _VisibleBarReference]
+
+
 def _validate_expiries(
     expiries: Sequence[date],
     config: AnalyticsConfig,
@@ -1112,20 +1171,373 @@ def _instrument_selector(
         raise SyncError("stored instrument selector is invalid") from error
 
 
-def _latest_visible_bar_revisions(
+def _canonical_stored_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError) as error:
+        raise SyncError("stored source page integrity check failed") from error
+
+
+def _authenticated_source_page(row: tuple[object, ...]) -> _AuthenticatedSourcePage:
+    if len(row) != _SOURCE_PAGE_INTEGRITY_COLUMN_COUNT:
+        raise SyncError("stored source page integrity check failed")
+    if type(row[9]) is not int or type(row[10]) is not int:
+        raise SyncError("stored source page integrity check failed")
+    try:
+        page_id = _required_text(row[0], "stored source page ID")
+        source_kind = _required_text(row[1], "stored source kind")
+        page_key = _required_text(row[2], "stored source page key")
+        source_revision = _required_text(row[3], "stored source revision")
+        source_native_revision = _required_text(row[4], "stored source native revision")
+        account_scope = None if row[5] is None else _required_text(row[5], "account scope")
+        instrument_handle = None if row[6] is None else _validate_instrument_handle(row[6])
+        instrument_scope_sha256 = (
+            None
+            if row[7] is None
+            else _required_text(row[7], "stored instrument scope fingerprint")
+        )
+        source_timestamp = _epoch_us(row[8])
+        row_count = row[9]
+        byte_count = row[10]
+        fingerprint_sha256 = _required_text(row[11], "stored source page fingerprint")
+        payload_sha256 = _required_text(row[12], "stored source payload fingerprint")
+        payload_json = _required_text(row[13], "stored source payload")
+        contract_id = _required_text(row[14], "stored source contract ID")
+        contract_name = _required_text(row[15], "stored source contract name")
+        contract_sha256 = _required_text(row[16], "stored source contract fingerprint")
+        source_scope = _required_text(row[17], "stored source scope")
+        logical_key_sha256 = _required_text(row[18], "stored source logical key")
+        loaded_payload = json.loads(payload_json)
+    except (SyncError, TypeError, ValueError) as error:
+        raise SyncError("stored source page integrity check failed") from error
+    if not isinstance(loaded_payload, dict):
+        raise SyncError("stored source page integrity check failed")
+    payload = cast("dict[str, object]", loaded_payload)
+    canonical_payload = _canonical_stored_json(payload)
+    raw_rows = payload.get("rows")
+    if not isinstance(raw_rows, list):
+        raise SyncError("stored source page integrity check failed")
+    source_rows = cast("list[object]", raw_rows)
+    contract = source_contracts_by_id().get(contract_name)
+    if (
+        source_scope != "saxo_openapi"
+        or contract is None
+        or contract.contract_id != contract_name
+        or contract.source_kind != source_kind
+        or source_contract_fingerprint(contract) != contract_sha256
+        or contract_id
+        != "sc_" + hashlib.sha256(f"{contract_name}:{contract_sha256}".encode()).hexdigest()
+        or payload.get("contract_id") != contract_name
+        or any(not isinstance(source_row, dict) for source_row in source_rows)
+        or len(source_rows) != row_count
+        or len(canonical_payload.encode()) != byte_count
+        or hashlib.sha256(canonical_payload.encode()).hexdigest() != payload_sha256
+        or canonical_payload != payload_json
+    ):
+        raise SyncError("stored source page integrity check failed")
+    if (
+        "source_native_revision" in payload
+        and payload.get("source_native_revision") != source_native_revision
+    ):
+        raise SyncError("stored source page integrity check failed")
+    raw_page_fingerprint = payload.get("page_fingerprint_sha256")
+    if (raw_page_fingerprint is not None or contract_name == _CHART_CONTRACT_ID) and (
+        not isinstance(raw_page_fingerprint, str)
+        or source_page_fingerprint(
+            cast("list[Mapping[str, object]]", source_rows),
+        )
+        != raw_page_fingerprint
+    ):
+        raise SyncError("stored source page integrity check failed")
+    material_json = _canonical_stored_json(
+        {
+            "account_scope": account_scope,
+            "contract_name": contract_name,
+            "contract_sha256": contract_sha256,
+            "instrument_handle": instrument_handle,
+            "instrument_scope_sha256": instrument_scope_sha256,
+            "page_key": page_key,
+            "payload_sha256": payload_sha256,
+            "row_count": row_count,
+            "source_kind": source_kind,
+            "source_revision": source_revision,
+            "source_native_revision": source_native_revision,
+            "source_timestamp": source_timestamp.isoformat(),
+        },
+    )
+    logical_key_json = _canonical_stored_json(
+        {
+            "account_scope": account_scope,
+            "instrument_handle": instrument_handle,
+            "instrument_scope_sha256": instrument_scope_sha256,
+            "page_key": page_key,
+            "source_kind": source_kind,
+            "source_revision": source_revision,
+        },
+    )
+    reconstructed_fingerprint = hashlib.sha256(material_json.encode()).hexdigest()
+    if (
+        fingerprint_sha256 != reconstructed_fingerprint
+        or page_id != f"sp_{reconstructed_fingerprint}"
+        or logical_key_sha256 != hashlib.sha256(logical_key_json.encode()).hexdigest()
+    ):
+        raise SyncError("stored source page integrity check failed")
+    return _AuthenticatedSourcePage(
+        page_id=page_id,
+        source_revision=source_revision,
+        source_timestamp=source_timestamp,
+        account_scope=account_scope,
+        instrument_handle=instrument_handle,
+        contract_name=contract_name,
+        contract_sha256=contract_sha256,
+        fingerprint_sha256=fingerprint_sha256,
+        row_count=row_count,
+        byte_count=byte_count,
+        payload=payload,
+    )
+
+
+def _authenticated_dataset_metadata(  # noqa: C901
+    connection: duckdb.DuckDBPyConnection,
+    dataset_id: str,
+) -> tuple[dict[str, object], tuple[_AuthenticatedSourcePage, ...], str]:
+    dataset_row = connection.execute(
+        """
+        SELECT
+            account_scope,
+            source_scope,
+            source_revision,
+            epoch_us(coverage_start),
+            epoch_us(coverage_end),
+            quality_state,
+            row_count,
+            byte_count,
+            fingerprint_sha256
+        FROM datasets
+        WHERE dataset_id = ?
+        """,
+        (dataset_id,),
+    ).fetchone()
+    if dataset_row is None:
+        raise DatasetNotFoundError("research dataset does not exist")
+    if (
+        len(dataset_row) != _DATASET_INTEGRITY_COLUMN_COUNT
+        or type(dataset_row[6]) is not int
+        or type(dataset_row[7]) is not int
+    ):
+        raise SyncError("stored dataset lineage integrity check failed")
+    try:
+        account_scope = _required_text(dataset_row[0], "stored dataset account scope")
+        source_scope = _required_text(dataset_row[1], "stored dataset source scope")
+        source_revision = _required_text(dataset_row[2], "stored dataset source revision")
+        coverage_start = _epoch_us(dataset_row[3])
+        coverage_end = _epoch_us(dataset_row[4])
+        quality_state = _required_text(dataset_row[5], "stored dataset quality state")
+        row_count = dataset_row[6]
+        byte_count = dataset_row[7]
+        dataset_fingerprint = _required_text(
+            dataset_row[8],
+            "stored dataset fingerprint",
+        )
+    except (IndexError, SyncError) as error:
+        raise SyncError("stored dataset lineage integrity check failed") from error
+    raw_page_rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
+            SELECT
+                p.page_id,
+                p.source_kind,
+                p.page_key,
+                p.source_revision,
+                p.source_native_revision,
+                p.account_scope,
+                p.instrument_handle,
+                p.instrument_scope_sha256,
+                epoch_us(p.source_timestamp),
+                p.row_count,
+                p.byte_count,
+                p.fingerprint_sha256,
+                p.payload_sha256,
+                p.payload_json,
+                p.contract_id,
+                c.contract_name,
+                c.contract_sha256,
+                c.source_scope,
+                p.logical_key_sha256
+            FROM dataset_source_pages AS dsp
+            JOIN source_pages AS p ON p.page_id = dsp.page_id
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE dsp.dataset_id = ?
+            ORDER BY p.page_id
+            """,
+            (dataset_id,),
+        ).fetchall(),
+    )
+    if not raw_page_rows:
+        raise SyncError("stored dataset lineage integrity check failed")
+    try:
+        source_pages = tuple(_authenticated_source_page(row) for row in raw_page_rows)
+    except SyncError as error:
+        raise SyncError("stored dataset lineage integrity check failed") from error
+    current_pages = tuple(page for page in source_pages if page.source_revision == source_revision)
+    if (
+        source_scope != "saxo_openapi"
+        or not current_pages
+        or any(
+            page.account_scope is not None and page.account_scope != account_scope
+            for page in source_pages
+        )
+        or row_count != sum(page.row_count for page in source_pages)
+        or byte_count != sum(page.byte_count for page in source_pages)
+    ):
+        raise SyncError("stored dataset lineage integrity check failed")
+    dataset_material = _canonical_stored_json(
+        {
+            "account_scope": account_scope,
+            "coverage_end": coverage_end.isoformat(),
+            "coverage_start": coverage_start.isoformat(),
+            "pages": [
+                {
+                    "page_id": page.page_id,
+                    "page_fingerprint_sha256": page.fingerprint_sha256,
+                    "source_contract_sha256": page.contract_sha256,
+                }
+                for page in source_pages
+            ],
+            "quality_state": quality_state,
+            "source_revision": source_revision,
+            "source_scope": source_scope,
+        },
+    )
+    if hashlib.sha256(dataset_material.encode()).hexdigest() != dataset_fingerprint:
+        raise SyncError("stored dataset lineage integrity check failed")
+    try:
+        metadata_values = tuple(
+            _stored_sync_metadata(_canonical_stored_json(page.payload)) for page in current_pages
+        )
+    except SyncError as error:
+        raise SyncError("stored dataset lineage integrity check failed") from error
+    canonical_metadata = {_canonical_stored_json(metadata) for metadata in metadata_values}
+    if len(canonical_metadata) != 1:
+        raise SyncError("stored dataset lineage integrity check failed")
+    metadata = metadata_values[0]
+    if metadata.get("capture_revision") != source_revision:
+        raise SyncError("stored dataset lineage integrity check failed")
+    return metadata, source_pages, source_revision
+
+
+def _authenticated_chart_lineage(  # noqa: PLR0913
+    connection: duckdb.DuckDBPyConnection,
+    dataset_id: str,
+    instrument_handle: str,
+    interval: ChartInterval,
+    metadata: Mapping[str, object],
+    source_pages: Sequence[_AuthenticatedSourcePage],
+    source_revision: str,
+) -> _VisibleBarLineage:
+    if (
+        metadata.get("data_kind") != "price_bars"
+        or metadata.get("instrument_handle") != instrument_handle
+        or metadata.get("interval") != interval.value
+    ):
+        raise SyncError("stored chart lineage integrity check failed")
+    try:
+        visible_revisions = _stored_visible_bar_revisions(
+            metadata.get("visible_bar_revisions"),
+        )
+    except SyncError as error:
+        raise SyncError("stored chart lineage integrity check failed") from error
+    normalized_rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
+            SELECT epoch_us(b.bar_time), b.page_id, p.source_revision
+            FROM price_bars AS b
+            JOIN dataset_source_pages AS dsp
+                ON dsp.dataset_id = ? AND dsp.page_id = b.page_id
+            JOIN source_pages AS p ON p.page_id = b.page_id
+            WHERE b.instrument_handle = ? AND b.duration = ?
+            ORDER BY b.bar_time, b.page_id
+            """,
+            (dataset_id, instrument_handle, interval.value),
+        ).fetchall(),
+    )
+    rows_by_lineage: dict[tuple[datetime, str], list[str]] = {}
+    for raw_time, raw_page_id, raw_revision in normalized_rows:
+        key = (
+            _epoch_us(raw_time),
+            _required_text(raw_revision, "stored price-bar revision"),
+        )
+        rows_by_lineage.setdefault(key, []).append(
+            _required_text(raw_page_id, "stored price-bar page ID"),
+        )
+    pages_by_id = {page.page_id: page for page in source_pages}
+    lineage: _VisibleBarLineage = {}
+    for bar_time, capture_revision in visible_revisions.items():
+        page_ids = rows_by_lineage.get((bar_time, capture_revision), [])
+        if len(page_ids) != 1:
+            raise SyncError("stored chart lineage integrity check failed")
+        source_page = pages_by_id.get(page_ids[0])
+        if source_page is None:
+            raise SyncError("stored chart lineage integrity check failed")
+        lineage[bar_time] = _VisibleBarReference(
+            page_id=source_page.page_id,
+            capture_revision=capture_revision,
+            source_row=_authenticated_source_row(source_page, bar_time),
+        )
+    current_page_ids = {
+        page.page_id for page in source_pages if page.source_revision == source_revision
+    }
+    visible_page_ids = {reference.page_id for reference in lineage.values()}
+    if set(pages_by_id) != current_page_ids | visible_page_ids:
+        raise SyncError("stored chart lineage integrity check failed")
+    return lineage
+
+
+def _authenticated_source_row(
+    source_page: _AuthenticatedSourcePage,
+    bar_time: datetime,
+) -> dict[str, object]:
+    raw_rows = source_page.payload.get("rows")
+    if not isinstance(raw_rows, list):
+        raise SyncError("stored chart lineage integrity check failed")
+    matching_rows: list[dict[str, object]] = []
+    try:
+        for raw_row in cast("list[object]", raw_rows):
+            if not isinstance(raw_row, dict):
+                continue
+            row = cast("dict[str, object]", raw_row)
+            raw_time = row.get("Time")
+            if isinstance(raw_time, str) and _parse_source_time(raw_time) == bar_time:
+                matching_rows.append(row)
+    except (SyncError, TypeError, ValueError) as error:
+        raise SyncError("stored chart lineage integrity check failed") from error
+    if len(matching_rows) != 1:
+        raise SyncError("stored chart lineage integrity check failed")
+    return dict(matching_rows[0])
+
+
+def _latest_visible_bar_lineage(
     config: AnalyticsConfig,
     instrument_handle: str,
     interval: ChartInterval,
     start: datetime,
     end: datetime,
-) -> dict[datetime, str]:
+) -> _VisibleBarLineage:
     connection = _connect(config, read_only=True)
     try:
         candidates = cast(
             "list[tuple[object, ...]]",
             connection.execute(
                 """
-                SELECT p.payload_json
+                SELECT d.dataset_id
                 FROM datasets AS d
                 JOIN dataset_source_pages AS dsp ON dsp.dataset_id = d.dataset_id
                 JOIN source_pages AS p ON p.page_id = dsp.page_id
@@ -1133,26 +1545,37 @@ def _latest_visible_bar_revisions(
                 WHERE
                     p.instrument_handle = ?
                     AND c.contract_name = ?
+                    AND p.source_revision = d.source_revision
                     AND d.coverage_start <= ?
                     AND d.coverage_end >= ?
+                GROUP BY d.dataset_id
                 ORDER BY
-                    p.ingested_at DESC,
-                    p.source_timestamp DESC,
-                    p.page_key DESC,
+                    max(p.ingested_at) DESC,
+                    max(p.source_timestamp) DESC,
                     d.dataset_id DESC
                 """,
                 (instrument_handle, _CHART_CONTRACT_ID, end, start),
             ).fetchall(),
         )
         for row in candidates:
-            candidate = _stored_sync_metadata(row[0])
+            dataset_id = _required_text(row[0], "stored dataset ID")
+            candidate, source_pages, source_revision = _authenticated_dataset_metadata(
+                connection,
+                dataset_id,
+            )
             if (
                 candidate.get("data_kind") == "price_bars"
                 and candidate.get("instrument_handle") == instrument_handle
                 and candidate.get("interval") == interval.value
             ):
-                return _stored_visible_bar_revisions(
-                    candidate.get("visible_bar_revisions"),
+                return _authenticated_chart_lineage(
+                    connection,
+                    dataset_id,
+                    instrument_handle,
+                    interval,
+                    candidate,
+                    source_pages,
+                    source_revision,
                 )
     finally:
         connection.close()
@@ -1160,13 +1583,11 @@ def _latest_visible_bar_revisions(
 
 
 def _existing_bar_state(
-    visible_bar_revisions: Mapping[datetime, str],
+    visible_bar_lineage: Mapping[datetime, object],
     start: datetime,
     end: datetime,
 ) -> _ExistingBarState | None:
-    visible_times = sorted(
-        bar_time for bar_time in visible_bar_revisions if start <= bar_time <= end
-    )
+    visible_times = sorted(bar_time for bar_time in visible_bar_lineage if start <= bar_time <= end)
     if not visible_times:
         return None
     return _ExistingBarState(
@@ -1200,6 +1621,8 @@ def _stored_visible_bar_revisions(value: object) -> dict[datetime, str]:
     revisions: dict[datetime, str] = {}
     for raw_time, raw_revision in cast("dict[str, object]", value).items():
         bar_time = _required_utc_text(raw_time, "stored visible price-bar time")
+        if bar_time in revisions:
+            raise SyncError("stored visible price-bar lineage is invalid")
         revisions[bar_time] = _required_text(
             raw_revision,
             "stored visible price-bar revision",
@@ -1208,20 +1631,17 @@ def _stored_visible_bar_revisions(value: object) -> dict[datetime, str]:
 
 
 def _merged_price_series(  # noqa: PLR0913
-    config: AnalyticsConfig,
+    _config: AnalyticsConfig,
     instrument_handle: str,
     interval: ChartInterval,
     start: datetime,
     end: datetime,
     refreshed: NormalizedPriceSeries,
     refreshed_rows: Sequence[Mapping[str, object]],
-    retained_bar_revisions: Mapping[datetime, str],
+    retained_bar_lineage: Mapping[datetime, _VisibleBarReference],
 ) -> NormalizedPriceSeries:
-    retained_rows = _latest_stored_price_rows(
-        config,
-        instrument_handle,
-        interval,
-        retained_bar_revisions,
+    retained_rows = tuple(
+        reference.source_row for _bar_time, reference in sorted(retained_bar_lineage.items())
     )
     if not retained_rows:
         return refreshed
@@ -1253,117 +1673,6 @@ def _price_series_coverage(
     if not series.bars:
         return requested_start, requested_end
     return series.bars[0].bar_time, series.bars[-1].bar_time
-
-
-def _latest_stored_price_rows(
-    config: AnalyticsConfig,
-    instrument_handle: str,
-    interval: ChartInterval,
-    visible_bar_revisions: Mapping[datetime, str],
-) -> tuple[dict[str, object], ...]:
-    if not visible_bar_revisions:
-        return ()
-    bar_times_us, capture_revisions = _bar_lineage_query_values(
-        visible_bar_revisions,
-    )
-    connection = _connect(config, read_only=True)
-    try:
-        rows = cast(
-            "list[tuple[object, ...]]",
-            connection.execute(
-                _VISIBLE_PRICE_BAR_SQL
-                + """
-                    SELECT
-                        bar_time_us,
-                        open_value,
-                        high_value,
-                        low_value,
-                        close_value,
-                        volume_value,
-                        payload_json
-                    FROM visible
-                    ORDER BY bar_time_us
-                """,
-                (
-                    bar_times_us,
-                    capture_revisions,
-                    instrument_handle,
-                    interval.value,
-                ),
-            ).fetchall(),
-        )
-    finally:
-        connection.close()
-    if len(rows) != len(visible_bar_revisions):
-        raise SyncError("stored visible price-bar lineage is invalid")
-    return tuple(
-        {
-            "CloseBid": _required_float(row[4]),
-            "HighBid": _optional_float(row[2]),
-            "LowBid": _optional_float(row[3]),
-            "OpenBid": _optional_float(row[1]),
-            "Time": _stored_price_source_time(row[6], _epoch_us(row[0])),
-            "Volume": _optional_float(row[5]),
-        }
-        for row in rows
-    )
-
-
-def _stored_price_source_time(payload_json: object, bar_time: datetime) -> str:
-    if not isinstance(payload_json, str):
-        raise SyncError("stored price-bar source time is invalid")
-    try:
-        loaded_payload = json.loads(payload_json)
-    except (TypeError, ValueError) as error:
-        raise SyncError("stored price-bar source time is invalid") from error
-    if not isinstance(loaded_payload, dict):
-        raise SyncError("stored price-bar source time is invalid")
-    payload = cast("dict[str, object]", loaded_payload)
-    loaded_rows = payload.get("rows")
-    if not isinstance(loaded_rows, list):
-        raise SyncError("stored price-bar source time is invalid")
-    source_times: list[str] = []
-    for loaded_row in cast("list[object]", loaded_rows):
-        if not isinstance(loaded_row, dict):
-            continue
-        row = cast("dict[str, object]", loaded_row)
-        source_time = row.get("Time")
-        if isinstance(source_time, str) and _parse_source_time(source_time) == bar_time:
-            source_times.append(source_time)
-    if len(source_times) != 1:
-        raise SyncError("stored price-bar source time is invalid")
-    return source_times[0]
-
-
-def _latest_bar_page_ids(
-    config: AnalyticsConfig,
-    instrument_handle: str,
-    interval: ChartInterval,
-    visible_bar_revisions: Mapping[datetime, str],
-) -> tuple[str, ...]:
-    if not visible_bar_revisions:
-        return ()
-    bar_times_us, capture_revisions = _bar_lineage_query_values(
-        visible_bar_revisions,
-    )
-    connection = _connect(config, read_only=True)
-    try:
-        rows = connection.execute(
-            _PRICE_BAR_PAGE_ID_SQL,
-            (
-                bar_times_us,
-                capture_revisions,
-                instrument_handle,
-                interval.value,
-            ),
-        ).fetchall()
-    finally:
-        connection.close()
-    if len(rows) != len(visible_bar_revisions):
-        raise SyncError("stored visible price-bar lineage is invalid")
-    return tuple(
-        sorted({_required_text(row[1], "stored source page ID") for row in rows}),
-    )
 
 
 def _capture_fingerprints(
@@ -1425,6 +1734,7 @@ def _persist_chart_capture(  # noqa: PLR0913
     fingerprints: IngestionFingerprints,
     correction_state: Mapping[str, object],
     prior_page_ids: Sequence[str],
+    retained_page_ids: Sequence[str],
     normalized_series: NormalizedPriceSeries,
     coverage: tuple[datetime, datetime],
     visible_bar_revisions: Mapping[datetime, str],
@@ -1459,6 +1769,7 @@ def _persist_chart_capture(  # noqa: PLR0913
         quality_state=quality_state,
         sync_metadata=sync_metadata,
         normalized_bytes=(len(normalized_series.bars) * _NORMALIZED_ROW_ESTIMATE_BYTES),
+        lineage_page_ids=retained_page_ids,
         persist_normalized=lambda connection, stored_page_ids: _persist_normalized_bars(
             connection=connection,
             pages=pages,
@@ -1478,6 +1789,7 @@ def _persist_market_capture(  # noqa: PLR0913
     quality_state: QualityState,
     sync_metadata: Mapping[str, object],
     normalized_bytes: int,
+    lineage_page_ids: Sequence[str] = (),
     persist_normalized: Callable[
         [duckdb.DuckDBPyConnection, Mapping[int, str]],
         None,
@@ -1529,6 +1841,7 @@ def _persist_market_capture(  # noqa: PLR0913
                     source_scope="saxo_openapi",
                     source_revision=pages[0].capture_revision,
                     source_page_ids=tuple(stored_page_ids.values()),
+                    lineage_source_page_ids=lineage_page_ids,
                     created_at=pages[0].source_timestamp,
                     coverage_start=coverage_start,
                     coverage_end=coverage_end,
@@ -1977,31 +2290,6 @@ def _option_handles(
     return handles
 
 
-def _dataset_sync_metadata(
-    config: AnalyticsConfig,
-    dataset_id: str,
-) -> dict[str, object]:
-    connection = _connect(config, read_only=True)
-    try:
-        row = connection.execute(
-            """
-            SELECT p.payload_json
-            FROM datasets AS d
-            JOIN dataset_source_pages AS dsp ON dsp.dataset_id = d.dataset_id
-            JOIN source_pages AS p ON p.page_id = dsp.page_id
-            WHERE d.dataset_id = ?
-            ORDER BY p.source_timestamp DESC, p.ingested_at DESC, p.page_key DESC
-            LIMIT 1
-            """,
-            (dataset_id,),
-        ).fetchone()
-    finally:
-        connection.close()
-    if row is None:
-        raise DatasetNotFoundError("research dataset does not exist")
-    return _stored_sync_metadata(row[0])
-
-
 def _connect(
     config: AnalyticsConfig,
     *,
@@ -2111,13 +2399,13 @@ def _datetime_epoch_us(value: datetime) -> int:
     return (elapsed.days * 86_400 + elapsed.seconds) * 1_000_000 + elapsed.microseconds
 
 
-def _bar_lineage_query_values(
-    visible_bar_revisions: Mapping[datetime, str],
+def _bar_page_query_values(
+    visible_bar_lineage: Mapping[datetime, _VisibleBarReference],
 ) -> tuple[list[int], list[str]]:
-    entries = sorted(visible_bar_revisions.items())
+    entries = sorted(visible_bar_lineage.items())
     return (
-        [_datetime_epoch_us(bar_time) for bar_time, _revision in entries],
-        [revision for _bar_time, revision in entries],
+        [_datetime_epoch_us(bar_time) for bar_time, _reference in entries],
+        [reference.page_id for _bar_time, reference in entries],
     )
 
 
@@ -2137,7 +2425,7 @@ _VISIBLE_PRICE_BAR_SQL: Final = """
     WITH lineage AS (
         SELECT
             unnest(?::BIGINT[]) AS bar_time_us,
-            unnest(?::VARCHAR[]) AS capture_revision
+            unnest(?::VARCHAR[]) AS page_id
     ),
     visible AS (
         SELECT
@@ -2148,13 +2436,11 @@ _VISIBLE_PRICE_BAR_SQL: Final = """
             b.low_value,
             b.close_value,
             b.volume_value,
-            p.payload_json,
             b.page_id
         FROM lineage
-        JOIN price_bars AS b ON epoch_us(b.bar_time) = lineage.bar_time_us
-        JOIN source_pages AS p ON
-            p.page_id = b.page_id
-            AND p.source_revision = lineage.capture_revision
+        JOIN price_bars AS b ON
+            epoch_us(b.bar_time) = lineage.bar_time_us
+            AND b.page_id = lineage.page_id
         WHERE
             b.instrument_handle = ?
             AND b.duration = ?
@@ -2163,14 +2449,6 @@ _VISIBLE_PRICE_BAR_SQL: Final = """
 _PRICE_BAR_COUNT_SQL: Final = (
     _VISIBLE_PRICE_BAR_SQL  # noqa: S608
     + "SELECT count(*) FROM visible"
-)
-_PRICE_BAR_PAGE_ID_SQL: Final = (
-    _VISIBLE_PRICE_BAR_SQL  # noqa: S608
-    + """
-        SELECT bar_time_us, page_id
-        FROM visible
-        ORDER BY bar_time_us
-    """
 )
 _PRICE_BAR_PAGE_SQL: Final = (
     _VISIBLE_PRICE_BAR_SQL
