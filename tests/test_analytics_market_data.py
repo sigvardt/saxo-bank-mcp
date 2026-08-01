@@ -186,6 +186,50 @@ def test_quote_preserves_delayed_and_stale_quality() -> None:
     assert set(quote.warnings) == {"quote_delayed", "quote_stale"}
 
 
+def test_quote_fingerprint_distinguishes_fresh_from_stale_quality() -> None:
+    handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    row = {
+        "AssetType": "Stock",
+        "PriceTypeAsk": "RealTime",
+        "PriceTypeBid": "RealTime",
+        "Quote": {
+            "Ask": 102.0,
+            "Bid": 100.0,
+            "DelayedByMinutes": 0,
+            "Mid": 101.0,
+            "PriceType": "RealTime",
+        },
+        "Uic": 1001,
+    }
+    captured_at = datetime(2026, 3, 30, 12, tzinfo=UTC)
+    fresh = normalize_quote(
+        row=row,
+        instrument_handle=handle,
+        captured_at=captured_at,
+        evaluated_at=captured_at,
+        max_age=timedelta(minutes=5),
+    )
+    repeat = normalize_quote(
+        row=row,
+        instrument_handle=handle,
+        captured_at=captured_at,
+        evaluated_at=captured_at,
+        max_age=timedelta(minutes=5),
+    )
+    stale = normalize_quote(
+        row=row,
+        instrument_handle=handle,
+        captured_at=captured_at,
+        evaluated_at=captured_at + timedelta(minutes=6),
+        max_age=timedelta(minutes=5),
+    )
+
+    assert fresh.freshness == "fresh"
+    assert stale.freshness == "stale"
+    assert fresh.fingerprint_sha256 == repeat.fingerprint_sha256
+    assert fresh.fingerprint_sha256 != stale.fingerprint_sha256
+
+
 def test_option_chain_keeps_only_complete_references_and_marks_missing_currency() -> None:
     chain = normalize_option_chain(
         row={

@@ -51,6 +51,7 @@ from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 
 _CHART_CONTRACT_ID: Final = "chart_v3"
 _MISSING_CURRENCY: Final = "__unavailable__"
+_OPTION_SAFE_LABEL: Final = "Saxo option contract"
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 128
 _DATASET_INTEGRITY_COLUMN_COUNT: Final = 9
 _PRICE_BAR_INTEGRITY_COLUMN_COUNT: Final = 13
@@ -536,11 +537,6 @@ async def capture_quote(  # noqa: PLR0913
             {page.source_revision for page in envelope.pages},
         ),
     }
-    fingerprints = _capture_fingerprints(
-        envelope.pages,
-        quote.fingerprint_sha256,
-        correction_state,
-    )
     source_limited = any(page.source_quality.state == "limited" for page in envelope.pages)
     entitlement_limited = any(
         page.source_quality.entitlement_limited_fields for page in envelope.pages
@@ -570,6 +566,17 @@ async def capture_quote(  # noqa: PLR0913
     if not has_price:
         warnings.add("quote_values_missing")
     sorted_warnings = tuple(sorted(warnings))
+    row_fingerprint_sha256 = _quote_row_fingerprint(
+        quote,
+        quality_state=quality_state,
+        entitlement_state=entitlement_state,
+        warnings=sorted_warnings,
+    )
+    fingerprints = _capture_fingerprints(
+        envelope.pages,
+        row_fingerprint_sha256,
+        correction_state,
+    )
     sync_metadata = {
         "capture_revision": capture.capture_revision,
         "captured_at": captured_at.isoformat(),
@@ -580,6 +587,7 @@ async def capture_quote(  # noqa: PLR0913
         "fingerprints": fingerprints.model_dump(mode="json"),
         "freshness": quote.freshness,
         "instrument_handle": instrument_handle,
+        "quality_state": quality_state.value,
         "warnings": list(sorted_warnings),
     }
     _stored_pages, dataset_id = _persist_market_capture(
@@ -596,6 +604,7 @@ async def capture_quote(  # noqa: PLR0913
             pages=envelope.pages,
             stored_page_ids=stored_page_ids,
             quote=quote,
+            row_fingerprint_sha256=row_fingerprint_sha256,
         ),
     )
     summary = QuoteDatasetSummary(
@@ -1068,7 +1077,7 @@ def _option_dataset_page(
     total_rows = total_row[0]
     if total_rows != len(rows):
         raise SyncError("stored option normalized-row integrity check failed")
-    _validate_stored_options(rows, metadata)
+    _validate_stored_options(connection, rows, metadata)
     parsed_rows = tuple(_option_dataset_row(row) for row in rows[offset : offset + limit])
     return DatasetPage(
         dataset_id=dataset_id,
@@ -1131,28 +1140,55 @@ def _validate_stored_quotes(
     source_rows = cast("list[object]", raw_rows)
     if len(source_rows) != 1 or not isinstance(source_rows[0], dict):
         raise SyncError("stored quote normalized-row integrity check failed")
+    freshness = metadata.get("freshness")
+    delayed_by_minutes = metadata.get("delayed_by_minutes")
+    entitlement_state = metadata.get("entitlement_state")
+    quality_state_value = metadata.get("quality_state")
+    if (
+        freshness not in {"fresh", "stale"}
+        or (
+            delayed_by_minutes is not None
+            and (type(delayed_by_minutes) is not int or delayed_by_minutes < 0)
+        )
+        or entitlement_state not in {"available", "delayed", "limited"}
+        or not isinstance(quality_state_value, str)
+    ):
+        raise SyncError("stored quote normalized-row integrity check failed")
     try:
+        quality_state = QualityState(quality_state_value)
         canonical = normalize_quote(
             row=cast("dict[str, object]", source_rows[0]),
             instrument_handle=instrument_handle,
             captured_at=captured_at,
-            evaluated_at=captured_at,
+            evaluated_at=(
+                captured_at + timedelta(microseconds=2) if freshness == "stale" else captured_at
+            ),
             max_age=timedelta(microseconds=1),
         )
-    except MarketDataError as error:
+    except (MarketDataError, ValueError) as error:
         raise SyncError("stored quote normalized-row integrity check failed") from error
+    warnings = _warning_tuple(metadata.get("warnings"))
+    validated_entitlement_state = cast("str", entitlement_state)
+    canonical_row_fingerprint = _quote_row_fingerprint(
+        canonical,
+        quality_state=quality_state,
+        entitlement_state=validated_entitlement_state,
+        warnings=warnings,
+    )
     if (
         stored_handle != canonical.instrument_handle
         or bid_value != canonical.bid_value
         or ask_value != canonical.ask_value
         or mid_value != canonical.mid_value
-        or fingerprint_sha256 != canonical.fingerprint_sha256
+        or delayed_by_minutes != canonical.delayed_by_minutes
+        or fingerprint_sha256 != canonical_row_fingerprint
     ):
         raise SyncError("stored quote normalized-row integrity check failed")
-    _validate_normalized_rows_fingerprint(metadata, canonical.fingerprint_sha256)
+    _validate_normalized_rows_fingerprint(metadata, canonical_row_fingerprint)
 
 
 def _validate_stored_options(  # noqa: C901
+    connection: duckdb.DuckDBPyConnection,
     rows: Sequence[tuple[object, ...]],
     metadata: Mapping[str, object],
 ) -> None:
@@ -1169,7 +1205,7 @@ def _validate_stored_options(  # noqa: C901
         )
     except ValidationError as error:
         raise SyncError("stored option normalized-row integrity check failed") from error
-    canonical_metadata_options: dict[str, NormalizedOptionReference] = {}
+    canonical_metadata_options: dict[int, NormalizedOptionReference] = {}
     for option in metadata_options:
         expected_fingerprint = _fingerprint(
             {
@@ -1181,16 +1217,29 @@ def _validate_stored_options(  # noqa: C901
         )
         if (
             option.fingerprint_sha256 != expected_fingerprint
-            or option.fingerprint_sha256 in canonical_metadata_options
+            or option.source_identifier in canonical_metadata_options
         ):
             raise SyncError("stored option normalized-row integrity check failed")
-        canonical_metadata_options[option.fingerprint_sha256] = option
+        canonical_metadata_options[option.source_identifier] = option
+    option_handles = _validated_option_handles(connection)
+    identifiers_by_handle = {handle: identifier for identifier, handle in option_handles.items()}
+    try:
+        expected_underlying_handle = _validate_instrument_handle(
+            metadata.get("instrument_handle"),
+        )
+        expected_captured_at = _required_utc_text(
+            metadata.get("captured_at"),
+            "stored option capture time",
+        )
+    except SyncError as error:
+        raise SyncError("stored option normalized-row integrity check failed") from error
     canonical_options: list[NormalizedOptionReference] = []
+    seen_identifiers: set[int] = set()
     for row in rows:
         try:
-            _validate_instrument_handle(row[0])
-            _validate_instrument_handle(row[1])
-            _epoch_us(row[2])
+            option_handle = _validate_instrument_handle(row[0])
+            underlying_handle = _validate_instrument_handle(row[1])
+            captured_at = _epoch_us(row[2])
             expiry = row[3]
             strike_value = _required_float(row[4])
             currency = _required_text(row[5], "stored option currency")
@@ -1206,29 +1255,42 @@ def _validate_stored_options(  # noqa: C901
         ):
             raise SyncError("stored option normalized-row integrity check failed")
         put_call = cast("Literal['call', 'put']", put_call_value)
-        metadata_option = canonical_metadata_options.get(fingerprint_sha256)
+        source_identifier = identifiers_by_handle.get(option_handle)
+        metadata_option = (
+            canonical_metadata_options.get(source_identifier)
+            if source_identifier is not None
+            else None
+        )
         if (
-            metadata_option is None
+            source_identifier is None
+            or metadata_option is None
+            or source_identifier in seen_identifiers
             or currency != _MISSING_CURRENCY
+            or underlying_handle != expected_underlying_handle
+            or captured_at != expected_captured_at
             or expiry != metadata_option.expiry
             or strike_value != metadata_option.strike_value
             or put_call != metadata_option.put_call
-            or fingerprint_sha256 != metadata_option.fingerprint_sha256
         ):
             raise SyncError("stored option normalized-row integrity check failed")
         expected_payload = _canonical_stored_json(
             {
                 "currency": None,
                 "currency_state": "unavailable",
-                "option_reference_sha256": fingerprint_sha256,
+                "option_reference_sha256": metadata_option.fingerprint_sha256,
             },
         )
-        if payload_json != expected_payload:
+        expected_row_fingerprint = _option_row_fingerprint(
+            option_handle=option_handle,
+            underlying_handle=underlying_handle,
+            captured_at=captured_at,
+            option=metadata_option,
+        )
+        if payload_json != expected_payload or fingerprint_sha256 != expected_row_fingerprint:
             raise SyncError("stored option normalized-row integrity check failed")
+        seen_identifiers.add(source_identifier)
         canonical_options.append(metadata_option)
-    if {option.fingerprint_sha256 for option in canonical_options} != set(
-        canonical_metadata_options
-    ):
+    if seen_identifiers != set(canonical_metadata_options):
         raise SyncError("stored option normalized-row integrity check failed")
     ordered_options = sorted(
         canonical_options,
@@ -2401,12 +2463,37 @@ def _persist_normalized_bars(
     )
 
 
+def _quote_row_fingerprint(
+    quote: NormalizedQuote,
+    *,
+    quality_state: QualityState,
+    entitlement_state: str,
+    warnings: Sequence[str],
+) -> str:
+    return _fingerprint(
+        {
+            "ask_value": quote.ask_value,
+            "bid_value": quote.bid_value,
+            "captured_at": quote.captured_at.isoformat(),
+            "delayed_by_minutes": quote.delayed_by_minutes,
+            "entitlement_state": entitlement_state,
+            "freshness": quote.freshness,
+            "instrument_handle": quote.instrument_handle,
+            "mid_value": quote.mid_value,
+            "price_type": quote.price_type,
+            "quality_state": quality_state.value,
+            "warnings": list(warnings),
+        },
+    )
+
+
 def _persist_normalized_quote(
     *,
     connection: duckdb.DuckDBPyConnection,
     pages: Sequence[SourcePage],
     stored_page_ids: Mapping[int, str],
     quote: NormalizedQuote,
+    row_fingerprint_sha256: str,
 ) -> None:
     if len(pages) != 1:
         raise SyncError("quote capture contains an invalid source-page count")
@@ -2415,7 +2502,7 @@ def _persist_normalized_quote(
         {
             "capture_revision": source_page.capture_revision,
             "instrument_handle": quote.instrument_handle,
-            "quote_fingerprint": quote.fingerprint_sha256,
+            "quote_fingerprint": row_fingerprint_sha256,
         },
     )
     connection.execute(
@@ -2445,11 +2532,33 @@ def _persist_normalized_quote(
             quote.ask_value,
             quote.mid_value,
             None,
-            quote.fingerprint_sha256,
+            row_fingerprint_sha256,
         ),
     )
     connection.execute(
         "UPDATE store_metadata SET revision = revision + 1 WHERE singleton = TRUE",
+    )
+
+
+def _option_row_fingerprint(
+    *,
+    option_handle: str,
+    underlying_handle: str,
+    captured_at: datetime,
+    option: NormalizedOptionReference,
+) -> str:
+    return _fingerprint(
+        {
+            "captured_at": captured_at.isoformat(),
+            "currency": option.currency,
+            "expiry": option.expiry.isoformat(),
+            "instrument_handle": option_handle,
+            "put_call": option.put_call,
+            "row_kind": "option_reference",
+            "source_identifier": option.source_identifier,
+            "strike_value": option.strike_value,
+            "underlying_handle": underlying_handle,
+        },
     )
 
 
@@ -2473,10 +2582,16 @@ def _persist_normalized_options(
     )
     for option in chain.options:
         option_handle = option_handles[option.source_identifier]
+        row_fingerprint_sha256 = _option_row_fingerprint(
+            option_handle=option_handle,
+            underlying_handle=underlying_handle,
+            captured_at=source_page.source_timestamp,
+            option=option,
+        )
         snapshot_id = "option:" + _fingerprint(
             {
                 "capture_revision": source_page.capture_revision,
-                "option_fingerprint": option.fingerprint_sha256,
+                "option_fingerprint": row_fingerprint_sha256,
                 "underlying_handle": underlying_handle,
             },
         )
@@ -2520,7 +2635,7 @@ def _persist_normalized_options(
                 option.strike_value,
                 _MISSING_CURRENCY,
                 option.put_call,
-                option.fingerprint_sha256,
+                row_fingerprint_sha256,
                 payload,
             ),
         )
@@ -2529,32 +2644,65 @@ def _persist_normalized_options(
     )
 
 
+def _validated_option_handles(
+    connection: duckdb.DuckDBPyConnection,
+) -> dict[int, str]:
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
+            SELECT
+                s.instrument_handle,
+                s.asset_type,
+                s.safe_label,
+                s.fingerprint_sha256,
+                s.metadata_json
+            FROM safe_instruments AS s
+            WHERE s.asset_type = 'ContractOption'
+                OR EXISTS (
+                    SELECT 1
+                    FROM option_snapshots AS o
+                    WHERE o.instrument_handle = s.instrument_handle
+                )
+            """,
+        ).fetchall(),
+    )
+    handles: dict[int, str] = {}
+    for row in rows:
+        try:
+            handle = _validate_instrument_handle(row[0])
+            asset_type = _required_text(row[1], "stored option asset type")
+            safe_label = _required_text(row[2], "stored option label")
+            fingerprint_sha256 = _required_text(row[3], "stored option fingerprint")
+            metadata_json = _required_text(row[4], "stored option metadata")
+            loaded_metadata = json.loads(metadata_json)
+        except (IndexError, SyncError, TypeError, ValueError) as error:
+            raise SyncError("stored option instrument integrity check failed") from error
+        if not isinstance(loaded_metadata, dict):
+            raise SyncError("stored option instrument integrity check failed")
+        metadata = cast("dict[str, object]", loaded_metadata)
+        identifier = metadata.get("identifier")
+        if (
+            asset_type != "ContractOption"
+            or safe_label != _OPTION_SAFE_LABEL
+            or hashlib.sha256(metadata_json.encode()).hexdigest() != fingerprint_sha256
+            or metadata.get("asset_type") != asset_type
+            or metadata.get("display_label") != safe_label
+            or type(identifier) is not int
+            or identifier < 0
+            or identifier in handles
+        ):
+            raise SyncError("stored option instrument integrity check failed")
+        handles[identifier] = handle
+    return handles
+
+
 def _option_handles(
     connection: duckdb.DuckDBPyConnection,
     options: Sequence[NormalizedOptionReference],
     source_page: SourcePage,
 ) -> dict[int, str]:
-    rows = connection.execute(
-        """
-        SELECT instrument_handle, metadata_json
-        FROM safe_instruments
-        WHERE asset_type = 'ContractOption'
-        """,
-    ).fetchall()
-    handles: dict[int, str] = {}
-    for raw_handle, raw_metadata in rows:
-        if not isinstance(raw_handle, str) or not isinstance(raw_metadata, str):
-            raise SyncError("stored option instrument is invalid")
-        try:
-            loaded_metadata = json.loads(raw_metadata)
-        except (TypeError, ValueError) as error:
-            raise SyncError("stored option instrument is invalid") from error
-        if not isinstance(loaded_metadata, dict):
-            raise SyncError("stored option instrument is invalid")
-        metadata = cast("dict[str, object]", loaded_metadata)
-        identifier = metadata.get("identifier")
-        if type(identifier) is int:
-            handles[identifier] = _validate_instrument_handle(raw_handle)
+    handles = _validated_option_handles(connection)
     for option in options:
         if option.source_identifier in handles:
             continue
@@ -2562,7 +2710,7 @@ def _option_handles(
         metadata: dict[str, object] = {
             "aliases": list[str](),
             "asset_type": "ContractOption",
-            "display_label": "Saxo option contract",
+            "display_label": _OPTION_SAFE_LABEL,
             "exchange": None,
             "identifier": option.source_identifier,
             "symbol": None,
@@ -2588,7 +2736,7 @@ def _option_handles(
             """,
             (
                 option_handle,
-                "Saxo option contract",
+                _OPTION_SAFE_LABEL,
                 source_page.source_revision,
                 source_page.source_timestamp,
                 hashlib.sha256(metadata_json.encode()).hexdigest(),

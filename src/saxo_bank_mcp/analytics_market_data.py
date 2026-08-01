@@ -241,9 +241,11 @@ def normalize_quote(
             "bid_value": bid_value,
             "captured_at": captured_at.isoformat(),
             "delayed_by_minutes": delayed_by_minutes,
+            "freshness": freshness,
             "instrument_handle": handle,
             "mid_value": mid_value,
             "price_type": price_type,
+            "warnings": sorted(warnings),
         },
     )
     return NormalizedQuote(

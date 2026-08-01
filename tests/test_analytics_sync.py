@@ -29,6 +29,7 @@ from saxo_bank_mcp.analytics_store import (
 )
 from saxo_bank_mcp.analytics_sync import (
     OptionChainSyncSpec,
+    OptionReferenceDatasetRow,
     PriceBarDatasetSummary,
     PriceBarSyncSpec,
     QuoteDatasetRow,
@@ -1279,6 +1280,77 @@ async def test_quote_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> No
 
 
 @pytest.mark.anyio
+async def test_quote_row_fingerprint_distinguishes_entitlement_quality(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    available = await capture_quote(
+        handle,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "AssetType": "Stock",
+                        "PriceTypeAsk": "RealTime",
+                        "PriceTypeBid": "RealTime",
+                        "Quote": {
+                            "Ask": 102.0,
+                            "Bid": 100.0,
+                            "DelayedByMinutes": 0,
+                            "Mid": 101.0,
+                            "PriceType": "RealTime",
+                        },
+                        "Uic": 1001,
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    limited = await capture_quote(
+        handle,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "AssetType": "Stock",
+                        "PriceTypeAsk": "NoAccess",
+                        "PriceTypeBid": "RealTime",
+                        "Quote": {
+                            "Ask": 102.0,
+                            "Bid": 100.0,
+                            "DelayedByMinutes": 0,
+                            "Mid": 101.0,
+                            "PriceType": "RealTime",
+                        },
+                        "Uic": 1001,
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert available.datasets[0].quality_state == "complete"
+    assert limited.datasets[0].quality_state == "partial"
+    assert limited.datasets[0].warnings == ("quote_entitlement_limited",)
+    assert get_dataset(available.datasets[0].dataset_id, 1, 500, config=config).total_rows == 1
+    assert get_dataset(limited.datasets[0].dataset_id, 1, 500, config=config).total_rows == 1
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        fingerprints = connection.execute(
+            "SELECT fingerprint_sha256 FROM quotes",
+        ).fetchall()
+    finally:
+        connection.close()
+    assert len(fingerprints) == 2
+    assert len({str(row[0]) for row in fingerprints}) == 2
+
+
+@pytest.mark.anyio
 async def test_option_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
     config = _config(tmp_path)
     handle = await _resolved_handle(config)
@@ -1314,6 +1386,134 @@ async def test_option_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> N
 
     with pytest.raises(SyncError, match="integrity"):
         get_dataset(summary.dataset_id, 1, 500, config=config)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mutation_sql",
+    [
+        "UPDATE option_snapshots SET instrument_handle = underlying_handle",
+        "UPDATE option_snapshots SET underlying_handle = instrument_handle",
+        "UPDATE option_snapshots SET captured_at = captured_at + INTERVAL 1 SECOND",
+    ],
+    ids=("instrument-handle", "underlying-handle", "captured-at"),
+)
+async def test_option_row_material_column_mismatch_fails_closed(
+    tmp_path: Path,
+    mutation_sql: str,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    result = await capture_option_chain(
+        handle,
+        (date(2026, 9, 18),),
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "ExpiryDates": ["2026-09-18"],
+                        "OptionRootId": 1001,
+                        "SpecificOptions": [
+                            {"PutCall": "Call", "Strike": 100.0, "Uic": 2001},
+                        ],
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    summary = result.datasets[0]
+    normal = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert normal.total_rows == 1
+    assert isinstance(normal.rows[0], OptionReferenceDatasetRow)
+    assert normal.rows[0].underlying_handle == handle
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute(mutation_sql)
+    finally:
+        connection.close()
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "metadata_mutation",
+    ["checksum", "identity"],
+)
+async def test_option_handle_metadata_mismatch_rolls_back_reuse(
+    tmp_path: Path,
+    metadata_mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    payload = {
+        "ExpiryDates": ["2026-09-18"],
+        "OptionRootId": 1001,
+        "SpecificOptions": [
+            {"PutCall": "Call", "Strike": 100.0, "Uic": 2001},
+        ],
+    }
+    executor = _PayloadExecutor((payload, payload))
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    first = await capture_option_chain(
+        handle,
+        (date(2026, 9, 18),),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    assert get_dataset(first.datasets[0].dataset_id, 1, 500, config=config).total_rows == 1
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        row = connection.execute(
+            """
+            SELECT metadata_json
+            FROM safe_instruments
+            WHERE asset_type = 'ContractOption'
+            """,
+        ).fetchone()
+        assert row is not None
+        metadata_json = str(row[0])
+        if metadata_mutation == "checksum":
+            connection.execute(
+                """
+                UPDATE safe_instruments
+                SET metadata_json = metadata_json || ' '
+                WHERE asset_type = 'ContractOption'
+                """,
+            )
+        else:
+            loaded = json.loads(metadata_json)
+            assert isinstance(loaded, dict)
+            metadata = cast("dict[str, object]", loaded)
+            metadata["asset_type"] = "Stock"
+            changed_json = json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+            connection.execute(
+                """
+                UPDATE safe_instruments
+                SET metadata_json = ?, fingerprint_sha256 = sha256(?)
+                WHERE asset_type = 'ContractOption'
+                """,
+                (changed_json, changed_json),
+            )
+    finally:
+        connection.close()
+    counts_before = _integrity_store_counts(config)
+
+    with pytest.raises(SyncError, match=r"option instrument.*integrity"):
+        await capture_option_chain(
+            handle,
+            (date(2026, 9, 18),),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert len(executor.calls) == 2
+    assert _integrity_store_counts(config) == counts_before
 
 
 @pytest.mark.anyio
