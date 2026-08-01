@@ -1258,7 +1258,16 @@ class AnalyticsStore:
                     p.instrument_handle,
                     i.instrument_handle,
                     p.payload_json,
-                    c.contract_name
+                    c.contract_name,
+                    p.source_kind,
+                    p.page_key,
+                    p.source_native_revision,
+                    p.instrument_scope_sha256,
+                    epoch_us(p.source_timestamp),
+                    p.payload_sha256,
+                    p.contract_id,
+                    c.source_scope,
+                    p.logical_key_sha256
                 FROM source_pages AS p
                 LEFT JOIN source_contracts AS c ON c.contract_id = p.contract_id
                 LEFT JOIN safe_instruments AS i
@@ -1288,7 +1297,113 @@ class AnalyticsStore:
             raise StoreValidationError(
                 "dataset source revision does not match its source pages",
             )
+        for row in rows:
+            AnalyticsStore._validate_bound_source_page_identity(row)
         return rows
+
+    @staticmethod
+    def _validate_bound_source_page_identity(row: tuple[object, ...]) -> None:
+        try:
+            page_id = _require_str(row[0])
+            fingerprint_sha256 = _require_str(row[1])
+            row_count = _require_int(row[2])
+            byte_count = _require_int(row[3])
+            account_scope = _optional_str(row[4])
+            source_revision = _require_str(row[5])
+            contract_sha256 = _require_str(row[6])
+            instrument_handle = _optional_str(row[7])
+            payload_json = _require_str(row[9])
+            contract_name = _require_str(row[10])
+            source_kind = _require_str(row[11])
+            page_key = _require_str(row[12])
+            source_native_revision = _require_str(row[13])
+            instrument_scope_sha256 = _optional_str(row[14])
+            source_timestamp = _require_datetime(row[15])
+            payload_sha256 = _require_str(row[16])
+            contract_id = _require_str(row[17])
+            source_scope = _require_str(row[18])
+            logical_key_sha256 = _require_str(row[19])
+            loaded_payload = json.loads(payload_json)
+        except (IndexError, StoreError, TypeError, ValueError) as error:
+            raise StoreValidationError(
+                "dataset source page integrity check failed",
+            ) from error
+        if not isinstance(loaded_payload, dict):
+            raise StoreValidationError("dataset source page integrity check failed")
+        payload = cast("dict[str, object]", loaded_payload)
+        canonical_payload = _canonical_json(payload)
+        raw_rows = payload.get("rows")
+        if raw_rows is not None and not isinstance(raw_rows, list):
+            raise StoreValidationError("dataset source page integrity check failed")
+        source_rows = [] if raw_rows is None else cast("list[object]", raw_rows)
+        contract = source_contracts_by_id().get(contract_name)
+        if contract is not None and (
+            contract.contract_id != contract_name
+            or contract.source_kind != source_kind
+            or source_contract_fingerprint(contract) != contract_sha256
+        ):
+            raise StoreValidationError(
+                "persisted source contract metadata is invalid",
+            )
+        if (
+            source_scope != "saxo_openapi"
+            or contract_id != f"sc_{_fingerprint(f'{contract_name}:{contract_sha256}')}"
+            or ("contract_id" in payload and payload.get("contract_id") != contract_name)
+            or any(not isinstance(source_row, dict) for source_row in source_rows)
+            or (raw_rows is not None and len(source_rows) != row_count)
+            or canonical_payload != payload_json
+            or len(payload_json.encode()) != byte_count
+            or _fingerprint(payload_json) != payload_sha256
+        ):
+            raise StoreValidationError("dataset source page integrity check failed")
+        if (
+            "source_native_revision" in payload
+            and payload.get("source_native_revision") != source_native_revision
+        ):
+            raise StoreValidationError("dataset source page integrity check failed")
+        raw_page_fingerprint = payload.get("page_fingerprint_sha256")
+        if raw_page_fingerprint is not None and (
+            raw_rows is None
+            or not isinstance(raw_page_fingerprint, str)
+            or source_page_fingerprint(
+                cast("list[Mapping[str, object]]", source_rows),
+            )
+            != raw_page_fingerprint
+        ):
+            raise StoreValidationError("dataset source page integrity check failed")
+        material_json = _canonical_json(
+            {
+                "account_scope": account_scope,
+                "contract_name": contract_name,
+                "contract_sha256": contract_sha256,
+                "instrument_handle": instrument_handle,
+                "instrument_scope_sha256": instrument_scope_sha256,
+                "page_key": page_key,
+                "payload_sha256": payload_sha256,
+                "row_count": row_count,
+                "source_kind": source_kind,
+                "source_revision": source_revision,
+                "source_native_revision": source_native_revision,
+                "source_timestamp": source_timestamp.isoformat(),
+            },
+        )
+        logical_key_json = _canonical_json(
+            {
+                "account_scope": account_scope,
+                "instrument_handle": instrument_handle,
+                "instrument_scope_sha256": instrument_scope_sha256,
+                "page_key": page_key,
+                "source_kind": source_kind,
+                "source_revision": source_revision,
+            },
+        )
+        reconstructed_fingerprint = _fingerprint(material_json)
+        if (
+            fingerprint_sha256 != reconstructed_fingerprint
+            or page_id != f"sp_{reconstructed_fingerprint}"
+            or logical_key_sha256 != _fingerprint(logical_key_json)
+        ):
+            raise StoreValidationError("dataset source page integrity check failed")
 
     @staticmethod
     def _bound_dataset_quality_state(

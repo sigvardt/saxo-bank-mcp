@@ -15,8 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_market_data import (
     ChartInterval,
+    MarketDataError,
     NormalizedOptionChain,
     NormalizedOptionReference,
+    NormalizedPriceBar,
     NormalizedPriceSeries,
     NormalizedQuote,
     normalize_option_chain,
@@ -51,6 +53,8 @@ _CHART_CONTRACT_ID: Final = "chart_v3"
 _MISSING_CURRENCY: Final = "__unavailable__"
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 128
 _DATASET_INTEGRITY_COLUMN_COUNT: Final = 9
+_PRICE_BAR_INTEGRITY_COLUMN_COUNT: Final = 13
+_QUOTE_INTEGRITY_COLUMN_COUNT: Final = 7
 _SOURCE_PAGE_INTEGRITY_COLUMN_COUNT: Final = 19
 _CONNECTION_CONFIG: Final = MappingProxyType(
     {
@@ -838,27 +842,34 @@ def get_dataset(
                 page,
                 limit,
             )
+        if metadata.get("data_kind") == "option_chain":
+            if metadata.get("entitlement_state") == "denied":
+                return DatasetPage(
+                    dataset_id=validated_id,
+                    page=page,
+                    limit=limit,
+                    total_rows=0,
+                    rows=(),
+                    next_page=None,
+                )
+            return _option_dataset_page(
+                connection,
+                validated_id,
+                page,
+                limit,
+                metadata,
+            )
+        if metadata.get("data_kind") == "quote":
+            return _quote_dataset_page(
+                connection,
+                validated_id,
+                page,
+                limit,
+                metadata,
+                source_pages,
+            )
     finally:
         connection.close()
-    if metadata.get("data_kind") == "option_chain":
-        if metadata.get("entitlement_state") == "denied":
-            return DatasetPage(
-                dataset_id=validated_id,
-                page=page,
-                limit=limit,
-                total_rows=0,
-                rows=(),
-                next_page=None,
-            )
-        return _option_dataset_page(validated_id, page, limit, config)
-    if metadata.get("data_kind") == "quote":
-        return _quote_dataset_page(
-            validated_id,
-            page,
-            limit,
-            metadata,
-            config,
-        )
     raise SyncValidationError("dataset kind is not supported")
 
 
@@ -936,12 +947,13 @@ def _price_bar_dataset_page(  # noqa: PLR0913
     )
 
 
-def _quote_dataset_page(
+def _quote_dataset_page(  # noqa: PLR0913
+    connection: duckdb.DuckDBPyConnection,
     dataset_id: str,
     page: int,
     limit: int,
     metadata: Mapping[str, object],
-    config: AnalyticsConfig,
+    source_pages: Sequence[_AuthenticatedSourcePage],
 ) -> DatasetPage:
     instrument_handle = _validate_instrument_handle(metadata.get("instrument_handle"))
     freshness_value = metadata.get("freshness")
@@ -950,41 +962,46 @@ def _quote_dataset_page(
     freshness = cast("Literal['fresh', 'stale']", freshness_value)
     warnings = _warning_tuple(metadata.get("warnings"))
     offset = (page - 1) * limit
-    connection = _connect(config, read_only=True)
-    try:
-        total_row = connection.execute(
-            """
+    total_row = connection.execute(
+        """
             SELECT count(*)
             FROM quotes AS q
             JOIN dataset_source_pages AS dsp ON dsp.page_id = q.page_id
             WHERE dsp.dataset_id = ? AND q.instrument_handle = ?
             """,
-            (dataset_id, instrument_handle),
-        ).fetchone()
-        rows = cast(
-            "list[tuple[object, ...]]",
-            connection.execute(
-                """
+        (dataset_id, instrument_handle),
+    ).fetchone()
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
                 SELECT
                     q.instrument_handle,
                     epoch_us(q.captured_at),
                     q.bid_value,
                     q.ask_value,
-                    q.mid_value
+                    q.mid_value,
+                    q.page_id,
+                    q.fingerprint_sha256
                 FROM quotes AS q
                 JOIN dataset_source_pages AS dsp ON dsp.page_id = q.page_id
                 WHERE dsp.dataset_id = ? AND q.instrument_handle = ?
                 ORDER BY q.captured_at, q.quote_id
-                LIMIT ? OFFSET ?
                 """,
-                (dataset_id, instrument_handle, limit, offset),
-            ).fetchall(),
-        )
-    finally:
-        connection.close()
+            (dataset_id, instrument_handle),
+        ).fetchall(),
+    )
     if total_row is None or not isinstance(total_row[0], int):
         raise SyncError("dataset row count is invalid")
     total_rows = total_row[0]
+    if total_rows != len(rows):
+        raise SyncError("stored quote normalized-row integrity check failed")
+    _validate_stored_quotes(
+        rows,
+        instrument_handle,
+        metadata,
+        source_pages,
+    )
     parsed_rows = tuple(
         QuoteDatasetRow(
             instrument_handle=_required_text(row[0], "stored instrument handle"),
@@ -995,7 +1012,7 @@ def _quote_dataset_page(
             freshness=freshness,
             warnings=warnings,
         )
-        for row in rows
+        for row in rows[offset : offset + limit]
     )
     return DatasetPage(
         dataset_id=dataset_id,
@@ -1008,27 +1025,26 @@ def _quote_dataset_page(
 
 
 def _option_dataset_page(
+    connection: duckdb.DuckDBPyConnection,
     dataset_id: str,
     page: int,
     limit: int,
-    config: AnalyticsConfig,
+    metadata: Mapping[str, object],
 ) -> DatasetPage:
     offset = (page - 1) * limit
-    connection = _connect(config, read_only=True)
-    try:
-        total_row = connection.execute(
-            """
+    total_row = connection.execute(
+        """
             SELECT count(*)
             FROM option_snapshots AS o
             JOIN dataset_source_pages AS dsp ON dsp.page_id = o.page_id
             WHERE dsp.dataset_id = ?
             """,
-            (dataset_id,),
-        ).fetchone()
-        rows = cast(
-            "list[tuple[object, ...]]",
-            connection.execute(
-                """
+        (dataset_id,),
+    ).fetchone()
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
                 SELECT
                     o.instrument_handle,
                     o.underlying_handle,
@@ -1036,22 +1052,24 @@ def _option_dataset_page(
                     o.expiry_date,
                     o.strike_value,
                     o.currency,
-                    o.put_call
+                    o.put_call,
+                    o.fingerprint_sha256,
+                    o.payload_json
                 FROM option_snapshots AS o
                 JOIN dataset_source_pages AS dsp ON dsp.page_id = o.page_id
                 WHERE dsp.dataset_id = ?
                 ORDER BY o.expiry_date, o.strike_value, o.put_call, o.instrument_handle
-                LIMIT ? OFFSET ?
                 """,
-                (dataset_id, limit, offset),
-            ).fetchall(),
-        )
-    finally:
-        connection.close()
+            (dataset_id,),
+        ).fetchall(),
+    )
     if total_row is None or not isinstance(total_row[0], int):
         raise SyncError("dataset row count is invalid")
     total_rows = total_row[0]
-    parsed_rows = tuple(_option_dataset_row(row) for row in rows)
+    if total_rows != len(rows):
+        raise SyncError("stored option normalized-row integrity check failed")
+    _validate_stored_options(rows, metadata)
+    parsed_rows = tuple(_option_dataset_row(row) for row in rows[offset : offset + limit])
     return DatasetPage(
         dataset_id=dataset_id,
         page=page,
@@ -1082,6 +1100,146 @@ def _option_dataset_row(row: tuple[object, ...]) -> OptionReferenceDatasetRow:
     )
 
 
+def _validate_stored_quotes(
+    rows: Sequence[tuple[object, ...]],
+    instrument_handle: str,
+    metadata: Mapping[str, object],
+    source_pages: Sequence[_AuthenticatedSourcePage],
+) -> None:
+    if len(rows) != 1:
+        raise SyncError("stored quote normalized-row integrity check failed")
+    pages_by_id = {page.page_id: page for page in source_pages}
+    row = rows[0]
+    if len(row) != _QUOTE_INTEGRITY_COLUMN_COUNT:
+        raise SyncError("stored quote normalized-row integrity check failed")
+    try:
+        stored_handle = _validate_instrument_handle(row[0])
+        captured_at = _epoch_us(row[1])
+        bid_value = _optional_float(row[2])
+        ask_value = _optional_float(row[3])
+        mid_value = _optional_float(row[4])
+        page_id = _required_text(row[5], "stored quote page ID")
+        fingerprint_sha256 = _required_text(row[6], "stored quote fingerprint")
+    except (IndexError, SyncError) as error:
+        raise SyncError("stored quote normalized-row integrity check failed") from error
+    source_page = pages_by_id.get(page_id)
+    if source_page is None:
+        raise SyncError("stored quote normalized-row integrity check failed")
+    raw_rows = source_page.payload.get("rows")
+    if not isinstance(raw_rows, list):
+        raise SyncError("stored quote normalized-row integrity check failed")
+    source_rows = cast("list[object]", raw_rows)
+    if len(source_rows) != 1 or not isinstance(source_rows[0], dict):
+        raise SyncError("stored quote normalized-row integrity check failed")
+    try:
+        canonical = normalize_quote(
+            row=cast("dict[str, object]", source_rows[0]),
+            instrument_handle=instrument_handle,
+            captured_at=captured_at,
+            evaluated_at=captured_at,
+            max_age=timedelta(microseconds=1),
+        )
+    except MarketDataError as error:
+        raise SyncError("stored quote normalized-row integrity check failed") from error
+    if (
+        stored_handle != canonical.instrument_handle
+        or bid_value != canonical.bid_value
+        or ask_value != canonical.ask_value
+        or mid_value != canonical.mid_value
+        or fingerprint_sha256 != canonical.fingerprint_sha256
+    ):
+        raise SyncError("stored quote normalized-row integrity check failed")
+    _validate_normalized_rows_fingerprint(metadata, canonical.fingerprint_sha256)
+
+
+def _validate_stored_options(  # noqa: C901
+    rows: Sequence[tuple[object, ...]],
+    metadata: Mapping[str, object],
+) -> None:
+    raw_normalized_rows = metadata.get("normalized_rows")
+    if not isinstance(raw_normalized_rows, list):
+        raise SyncError("stored option normalized-row integrity check failed")
+    try:
+        metadata_options = tuple(
+            NormalizedOptionReference.model_validate_json(
+                _canonical_stored_json(value),
+                strict=True,
+            )
+            for value in cast("list[object]", raw_normalized_rows)
+        )
+    except ValidationError as error:
+        raise SyncError("stored option normalized-row integrity check failed") from error
+    canonical_metadata_options: dict[str, NormalizedOptionReference] = {}
+    for option in metadata_options:
+        expected_fingerprint = _fingerprint(
+            {
+                "expiry": option.expiry.isoformat(),
+                "put_call": option.put_call,
+                "source_identifier": option.source_identifier,
+                "strike_value": option.strike_value,
+            },
+        )
+        if (
+            option.fingerprint_sha256 != expected_fingerprint
+            or option.fingerprint_sha256 in canonical_metadata_options
+        ):
+            raise SyncError("stored option normalized-row integrity check failed")
+        canonical_metadata_options[option.fingerprint_sha256] = option
+    canonical_options: list[NormalizedOptionReference] = []
+    for row in rows:
+        try:
+            _validate_instrument_handle(row[0])
+            _validate_instrument_handle(row[1])
+            _epoch_us(row[2])
+            expiry = row[3]
+            strike_value = _required_float(row[4])
+            currency = _required_text(row[5], "stored option currency")
+            put_call_value = _required_text(row[6], "stored option put-call value")
+            fingerprint_sha256 = _required_text(row[7], "stored option fingerprint")
+            payload_json = _required_text(row[8], "stored option payload")
+        except (IndexError, SyncError) as error:
+            raise SyncError("stored option normalized-row integrity check failed") from error
+        if (
+            isinstance(expiry, datetime)
+            or not isinstance(expiry, date)
+            or put_call_value not in {"call", "put"}
+        ):
+            raise SyncError("stored option normalized-row integrity check failed")
+        put_call = cast("Literal['call', 'put']", put_call_value)
+        metadata_option = canonical_metadata_options.get(fingerprint_sha256)
+        if (
+            metadata_option is None
+            or currency != _MISSING_CURRENCY
+            or expiry != metadata_option.expiry
+            or strike_value != metadata_option.strike_value
+            or put_call != metadata_option.put_call
+            or fingerprint_sha256 != metadata_option.fingerprint_sha256
+        ):
+            raise SyncError("stored option normalized-row integrity check failed")
+        expected_payload = _canonical_stored_json(
+            {
+                "currency": None,
+                "currency_state": "unavailable",
+                "option_reference_sha256": fingerprint_sha256,
+            },
+        )
+        if payload_json != expected_payload:
+            raise SyncError("stored option normalized-row integrity check failed")
+        canonical_options.append(metadata_option)
+    if {option.fingerprint_sha256 for option in canonical_options} != set(
+        canonical_metadata_options
+    ):
+        raise SyncError("stored option normalized-row integrity check failed")
+    ordered_options = sorted(
+        canonical_options,
+        key=lambda option: (option.strike_value, option.put_call, option.source_identifier),
+    )
+    _validate_normalized_rows_fingerprint(
+        metadata,
+        _fingerprint([option.model_dump(mode="json") for option in ordered_options]),
+    )
+
+
 class _InstrumentSelector(_StrictModel):
     identifier: int = Field(ge=0)
     asset_type: str = Field(min_length=1, max_length=64)
@@ -1097,6 +1255,7 @@ class _ExistingBarState(_StrictModel):
 class _AuthenticatedSourcePage:
     page_id: str
     source_revision: str
+    source_native_revision: str
     source_timestamp: datetime
     account_scope: str | None
     instrument_handle: str | None
@@ -1116,6 +1275,20 @@ class _VisibleBarReference:
 
 
 type _VisibleBarLineage = dict[datetime, _VisibleBarReference]
+
+
+@dataclass(frozen=True, slots=True)
+class _StoredPriceBar:
+    page_id: str
+    instrument_handle: str
+    source_native_revision: str
+    bar_time: datetime
+    interval: ChartInterval
+    open_value: float | None
+    high_value: float | None
+    low_value: float | None
+    close_value: float
+    volume_value: float | None
 
 
 def _validate_expiries(
@@ -1146,29 +1319,50 @@ def _instrument_selector(
     connection = _connect(config, read_only=True)
     try:
         row = connection.execute(
-            "SELECT metadata_json FROM safe_instruments WHERE instrument_handle = ?",
+            """
+            SELECT
+                instrument_handle,
+                asset_type,
+                safe_label,
+                fingerprint_sha256,
+                metadata_json
+            FROM safe_instruments
+            WHERE instrument_handle = ?
+            """,
             (instrument_handle,),
         ).fetchone()
     finally:
         connection.close()
-    if row is None or not isinstance(row[0], str):
+    if row is None:
         raise SyncValidationError("instrument handle is not resolved")
     try:
-        loaded_payload = json.loads(row[0])
-    except (TypeError, ValueError) as error:
-        raise SyncError("stored instrument selector is invalid") from error
+        stored_handle = _validate_instrument_handle(row[0])
+        stored_asset_type = _required_text(row[1], "stored instrument asset type")
+        stored_label = _required_text(row[2], "stored instrument label")
+        stored_fingerprint = _required_text(row[3], "stored instrument fingerprint")
+        metadata_json = _required_text(row[4], "stored instrument metadata")
+        loaded_payload = json.loads(metadata_json)
+    except (IndexError, SyncError, TypeError, ValueError) as error:
+        raise SyncError("stored instrument selector integrity check failed") from error
     if not isinstance(loaded_payload, dict):
-        raise SyncError("stored instrument selector is invalid")
+        raise SyncError("stored instrument selector integrity check failed")
     payload = cast("dict[str, object]", loaded_payload)
     identifier = payload.get("identifier")
     asset_type = payload.get("asset_type")
+    if (
+        stored_handle != instrument_handle
+        or hashlib.sha256(metadata_json.encode()).hexdigest() != stored_fingerprint
+        or asset_type != stored_asset_type
+        or payload.get("display_label") != stored_label
+    ):
+        raise SyncError("stored instrument selector integrity check failed")
     try:
         return _InstrumentSelector.model_validate(
             {"identifier": identifier, "asset_type": asset_type},
             strict=True,
         )
     except ValidationError as error:
-        raise SyncError("stored instrument selector is invalid") from error
+        raise SyncError("stored instrument selector integrity check failed") from error
 
 
 def _canonical_stored_json(value: object) -> str:
@@ -1291,6 +1485,7 @@ def _authenticated_source_page(row: tuple[object, ...]) -> _AuthenticatedSourceP
     return _AuthenticatedSourcePage(
         page_id=page_id,
         source_revision=source_revision,
+        source_native_revision=source_native_revision,
         source_timestamp=source_timestamp,
         account_scope=account_scope,
         instrument_handle=instrument_handle,
@@ -1458,7 +1653,20 @@ def _authenticated_chart_lineage(  # noqa: PLR0913
         "list[tuple[object, ...]]",
         connection.execute(
             """
-            SELECT epoch_us(b.bar_time), b.page_id, p.source_revision
+            SELECT
+                epoch_us(b.bar_time),
+                b.page_id,
+                p.source_revision,
+                b.instrument_handle,
+                b.source_revision,
+                b.duration,
+                b.open_value,
+                b.high_value,
+                b.low_value,
+                b.close_value,
+                b.volume_value,
+                b.currency,
+                b.adjusted
             FROM price_bars AS b
             JOIN dataset_source_pages AS dsp
                 ON dsp.dataset_id = ? AND dsp.page_id = b.page_id
@@ -1469,28 +1677,45 @@ def _authenticated_chart_lineage(  # noqa: PLR0913
             (dataset_id, instrument_handle, interval.value),
         ).fetchall(),
     )
-    rows_by_lineage: dict[tuple[datetime, str], list[str]] = {}
-    for raw_time, raw_page_id, raw_revision in normalized_rows:
-        key = (
-            _epoch_us(raw_time),
-            _required_text(raw_revision, "stored price-bar revision"),
-        )
-        rows_by_lineage.setdefault(key, []).append(
-            _required_text(raw_page_id, "stored price-bar page ID"),
-        )
+    rows_by_lineage: dict[tuple[datetime, str], list[_StoredPriceBar]] = {}
+    for row in normalized_rows:
+        stored_bar = _stored_price_bar(row)
+        capture_revision = _required_text(row[2], "stored price-bar capture revision")
+        rows_by_lineage.setdefault((stored_bar.bar_time, capture_revision), []).append(stored_bar)
     pages_by_id = {page.page_id: page for page in source_pages}
     lineage: _VisibleBarLineage = {}
+    canonical_bars: list[NormalizedPriceBar] = []
     for bar_time, capture_revision in visible_revisions.items():
-        page_ids = rows_by_lineage.get((bar_time, capture_revision), [])
-        if len(page_ids) != 1:
+        stored_bars = rows_by_lineage.get((bar_time, capture_revision), [])
+        if len(stored_bars) != 1:
             raise SyncError("stored chart lineage integrity check failed")
-        source_page = pages_by_id.get(page_ids[0])
+        stored_bar = stored_bars[0]
+        source_page = pages_by_id.get(stored_bar.page_id)
         if source_page is None:
             raise SyncError("stored chart lineage integrity check failed")
+        source_row = _authenticated_source_row(source_page, bar_time)
+        canonical_bar = _canonical_price_bar(
+            source_row,
+            instrument_handle,
+            interval,
+            bar_time,
+        )
+        if (
+            stored_bar.instrument_handle != canonical_bar.instrument_handle
+            or stored_bar.source_native_revision != source_page.source_native_revision
+            or stored_bar.interval is not canonical_bar.interval
+            or stored_bar.open_value != canonical_bar.open_value
+            or stored_bar.high_value != canonical_bar.high_value
+            or stored_bar.low_value != canonical_bar.low_value
+            or stored_bar.close_value != canonical_bar.close_value
+            or stored_bar.volume_value != canonical_bar.volume_value
+        ):
+            raise SyncError("stored chart normalized-row integrity check failed")
+        canonical_bars.append(canonical_bar)
         lineage[bar_time] = _VisibleBarReference(
             page_id=source_page.page_id,
             capture_revision=capture_revision,
-            source_row=_authenticated_source_row(source_page, bar_time),
+            source_row=source_row,
         )
     current_page_ids = {
         page.page_id for page in source_pages if page.source_revision == source_revision
@@ -1498,7 +1723,55 @@ def _authenticated_chart_lineage(  # noqa: PLR0913
     visible_page_ids = {reference.page_id for reference in lineage.values()}
     if set(pages_by_id) != current_page_ids | visible_page_ids:
         raise SyncError("stored chart lineage integrity check failed")
+    _validate_normalized_rows_fingerprint(
+        metadata,
+        _fingerprint([bar.model_dump(mode="json") for bar in canonical_bars]),
+    )
     return lineage
+
+
+def _stored_price_bar(row: tuple[object, ...]) -> _StoredPriceBar:
+    if len(row) != _PRICE_BAR_INTEGRITY_COLUMN_COUNT or row[11] is not None or row[12] is not False:
+        raise SyncError("stored chart normalized-row integrity check failed")
+    try:
+        return _StoredPriceBar(
+            page_id=_required_text(row[1], "stored price-bar page ID"),
+            instrument_handle=_validate_instrument_handle(row[3]),
+            source_native_revision=_required_text(
+                row[4],
+                "stored price-bar source revision",
+            ),
+            bar_time=_epoch_us(row[0]),
+            interval=ChartInterval(_required_text(row[5], "stored price-bar interval")),
+            open_value=_optional_float(row[6]),
+            high_value=_optional_float(row[7]),
+            low_value=_optional_float(row[8]),
+            close_value=_required_float(row[9]),
+            volume_value=_optional_float(row[10]),
+        )
+    except (IndexError, SyncError, ValueError) as error:
+        raise SyncError("stored chart normalized-row integrity check failed") from error
+
+
+def _canonical_price_bar(
+    source_row: Mapping[str, object],
+    instrument_handle: str,
+    interval: ChartInterval,
+    bar_time: datetime,
+) -> NormalizedPriceBar:
+    try:
+        series = normalize_price_series(
+            rows=(source_row,),
+            instrument_handle=instrument_handle,
+            interval=interval,
+            start=bar_time,
+            end=bar_time,
+        )
+    except (MarketDataError, TypeError, ValueError) as error:
+        raise SyncError("stored chart normalized-row integrity check failed") from error
+    if len(series.bars) != 1 or series.bars[0].bar_time != bar_time:
+        raise SyncError("stored chart normalized-row integrity check failed")
+    return series.bars[0]
 
 
 def _authenticated_source_row(
@@ -1628,6 +1901,42 @@ def _stored_visible_bar_revisions(value: object) -> dict[datetime, str]:
             "stored visible price-bar revision",
         )
     return revisions
+
+
+def _validate_normalized_rows_fingerprint(
+    metadata: Mapping[str, object],
+    canonical_rows_sha256: str,
+) -> None:
+    raw_prior_page_ids = metadata.get("prior_page_ids", [])
+    if not isinstance(raw_prior_page_ids, list):
+        raise SyncError("stored normalized-row fingerprint integrity check failed")
+    raw_page_ids = cast("list[object]", raw_prior_page_ids)
+    if any(not isinstance(page_id, str) for page_id in raw_page_ids):
+        raise SyncError("stored normalized-row fingerprint integrity check failed")
+    prior_page_ids = cast("list[str]", raw_page_ids)
+    if prior_page_ids != sorted(set(prior_page_ids)):
+        raise SyncError("stored normalized-row fingerprint integrity check failed")
+    try:
+        fingerprints = IngestionFingerprints.model_validate(
+            metadata.get("fingerprints"),
+            strict=True,
+        )
+    except ValidationError as error:
+        raise SyncError("stored normalized-row fingerprint integrity check failed") from error
+    visible_dataset_sha256 = _fingerprint(
+        {
+            "normalized_rows_sha256": canonical_rows_sha256,
+            "retained_page_ids": prior_page_ids,
+        },
+    )
+    expected = _fingerprint(
+        {
+            "normalized_rows_sha256": canonical_rows_sha256,
+            "visible_dataset_sha256": visible_dataset_sha256,
+        },
+    )
+    if fingerprints.normalized_rows_sha256 != expected:
+        raise SyncError("stored normalized-row fingerprint integrity check failed")
 
 
 def _merged_price_series(  # noqa: PLR0913

@@ -22,7 +22,11 @@ from saxo_bank_mcp.analytics_market_data import ChartInterval
 from saxo_bank_mcp.analytics_models import HandleKind
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_resolver import InstrumentResolver
-from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
+from saxo_bank_mcp.analytics_store import (
+    AnalyticsStore,
+    StoreQuotaError,
+    StoreValidationError,
+)
 from saxo_bank_mcp.analytics_sync import (
     OptionChainSyncSpec,
     PriceBarDatasetSummary,
@@ -1163,6 +1167,261 @@ async def test_chart_lineage_authentication_allows_normal_replay(
         connection.close()
     assert binding_count == (3,)
     assert len(executor.calls) == 3
+
+
+@pytest.mark.anyio
+async def test_chart_row_fingerprint_mismatch_fails_before_read_or_refresh(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:00:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 102.0,
+                        "Time": "2026-03-30T09:00:00+02:00",
+                        "Volume": 2,
+                    },
+                ],
+                "DataVersion": 2,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    result = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        datetime(2026, 3, 30, 7, tzinfo=UTC),
+        datetime(2026, 3, 30, 7, tzinfo=UTC),
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    summary = result.datasets[0]
+    normal = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert [row.close_value for row in normal.rows if row.row_kind == "price_bar"] == [101.0]
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute("UPDATE price_bars SET close_value = 999.0")
+    finally:
+        connection.close()
+    counts_after_tamper = _integrity_store_counts(config)
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+    with pytest.raises(SyncError, match="integrity"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert len(executor.calls) == 1
+    assert _integrity_store_counts(config) == counts_after_tamper
+
+
+@pytest.mark.anyio
+async def test_quote_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    result = await capture_quote(
+        handle,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "AssetType": "Stock",
+                        "PriceTypeAsk": "RealTime",
+                        "PriceTypeBid": "RealTime",
+                        "Quote": {
+                            "Ask": 102.0,
+                            "Bid": 100.0,
+                            "DelayedByMinutes": 0,
+                            "Mid": 101.0,
+                            "PriceType": "RealTime",
+                        },
+                        "Uic": 1001,
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    summary = result.datasets[0]
+    normal = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert isinstance(normal.rows[0], QuoteDatasetRow)
+    assert normal.rows[0].bid_value == 100.0
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute("UPDATE quotes SET bid_value = 999.0")
+    finally:
+        connection.close()
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+
+
+@pytest.mark.anyio
+async def test_option_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    result = await capture_option_chain(
+        handle,
+        (date(2026, 9, 18),),
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "ExpiryDates": ["2026-09-18"],
+                        "OptionRootId": 1001,
+                        "SpecificOptions": [
+                            {"PutCall": "Call", "Strike": 100.0, "Uic": 2001},
+                        ],
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    summary = result.datasets[0]
+    normal = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert [row.strike_value for row in normal.rows if row.row_kind == "option_reference"] == [
+        100.0
+    ]
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute("UPDATE option_snapshots SET strike_value = 999.0")
+    finally:
+        connection.close()
+
+    with pytest.raises(SyncError, match="integrity"):
+        get_dataset(summary.dataset_id, 1, 500, config=config)
+
+
+@pytest.mark.anyio
+async def test_instrument_selector_identity_mismatch_fails_before_source_access(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        row = connection.execute(
+            "SELECT metadata_json FROM safe_instruments WHERE instrument_handle = ?",
+            (handle,),
+        ).fetchone()
+        assert row is not None
+        loaded = json.loads(str(row[0]))
+        assert isinstance(loaded, dict)
+        metadata = cast("dict[str, object]", loaded)
+        metadata["asset_type"] = "CfdOnStock"
+        metadata_json = json.dumps(metadata, separators=(",", ":"))
+        connection.execute(
+            """
+            UPDATE safe_instruments
+            SET metadata_json = ?, fingerprint_sha256 = sha256(?)
+            WHERE instrument_handle = ?
+            """,
+            (metadata_json, metadata_json, handle),
+        )
+    finally:
+        connection.close()
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:00:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 1,
+            },
+        ),
+    )
+
+    with pytest.raises(SyncError, match="integrity"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert executor.calls == []
+    assert _integrity_store_counts(config) == (0, 0, 0, 0)
+
+
+@pytest.mark.anyio
+async def test_write_time_page_integrity_mismatch_rolls_back_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:00:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 1,
+            },
+        ),
+    )
+    persist_bars = analytics_sync_module._persist_normalized_bars  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+
+    def persist_then_tamper(*args: object, **kwargs: object) -> None:
+        persist_bars(*args, **kwargs)  # pyright: ignore[reportCallIssue]
+        connection = kwargs.get("connection")
+        assert isinstance(connection, duckdb.DuckDBPyConnection)
+        connection.execute("UPDATE source_pages SET payload_json = payload_json || ' '")
+
+    monkeypatch.setattr(
+        analytics_sync_module,
+        "_persist_normalized_bars",
+        persist_then_tamper,
+    )
+
+    with pytest.raises(StoreValidationError, match="integrity"):
+        await sync_price_bars(
+            handle,
+            ChartInterval.ONE_MINUTE,
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            datetime(2026, 3, 30, 7, tzinfo=UTC),
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+
+    assert len(executor.calls) == 1
+    assert _integrity_store_counts(config) == (0, 0, 0, 0)
 
 
 @pytest.mark.anyio
