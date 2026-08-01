@@ -27,6 +27,7 @@ from analytics_source_matrix_support import (
     BOUNDARY_FORBIDDEN_SCALARS,
     BoundaryEventFixture,
     ScriptedMatrixSession,
+    build_fixture_candidate,
     canonical_digest,
     expected_matrix_events,
     matrix_payloads,
@@ -35,6 +36,7 @@ from analytics_source_matrix_support import (
 
 from saxo_bank_mcp import (
     analytics_source_process,
+    generate_analytics_source_matrix_candidate,
     qa_analytics_source_matrix,
 )
 from saxo_bank_mcp._evidence import JsonValue
@@ -67,8 +69,11 @@ if TYPE_CHECKING:
     from saxo_bank_mcp.qa_analytics_source_matrix import PreparedMatrix
 
 _NONZERO_FIXTURE_EXIT_CODE: Final = 17
+_OWNER_FILE_MODE: Final = 0o600
 _SEALED_DIRECTORY_MODE: Final = 0o500
 _SEALED_FILE_MODE: Final = 0o400
+_SHA256_HEX_LENGTH: Final = 64
+_SOURCE_MATRIX_CHILD_TOOL_COUNT: Final = 6
 _ROOT: Final = Path(__file__).parents[1]
 QA_MATRIX_PATH: Final = Path("src/saxo_bank_mcp/qa_analytics_source_matrix.py")
 ROUND7_PATH: Final = Path("tests/test_area_b_review_round7.py")
@@ -1125,6 +1130,91 @@ def test_fresh_final_runtimes_remove_exact_dynamic_installer_metadata(
         assert safe_target.read_text(encoding="utf-8") == "safe"
 
 
+def test_installed_launcher_runs_sealed_deterministic_child_boundary(tmp_path: Path) -> None:
+    uv_command = shutil.which("uv")
+    assert uv_command is not None
+    uv_path = Path(uv_command).resolve()
+    assert uv_path.is_absolute()
+
+    candidate = build_fixture_candidate(tmp_path, uv_path)
+
+    receipt = candidate.receipt
+    assert receipt["candidate_identity_sha256"] == candidate.identity
+    assert receipt["status"] == "reduced"
+    assert receipt["errors"] == []
+    cleanup = cast("dict[str, JsonValue]", receipt["cleanup"])
+    assert cleanup["state_equal"] is True
+    assert cleanup["before_fingerprint"] == cleanup["after_fingerprint"]
+    assert cleanup["resources_created"] == cleanup["resources_remaining"] == 0
+    assert cleanup["complete"] is True
+    ledger = cast("dict[str, JsonValue]", receipt["ledger"])
+    assert ledger["ledger_complete"] is True
+    assert ledger["events_evicted"] == 0
+    assert ledger["negative_proof_available"] is True
+    assert ledger["non_get_request_count"] == ledger["live_events"] == 0
+    assert ledger["methods"] == ["GET"]
+    assert ledger["gateway_environments"] == ["SIM"]
+    assert ledger["sim_only"] is True
+
+    process = cast("dict[str, JsonValue]", receipt["process_boundary"])
+    assert set(process) == {
+        "transport",
+        "child_process_distinct",
+        "process_identity_sha256",
+        "stdio_identity_sha256",
+        "child_spawn_count",
+        "mcp_session_count",
+        "mcp_initialize_count",
+        "tool_list_count",
+        "tool_count",
+        "tool_ids_sha256",
+        "reconnect_count",
+        "restart_count",
+        "child_exit_code",
+        "stdout_protocol_only",
+        "stderr_published",
+    }
+    assert process["transport"] == "stdio"
+    assert process["child_process_distinct"] is True
+    assert process["child_spawn_count"] == 1
+    assert process["mcp_session_count"] == 1
+    assert process["mcp_initialize_count"] == 1
+    assert process["tool_list_count"] == 1
+    assert (
+        process["tool_count"]
+        == len(SOURCE_MATRIX_CHILD_TOOLS)
+        == _SOURCE_MATRIX_CHILD_TOOL_COUNT
+    )
+    assert process["tool_ids_sha256"] == CHILD_TOOL_IDS_SHA256
+    assert process["reconnect_count"] == process["restart_count"] == 0
+    assert process["child_exit_code"] == 0
+    assert process["stdout_protocol_only"] is True
+    assert process["stderr_published"] is False
+    for key in ("process_identity_sha256", "stdio_identity_sha256"):
+        value = process[key]
+        assert isinstance(value, str)
+        assert len(value) == _SHA256_HEX_LENGTH
+
+    candidate_directory = (
+        candidate.state_root / "qa/analytics-source-matrix" / candidate.identity
+    )
+    guard = candidate_directory / "claimed.json"
+    evidence = candidate_directory / "source-matrix.json"
+    assert candidate.runtime.is_relative_to(tmp_path)
+    assert guard.is_relative_to(candidate.state_root)
+    assert evidence.is_relative_to(candidate.state_root)
+    assert {
+        path.relative_to(candidate.state_root).as_posix()
+        for path in candidate.state_root.rglob("*")
+        if path.is_file()
+    } == {
+        guard.relative_to(candidate.state_root).as_posix(),
+        evidence.relative_to(candidate.state_root).as_posix(),
+    }
+    assert stat.S_IMODE(guard.stat().st_mode) == _OWNER_FILE_MODE
+    assert stat.S_IMODE(evidence.stat().st_mode) == _OWNER_FILE_MODE
+
+
 def test_dependency_copy_cannot_overwrite_interpreter_with_unmanifested_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1297,6 +1387,49 @@ def test_development_cleanup_removes_exact_empty_run_directories(
 
         assert not run_root.exists()
         assert unrelated.is_dir()
+
+
+def test_candidate_manifest_publish_is_atomic_owner_only_and_external(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "sealed-runtime"
+    runtime.mkdir(mode=0o500)
+    repository = tmp_path / "repository"
+    repository.mkdir(mode=0o700)
+    output = repository / "candidate.json"
+    output.write_text("stale\n", encoding="utf-8")
+    output.chmod(0o644)
+    rendered = '{"schema_version":"5"}\n'
+    unrelated_work = tmp_path / "unrelated-work"
+    unrelated_work.mkdir(mode=0o700)
+    monkeypatch.chdir(unrelated_work)
+
+    destination = generate_analytics_source_matrix_candidate._external_output_path(  # noqa: SLF001
+        Path(output.name),
+        runtime,
+        repository,
+    )
+    generate_analytics_source_matrix_candidate._atomic_write_text(  # noqa: SLF001
+        destination,
+        rendered,
+    )
+
+    assert output.read_text(encoding="utf-8") == rendered
+    assert stat.S_IMODE(output.stat().st_mode) == _OWNER_FILE_MODE
+    assert not tuple(repository.glob(f".{output.name}.*.tmp"))
+
+    runtime.chmod(0o700)
+    runtime_output_parent = runtime / "data"
+    runtime_output_parent.mkdir(mode=0o500)
+    alias = tmp_path / "runtime-alias"
+    alias.symlink_to(runtime, target_is_directory=True)
+    with pytest.raises(ValueError, match="outside the sealed runtime"):
+        generate_analytics_source_matrix_candidate._external_output_path(  # noqa: SLF001
+            alias / "candidate.json",
+            runtime,
+            repository,
+        )
 
 
 def test_linux_lib64_alias_is_removed_before_final_symlink_check(

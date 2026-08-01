@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -136,6 +137,48 @@ def _installed_files(
     return installed, exclusions, console_scripts, _digest(projected)
 
 
+def _external_output_path(
+    output: Path,
+    runtime_root: Path,
+    relative_root: Path,
+) -> Path:
+    if not output.name:
+        raise ValueError("candidate output must be outside the sealed runtime")
+    selected = output if output.is_absolute() else relative_root / output
+    parent = selected.absolute().parent.resolve(strict=True)
+    destination = parent / output.name
+    sealed_runtime = runtime_root.resolve(strict=True)
+    if destination == sealed_runtime or destination.is_relative_to(sealed_runtime):
+        raise ValueError("candidate output must be outside the sealed runtime")
+    return destination
+
+
+def _atomic_write_text(output: Path, text: str) -> None:
+    descriptor, raw_temporary = tempfile.mkstemp(
+        dir=output.parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+    )
+    temporary = Path(raw_temporary)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(output)
+        directory_descriptor = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Seal the complete analytics source-matrix candidate closure.",
@@ -158,6 +201,7 @@ def main() -> int:
     ):
         raise ValueError("candidate generator requires an isolated launcher")
     repository_root = arguments.repository_root.resolve(strict=True)
+    output = _external_output_path(arguments.out, Path(sys.prefix), repository_root)
     source_files = _source_candidate_files(repository_root)
     (
         installed_files,
@@ -232,9 +276,9 @@ def main() -> int:
         "source_files": source_files,
         "source_wheel_projection_sha256": source_wheel_projection_sha256,
     }
-    arguments.out.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    _atomic_write_text(
+        output,
+        json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n",
     )
     sys.stdout.write(candidate_identity_sha256 + "\n")
     return 0

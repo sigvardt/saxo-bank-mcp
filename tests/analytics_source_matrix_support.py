@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import sys
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -60,6 +63,7 @@ BOUNDARY_FORBIDDEN_SCALARS: Final[frozenset[str | int]] = frozenset(
         BOUNDARY_PRIVATE_CLIENT,
     },
 )
+REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 
 
 _SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
@@ -87,6 +91,162 @@ _STATE_PATHS: Final[tuple[str, ...]] = (
     "/port/v1/positions/me",
     "/port/v1/balances/me",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SealedFixtureCandidate:
+    identity: str
+    receipt: dict[str, JsonValue]
+    runtime: Path
+    state_root: Path
+
+
+def build_fixture_candidate(root: Path, uv_path: Path) -> SealedFixtureCandidate:
+    if not root.is_absolute() or not uv_path.is_absolute():
+        raise ValueError("fixture candidate paths must be absolute")
+    source = root / "source"
+    interpreter = Path(sys.executable).absolute()
+    compiled_home = root / "compiled-home"
+    compiled_home.mkdir(mode=0o700)
+    state_root = compiled_home / ".local/state/saxo-bank-mcp"
+    for directory in (
+        compiled_home / ".local",
+        compiled_home / ".local/state",
+        state_root,
+    ):
+        directory.mkdir(mode=0o700)
+    shutil.copytree(
+        REPOSITORY_ROOT,
+        source,
+        symlinks=False,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv",
+            ".superpowers",
+            "dist",
+            "__pycache__",
+            "*.pyc",
+            "*.pyo",
+        ),
+    )
+    shutil.copy2(
+        REPOSITORY_ROOT / "tests/fixtures/analytics/source_matrix_fixture_server.py",
+        source / "src/saxo_bank_mcp/server.py",
+    )
+    qa_path = source / "src/saxo_bank_mcp/qa_analytics_source_matrix.py"
+    qa_text = qa_path.read_text(encoding="utf-8")
+    original = (
+        "selected_home = Path(pwd.getpwuid(os.getuid()).pw_dir) "
+        "if owner_home is None else owner_home"
+    )
+    replacement = (
+        f"selected_home = Path({str(compiled_home)!r}) "
+        "if owner_home is None else owner_home"
+    )
+    assert qa_text.count(original) == 1
+    qa_path.write_text(qa_text.replace(original, replacement), encoding="utf-8")
+
+    bootstrap_wheels = root / "bootstrap-wheel"
+    bootstrap_runtime = root / "bootstrap-runtime"
+    final_wheels = root / "final-wheel"
+    final_runtime = root / "final-runtime"
+    bootstrap_wheels.mkdir(mode=0o700)
+    final_wheels.mkdir(mode=0o700)
+    wheel_name = "saxo_bank_mcp-0.1.0-py3-none-any.whl"
+    _run_checked(
+        (uv_path, "build", "--offline", "--wheel", "--out-dir", bootstrap_wheels),
+        source,
+    )
+    _run_checked(
+        (
+            interpreter,
+            "scripts/prepare_analytics_source_matrix_runtime.py",
+            "--uv",
+            uv_path,
+            "--runtime",
+            bootstrap_runtime,
+            "--wheel",
+            bootstrap_wheels / wheel_name,
+        ),
+        source,
+    )
+    _run_checked(
+        (
+            bootstrap_runtime / "bin/saxo-bank-analytics-source-matrix-generate",
+            "--repository-root",
+            source,
+            "--wheel",
+            bootstrap_wheels / wheel_name,
+            "--out",
+            source / "data/analytics/source_matrix_candidate.json",
+        ),
+        source,
+    )
+    _run_checked(
+        (uv_path, "build", "--offline", "--wheel", "--out-dir", final_wheels),
+        source,
+    )
+    _run_checked(
+        (
+            interpreter,
+            "scripts/prepare_analytics_source_matrix_runtime.py",
+            "--uv",
+            uv_path,
+            "--runtime",
+            final_runtime,
+            "--wheel",
+            final_wheels / wheel_name,
+        ),
+        source,
+    )
+    token_cache = root / "fixture-token-cache.json"
+    environment = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "SAXO_MCP_ENABLE_LIVE_READS": "0",
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_SIM_APP_KEY": "sim-app-key",
+        "SAXO_MCP_SIM_REDIRECT_URI": "http://localhost:8080/callback",
+        "SAXO_MCP_TOKEN_CACHE_PATH": str(token_cache),
+    }
+    _run_checked(
+        (final_runtime / "bin/saxo-bank-analytics-source-matrix",),
+        root,
+        env=environment,
+    )
+    identity = _run_checked(
+        (final_runtime / "bin/saxo-bank-analytics-source-matrix", "--identity"),
+        root,
+        env=environment,
+    ).stdout.strip()
+    evidence = state_root / "qa/analytics-source-matrix" / identity / "source-matrix.json"
+    return SealedFixtureCandidate(
+        identity=identity,
+        receipt=cast(
+            "dict[str, JsonValue]",
+            json.loads(evidence.read_text(encoding="utf-8")),
+        ),
+        runtime=final_runtime,
+        state_root=state_root,
+    )
+
+
+def _run_checked(
+    command: Sequence[str | os.PathLike[str]],
+    cwd: Path,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        tuple(os.fspath(argument) for argument in command),
+        cwd=cwd,
+        env=env,
+        shell=False,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @dataclass(slots=True)

@@ -1761,12 +1761,14 @@ financial bugs is not accepted.
 
 ### Stage 5: Executable MCP SIM matrix
 
-Drive the actual FastMCP server and every new `analysis_kind` against Saxo SIM:
+Drive one sealed installed coordinator and one distinct installed MCP child against Saxo SIM:
 
 - Use isolated headless authentication.
 - Require no human approval for SIM actions.
+- Spawn one exact copied CPython interpreter over direct stdio, establish one MCP session, list
+  exactly the six approved tools once, and allow no reconnect or restart.
 - Record logical tool calls, source endpoint receipts, dataset fingerprints, analysis IDs, proof
-  profiles, warnings, and artifacts.
+  profiles, warnings, artifacts, and the reduced process-boundary receipt.
 - Exercise success, degraded, entitlement-denied, stale, missing-data, ambiguity, and refusal paths.
 - Verify outputs against the known-answer or reconciliation oracle.
 - Clean up every stream, job, preview, or temporary state.
@@ -1779,40 +1781,71 @@ proof.
 #### Official isolated source-matrix invocation
 
 The analytics source matrix is an installed-only command. A direct source import is a development
-surface and cannot claim or publish official evidence. Prepare each candidate in a new dedicated
-runtime from the lock-synchronized seed environment:
+surface and cannot claim or publish official evidence. Each candidate contains a copied CPython
+base and complete dependency closure. Sealing sets directories to `0500`, regular files to `0400`,
+and executables to `0500`. Coordinator and child cache, work, and temporary directories are
+separate, owner-only, outside the sealed runtime, empty before launch, and empty again after child
+exit.
+
+Prepare a bootstrap candidate, then independently prepare two final runtimes from the rebuilt
+wheel. Generate a manifest from each final runtime and require both to be byte-identical to the
+checked manifest:
 
 ```bash
 umask 077
-uv build --offline --wheel --out-dir dist/bootstrap
-.venv/bin/python scripts/prepare_analytics_source_matrix_runtime.py \
-  --runtime /absolute/private/path/source-matrix-bootstrap \
-  --wheel dist/bootstrap/saxo_bank_mcp-0.1.0-py3-none-any.whl
-/absolute/private/path/source-matrix-bootstrap/bin/saxo-bank-analytics-source-matrix-generate \
+ARTIFACT_ROOT=$(mktemp -d)
+UV_BIN=$(command -v uv)
+
+mkdir -m 700 "$ARTIFACT_ROOT/bootstrap-wheel"
+"$UV_BIN" build --offline --wheel --out-dir "$ARTIFACT_ROOT/bootstrap-wheel"
+"$UV_BIN" run python scripts/prepare_analytics_source_matrix_runtime.py \
+  --uv "$UV_BIN" \
+  --runtime "$ARTIFACT_ROOT/bootstrap-runtime" \
+  --wheel "$ARTIFACT_ROOT/bootstrap-wheel/saxo_bank_mcp-0.1.0-py3-none-any.whl"
+"$ARTIFACT_ROOT/bootstrap-runtime/bin/saxo-bank-analytics-source-matrix-generate" \
   --repository-root "$PWD" \
-  --wheel dist/bootstrap/saxo_bank_mcp-0.1.0-py3-none-any.whl \
+  --wheel "$ARTIFACT_ROOT/bootstrap-wheel/saxo_bank_mcp-0.1.0-py3-none-any.whl" \
   --out data/analytics/source_matrix_candidate.json
-uv build --offline --wheel --out-dir dist/final
-.venv/bin/python scripts/prepare_analytics_source_matrix_runtime.py \
-  --runtime /absolute/private/path/source-matrix-final \
-  --wheel dist/final/saxo_bank_mcp-0.1.0-py3-none-any.whl
+
+mkdir -m 700 "$ARTIFACT_ROOT/final-wheel"
+"$UV_BIN" build --offline --wheel --out-dir "$ARTIFACT_ROOT/final-wheel"
+for suffix in a b; do
+  "$UV_BIN" run python scripts/prepare_analytics_source_matrix_runtime.py \
+    --uv "$UV_BIN" \
+    --runtime "$ARTIFACT_ROOT/final-runtime-$suffix" \
+    --wheel "$ARTIFACT_ROOT/final-wheel/saxo_bank_mcp-0.1.0-py3-none-any.whl"
+  "$ARTIFACT_ROOT/final-runtime-$suffix/bin/saxo-bank-analytics-source-matrix-generate" \
+    --repository-root "$PWD" \
+    --wheel "$ARTIFACT_ROOT/final-wheel/saxo_bank_mcp-0.1.0-py3-none-any.whl" \
+    --out "$ARTIFACT_ROOT/final-manifest-$suffix.json"
+done
+cmp data/analytics/source_matrix_candidate.json "$ARTIFACT_ROOT/final-manifest-a.json"
+cmp "$ARTIFACT_ROOT/final-manifest-a.json" "$ARTIFACT_ROOT/final-manifest-b.json"
 ```
 
 The preparation command refuses an existing target, verifies the offline lock and sealed dependency
-seed, copies only the complete recorded runtime dependency closure, installs the wheel without
-dependency resolution, removes group and other permissions, and refuses Python cache artifacts.
-The installed launchers establish `-I -B -S`, a private empty cache prefix, and the fixed runtime
-site directory before importing `saxo_bank_mcp`. These local checks require no Saxo credentials:
+seed, installs without dependency resolution, and refuses Python cache artifacts. The installed
+launchers establish `-I -B -S`, one exact installed interpreter, and the fixed runtime site
+directory. The coordinator holds no-follow descriptors across the child lifetime and repeats the
+canonical ancestor, portable tree, entry metadata, owner, and mode checks only after the child is
+reaped.
+
+The full receipt records stdio transport, distinct process proof, irreversible process and stdio
+identities, one spawn, one session, one initialize, one tool list, exact tool count and digest, zero
+reconnects, zero restarts, child exit zero, protocol-only stdout, and unpublished stderr. Failure
+precedence is fixed: post-exit static change, child-process failure, matrix failure, then privacy-scan
+failure. These local checks require no Saxo credentials:
 
 ```bash
-/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --help
-/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --identity
-/absolute/private/path/source-matrix-final/bin/saxo-bank-analytics-source-matrix --preflight
+"$ARTIFACT_ROOT/final-runtime-a/bin/saxo-bank-analytics-source-matrix" --help
+"$ARTIFACT_ROOT/final-runtime-a/bin/saxo-bank-analytics-source-matrix" --identity
+"$ARTIFACT_ROOT/final-runtime-a/bin/saxo-bank-analytics-source-matrix" --preflight
 ```
 
-Run the installed command without a mode flag only for the explicitly authorized one-shot SIM
-source exercise. Generate the manifest once more from the final runtime into a temporary file and
-require byte-for-byte equality before treating the candidate as sealed.
+Fixture replay and the offline process-boundary proof cannot close Task 6. The normal installed
+invocation remains blocked until ready real SIM authentication and separate authorization exist.
+That future one-shot run must prove a SIM-only GET ledger, unchanged brokerage state, zero mutation
+calls, privacy success, the exact process receipt, and a clean post-exit seal.
 
 ### Stage 6: Artifact and agent proof
 
@@ -2272,10 +2305,12 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-Start Phase 0 as a read-only SIM evidence cycle. Exercise the relevant Saxo endpoints for chart
-bars, closed positions, transactions, bookings, performance, balances, costs, instrument details,
-entitlements, and options. Record actual coverage and schema behavior before implementing storage
-and rendering.
+Keep the frozen offline process-boundary artifacts available for inspection. Phase 0 real SIM
+acceptance is blocked until ready authentication and separate authorization exist. Once both are
+available, run the normal installed command exactly once and exercise the relevant Saxo endpoints
+for chart bars, closed positions, transactions, bookings, performance, balances, costs, instrument
+details, entitlements, and options. Record actual coverage and schema behavior before implementing
+storage and rendering.
 
 In parallel, write the source-controlled definitions, exact tolerances, known-answer datasets,
 independent reference methods, and Saxo reconciliation targets for the first-slice metrics. Do not
