@@ -40,6 +40,7 @@ from saxo_bank_mcp.analytics_models import (
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceCaptureEnvelope,
     SourceJsonValue,
+    SourceQualityProof,
     source_contract_fingerprint,
     source_contracts_by_id,
     source_page_fingerprint,
@@ -1229,7 +1230,8 @@ class AnalyticsStore:
                     p.source_revision,
                     c.contract_sha256,
                     p.instrument_handle,
-                    i.instrument_handle
+                    i.instrument_handle,
+                    p.payload_json
                 FROM source_pages AS p
                 LEFT JOIN source_contracts AS c ON c.contract_id = p.contract_id
                 LEFT JOIN safe_instruments AS i
@@ -1258,6 +1260,38 @@ class AnalyticsStore:
                 "dataset source revision does not match its source pages",
             )
         return rows
+
+    @staticmethod
+    def _bound_dataset_quality_state(
+        rows: Sequence[tuple[object, ...]],
+        requested: QualityState,
+    ) -> QualityState:
+        has_limited_source = False
+        for row in rows:
+            try:
+                raw_payload = json.loads(_require_str(row[9]))
+            except (TypeError, ValueError) as error:
+                raise StoreValidationError(
+                    "persisted source quality metadata is invalid",
+                ) from error
+            if not isinstance(raw_payload, dict):
+                raise StoreValidationError(
+                    "persisted source quality metadata is invalid",
+                )
+            payload = cast("dict[str, object]", raw_payload)
+            source_quality = payload.get("source_quality")
+            if source_quality is None:
+                continue
+            try:
+                proof = SourceQualityProof.model_validate(source_quality, strict=True)
+            except ValidationError as error:
+                raise StoreValidationError(
+                    "persisted source quality metadata is invalid",
+                ) from error
+            has_limited_source = has_limited_source or proof.state == "limited"
+        if has_limited_source and requested is QualityState.COMPLETE:
+            return QualityState.PARTIAL
+        return requested
 
     def create_dataset(  # noqa: PLR0913
         self,
@@ -1296,6 +1330,7 @@ class AnalyticsStore:
                 account_scope,
                 source_revision,
             )
+            bound_quality_state = self._bound_dataset_quality_state(rows, quality_state)
             row_count = sum(_require_int(row[2]) for row in rows)
             byte_count = sum(_require_int(row[3]) for row in rows)
             material_json = _canonical_json(
@@ -1311,7 +1346,7 @@ class AnalyticsStore:
                         }
                         for row in rows
                     ],
-                    "quality_state": quality_state.value,
+                    "quality_state": bound_quality_state.value,
                     "source_revision": source_revision,
                     "source_scope": source_scope,
                 },
@@ -1349,7 +1384,7 @@ class AnalyticsStore:
                     created_at,
                     coverage_start,
                     coverage_end,
-                    quality_state.value,
+                    bound_quality_state.value,
                     row_count,
                     byte_count,
                     fingerprint_sha256,

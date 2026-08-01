@@ -15,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceContract,
     SourceContractCatalog,
+    SourceQualityProof,
     SourceValueType,
     compare_source_schema,
     load_source_contract_catalog,
@@ -61,6 +62,14 @@ def test_checked_in_contract_catalog_round_trips_exactly() -> None:
     assert loaded == checked_in
     assert loaded.schema_version == "1"
     assert len({contract.contract_id for contract in loaded.contracts}) == len(loaded.contracts)
+
+
+def test_source_quality_proof_rejects_invented_field_paths() -> None:
+    with pytest.raises(ValidationError):
+        SourceQualityProof(
+            state="limited",
+            entitlement_limited_fields=("Invented.Field",),
+        )
 
 
 def test_clean_wheel_loads_contracts_and_registry_outside_the_repository(

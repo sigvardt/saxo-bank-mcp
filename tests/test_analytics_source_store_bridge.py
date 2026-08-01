@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 import saxo_bank_mcp.analytics_store as store_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
-from saxo_bank_mcp.analytics_models import QualityState
+from saxo_bank_mcp.analytics_models import HandleKind, QualityState, new_safe_handle
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_source_contracts import (
     SourceCaptureEnvelope,
@@ -223,6 +223,31 @@ async def test_quote_quality_is_persisted_and_derives_replay_safe_dataset_qualit
     assert persisted["source_quality"] == envelope.pages[0].model_dump(mode="json")[
         "source_quality"
     ]
+
+
+@pytest.mark.anyio
+async def test_create_dataset_cannot_upgrade_persisted_limited_quote_quality(
+    tmp_path: Path,
+) -> None:
+    envelope = await _quote_capture("NoAccess")
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        capture = store.ingest_source_capture(envelope)
+        upgraded = store.create_dataset(
+            dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+            account_scope=envelope.capture.account_scope,
+            source_scope="saxo_openapi",
+            source_revision=envelope.capture.capture_revision,
+            source_page_ids=tuple(page.page_id for page in capture.pages),
+            created_at=_CAPTURED_AT,
+            coverage_start=_CAPTURED_AT,
+            coverage_end=_CAPTURED_AT,
+            quality_state=QualityState.COMPLETE,
+        )
+    finally:
+        store.close()
+
+    assert upgraded.quality_state is QualityState.PARTIAL
 
 
 @pytest.mark.anyio

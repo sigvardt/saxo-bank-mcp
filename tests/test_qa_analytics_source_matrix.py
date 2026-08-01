@@ -263,6 +263,41 @@ async def test_matrix_refuses_internally_inconsistent_quote_quality_metadata() -
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
+    ("contract_id", "invented_path"),
+    [
+        ("info_price_v1", "Invented.Field"),
+        ("info_prices_list_v1", "PriceTypeBid"),
+    ],
+)
+async def test_matrix_refuses_quality_paths_outside_the_exact_contract(
+    contract_id: str,
+    invented_path: str,
+) -> None:
+    prepared = _prepared()
+    session = _session(prepared)
+    _set_source_quality(
+        session,
+        contract_id,
+        {
+            "state": "limited",
+            "entitlement_limited_fields": [invented_path],
+            "delayed_fields": [],
+            "missing_fields": [],
+        },
+    )
+
+    receipt = await _run(prepared, session)
+
+    assert isinstance(receipt, ClaimedMatrixDraft)
+    source = next(item for item in receipt.source_receipts if item.contract_id == contract_id)
+    assert source.source_status == "refused"
+    assert source.outcome_reason == "analytics_contract_receipt_invalid"
+    assert source.entitlement_state == "unverified"
+    assert source.source_quality is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
     ("stage", "reason"),
     [
         ("auth", "sim_auth_unavailable"),

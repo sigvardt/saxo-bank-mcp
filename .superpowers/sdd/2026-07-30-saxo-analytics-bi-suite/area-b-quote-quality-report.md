@@ -11,6 +11,9 @@ denied entitlement. Store ingestion persists the proof and derives a `partial` d
 missing, and null optional quote fields also derive `partial`. Only a fully proved quote derives
 `complete`.
 
+The post-review correction additionally prevents a caller from upgrading a persisted limited quote
+page to a `complete` dataset and binds every quality-proof field path to the exact quote contract.
+
 ## RED evidence
 
 The initial focused provider, store, and matrix run failed with 10 expected failures:
@@ -21,6 +24,14 @@ The initial focused provider, store, and matrix run failed with 10 expected fail
 - the matrix receipt had no `source_quality`
 
 The separate receipt regression failed with `KeyError: 'source_quality'`.
+
+The post-review focused reproduction failed in four places before the correction:
+
+- `SourceQualityProof` accepted `entitlement_limited_fields=["Invented.Field"]`.
+- `AnalyticsStore.create_dataset` accepted caller `complete` over a persisted NoAccess page.
+- the matrix accepted `Invented.Field` for `info_price_v1`.
+- the matrix accepted the known but wrong-contract `PriceTypeBid` path for
+  `info_prices_list_v1`.
 
 The pre-change full suite also had one unrelated existing failure at 8 percent:
 `tests/test_agent_skill_evidence_fail_closed.py::test_install_normal_mode_runs_instrumented_real_producer_path`.
@@ -38,13 +49,18 @@ It expected return code 0 and received 1. This task did not change that surface.
 - Classified field-level `NoAccess` as `reduced` and entitlement `denied`.
 - Persisted the value-free proof in source-page payload metadata and derived dataset quality from
   all captured pages.
+- Revalidated every persisted quality proof during direct dataset creation and downgraded a caller
+  request for `complete` to `partial` whenever any selected page is limited.
+- Restricted entitlement, delay, and missing-field proof categories to known quote fields, then
+  required their union to be a subset of the selected contract's exact field paths.
 - Kept transport, retry, pagination, schema quarantine, store replay, and privacy boundaries intact.
 
 ## GREEN evidence
 
 - Focused quote regressions: provider 6 passed, receipt 1 passed, store replay 2 passed, matrix 3
   passed.
-- Source and Area B regression command: 230 passed across source contracts, provider, receipt,
+- Post-review focused regressions: 4 passed after 4 expected RED failures.
+- Source and Area B regression command: 234 passed across source contracts, provider, receipt,
   store, store bridge, matrix, and Area B review rounds 2 through 6.
 - `uv run ruff check .`: passed.
 - Exact `uv run basedpyright`: 0 errors, 0 warnings, 0 notes.
@@ -57,18 +73,20 @@ It expected return code 0 and received 1. This task did not change that surface.
 
 ## Offline candidate and sealed runtimes
 
-- Candidate identity: `864eb5c8277179a59854ea91113d5d40ce4c5307338e549c46a6443925b0d4e3`
-- Checked manifest SHA-256: `3f83a35ac3db595a489c524d187e99433d2c2ba586eefcf93e877d656773c1cd`
-- Final manifest A SHA-256: `3f83a35ac3db595a489c524d187e99433d2c2ba586eefcf93e877d656773c1cd`
-- Final manifest B SHA-256: `3f83a35ac3db595a489c524d187e99433d2c2ba586eefcf93e877d656773c1cd`
-- Portable runtime tree SHA-256: `04a72a41a14a700a942478a7098855b489af652ac4ad1cae95c00371c3b333d3`
-- Harness build SHA-256: `9cb98ed1ce69b68a0b1c10205eefe04102e5127456cad22f5e9ef18799786d87`
-- Source build SHA-256: `527fb9e68d0717928f25d242739bf54e0e971dbb83684263adf6bc468717f823`
-- Installed build SHA-256: `c8697d0b76230befe9925d5b36cfaf239928b8f6e472699094e9a4c3e95a3f39`
+- Candidate identity: `2534df0a57ebe1c6f6e4cb86e7e03fc7973542d05cbf2e4698ee719c5e34e886`
+- Checked manifest SHA-256: `b125fb1df8d3433235b5b720430ccc9907ae2d68ce27ffce27f51c6d3ac33120`
+- Final manifest A SHA-256: `b125fb1df8d3433235b5b720430ccc9907ae2d68ce27ffce27f51c6d3ac33120`
+- Final manifest B SHA-256: `b125fb1df8d3433235b5b720430ccc9907ae2d68ce27ffce27f51c6d3ac33120`
+- Portable runtime tree SHA-256: `2da0f802dbe4f9af5e7854334427be69aa79fd9d9e030e54a95d7f8ca79d25d1`
+- Harness build SHA-256: `99109cd483c3af14e494b748db715db4aed3877954bbbfb587e8f4d7b856fb7b`
+- Source build SHA-256: `14621597d0c86b933a2aa91fc5bb27fbf81ce41cd77dd12c8bfdd3721ac6d788`
+- Installed build SHA-256: `7dfa452925c07bfc6e2a114e9ea8c075e8d08b093dc0d18de762b942a17eb474`
 - Source contract catalog SHA-256:
   `ca5c53480842bb6c3e48dc16bac10f43c49edf73a09b206eacf3af40f0b20038`
-- Final wheel SHA-256: `9500f43f31d93e69400652e9a833b4562962304495ac2212b0e83c2ef5f8c7ed`
-- Retained runtime root: `/Volumes/ssd_1/codex/tmp/area-b-quote-quality.gPXU1e`
+- Source wheel projection SHA-256:
+  `fef8e0194a557009293a4ce573a33ba6e312a3118d61739f7797c95afabbc39f`
+- Final wheel SHA-256: `e5c64c77e6615a20de73d819e762ab7a408ce2359510a086f03c6fb2d812a3c4`
+- Retained runtime root: `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-fix.nFhlra`
 
 The checked, A, and B manifests are byte-identical. Both final runtimes returned the same identity.
 Both local preflights returned `closure=sealed`, `dont_write_bytecode=true`,
@@ -84,6 +102,6 @@ contain its own final SHA.
 ## Retained local evidence
 
 - Changed-file privacy report:
-  `/Volumes/ssd_1/codex/tmp/area-b-quote-scoped-privacy.IXFGNf/secret-scan.json`
+  `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-fix-privacy.qa2fNl/secret-scan.json`
 - Offline checked and final manifests:
-  `/Volumes/ssd_1/codex/tmp/area-b-quote-quality.gPXU1e`
+  `/Volumes/ssd_1/codex/tmp/area-b-quote-quality-fix.nFhlra`

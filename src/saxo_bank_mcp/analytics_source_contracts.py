@@ -632,6 +632,24 @@ class SourceQualityProof(BaseModel):
                 "source_quality_state_invalid",
                 "source quality state does not match its field limitations",
             )
+        if any(
+            path not in _QUOTE_PRICE_TYPE_FIELD_SET
+            for path in self.entitlement_limited_fields
+        ):
+            raise PydanticCustomError(
+                "source_quality_entitlement_field_invalid",
+                "source quality entitlement field is not allowed",
+            )
+        if any(path not in _QUOTE_DELAY_FIELD_SET for path in self.delayed_fields):
+            raise PydanticCustomError(
+                "source_quality_delay_field_invalid",
+                "source quality delay field is not allowed",
+            )
+        if any(path not in _KNOWN_QUOTE_QUALITY_FIELDS for path in self.missing_fields):
+            raise PydanticCustomError(
+                "source_quality_missing_field_invalid",
+                "source quality missing field is not allowed",
+            )
         return self
 
 
@@ -665,6 +683,13 @@ _QUOTE_PRICE_TYPE_FIELDS: Final = (
     "PriceTypeAsk",
     "PriceTypeBid",
     "Quote.PriceType",
+)
+_QUOTE_PRICE_TYPE_FIELD_SET: Final = frozenset(_QUOTE_PRICE_TYPE_FIELDS)
+_QUOTE_DELAY_FIELD_SET: Final = _QUOTE_PRICE_TYPE_FIELD_SET | {
+    "Quote.DelayedByMinutes",
+}
+_KNOWN_QUOTE_QUALITY_FIELDS: Final = frozenset(
+    path for fields in _QUOTE_QUALITY_FIELDS.values() for path in fields
 )
 
 
@@ -726,14 +751,17 @@ def aggregate_source_quality(
     """Combine page proofs without introducing source values."""
     if not proofs:
         raise ValueError("source quality aggregation requires at least one page")
-    expected_state = (
-        "complete" if contract.contract_id in _QUOTE_QUALITY_FIELDS else "not_applicable"
-    )
+    quality_fields = _QUOTE_QUALITY_FIELDS.get(contract.contract_id)
+    expected_state = "complete" if quality_fields is not None else "not_applicable"
     entitlement_limited = {
         path for proof in proofs for path in proof.entitlement_limited_fields
     }
     delayed = {path for proof in proofs for path in proof.delayed_fields}
     missing = {path for proof in proofs for path in proof.missing_fields}
+    if quality_fields is not None and not (
+        entitlement_limited | delayed | missing
+    ) <= quality_fields:
+        raise ValueError("source quality fields do not match the source contract")
     if expected_state == "not_applicable" and any(
         proof.state != "not_applicable" for proof in proofs
     ):
