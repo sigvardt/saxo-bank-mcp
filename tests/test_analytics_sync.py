@@ -560,6 +560,179 @@ async def test_complete_chart_refresh_replaces_its_window_and_exposes_removed_ba
 
 
 @pytest.mark.anyio
+async def test_daily_refresh_rebuilds_retained_rows_with_original_exchange_midnights(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": close,
+                        "Time": source_time,
+                        "Volume": 1,
+                    }
+                    for close, source_time in (
+                        (100.0, "2026-03-27T00:00:00+01:00"),
+                        (101.0, "2026-03-28T00:00:00+01:00"),
+                        (102.0, "2026-03-29T00:00:00+01:00"),
+                        (103.0, "2026-03-30T00:00:00+02:00"),
+                    )
+                ],
+                "DataVersion": 1,
+            },
+            {
+                "Data": [
+                    {
+                        "CloseBid": 102.0,
+                        "Time": "2026-03-29T00:00:00+01:00",
+                        "Volume": 1,
+                    },
+                    {
+                        "CloseBid": 103.0,
+                        "Time": "2026-03-30T00:00:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 2,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    start = datetime(2026, 3, 26, 23, tzinfo=UTC)
+    end = datetime(2026, 3, 29, 22, tzinfo=UTC)
+
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_DAY,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    result = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_DAY,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert executor.calls[1][2]["Time"] == "2026-03-28T23:00:00+00:00"
+    assert executor.calls[1][2]["Count"] == "2"
+    summary = result.datasets[0]
+    assert isinstance(summary, PriceBarDatasetSummary)
+    assert summary.row_count == 4
+    assert summary.missing_interval_count == 0
+    page = get_dataset(summary.dataset_id, 1, 500, config=config)
+    assert [row.bar_time for row in page.rows if row.row_kind == "price_bar"] == [
+        datetime(2026, 3, 26, 23, tzinfo=UTC),
+        datetime(2026, 3, 27, 23, tzinfo=UTC),
+        datetime(2026, 3, 28, 23, tzinfo=UTC),
+        datetime(2026, 3, 29, 22, tzinfo=UTC),
+    ]
+
+
+@pytest.mark.anyio
+async def test_later_chart_refresh_anchors_to_latest_visible_dataset_after_removals(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = await _resolved_handle(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "CloseBid": 100.0 + minute,
+                        "Time": f"2026-03-30T09:0{minute}:00+02:00",
+                        "Volume": 1,
+                    }
+                    for minute in range(5)
+                ],
+                "DataVersion": 1,
+            },
+            {"Data": [], "DataVersion": 2},
+            {
+                "Data": [
+                    {
+                        "CloseBid": 101.0,
+                        "Time": "2026-03-30T09:01:00+02:00",
+                        "Volume": 1,
+                    },
+                    {
+                        "CloseBid": 102.0,
+                        "Time": "2026-03-30T09:02:00+02:00",
+                        "Volume": 1,
+                    },
+                ],
+                "DataVersion": 3,
+            },
+        ),
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    start = datetime(2026, 3, 30, 7, 0, tzinfo=UTC)
+    end = datetime(2026, 3, 30, 7, 4, tzinfo=UTC)
+
+    await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    removed = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+    removed_summary = removed.datasets[0]
+    assert isinstance(removed_summary, PriceBarDatasetSummary)
+    assert removed_summary.coverage_end == datetime(2026, 3, 30, 7, 2, tzinfo=UTC)
+
+    latest = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        start,
+        end,
+        provider=provider,
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert executor.calls[2][2]["Time"] == "2026-03-30T07:01:00+00:00"
+    assert executor.calls[2][2]["Count"] == "4"
+    latest_summary = latest.datasets[0]
+    assert isinstance(latest_summary, PriceBarDatasetSummary)
+    assert latest_summary.row_count == 3
+    assert latest_summary.coverage_end == datetime(2026, 3, 30, 7, 2, tzinfo=UTC)
+    page = get_dataset(latest_summary.dataset_id, 1, 500, config=config)
+    assert [row.close_value for row in page.rows if row.row_kind == "price_bar"] == [
+        100.0,
+        101.0,
+        102.0,
+    ]
+
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        historical_rows = connection.execute("SELECT count(*) FROM price_bars").fetchone()
+    finally:
+        connection.close()
+    assert historical_rows == (7,)
+
+
+@pytest.mark.anyio
 async def test_every_chart_fingerprint_binds_retained_and_refreshed_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

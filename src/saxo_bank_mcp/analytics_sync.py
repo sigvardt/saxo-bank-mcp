@@ -370,8 +370,9 @@ async def sync_price_bars(  # noqa: PLR0913
         budget,
     )
     envelope = build_source_capture_envelope(capture, pages)
+    source_rows = tuple(row for page in envelope.pages for row in page.rows)
     refreshed_series = normalize_price_series(
-        rows=tuple(row for page in envelope.pages for row in page.rows),
+        rows=source_rows,
         instrument_handle=instrument_handle,
         interval=interval,
         start=refresh_start,
@@ -384,6 +385,7 @@ async def sync_price_bars(  # noqa: PLR0913
         start,
         end,
         refreshed_series,
+        source_rows,
         refresh_start,
     )
     coverage = _price_series_coverage(series, start, end)
@@ -1115,40 +1117,104 @@ def _existing_bar_state(
 ) -> _ExistingBarState | None:
     connection = _connect(config, read_only=True)
     try:
-        row = connection.execute(
-            """
-            SELECT epoch_us(min(bar_time)), epoch_us(max(bar_time))
-            FROM price_bars
-            WHERE
-                instrument_handle = ?
-                AND duration = ?
-                AND bar_time BETWEEN ? AND ?
-            """,
-            (instrument_handle, interval.value, start, end),
-        ).fetchone()
-        trailing_rows = connection.execute(
-            """
-            SELECT epoch_us(bar_time)
-            FROM price_bars
-            WHERE
-                instrument_handle = ?
-                AND duration = ?
-                AND bar_time BETWEEN ? AND ?
-            GROUP BY bar_time
-            ORDER BY bar_time DESC
-            LIMIT 2
-            """,
-            (instrument_handle, interval.value, start, end),
-        ).fetchall()
+        candidates = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT p.payload_json
+                FROM datasets AS d
+                JOIN dataset_source_pages AS dsp ON dsp.dataset_id = d.dataset_id
+                JOIN source_pages AS p ON p.page_id = dsp.page_id
+                JOIN source_contracts AS c ON c.contract_id = p.contract_id
+                WHERE
+                    p.instrument_handle = ?
+                    AND c.contract_name = ?
+                    AND d.coverage_start <= ?
+                    AND d.coverage_end >= ?
+                ORDER BY
+                    p.ingested_at DESC,
+                    p.source_timestamp DESC,
+                    p.page_key DESC,
+                    d.dataset_id DESC
+                """,
+                (instrument_handle, _CHART_CONTRACT_ID, end, start),
+            ).fetchall(),
+        )
+        metadata: dict[str, object] | None = None
+        for row in candidates:
+            candidate = _stored_sync_metadata(row[0])
+            if (
+                candidate.get("data_kind") == "price_bars"
+                and candidate.get("instrument_handle") == instrument_handle
+                and candidate.get("interval") == interval.value
+            ):
+                metadata = candidate
+                break
+        if metadata is None:
+            return None
+        capture_revision = _required_text(
+            metadata.get("capture_revision"),
+            "dataset capture revision",
+        )
+        prior_page_ids = _stored_text_tuple(
+            metadata.get("prior_page_ids"),
+            "dataset prior source pages",
+        )
+        dataset_refresh_start = _required_utc_text(
+            metadata.get("refresh_start"),
+            "dataset refresh coverage",
+        )
+        visible_rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                _PRICE_BAR_RANKED_SQL
+                + """
+                    SELECT
+                        bar_time_us,
+                        min(bar_time_us) OVER (),
+                        max(bar_time_us) OVER ()
+                    FROM ranked
+                    WHERE revision_rank = 1
+                    ORDER BY bar_time_us DESC
+                    LIMIT 2
+                """,
+                (
+                    capture_revision,
+                    instrument_handle,
+                    interval.value,
+                    start,
+                    end,
+                    capture_revision,
+                    list(prior_page_ids),
+                    dataset_refresh_start,
+                ),
+            ).fetchall(),
+        )
     finally:
         connection.close()
-    if row is None or row[0] is None or row[1] is None or not trailing_rows:
+    if not visible_rows:
         return None
     return _ExistingBarState(
-        coverage_start=_epoch_us(row[0]),
-        coverage_end=_epoch_us(row[1]),
-        refresh_start=_epoch_us(trailing_rows[-1][0]),
+        coverage_start=_epoch_us(visible_rows[0][1]),
+        coverage_end=_epoch_us(visible_rows[0][2]),
+        refresh_start=_epoch_us(visible_rows[-1][0]),
     )
+
+
+def _stored_sync_metadata(payload_json: object) -> dict[str, object]:
+    if not isinstance(payload_json, str):
+        raise SyncError("stored dataset metadata is invalid")
+    try:
+        loaded_payload = json.loads(payload_json)
+    except (TypeError, ValueError) as error:
+        raise SyncError("stored dataset metadata is invalid") from error
+    if not isinstance(loaded_payload, dict):
+        raise SyncError("stored dataset metadata is invalid")
+    payload = cast("dict[str, object]", loaded_payload)
+    sync_metadata = payload.get("sync_metadata")
+    if not isinstance(sync_metadata, dict):
+        raise SyncError("stored dataset metadata is invalid")
+    return cast("dict[str, object]", sync_metadata)
 
 
 def _merged_price_series(  # noqa: PLR0913
@@ -1158,6 +1224,7 @@ def _merged_price_series(  # noqa: PLR0913
     start: datetime,
     end: datetime,
     refreshed: NormalizedPriceSeries,
+    refreshed_rows: Sequence[Mapping[str, object]],
     refresh_start: datetime,
 ) -> NormalizedPriceSeries:
     retained_rows = _latest_stored_price_rows(
@@ -1176,25 +1243,11 @@ def _merged_price_series(  # noqa: PLR0913
         )
         if bar_time < refresh_start:
             rows_by_time[bar_time] = row
-    for bar in refreshed.bars:
-        row: dict[str, object] = {
-            "CloseBid": bar.close_value,
-            "Time": bar.bar_time.isoformat(),
-        }
-        row.update(
-            {
-                field_name: value
-                for field_name, value in (
-                    ("OpenBid", bar.open_value),
-                    ("HighBid", bar.high_value),
-                    ("LowBid", bar.low_value),
-                    ("Volume", bar.volume_value),
-                    ("PriceType", bar.price_type),
-                )
-                if value is not None
-            },
+    for row in refreshed_rows:
+        bar_time = _parse_source_time(
+            _required_text(row.get("Time"), "refreshed price-bar time"),
         )
-        rows_by_time[bar.bar_time] = row
+        rows_by_time[bar_time] = row
     return normalize_price_series(
         rows=tuple(rows_by_time[key] for key in sorted(rows_by_time)),
         instrument_handle=instrument_handle,
@@ -1235,6 +1288,7 @@ def _latest_stored_price_rows(
                         b.low_value,
                         b.close_value,
                         b.volume_value,
+                        p.payload_json,
                         row_number() OVER (
                             PARTITION BY b.instrument_handle, b.bar_time, b.duration
                             ORDER BY
@@ -1255,7 +1309,8 @@ def _latest_stored_price_rows(
                     high_value,
                     low_value,
                     close_value,
-                    volume_value
+                    volume_value,
+                    payload_json
                 FROM ranked
                 WHERE revision_rank = 1
                 ORDER BY bar_time_us
@@ -1271,11 +1326,37 @@ def _latest_stored_price_rows(
             "HighBid": _optional_float(row[2]),
             "LowBid": _optional_float(row[3]),
             "OpenBid": _optional_float(row[1]),
-            "Time": _epoch_us(row[0]).isoformat(),
+            "Time": _stored_price_source_time(row[6], _epoch_us(row[0])),
             "Volume": _optional_float(row[5]),
         }
         for row in rows
     )
+
+
+def _stored_price_source_time(payload_json: object, bar_time: datetime) -> str:
+    if not isinstance(payload_json, str):
+        raise SyncError("stored price-bar source time is invalid")
+    try:
+        loaded_payload = json.loads(payload_json)
+    except (TypeError, ValueError) as error:
+        raise SyncError("stored price-bar source time is invalid") from error
+    if not isinstance(loaded_payload, dict):
+        raise SyncError("stored price-bar source time is invalid")
+    payload = cast("dict[str, object]", loaded_payload)
+    loaded_rows = payload.get("rows")
+    if not isinstance(loaded_rows, list):
+        raise SyncError("stored price-bar source time is invalid")
+    source_times: list[str] = []
+    for loaded_row in cast("list[object]", loaded_rows):
+        if not isinstance(loaded_row, dict):
+            continue
+        row = cast("dict[str, object]", loaded_row)
+        source_time = row.get("Time")
+        if isinstance(source_time, str) and _parse_source_time(source_time) == bar_time:
+            source_times.append(source_time)
+    if len(source_times) != 1:
+        raise SyncError("stored price-bar source time is invalid")
+    return source_times[0]
 
 
 def _latest_bar_page_ids(
@@ -1946,19 +2027,7 @@ def _dataset_sync_metadata(
         connection.close()
     if row is None:
         raise DatasetNotFoundError("research dataset does not exist")
-    if not isinstance(row[0], str):
-        raise SyncError("stored dataset metadata is invalid")
-    try:
-        loaded_payload = json.loads(row[0])
-    except (TypeError, ValueError) as error:
-        raise SyncError("stored dataset metadata is invalid") from error
-    if not isinstance(loaded_payload, dict):
-        raise SyncError("stored dataset metadata is invalid")
-    payload = cast("dict[str, object]", loaded_payload)
-    sync_metadata = payload.get("sync_metadata")
-    if not isinstance(sync_metadata, dict):
-        raise SyncError("stored dataset metadata is invalid")
-    return cast("dict[str, object]", sync_metadata)
+    return _stored_sync_metadata(row[0])
 
 
 def _connect(
