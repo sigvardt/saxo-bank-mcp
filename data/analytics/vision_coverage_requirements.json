@@ -1,0 +1,579 @@
+{
+  "required_analysis_kinds": [
+    "cash_and_settlement",
+    "corporate_action_center",
+    "cost_xray",
+    "derivatives_model",
+    "derivatives_scenario",
+    "execution_quality",
+    "fixed_income",
+    "futures_curve",
+    "fx_forward_carry",
+    "goal_model",
+    "income_calendar",
+    "instrument_dossier",
+    "instrument_price_return",
+    "instrument_price_volume",
+    "instrument_quote",
+    "instrument_resolution",
+    "instrument_risk",
+    "iv_surface",
+    "margin_fire_drill",
+    "market_comparison",
+    "market_correlation_regime",
+    "market_microstructure",
+    "market_volatility_dispersion",
+    "monte_carlo",
+    "multi_instrument_comparison",
+    "option_chain",
+    "option_greeks",
+    "option_payoff",
+    "portfolio_attribution",
+    "portfolio_comparison",
+    "portfolio_exposure",
+    "portfolio_margin",
+    "portfolio_minimum_variance",
+    "portfolio_overview",
+    "portfolio_performance",
+    "portfolio_risk",
+    "portfolio_risk_parity",
+    "portfolio_scenario",
+    "portfolio_time_machine",
+    "position_sizing",
+    "pretrade_impact",
+    "regulatory_cost_report",
+    "scenario_combined",
+    "scenario_currency",
+    "scenario_custom",
+    "scenario_historical",
+    "scenario_margin",
+    "scenario_rate",
+    "scenario_volatility",
+    "session_cockpit",
+    "technical_indicators",
+    "trading_conditions",
+    "trading_mirror",
+    "wrapper_comparison"
+  ],
+  "required_artifact_owners": [
+    {
+      "analysis_kind": "instrument_price_volume",
+      "template_id": "price_volume_indicator"
+    },
+    {
+      "analysis_kind": "market_comparison",
+      "template_id": "relative_performance"
+    },
+    {
+      "analysis_kind": "portfolio_performance",
+      "template_id": "equity_curve_drawdown"
+    },
+    {
+      "analysis_kind": "portfolio_performance",
+      "template_id": "monthly_return_heatmap"
+    },
+    {
+      "analysis_kind": "portfolio_performance",
+      "template_id": "portfolio_tearsheet"
+    },
+    {
+      "analysis_kind": "portfolio_performance",
+      "template_id": "portfolio_briefing"
+    },
+    {
+      "analysis_kind": "portfolio_exposure",
+      "template_id": "allocation_exposure"
+    },
+    {
+      "analysis_kind": "portfolio_attribution",
+      "template_id": "contribution_waterfall"
+    },
+    {
+      "analysis_kind": "portfolio_risk",
+      "template_id": "risk_contribution"
+    },
+    {
+      "analysis_kind": "portfolio_risk",
+      "template_id": "correlation_heatmap_cluster_map"
+    },
+    {
+      "analysis_kind": "portfolio_scenario",
+      "template_id": "scenario_waterfall"
+    },
+    {
+      "analysis_kind": "portfolio_minimum_variance",
+      "template_id": "efficient_frontier"
+    },
+    {
+      "analysis_kind": "option_payoff",
+      "template_id": "options_payoff_greeks"
+    },
+    {
+      "analysis_kind": "iv_surface",
+      "template_id": "iv_smile_surface"
+    },
+    {
+      "analysis_kind": "cost_xray",
+      "template_id": "cost_waterfall"
+    },
+    {
+      "analysis_kind": "trading_mirror",
+      "template_id": "trade_distribution_behavior_dashboard"
+    },
+    {
+      "analysis_kind": "trading_mirror",
+      "template_id": "trading_mirror"
+    },
+    {
+      "analysis_kind": "pretrade_impact",
+      "template_id": "pretrade_impact_card"
+    },
+    {
+      "analysis_kind": "execution_quality",
+      "template_id": "execution_report_card"
+    },
+    {
+      "analysis_kind": "session_cockpit",
+      "template_id": "session_cockpit"
+    }
+  ],
+  "required_metric_ids": [
+    "price_return",
+    "adjusted_price_return",
+    "total_return",
+    "time_weighted_return",
+    "money_weighted_return",
+    "xirr",
+    "cagr",
+    "daily_return",
+    "weekly_return",
+    "monthly_return",
+    "quarterly_return",
+    "annual_return",
+    "contribution_withdrawal_aware_growth",
+    "benchmark_relative_return",
+    "active_return",
+    "tracking_error",
+    "information_ratio",
+    "alpha",
+    "beta",
+    "upside_capture",
+    "downside_capture",
+    "rolling_return",
+    "best_period_return",
+    "worst_period_return",
+    "recovery_time",
+    "volatility",
+    "downside_deviation",
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "maximum_drawdown",
+    "underwater_duration",
+    "historical_var",
+    "expected_shortfall",
+    "parametric_var",
+    "marginal_risk_contribution",
+    "component_risk_contribution",
+    "concentration_index",
+    "correlation",
+    "covariance",
+    "rolling_beta",
+    "rolling_correlation",
+    "margin_utilization",
+    "distance_to_liquidation_approximation",
+    "instrument_exposure",
+    "asset_class_exposure",
+    "currency_exposure",
+    "exchange_exposure",
+    "long_exposure",
+    "short_exposure",
+    "gross_exposure",
+    "net_exposure",
+    "leveraged_exposure",
+    "unleveraged_exposure",
+    "delta_equivalent_options_exposure",
+    "duration_exposure",
+    "rate_exposure",
+    "settlement_currency_exposure",
+    "upcoming_cash_obligation",
+    "position_contribution",
+    "currency_contribution",
+    "local_asset_contribution",
+    "income_contribution",
+    "cost_drag",
+    "trading_contribution",
+    "allocation_attribution",
+    "selection_attribution",
+    "snapshot_change",
+    "fx_drag",
+    "commission_cost",
+    "spread_cost",
+    "fx_conversion_cost",
+    "financing_cost",
+    "borrow_cost",
+    "carry_cost",
+    "custody_cost",
+    "exchange_fee_cost",
+    "tax_cost",
+    "stamp_duty_cost",
+    "turnover_cost",
+    "cost_to_open",
+    "cost_to_hold",
+    "cost_to_close",
+    "estimated_round_trip_cost",
+    "wrapper_cost_difference",
+    "realized_cost_drag",
+    "regulatory_ex_ante_cost",
+    "regulatory_ex_post_cost",
+    "total_cost",
+    "cost_return_impact",
+    "win_rate",
+    "expectancy",
+    "average_winner",
+    "average_loser",
+    "holding_time_asymmetry",
+    "disposition_effect_indicator",
+    "averaging_down_rate",
+    "entry_timing_effect",
+    "exit_timing_effect",
+    "overtrading_rate",
+    "turnover",
+    "concentration_after_loss",
+    "concentration_after_win",
+    "twr_mwr_behavior_gap",
+    "plan_outcome_variance",
+    "do_nothing_counterfactual",
+    "arrival_price",
+    "midpoint_price",
+    "vwap",
+    "bar_approximation_price",
+    "slippage",
+    "spread",
+    "spread_quality",
+    "market_depth",
+    "depth_imbalance",
+    "quote_delay",
+    "liquidity_score",
+    "historical_scenario_effect",
+    "custom_shock_effect",
+    "currency_shock_effect",
+    "volatility_shock_effect",
+    "rate_shock_effect",
+    "margin_stress_effect",
+    "combined_scenario_effect",
+    "scenario_contribution",
+    "goal_probability",
+    "ruin_probability",
+    "sequence_of_returns_risk",
+    "inflation_adjusted_outcome",
+    "sensitivity_lower",
+    "sensitivity_upper",
+    "moving_average",
+    "rsi",
+    "macd",
+    "atr",
+    "bollinger_lower",
+    "bollinger_middle",
+    "bollinger_upper",
+    "realized_volatility",
+    "volume",
+    "volume_weighted_price",
+    "support_level",
+    "resistance_level",
+    "relative_strength",
+    "momentum",
+    "trend_state",
+    "regime_state",
+    "option_breakeven",
+    "payoff_at_expiry",
+    "theoretical_option_value",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "rho",
+    "aggregate_delta",
+    "aggregate_gamma",
+    "aggregate_theta",
+    "aggregate_vega",
+    "aggregate_rho",
+    "implied_volatility",
+    "iv_smile",
+    "iv_skew",
+    "iv_term_structure",
+    "probability_range",
+    "option_margin",
+    "option_cost",
+    "futures_basis",
+    "futures_carry",
+    "futures_term_structure",
+    "futures_roll",
+    "fx_forward",
+    "fx_carry",
+    "position_size",
+    "maximum_loss",
+    "stop_distance",
+    "volatility_position_size",
+    "concentration_limit",
+    "margin_constraint",
+    "buying_power_constraint",
+    "estimated_transaction_cost",
+    "minimum_variance_objective",
+    "risk_parity_contribution",
+    "target_weight",
+    "current_weight",
+    "current_to_target_delta",
+    "optimizer_turnover",
+    "optimizer_stability",
+    "yield_to_maturity",
+    "modified_duration",
+    "convexity",
+    "bond_carry",
+    "roll_down",
+    "curve_shock_effect",
+    "account_value",
+    "cash_balance",
+    "settled_cash",
+    "unsettled_cash",
+    "margin_headroom",
+    "buying_power",
+    "working_order_count",
+    "position_count",
+    "income_amount",
+    "dividend_amount",
+    "settlement_obligation",
+    "portfolio_weight"
+  ],
+  "required_source_contracts": [
+    {
+      "contract_id": "chart_v3",
+      "field_paths": [
+        "Time",
+        "CloseBid",
+        "OpenBid",
+        "HighBid",
+        "LowBid",
+        "Volume",
+        "AskVolume",
+        "PriceType"
+      ]
+    },
+    {
+      "contract_id": "reference_instruments_v1",
+      "field_paths": [
+        "Identifier",
+        "AssetType",
+        "Description",
+        "Symbol",
+        "ExchangeId"
+      ]
+    },
+    {
+      "contract_id": "reference_instrument_details_v1",
+      "field_paths": [
+        "Uic",
+        "AssetType",
+        "CurrencyCode",
+        "Exchange",
+        "Exchange.CountryCode",
+        "Exchange.ExchangeId",
+        "Exchange.Name"
+      ]
+    },
+    {
+      "contract_id": "options_chain_reference_v1",
+      "field_paths": [
+        "OptionRootId",
+        "ExpiryDates",
+        "SpecificOptions",
+        "SpecificOptions.PutCall",
+        "SpecificOptions.Strike",
+        "SpecificOptions.Uic"
+      ]
+    },
+    {
+      "contract_id": "info_price_v1",
+      "field_paths": [
+        "Uic",
+        "AssetType",
+        "Quote",
+        "Quote.Ask",
+        "Quote.Bid",
+        "Quote.DelayedByMinutes",
+        "Quote.Mid",
+        "Quote.PriceType",
+        "PriceInfo",
+        "PriceInfo.High",
+        "PriceInfo.Low",
+        "PriceInfo.NetChange",
+        "PriceInfo.PercentChange",
+        "PriceTypeBid",
+        "PriceTypeAsk"
+      ]
+    },
+    {
+      "contract_id": "info_prices_list_v1",
+      "field_paths": [
+        "Uic",
+        "AssetType",
+        "Quote",
+        "Quote.Ask",
+        "Quote.Bid",
+        "Quote.DelayedByMinutes",
+        "Quote.Mid",
+        "Quote.PriceType"
+      ]
+    },
+    {
+      "contract_id": "performance_summary_v4",
+      "field_paths": [
+        "AccountValue",
+        "TimeWeightedReturn",
+        "TotalCashBalance"
+      ]
+    },
+    {
+      "contract_id": "performance_timeseries_v4",
+      "field_paths": [
+        "Date",
+        "EndOfDayBalance",
+        "TimeWeightedReturn",
+        "Benchmark"
+      ]
+    },
+    {
+      "contract_id": "balances_v1",
+      "field_paths": [
+        "CashBalance",
+        "Currency",
+        "CashAvailableForTrading",
+        "CashBlocked",
+        "CashBlockedFromWithdrawal",
+        "FinancingAccruals",
+        "FundsAvailableForSettlement",
+        "FundsReservedForSettlement",
+        "SpendingPower",
+        "SpendingPowerDetail",
+        "SpendingPowerDetail.Current",
+        "SpendingPowerDetail.Maximum",
+        "TransactionsNotBooked",
+        "TransactionsNotBookedDetail",
+        "TransactionsNotBookedDetail.Accrual",
+        "TransactionsNotBookedDetail.AdditionalTransactionCost",
+        "TransactionsNotBookedDetail.BondValue",
+        "TransactionsNotBookedDetail.CashDeposit",
+        "TransactionsNotBookedDetail.CashReservation",
+        "TransactionsNotBookedDetail.CashWithdrawal",
+        "TransactionsNotBookedDetail.CertificatesValue",
+        "TransactionsNotBookedDetail.Commission",
+        "TransactionsNotBookedDetail.ExchangeFee",
+        "TransactionsNotBookedDetail.ExternalCharges",
+        "TransactionsNotBookedDetail.FundsReservedByOrder",
+        "TransactionsNotBookedDetail.IpoSubscriptionFee",
+        "TransactionsNotBookedDetail.LeveragedKnockOutProductsValue",
+        "TransactionsNotBookedDetail.MutualFundValue",
+        "TransactionsNotBookedDetail.OptionPremium",
+        "TransactionsNotBookedDetail.ShareValue",
+        "TransactionsNotBookedDetail.StampDuty",
+        "TransactionsNotBookedDetail.WarrantPremium",
+        "VariationMarginCashBalance",
+        "TotalValue",
+        "MarginAvailableForTrading"
+      ]
+    },
+    {
+      "contract_id": "positions_v1",
+      "field_paths": [
+        "PositionId",
+        "PositionBase",
+        "PositionBase.Amount",
+        "PositionBase.AssetType",
+        "PositionBase.ExecutionTimeOpen",
+        "PositionBase.OpenPrice",
+        "PositionBase.Uic",
+        "PositionView",
+        "PositionView.CurrentPrice",
+        "PositionView.Exposure",
+        "PositionView.ProfitLossOnTrade"
+      ]
+    },
+    {
+      "contract_id": "orders_v1",
+      "field_paths": [
+        "OrderId",
+        "AssetType",
+        "Status"
+      ]
+    },
+    {
+      "contract_id": "transactions_v1",
+      "field_paths": [
+        "TransactionId",
+        "ExecutionTime",
+        "TransactionType",
+        "Amount"
+      ]
+    },
+    {
+      "contract_id": "bookings_v1",
+      "field_paths": [
+        "BookingId",
+        "BookingDate",
+        "Amount"
+      ]
+    },
+    {
+      "contract_id": "closed_positions_history_v1",
+      "field_paths": [
+        "ClosedPositionId",
+        "ClosingPosition",
+        "ClosingPosition.Amount",
+        "ClosingPosition.AssetType",
+        "ClosingPosition.Uic",
+        "ClosedPosition",
+        "ClosedPosition.ClosedProfitLoss",
+        "ClosedPosition.ExecutionTimeClose"
+      ]
+    },
+    {
+      "contract_id": "exposure_instruments_v1",
+      "field_paths": [
+        "Uic",
+        "AssetType",
+        "Amount",
+        "Currency"
+      ]
+    },
+    {
+      "contract_id": "costs_v1",
+      "field_paths": [
+        "Cost",
+        "Cost.Commission",
+        "Cost.StampDuty",
+        "Cost.TotalCost",
+        "Currency",
+        "HoldingPeriodInDays"
+      ]
+    },
+    {
+      "contract_id": "corporate_action_events_v2",
+      "field_paths": [
+        "EventId",
+        "EventType",
+        "ExDate",
+        "PayDate"
+      ]
+    },
+    {
+      "contract_id": "corporate_action_holdings_v2",
+      "field_paths": [
+        "EventId",
+        "Uic",
+        "Amount"
+      ]
+    }
+  ],
+  "requirements_version": "analytics-vision-1",
+  "schema_version": "1"
+}

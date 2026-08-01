@@ -48,6 +48,9 @@ def _source_path_for_wheel_path(name: str) -> str | None:
         "saxo_bank_mcp/_analytics_proof_profiles/proof_profiles.json": (
             "data/analytics/proof_profiles.json"
         ),
+        "saxo_bank_mcp/_analytics_vision_requirements/vision_coverage_requirements.json": (
+            "data/analytics/vision_coverage_requirements.json"
+        ),
         "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json": (
             "data/analytics/source_contracts.json"
         ),
@@ -126,6 +129,7 @@ def _installed_files(
                 "data/analytics/metric_definitions.json",
                 "data/analytics/proof_profiles.json",
                 "data/analytics/source_contracts.json",
+                "data/analytics/vision_coverage_requirements.json",
                 "data/saxo/openapi_inventory.json",
             }
         }

@@ -54,11 +54,20 @@ _NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
 _SOURCE_SHA = "a" * 64
 _PAGE_ID = f"sp_{'b' * 64}"
 _DATASET_FINGERPRINT = "c" * 64
+_ANALYSIS_PARAMETERS_DOMAIN = b"saxo-bank-mcp:analysis-parameters:v1\x00"
 _ANALYSIS_ID_LENGTH = 35
 _OPAQUE_UUID_VERSION = 4
-_DISTINCT_ID_COUNT = 4
+_DISTINCT_ID_COUNT = 6
 _OWNER_FILE_MODE = 0o600
 _SHA256_LENGTH = 64
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_quarantine_state(  # pyright: ignore[reportUnusedFunction]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "default-state"))
 
 
 def _sha256(value: str) -> str:
@@ -73,13 +82,13 @@ def _registry(
     *,
     engine_version: str = "1",
     required_metric_ids: tuple[str, ...] = ("price_return",),
-    definition_output_unit: str | None = None,
+    definition_updates: dict[str, object] | None = None,
     config: AnalyticsConfig | None = None,
 ) -> tuple[ProofRegistry, ProofProfile]:
     definitions = load_metric_definition_catalog()
-    if definition_output_unit is not None:
+    if definition_updates is not None:
         changed = definitions.by_id()["price_return"].model_copy(
-            update={"output_unit": definition_output_unit},
+            update=definition_updates,
         )
         definitions = definitions.from_definitions(
             catalog_version="replay-unit-test-definition",
@@ -144,6 +153,11 @@ def _registry(
 
 def _analysis_result() -> AnalysisResult:
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    request = MarketAnalysisRequest(
+        request_kind="market",
+        analysis_kind="replay_unit_test",
+        dataset_id=dataset_id,
+    )
     identity = provenance_module.build_analysis_identity(
         _identity_inputs(dataset_id),
         _engine_versions(),
@@ -165,11 +179,7 @@ def _analysis_result() -> AnalysisResult:
         tool_name="saxo_analyze_market",
         analysis_id=identity.analysis_id,
         analysis_kind="replay_unit_test",
-        request=MarketAnalysisRequest(
-            request_kind="market",
-            analysis_kind="replay_unit_test",
-            dataset_id=dataset_id,
-        ),
+        request=request,
         account_scope="aggregate",
         as_of=_NOW,
         valid_until=_NOW + timedelta(hours=1),
@@ -226,6 +236,7 @@ def _analysis_result() -> AnalysisResult:
             engine_version="1",
             code_commit="abcdef0",
             analysis_input_sha256=identity.input_sha256,
+            analysis_parameters_sha256=_analysis_parameters_sha256(dataset_id),
             analysis_engine_sha256=identity.engine_sha256,
             analysis_seed_sha256=identity.seed_sha256,
             random_seed=None,
@@ -246,7 +257,35 @@ def _identity_inputs(dataset_id: str) -> dict[str, object]:
         "dataset_fingerprint_sha256": _DATASET_FINGERPRINT,
         "dataset_id": dataset_id,
         "source_revision": "revision-a",
+        "tool_name": "saxo_analyze_market",
+        "analysis_parameters_sha256": _analysis_parameters_sha256(dataset_id),
     }
+
+
+def _analysis_parameters_sha256(
+    dataset_id: str,
+    *,
+    account_scope: str = "aggregate",
+) -> str:
+    material = {
+        "account_scope": account_scope,
+        "analysis_kind": "replay_unit_test",
+        "as_of": _NOW.isoformat(),
+        "request": {
+            "analysis_kind": "replay_unit_test",
+            "dataset_id": dataset_id,
+            "request_kind": "market",
+        },
+        "schema_version": "1",
+    }
+    encoded = json.dumps(
+        material,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(_ANALYSIS_PARAMETERS_DOMAIN + encoded).hexdigest()
 
 
 def _engine_versions() -> dict[str, object]:
@@ -340,6 +379,8 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
         "dataset_fingerprint_sha256": "1" * 64,
         "dataset_id": dataset_id,
         "source_revision": "revision-a",
+        "tool_name": "saxo_analyze_market",
+        "analysis_parameters_sha256": "2" * 64,
     }
     inputs_b = dict(reversed(tuple(inputs_a.items())))
     engines = {"saxo_analytics": {"version": "1", "code_commit": "abcdef0"}}
@@ -357,6 +398,16 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
         engines,
         7,
     )
+    different_tool = build_analysis_id(
+        {**inputs_a, "tool_name": "saxo_analyze_portfolio"},
+        engines,
+        7,
+    )
+    different_parameters = build_analysis_id(
+        {**inputs_a, "analysis_parameters_sha256": "3" * 64},
+        engines,
+        7,
+    )
 
     assert first == reordered
     assert len(first) == _ANALYSIS_ID_LENGTH
@@ -364,8 +415,18 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
     opaque_uuid = UUID(hex=first.removeprefix("an_"))
     assert opaque_uuid.version == _OPAQUE_UUID_VERSION
     assert opaque_uuid.variant == RFC_4122
-    assert len({first, different_seed, different_engine, different_revision}) == (
-        _DISTINCT_ID_COUNT
+    assert (
+        len(
+            {
+                first,
+                different_seed,
+                different_engine,
+                different_revision,
+                different_tool,
+                different_parameters,
+            },
+        )
+        == _DISTINCT_ID_COUNT
     )
 
 
@@ -378,6 +439,8 @@ def test_analysis_id_refuses_invalid_random_seed(seed: int) -> None:
                 "dataset_fingerprint_sha256": "1" * 64,
                 "dataset_id": dataset_id,
                 "source_revision": "revision-a",
+                "tool_name": "saxo_analyze_market",
+                "analysis_parameters_sha256": "2" * 64,
             },
             _engine_versions(),
             seed,
@@ -402,6 +465,7 @@ def test_analysis_result_persists_only_value_free_identity_fingerprints() -> Non
     result = _analysis_result()
 
     assert len(result.provenance.analysis_input_sha256) == _SHA256_LENGTH
+    assert len(result.provenance.analysis_parameters_sha256) == _SHA256_LENGTH
     assert len(result.provenance.analysis_engine_sha256) == _SHA256_LENGTH
     assert len(result.provenance.analysis_seed_sha256) == _SHA256_LENGTH
     serialized = result.model_dump_json()
@@ -562,7 +626,7 @@ def test_replay_refuses_unknown_unbound_or_missing_required_metrics(tmp_path: Pa
 def test_replay_refuses_metric_unit_or_identity_fingerprint_change(tmp_path: Path) -> None:
     config = _config(tmp_path)
     result = _analysis_result()
-    unit_registry, _ = _registry(definition_output_unit="decimal_ratio")
+    unit_registry, _ = _registry(definition_updates={"output_unit": "decimal_ratio"})
     _seed_store(config, result)
     with pytest.raises(AnalysisReplayRefused) as unit:
         replay_analysis(result.analysis_id, config=config, registry=unit_registry, at=_NOW)
@@ -587,6 +651,87 @@ def test_replay_refuses_metric_unit_or_identity_fingerprint_change(tmp_path: Pat
             at=_NOW,
         )
     assert identity.value.reason_code == "analysis_identity_changed"
+
+
+def test_replay_refuses_tool_or_safe_analysis_parameter_change(tmp_path: Path) -> None:
+    result = _analysis_result()
+    registry, _ = _registry()
+    tool_config = _config(tmp_path / "tool")
+    _seed_store(
+        tool_config,
+        result.model_copy(update={"tool_name": "saxo_analyze_portfolio"}),
+    )
+    with pytest.raises(AnalysisReplayRefused) as tool_changed:
+        replay_analysis(result.analysis_id, config=tool_config, registry=registry, at=_NOW)
+    assert tool_changed.value.reason_code == "analysis_identity_changed"
+
+    parameter_config = _config(tmp_path / "parameters")
+    _seed_store(
+        parameter_config,
+        result.model_copy(update={"account_scope": "selected SIM account"}),
+    )
+    with pytest.raises(AnalysisReplayRefused) as parameters_changed:
+        replay_analysis(
+            result.analysis_id,
+            config=parameter_config,
+            registry=registry,
+            at=_NOW,
+        )
+    assert parameters_changed.value.reason_code == "analysis_identity_changed"
+
+
+@pytest.mark.parametrize(
+    ("registry_kwargs", "reason_code"),
+    [
+        (
+            {"default_metric_class": MetricClass.MODEL_OUTPUT},
+            "metric_class_mismatch",
+        ),
+        (
+            {"unit_class": ValueUnitClass.PERCENTAGE},
+            "metric_unit_class_mismatch",
+        ),
+    ],
+)
+def test_replay_refuses_metric_definition_semantic_change(
+    tmp_path: Path,
+    registry_kwargs: dict[str, object],
+    reason_code: str,
+) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    registry, _ = _registry(definition_updates=registry_kwargs)
+    _seed_store(config, result)
+
+    with pytest.raises(AnalysisReplayRefused) as raised:
+        replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
+
+    assert raised.value.reason_code == reason_code
+
+
+def test_replay_refuses_metric_definition_currency_semantics(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    metric = result.metrics[0].model_copy(
+        update={
+            "unit": "usd",
+            "unit_class": ValueUnitClass.MONETARY,
+            "currency": "DKK",
+        },
+    )
+    changed_result = result.model_copy(update={"metrics": (metric,)})
+    registry, _ = _registry(
+        definition_updates={
+            "output_unit": "usd",
+            "unit_class": ValueUnitClass.MONETARY,
+        },
+    )
+    _seed_store(config, changed_result)
+
+    with pytest.raises(AnalysisReplayRefused) as raised:
+        replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
+
+    assert raised.value.reason_code == "metric_currency_mismatch"
 
 
 def test_replay_refuses_non_owner_store_permissions(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
     AnalyticsConfigError,
+    load_analytics_config,
     prepare_owner_only_path,
 )
 from saxo_bank_mcp.analytics_metric_definitions import (
@@ -31,6 +32,9 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_catalog_sha256,
     source_contract_fingerprint,
     source_contracts_by_id,
+)
+from saxo_bank_mcp.analytics_vision_requirements import (
+    load_vision_coverage_requirements,
 )
 
 _CATALOG_RESOURCE: Final = "_analytics_proof_profiles/proof_profiles.json"
@@ -313,9 +317,7 @@ class ProofRegistry:
         """Index immutable definition and profile catalogs by analysis kind."""
         self.definitions = definitions
         self.catalog = catalog
-        self.config = (
-            None if config is None else AnalyticsConfig.model_validate(config, strict=True)
-        )
+        self.config = _resolved_quarantine_config(config)
         self._profiles = MappingProxyType(
             {profile.analysis_kind: profile for profile in catalog.profiles},
         )
@@ -411,9 +413,9 @@ class ProofRegistry:
         return _status(ProofState.ACTIVE, "active", profile)
 
 
-def quarantine_store_path(config: AnalyticsConfig) -> Path:
+def quarantine_store_path(config: AnalyticsConfig | None = None) -> Path:
     """Return the owner-only persistent runtime-quarantine store."""
-    validated = AnalyticsConfig.model_validate(config, strict=True)
+    validated = _resolved_quarantine_config(config)
     return prepare_owner_only_path(
         validated.paths.analytics_root / _QUARANTINE_STORE_NAME,
     )
@@ -424,7 +426,7 @@ def quarantine_analysis_kind(
     reason: str,
     *,
     source_revision: str,
-    config: AnalyticsConfig,
+    config: AnalyticsConfig | None = None,
 ) -> None:
     """Persist an exact kind/revision quarantine with only a public reason code."""
     _require_safe_name(kind, "analysis kind")
@@ -437,7 +439,7 @@ def quarantine_analysis_kind(
     ):
         reason_code = "runtime_quarantine"
     _require_safe_name(reason_code, "quarantine reason")
-    validated = AnalyticsConfig.model_validate(config, strict=True)
+    validated = _resolved_quarantine_config(config)
     store_path = quarantine_store_path(validated)
     lock_path = prepare_owner_only_path(
         validated.paths.analytics_root / _QUARANTINE_LOCK_NAME,
@@ -493,13 +495,21 @@ def _generate_coverage_matrix(
     catalog: ProofProfileCatalog,
     require_active: bool,
 ) -> CoverageMatrix:
-    defined = set(definitions.by_id())
+    requirements = load_vision_coverage_requirements()
+    required_metric_ids = set(requirements.required_metric_ids)
+    required_analysis_kinds = set(requirements.required_analysis_kinds)
+    definitions_by_id = definitions.by_id()
+    defined = set(definitions_by_id)
     declared_metrics = {
         binding.metric_id for profile in catalog.profiles for binding in profile.metric_definitions
     }
     profiles_by_kind = {profile.analysis_kind: profile for profile in catalog.profiles}
     missing_metrics = sorted(
-        (set(definitions.production_metric_ids) - defined)
+        (required_metric_ids - defined)
+        | (required_metric_ids - set(definitions.production_metric_ids))
+        | (required_metric_ids - set(catalog.production_metric_ids))
+        | (required_metric_ids - declared_metrics)
+        | (set(definitions.production_metric_ids) - defined)
         | (set(definitions.production_metric_ids) - declared_metrics)
         | (set(catalog.production_metric_ids) - declared_metrics)
         | {
@@ -516,23 +526,40 @@ def _generate_coverage_matrix(
         },
     )
     profiled_kinds = set(profiles_by_kind)
-    missing_kinds = sorted(set(catalog.production_analysis_kinds) - profiled_kinds)
+    missing_kinds = sorted(
+        (required_analysis_kinds - set(catalog.production_analysis_kinds))
+        | (required_analysis_kinds - profiled_kinds)
+        | (set(catalog.production_analysis_kinds) - profiled_kinds),
+    )
     artifact_assignees: dict[str, set[str]] = {}
     for profile in catalog.profiles:
         for artifact_id in profile.artifact_template_ids:
             artifact_assignees.setdefault(artifact_id, set()).add(profile.analysis_kind)
     bound_artifacts = set(artifact_assignees)
-    missing_artifacts = sorted(
-        set(catalog.production_artifact_template_ids) - bound_artifacts,
-    )
     expected_artifact_owners = {
+        binding.template_id: binding.analysis_kind
+        for binding in requirements.required_artifact_owners
+    }
+    catalog_artifact_owners = {
         binding.template_id: binding.analysis_kind for binding in catalog.artifact_owners
     }
+    required_artifact_ids = set(expected_artifact_owners)
+    missing_artifacts = sorted(
+        (required_artifact_ids - set(catalog.production_artifact_template_ids))
+        | (required_artifact_ids - set(catalog_artifact_owners))
+        | (required_artifact_ids - bound_artifacts)
+        | (set(catalog.production_artifact_template_ids) - bound_artifacts),
+    )
     misassigned_artifacts = sorted(
         artifact_id
         for artifact_id, expected_kind in expected_artifact_owners.items()
-        if artifact_assignees.get(artifact_id)
-        and artifact_assignees[artifact_id] != {expected_kind}
+        if (
+            catalog_artifact_owners.get(artifact_id) not in {None, expected_kind}
+            or (
+                artifact_assignees.get(artifact_id)
+                and artifact_assignees[artifact_id] != {expected_kind}
+            )
+        )
     )
     supplied_fields = {
         f"{binding.contract_id}.{path}"
@@ -540,11 +567,42 @@ def _generate_coverage_matrix(
         for path in binding.field_paths
     }
     required_fields = {
+        f"{binding.contract_id}.{path}"
+        for binding in requirements.required_source_contracts
+        for path in binding.field_paths
+    }
+    current_fields = {
         f"{contract.contract_id}.{path}"
         for contract in source_contracts_by_id().values()
         for path in _source_field_paths(contract.fields)
     }
-    missing_fields = sorted(required_fields - supplied_fields)
+    profile_source_fields = {
+        profile.analysis_kind: {
+            binding.contract_id: frozenset(binding.field_paths)
+            for binding in profile.source_contracts
+        }
+        for profile in catalog.profiles
+    }
+    profile_binding_gaps = {
+        f"{profile.analysis_kind}:{input_binding.source_contract_id}.{field_path}"
+        for profile in catalog.profiles
+        for metric_binding in profile.metric_definitions
+        for definition in (definitions_by_id.get(metric_binding.metric_id),)
+        if definition is not None
+        for input_binding in definition.input_bindings
+        if input_binding.source_contract_id is not None
+        for field_path in input_binding.field_paths
+        if field_path
+        not in profile_source_fields[profile.analysis_kind].get(
+            input_binding.source_contract_id,
+            frozenset(),
+        )
+    }
+    missing_fields = sorted(
+        (required_fields - supplied_fields)
+        | (required_fields - current_fields)
+        | profile_binding_gaps,
+    )
     inactive_metrics: list[str] = []
     inactive_kinds: list[str] = []
     inactive_artifacts: list[str] = []
@@ -557,7 +615,7 @@ def _generate_coverage_matrix(
         )
         active_by_kind = {profile.analysis_kind: profile for profile in active_profiles}
         inactive_kinds = sorted(
-            set(catalog.production_analysis_kinds) - set(active_by_kind),
+            required_analysis_kinds - set(active_by_kind),
         )
         inactive_metrics = sorted(
             {
@@ -576,7 +634,7 @@ def _generate_coverage_matrix(
         )
         inactive_artifacts = sorted(
             artifact_id
-            for artifact_id in catalog.production_artifact_template_ids
+            for artifact_id in required_artifact_ids
             if (
                 expected_artifact_owners.get(artifact_id) not in active_by_kind
                 or artifact_id
@@ -674,6 +732,16 @@ def load_proof_profile_catalog(
             for definition in definitions.definitions
             if kind in definition.analysis_kinds
         )
+        required_metric_contract_ids = {
+            input_binding.source_contract_id
+            for definition in definitions.definitions
+            if kind in definition.analysis_kinds
+            for input_binding in definition.input_bindings
+            if input_binding.source_contract_id is not None
+        }
+        unknown_contract_ids = required_metric_contract_ids - set(contracts)
+        if unknown_contract_ids:
+            raise ProofProfileError("metric definitions bind unknown source contracts")
         source_bindings = tuple(
             SourceContractProofBinding(
                 contract_id=contract.contract_id,
@@ -681,7 +749,10 @@ def load_proof_profile_catalog(
                 field_paths=_source_field_paths(contract.fields),
             )
             for contract in contracts.values()
-            if kind in contract.dependent_analysis_kinds
+            if (
+                kind in contract.dependent_analysis_kinds
+                or contract.contract_id in required_metric_contract_ids
+            )
         )
         profiles.append(
             ProofProfile(
@@ -732,9 +803,9 @@ def load_proof_profile_catalog(
 def _runtime_quarantine_reason(
     analysis_kind: str,
     source_revision: str | None,
-    config: AnalyticsConfig | None,
+    config: AnalyticsConfig,
 ) -> str | None:
-    if config is None or source_revision is None:
+    if source_revision is None:
         return None
     try:
         document = _read_quarantine_document(quarantine_store_path(config))
@@ -747,6 +818,12 @@ def _runtime_quarantine_reason(
         ):
             return quarantine.reason_code
     return None
+
+
+def _resolved_quarantine_config(config: AnalyticsConfig | None) -> AnalyticsConfig:
+    if config is None:
+        return load_analytics_config(os.environ)
+    return AnalyticsConfig.model_validate(config, strict=True)
 
 
 def _read_quarantine_document(path: Path) -> _RuntimeQuarantineDocument:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -41,8 +44,37 @@ from saxo_bank_mcp.analytics_source_contracts import (
 _NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _MINIMUM_METRIC_COUNT = 120
+_EXACT_METRIC_COUNT = 206
+_EXACT_ANALYSIS_KIND_COUNT = 54
 _SHA256_LENGTH = 64
 _OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
+_PLACEHOLDER_FORMULA_PATTERNS = (
+    r"\bmodel\(",
+    r"\bsupported-model\b",
+    r"\bblack-scholes or black-76\b",
+    r"\bselected by (?:the )?product contract\b",
+    r"\buse saxo accountvalue when\b",
+    r"\bor reconciled compatible\b",
+    r"\bselected by the source contract\b",
+    r"\bdo not sum alternatives\b",
+    r"\bdeclared distribution\b",
+    r"\breprice supported\b",
+    r"\bmodeled supported\b",
+    r"\bmodel_value\(",
+    r"\bcurrent modeled price\b",
+    r"\bwhen required\b",
+    r"\bother declared eligible components\b",
+    r"\buse the eligible saxo margin value\b",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_quarantine_state(  # pyright: ignore[reportUnusedFunction]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "default-state"))
 
 
 def _active_registry(
@@ -155,6 +187,34 @@ def test_metric_definitions_are_versioned_and_machine_readable() -> None:
     assert "declared compounding" not in named["convexity"].formula
 
 
+def test_metric_formulas_reject_placeholder_models_and_bind_exact_branches() -> None:
+    named = load_metric_definition_catalog().by_id()
+    offenders = {
+        definition.metric_id: pattern
+        for definition in named.values()
+        for pattern in _PLACEHOLDER_FORMULA_PATTERNS
+        if re.search(pattern, definition.formula, flags=re.IGNORECASE)
+    }
+
+    assert offenders == {}
+    assert named["sensitivity_lower"].formula == (
+        "E(lower_parameter_set, random_seed), where E is the exact equation bound by "
+        "engine_name, engine_version, code_commit, and branch_id; lower_parameter_set is a "
+        "complete ordered vector persisted in the request; refuse a missing parameter, changed "
+        "branch_id, or changed seed."
+    )
+    assert named["account_value"].formula == (
+        "account_value = the unique balances_v1.TotalValue row whose account scope exactly "
+        "equals the request account_scope at cutoff; refuse when zero or multiple exact-scope "
+        "rows exist."
+    )
+    option_formula = named["theoretical_option_value"].formula
+    assert "pricing_model=black_scholes" in option_formula
+    assert "pricing_model=black_76" in option_formula
+    assert "call=S*exp(-q*T)*N(d1)-K*exp(-r*T)*N(d2)" in option_formula
+    assert "call=exp(-r*T)*(F*N(d1)-K*N(d2))" in option_formula
+
+
 def test_checked_in_profiles_cover_every_declared_surface_and_current_source() -> None:
     definitions = load_metric_definition_catalog()
     catalog = load_proof_profile_catalog(definitions=definitions)
@@ -181,6 +241,24 @@ def test_checked_in_profiles_cover_every_declared_surface_and_current_source() -
         for kind in contract.dependent_analysis_kinds
     }
     assert source_kinds <= set(catalog.production_analysis_kinds)
+
+    definitions_by_id = definitions.by_id()
+    source_count = len(source_contracts_by_id())
+    for profile in catalog.profiles:
+        profile_sources = {
+            binding.contract_id: frozenset(binding.field_paths)
+            for binding in profile.source_contracts
+        }
+        for metric_binding in profile.metric_definitions:
+            for input_binding in definitions_by_id[metric_binding.metric_id].input_bindings:
+                if input_binding.source_contract_id is None:
+                    continue
+                assert input_binding.source_contract_id in profile_sources
+                assert (
+                    set(input_binding.field_paths)
+                    <= profile_sources[input_binding.source_contract_id]
+                )
+        assert len(profile_sources) < source_count
 
     with pytest.raises(CoverageError) as inactive:
         generate_coverage_matrix(definitions=definitions, catalog=catalog)
@@ -251,14 +329,20 @@ def test_clean_wheel_loads_metric_and_proof_catalogs_outside_repository(
         installed_files = set(archive.namelist())
     assert "saxo_bank_mcp/_analytics_metric_definitions/metric_definitions.json" in installed_files
     assert "saxo_bank_mcp/_analytics_proof_profiles/proof_profiles.json" in installed_files
+    assert (
+        "saxo_bank_mcp/_analytics_vision_requirements/vision_coverage_requirements.json"
+        in installed_files
+    )
 
     script = """
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_proof_profiles import load_proof_profile_catalog
+from saxo_bank_mcp.analytics_vision_requirements import load_vision_coverage_requirements
 
 definitions = load_metric_definition_catalog()
 proofs = load_proof_profile_catalog(definitions=definitions)
-print(f"{len(definitions.definitions)}:{len(proofs.profiles)}")
+requirements = load_vision_coverage_requirements()
+print(f"{len(definitions.definitions)}:{len(proofs.profiles)}:{len(requirements.required_metric_ids)}")
 """
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(wheel)
@@ -271,7 +355,19 @@ print(f"{len(definitions.definitions)}:{len(proofs.profiles)}")
         text=True,
     )
     assert loaded.returncode == 0, loaded.stderr
-    assert loaded.stdout.strip() == "206:54"
+    assert loaded.stdout.strip() == "206:54:206"
+
+
+def test_vision_requirements_are_an_independent_resource() -> None:
+    spec = importlib.util.find_spec("saxo_bank_mcp.analytics_vision_requirements")
+    assert spec is not None
+    module = importlib.import_module("saxo_bank_mcp.analytics_vision_requirements")
+    requirements = module.load_vision_coverage_requirements()
+
+    assert len(requirements.required_metric_ids) == _EXACT_METRIC_COUNT
+    assert len(requirements.required_analysis_kinds) == _EXACT_ANALYSIS_KIND_COUNT
+    assert requirements.required_artifact_owners
+    assert requirements.required_source_contracts
 
 
 def test_coverage_fails_when_a_production_metric_has_no_definition() -> None:
@@ -297,6 +393,51 @@ def test_coverage_fails_when_a_production_metric_has_no_definition() -> None:
     assert raised.value.matrix.missing_metric_ids == (missing,)
 
 
+def test_coverage_fails_when_metric_is_deleted_consistently_from_catalogs() -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    missing = "price_return"
+    pruned_definitions = definitions.model_copy(
+        update={
+            "production_metric_ids": tuple(
+                item for item in definitions.production_metric_ids if item != missing
+            ),
+            "definitions": tuple(
+                definition
+                for definition in definitions.definitions
+                if definition.metric_id != missing
+            ),
+        },
+    )
+    pruned_catalog = catalog.model_copy(
+        update={
+            "production_metric_ids": tuple(
+                item for item in catalog.production_metric_ids if item != missing
+            ),
+            "profiles": tuple(
+                profile.model_copy(
+                    update={
+                        "metric_definitions": tuple(
+                            binding
+                            for binding in profile.metric_definitions
+                            if binding.metric_id != missing
+                        ),
+                    },
+                )
+                for profile in catalog.profiles
+            ),
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=pruned_definitions,
+            catalog=pruned_catalog,
+        )
+
+    assert raised.value.matrix.missing_metric_ids == (missing,)
+
+
 def test_coverage_fails_when_a_production_kind_has_no_profile() -> None:
     definitions = load_metric_definition_catalog()
     catalog = load_proof_profile_catalog(definitions=definitions)
@@ -313,6 +454,44 @@ def test_coverage_fails_when_a_production_kind_has_no_profile() -> None:
         proof_profiles_module.generate_declared_coverage_matrix(
             definitions=definitions,
             catalog=incomplete,
+        )
+
+    assert raised.value.matrix.missing_analysis_kinds == (missing,)
+
+
+def test_coverage_fails_when_kind_is_deleted_consistently_from_catalogs() -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    missing = "goal_model"
+    pruned_definitions = definitions.model_copy(
+        update={
+            "definitions": tuple(
+                definition.model_copy(
+                    update={
+                        "analysis_kinds": tuple(
+                            kind for kind in definition.analysis_kinds if kind != missing
+                        ),
+                    },
+                )
+                for definition in definitions.definitions
+            ),
+        },
+    )
+    pruned_catalog = catalog.model_copy(
+        update={
+            "production_analysis_kinds": tuple(
+                kind for kind in catalog.production_analysis_kinds if kind != missing
+            ),
+            "profiles": tuple(
+                profile for profile in catalog.profiles if profile.analysis_kind != missing
+            ),
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=pruned_definitions,
+            catalog=pruned_catalog,
         )
 
     assert raised.value.matrix.missing_analysis_kinds == (missing,)
@@ -411,6 +590,84 @@ def test_artifact_template_cannot_be_reassigned_to_another_analysis_kind() -> No
         )
 
     assert raised.value.matrix.misassigned_artifact_template_ids == (artifact_id,)
+
+
+def test_coverage_fails_when_artifact_is_deleted_consistently_from_catalogs() -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    missing = "price_volume_indicator"
+    pruned = catalog.model_copy(
+        update={
+            "production_artifact_template_ids": tuple(
+                item for item in catalog.production_artifact_template_ids if item != missing
+            ),
+            "artifact_owners": tuple(
+                binding for binding in catalog.artifact_owners if binding.template_id != missing
+            ),
+            "profiles": tuple(
+                profile.model_copy(
+                    update={
+                        "artifact_template_ids": tuple(
+                            item for item in profile.artifact_template_ids if item != missing
+                        ),
+                    },
+                )
+                for profile in catalog.profiles
+            ),
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=definitions,
+            catalog=pruned,
+        )
+
+    assert raised.value.matrix.missing_artifact_template_ids == (missing,)
+
+
+def test_coverage_fails_when_source_contract_is_deleted_consistently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    missing = "reference_instruments_v1"
+    contracts = dict(source_contracts_by_id())
+    missing_field = "Identifier"
+    monkeypatch.setattr(
+        proof_profiles_module,
+        "source_contracts_by_id",
+        lambda: {key: value for key, value in contracts.items() if key != missing},
+    )
+    pruned = catalog.model_copy(
+        update={
+            "source_field_coverage": tuple(
+                binding
+                for binding in catalog.source_field_coverage
+                if binding.contract_id != missing
+            ),
+            "profiles": tuple(
+                profile.model_copy(
+                    update={
+                        "source_contracts": tuple(
+                            binding
+                            for binding in profile.source_contracts
+                            if binding.contract_id != missing
+                        ),
+                    },
+                )
+                for profile in catalog.profiles
+            ),
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=definitions,
+            catalog=pruned,
+        )
+
+    assert f"{missing}.{missing_field}" in raised.value.matrix.missing_source_fields
 
 
 def test_definition_change_without_profile_rebinding_is_stale() -> None:
@@ -573,3 +830,34 @@ def test_runtime_quarantine_does_not_echo_arbitrary_private_reason(
     assert "123456" not in proof_profiles_module.quarantine_store_path(config).read_text(
         encoding="utf-8",
     )
+
+
+def test_registry_without_config_uses_persistent_owner_only_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_home = tmp_path / "implicit-state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    registry, profile, source_contracts = _active_registry()
+
+    quarantine_analysis_kind(
+        profile.analysis_kind,
+        "schema drift",
+        source_revision="revision-a",
+        config=None,
+    )
+    reloaded = ProofRegistry(definitions=registry.definitions, catalog=registry.catalog)
+    status = reloaded.status(
+        profile.analysis_kind,
+        "1",
+        source_contracts,
+        source_revision="revision-a",
+        engine_versions={"saxo_analytics": ("1", "abcdef0")},
+        at=_NOW,
+    )
+    quarantine_path = state_home / "saxo-bank-mcp" / "analytics" / "proof-quarantines.json"
+
+    assert status.state is ProofState.QUARANTINED
+    assert status.reason_code == "schema_drift"
+    assert stat.S_IMODE(quarantine_path.stat().st_mode) == _OWNER_FILE_MODE
+    assert stat.S_IMODE(quarantine_path.parent.stat().st_mode) == _OWNER_DIRECTORY_MODE

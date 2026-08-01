@@ -1,7 +1,7 @@
 {
   "schema_version": "1",
   "catalog_version": "2026-08-01.1",
-  "definition_catalog_sha256": "7600c47c1d64e43a667105fe2c896730808313692abed7f85dbdbdf22cc196c3",
+  "definition_catalog_sha256": "e46388a69dd0e5827274de33eceebd0eecb3ccee9f134fd8a09ed036d8a0fb67",
   "source_catalog_sha256": "ca5c53480842bb6c3e48dc16bac10f43c49edf73a09b206eacf3af40f0b20038",
   "production_analysis_kinds": [
     "cash_and_settlement",

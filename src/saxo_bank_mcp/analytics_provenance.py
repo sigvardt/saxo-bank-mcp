@@ -16,11 +16,17 @@ import duckdb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
-from saxo_bank_mcp.analytics_models import AnalysisResult
+from saxo_bank_mcp.analytics_metric_definitions import MetricDefinition
+from saxo_bank_mcp.analytics_models import (
+    AnalysisResult,
+    MetricValue,
+    ValueUnitClass,
+)
 from saxo_bank_mcp.analytics_proof_profiles import ProofProfile, ProofRegistry, ProofState
 
 _ANALYSIS_ID_DOMAIN: Final = b"saxo-bank-mcp:analysis-id:v1\x00"
 _ANALYSIS_INPUT_DOMAIN: Final = b"saxo-bank-mcp:analysis-input:v1\x00"
+_ANALYSIS_PARAMETERS_DOMAIN: Final = b"saxo-bank-mcp:analysis-parameters:v1\x00"
 _ANALYSIS_ENGINE_DOMAIN: Final = b"saxo-bank-mcp:analysis-engine:v1\x00"
 _ANALYSIS_SEED_DOMAIN: Final = b"saxo-bank-mcp:analysis-seed:v1\x00"
 _OWNER_FILE_MODE: Final = 0o600
@@ -29,7 +35,13 @@ _ANALYSIS_ID_LENGTH: Final = 35
 _OPAQUE_UUID_VERSION: Final = 4
 _SHA256_LENGTH: Final = 64
 _IDENTITY_INPUT_KEYS: Final = frozenset(
-    {"dataset_fingerprint_sha256", "dataset_id", "source_revision"},
+    {
+        "analysis_parameters_sha256",
+        "dataset_fingerprint_sha256",
+        "dataset_id",
+        "source_revision",
+        "tool_name",
+    },
 )
 _ENGINE_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_-]{0,127}$")
 _ENGINE_VERSION_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -131,6 +143,8 @@ def _normalized_identity_inputs(inputs: Mapping[str, object]) -> dict[str, str]:
     fingerprint = inputs["dataset_fingerprint_sha256"]
     dataset_id = inputs["dataset_id"]
     source_revision = inputs["source_revision"]
+    tool_name = inputs["tool_name"]
+    analysis_parameters_sha256 = inputs["analysis_parameters_sha256"]
     if not isinstance(fingerprint, str) or re.fullmatch(r"[a-f0-9]{64}", fingerprint) is None:
         raise ValueError("analysis identity input fingerprint is invalid")
     if not isinstance(dataset_id, str) or not _is_opaque_dataset_id(dataset_id):
@@ -140,11 +154,34 @@ def _normalized_identity_inputs(inputs: Mapping[str, object]) -> dict[str, str]:
         or _SOURCE_REVISION_PATTERN.fullmatch(source_revision) is None
     ):
         raise ValueError("analysis identity input source revision is invalid")
+    if not isinstance(tool_name, str) or _ENGINE_NAME_PATTERN.fullmatch(tool_name) is None:
+        raise ValueError("analysis identity input tool name is invalid")
+    if (
+        not isinstance(analysis_parameters_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", analysis_parameters_sha256) is None
+    ):
+        raise ValueError("analysis identity parameter fingerprint is invalid")
     return {
+        "analysis_parameters_sha256": analysis_parameters_sha256,
         "dataset_fingerprint_sha256": fingerprint,
         "dataset_id": dataset_id,
         "source_revision": source_revision,
+        "tool_name": tool_name,
     }
+
+
+def analysis_parameters_sha256(result: AnalysisResult) -> str:
+    """Fingerprint the complete canonical safe request and analysis parameters."""
+    return _canonical_component_sha256(
+        _ANALYSIS_PARAMETERS_DOMAIN,
+        {
+            "account_scope": result.account_scope,
+            "analysis_kind": result.analysis_kind,
+            "as_of": result.as_of.isoformat(),
+            "request": result.request.model_dump(mode="json"),
+            "schema_version": result.schema_version,
+        },
+    )
 
 
 def _normalized_engine_versions(
@@ -324,6 +361,9 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
         ):
             raise AnalysisReplayRefused("proof_receipt_changed")
         _verify_result_metric_bindings(result, registry=registry, profile=profile)
+        parameters_sha256 = analysis_parameters_sha256(result)
+        if parameters_sha256 != result.provenance.analysis_parameters_sha256:
+            raise AnalysisReplayRefused("analysis_identity_changed")
         identity_engines = {
             engine_name: {
                 "version": version,
@@ -334,9 +374,11 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
         try:
             identity = build_analysis_identity(
                 {
+                    "analysis_parameters_sha256": parameters_sha256,
                     "dataset_fingerprint_sha256": dataset_fingerprint,
                     "dataset_id": dataset_id,
                     "source_revision": source_revision,
+                    "tool_name": result.tool_name,
                 },
                 identity_engines,
                 result.provenance.random_seed,
@@ -448,10 +490,31 @@ def _verify_result_metric_bindings(
     if set(result_metric_ids) != required_metric_ids:
         raise AnalysisReplayRefused("required_metric_missing")
     for metric in result.metrics:
-        if metric.unit != definitions[metric.metric_id].output_unit:
-            raise AnalysisReplayRefused("metric_unit_mismatch")
+        definition = definitions[metric.metric_id]
+        _verify_metric_semantics(metric, definition)
         if metric.proof_profile_id != profile.proof_profile_id:
             raise AnalysisReplayRefused("proof_receipt_changed")
+
+
+def _verify_metric_semantics(
+    metric: MetricValue,
+    definition: MetricDefinition,
+) -> None:
+    if metric.metric_class is not definition.default_metric_class:
+        raise AnalysisReplayRefused("metric_class_mismatch")
+    if metric.unit_class is not definition.unit_class:
+        raise AnalysisReplayRefused("metric_unit_class_mismatch")
+    if metric.unit != definition.output_unit:
+        raise AnalysisReplayRefused("metric_unit_mismatch")
+    monetary = definition.unit_class is ValueUnitClass.MONETARY
+    allowed_monetary_unit = definition.output_unit in {
+        "price_currency",
+        "reporting_currency",
+    }
+    if (monetary and (metric.currency is None or not allowed_monetary_unit)) or (
+        not monetary and metric.currency is not None
+    ):
+        raise AnalysisReplayRefused("metric_currency_mismatch")
 
 
 def _verify_result_source_bindings(

@@ -61,6 +61,9 @@
         "analysis_input_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
         },
+        "analysis_parameters_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        },
         "analysis_seed_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
         },
@@ -132,6 +135,7 @@
         "engine_version",
         "code_commit",
         "analysis_input_sha256",
+        "analysis_parameters_sha256",
         "analysis_engine_sha256",
         "analysis_seed_sha256"
       ],

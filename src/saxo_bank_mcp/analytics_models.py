@@ -719,6 +719,7 @@ class AnalysisProvenance(_StrictAnalyticsModel):
     engine_version: EngineVersion
     code_commit: CodeCommit
     analysis_input_sha256: Sha256Fingerprint
+    analysis_parameters_sha256: Sha256Fingerprint
     analysis_engine_sha256: Sha256Fingerprint
     analysis_seed_sha256: Sha256Fingerprint
     random_seed: int | None = Field(default=None, ge=0, lt=2**64)

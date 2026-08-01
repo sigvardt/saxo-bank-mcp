@@ -314,6 +314,7 @@ def _analysis_result(  # noqa: PLR0913
             engine_version="1.0",
             code_commit=_CODE_COMMIT,
             analysis_input_sha256="d" * 64,
+            analysis_parameters_sha256="c" * 64,
             analysis_engine_sha256="e" * 64,
             analysis_seed_sha256="f" * 64,
             random_seed=None,
