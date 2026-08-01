@@ -4,8 +4,9 @@ import hashlib
 import json
 import os
 import sys
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
-from typing import Final, NamedTuple
+from typing import Final, NamedTuple, cast
 
 SOURCE_MATRIX_CHILD_TOOLS: Final[tuple[str, ...]] = (
     "saxo_auth_status",
@@ -288,7 +289,7 @@ _OPERATION_BY_CONTRACT: Final = {
 _OPERATION_BY_PATH: Final = {operation.path_template: operation for operation in _OPERATIONS}
 
 
-def resolve_eval_tool_filter(env: os._Environ[str]) -> frozenset[str]:
+def resolve_eval_tool_filter(env: Mapping[str, str]) -> frozenset[str]:
     if (
         env.get("SAXO_MCP_EVAL_TOOL_FILTER") != "1"
         or env.get("SAXO_MCP_ENVIRONMENT") != "SIM"
@@ -464,7 +465,7 @@ def _ledger_clear_payload() -> dict[str, object]:
 
 
 def _ledger_readback_payload() -> dict[str, object]:
-    event = {
+    event: dict[str, object] = {
         "timestamp": "2026-07-31T12:00:00+00:00",
         "phase": "attempted",
         "host_role": "gateway",
@@ -475,7 +476,7 @@ def _ledger_readback_payload() -> dict[str, object]:
         "query_present": False,
         "status": None,
     }
-    events = [dict(event) for _index in range(21)]
+    events: list[dict[str, object]] = [event.copy() for _index in range(21)]
     return {
         "status": "passed",
         "tool_name": "saxo_get_safe_request_ledger",
@@ -515,12 +516,13 @@ def _state_payload(path: str) -> dict[str, object]:
 
 def _validated_source_params(source: _SourceCall, arguments: dict[str, object]) -> dict[str, str]:
     raw_params = arguments.get("params", {})
-    if not isinstance(raw_params, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in raw_params.items()
-    ):
-        raise ValueError("fixture source arguments invalid")
-    params = dict(raw_params)
+    if not isinstance(raw_params, dict):
+        raise ValueError("fixture source arguments invalid")  # noqa: TRY004
+    params: dict[str, str] = {}
+    for key, value in cast("dict[object, object]", raw_params).items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("fixture source arguments invalid")  # noqa: TRY004
+        params[key] = value
     if source.contract_id != "transactions_v1":
         if params != source.params:
             raise ValueError("fixture source arguments invalid")
@@ -535,6 +537,17 @@ def _validated_source_params(source: _SourceCall, arguments: dict[str, object]) 
     if to_date != datetime.now(tz=UTC).date() or to_date - from_date != timedelta(days=365):
         raise ValueError("fixture source arguments invalid")
     return params
+
+
+def _object_mapping(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, object] = {}
+    for key, item in cast("dict[object, object]", value).items():
+        if not isinstance(key, str):
+            return None
+        result[key] = item
+    return result
 
 
 def _source_payload(source: _SourceCall, arguments: dict[str, object]) -> dict[str, object]:
@@ -755,9 +768,10 @@ class _FixtureServer:
         request_id: object,
         params: object,
     ) -> dict[str, object]:
-        if self._initialized or not isinstance(params, dict) or request_id is None:
+        typed_params = _object_mapping(params)
+        if self._initialized or typed_params is None or request_id is None:
             raise ValueError("fixture protocol invalid")
-        protocol_version = params.get("protocolVersion")
+        protocol_version = typed_params.get("protocolVersion")
         if not isinstance(protocol_version, str):
             raise TypeError("fixture protocol invalid")
         self._initialized = True
@@ -794,15 +808,20 @@ class _FixtureServer:
         request_id: object,
         params: object,
     ) -> dict[str, object]:
-        if not isinstance(params, dict) or set(params) != {"name", "arguments"}:
+        typed_params = _object_mapping(params)
+        if typed_params is None or set(typed_params) != {"name", "arguments"}:
             raise ValueError("fixture protocol invalid")
-        name = params.get("name")
-        arguments = params.get("arguments")
-        if not isinstance(name, str) or not isinstance(arguments, dict):
+        name = typed_params.get("name")
+        arguments = _object_mapping(typed_params.get("arguments"))
+        if not isinstance(name, str) or arguments is None:
             raise TypeError("fixture protocol invalid")
         payload = _dispatch_tool_call(self._call_index, name, arguments)
         self._call_index += 1
-        result = {"content": [], "structuredContent": payload, "isError": False}
+        result: dict[str, object] = {
+            "content": [],
+            "structuredContent": payload,
+            "isError": False,
+        }
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
@@ -821,8 +840,8 @@ def main() -> int:
     server = _FixtureServer()
     try:
         for line in sys.stdin.buffer:
-            message = json.loads(line.decode("utf-8", errors="strict"))
-            if not isinstance(message, dict):
+            message = _object_mapping(json.loads(line.decode("utf-8", errors="strict")))
+            if message is None:
                 return 65
             response = server.handle(message)
             if response is not None:

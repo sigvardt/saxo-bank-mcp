@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ import stat
 import subprocess
 import sys
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,8 +36,8 @@ from saxo_bank_mcp.analytics_source_contracts import (
 from saxo_bank_mcp.analytics_source_process import MatrixCallPolicy, RegisteredCallProfile
 from saxo_bank_mcp.analytics_source_runtime import (
     CandidateRuntimeError,
+    CandidateRuntimeSeal,
     ExternalRunLayout,
-    _open_candidate_runtime_seal_for_test,
     close_candidate_runtime_seal,
 )
 from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreValidationError
@@ -47,6 +48,14 @@ from saxo_bank_mcp.registered_read_execution import RegisteredReadResponse
 _CAPTURED_AT = datetime(2026, 7, 30, 12, tzinfo=UTC)
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures/analytics/saxo_pages"
 _EXPECTED_RETRY_ATTEMPTS = 2
+_RUNTIME_SEAL_HELPER = "_open_candidate_runtime_seal_for_test"
+_open_candidate_runtime_seal = cast(
+    "Callable[[Path, str, ExternalRunLayout], CandidateRuntimeSeal]",
+    getattr(
+        importlib.import_module("saxo_bank_mcp.analytics_source_runtime"),
+        _RUNTIME_SEAL_HELPER,
+    ),
+)
 
 
 def _identity() -> matrix_module.SourceMatrixCandidateIdentity:
@@ -183,7 +192,7 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
         directory.mkdir(mode=0o700)
     layout = ExternalRunLayout(run_root, *directories)
     manifest_text = manifest.read_text(encoding="utf-8")
-    baseline = _open_candidate_runtime_seal_for_test(runtime, manifest_text, layout)
+    baseline = _open_candidate_runtime_seal(runtime, manifest_text, layout)
     close_candidate_runtime_seal(baseline)
 
     installed = runtime / "lib" / "python3.12" / "site-packages"
@@ -205,7 +214,7 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
             target.write_bytes(original + b"\n# installed artifact mutation\n")
             target.chmod(original_mode)
             with pytest.raises(CandidateRuntimeError):
-                _open_candidate_runtime_seal_for_test(runtime, manifest_text, layout)
+                _open_candidate_runtime_seal(runtime, manifest_text, layout)
             target.chmod(0o600)
             target.write_bytes(original)
             target.chmod(original_mode)

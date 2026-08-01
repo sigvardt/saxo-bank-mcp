@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ import subprocess
 import sys
 import zipfile
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -48,6 +49,14 @@ _SECOND_ATTEMPT = 2
 _EXPECTED_ATTEMPTS = 3
 _EXPECTED_CONTINUATION_ATTEMPTS = 2
 _RATE_LIMIT_STATUS = 429
+_SOURCE_CANDIDATE_FILES_HELPER = "_source_candidate_files"
+_source_candidate_files = cast(
+    "Callable[[Path], dict[str, str]]",
+    getattr(
+        importlib.import_module("saxo_bank_mcp.analytics_source_runtime"),
+        _SOURCE_CANDIDATE_FILES_HELPER,
+    ),
+)
 _IDENTITY_COMMAND = (
     "from saxo_bank_mcp.qa_analytics_source_matrix import "
     "source_matrix_candidate_identity;"
@@ -75,26 +84,6 @@ def _identity() -> matrix_module.SourceMatrixCandidateIdentity:
         source_contract_catalog_sha256="a" * 64,
         harness_build_sha256="b" * 64,
         candidate_identity_sha256="c" * 64,
-    )
-
-
-def _run_identity(
-    runtime: Path,
-    cwd: Path,
-    *,
-    prefix: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    environment = os.environ if prefix is None else {**os.environ, "PYTHONPATH": str(prefix)}
-    return subprocess.run(
-        (
-            str(runtime / "bin" / "saxo-bank-analytics-source-matrix"),
-            "--identity",
-        ),
-        cwd=cwd,
-        env=environment,
-        check=False,
-        capture_output=True,
-        text=True,
     )
 
 
@@ -235,7 +224,7 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
 
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    source_files = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+    source_files = _source_candidate_files(source_copy)
     for name in (
         "generate_analytics_source_matrix_candidate.py",
         "prepare_analytics_source_matrix_runtime.py",
@@ -244,7 +233,7 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
         target = source_copy / "scripts" / name
         original = target.read_bytes()
         target.write_bytes(original + b"\nROUND3_SOURCE_MUTATION = True\n")
-        refused = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+        refused = _source_candidate_files(source_copy)
         target.write_bytes(original)
         assert refused != source_files, name
 

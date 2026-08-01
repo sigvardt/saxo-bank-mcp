@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
 import shutil
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -26,6 +28,22 @@ from saxo_bank_mcp.registered_read_execution import RegisteredReadResponse
 
 _ROOT = Path(__file__).parents[1]
 _EXPECTED_POST_ACCESS_ATTEMPTS = 2
+_SOURCE_CANDIDATE_FILES_HELPER = "_source_candidate_files"
+_RUNTIME_TREE_PROJECTION_HELPER = "_runtime_tree_projection"
+_VALIDATE_DIRECTORY_ENTRY_TREE_HELPER = "_validate_directory_entry_tree"
+_source_runtime = importlib.import_module("saxo_bank_mcp.analytics_source_runtime")
+_source_candidate_files = cast(
+    "Callable[[Path], dict[str, str]]",
+    getattr(_source_runtime, _SOURCE_CANDIDATE_FILES_HELPER),
+)
+_runtime_tree_projection = cast(
+    "Callable[[Path], tuple[str, int]]",
+    getattr(_source_runtime, _RUNTIME_TREE_PROJECTION_HELPER),
+)
+_validate_directory_entry_tree = cast(
+    "Callable[..., None]",
+    getattr(_source_runtime, _VALIDATE_DIRECTORY_ENTRY_TREE_HELPER),
+)
 
 
 def _copy_source_candidate(target: Path) -> None:
@@ -61,7 +79,7 @@ def test_candidate_identity_closes_startup_import_and_python_runtime(
 ) -> None:
     source_copy = tmp_path / "source-copy"
     _copy_source_candidate(source_copy)
-    baseline = matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+    baseline = _source_candidate_files(source_copy)
 
     package = source_copy / "src" / "saxo_bank_mcp"
     outside = tmp_path / "outside"
@@ -69,17 +87,17 @@ def test_candidate_identity_closes_startup_import_and_python_runtime(
     linked = package / "linked-runtime"
     linked.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
-        matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+        _source_candidate_files(source_copy)
     linked.unlink()
 
     runtime_tree = tmp_path / "runtime-tree"
     runtime_tree.mkdir()
     runtime_module = runtime_tree / "module.py"
     runtime_module.write_text("VALUE = 1\n", encoding="utf-8")
-    initial = matrix_module._runtime_tree_projection(runtime_tree)  # noqa: SLF001
+    initial = _runtime_tree_projection(runtime_tree)
     runtime_module.write_text("VALUE = 2\n", encoding="utf-8")
-    assert matrix_module._runtime_tree_projection(runtime_tree) != initial  # noqa: SLF001
-    assert matrix_module._source_candidate_files(source_copy) == baseline  # noqa: SLF001
+    assert _runtime_tree_projection(runtime_tree) != initial
+    assert _source_candidate_files(source_copy) == baseline
 
 
 def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
@@ -91,11 +109,11 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
     source_cache.mkdir()
     (source_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
     with pytest.raises(ValueError, match="cache"):
-        matrix_module._source_candidate_files(source_copy)  # noqa: SLF001
+        _source_candidate_files(source_copy)
 
     startup_search = tmp_path / "startup-search"
     startup_search.mkdir()
-    matrix_module._validate_directory_entry_tree(  # noqa: SLF001
+    _validate_directory_entry_tree(
         startup_search,
         scope="round4 startup search",
     )
@@ -103,7 +121,7 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
     startup_cache.mkdir()
     (startup_cache / "unsealed.cpython-312.pyc").write_bytes(b"unsealed-cache")
     with pytest.raises(ValueError, match="cache"):
-        matrix_module._validate_directory_entry_tree(  # noqa: SLF001
+        _validate_directory_entry_tree(
             startup_search,
             scope="round4 startup search",
         )
@@ -114,7 +132,7 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
     startup_symlink = startup_search / "unsealed-search-link"
     startup_symlink.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="symlink"):
-        matrix_module._validate_directory_entry_tree(  # noqa: SLF001
+        _validate_directory_entry_tree(
             startup_search,
             scope="round4 startup search",
         )
@@ -131,7 +149,7 @@ def test_candidate_identity_refuses_unsealed_python_cache_and_search_symlink(
         cache_entry.parent.mkdir(parents=True, exist_ok=True)
         cache_entry.write_bytes(b"unsealed-cache")
         with pytest.raises(ValueError, match="cache"):
-            matrix_module._runtime_tree_projection(runtime_tree)  # noqa: SLF001
+            _runtime_tree_projection(runtime_tree)
         cache_entry.unlink()
         if cache_entry.parent != runtime_tree:
             cache_entry.parent.rmdir()

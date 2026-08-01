@@ -237,10 +237,10 @@ def test_direct_paths_construction_rejects_symlink_escape(tmp_path: Path) -> Non
 def test_direct_config_construction_revalidates_forged_paths(tmp_path: Path) -> None:
     state_root = tmp_path / "state" / "saxo-bank-mcp"
     forged_paths = AnalyticsPaths.model_construct(
-        **{
-            **_paths_payload(state_root),
-            "store_path": tmp_path / "outside" / "analytics.duckdb",
-        },
+        state_root=state_root,
+        analytics_root=state_root / "analytics",
+        artifacts_dir=state_root / "analytics" / "artifacts",
+        store_path=tmp_path / "outside" / "analytics.duckdb",
     )
 
     with pytest.raises(ValidationError, match="state root"):

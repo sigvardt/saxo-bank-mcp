@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import RFC_4122, UUID
 
 import pytest
@@ -337,7 +338,7 @@ def test_analysis_requests_are_discriminated_and_round_trip() -> None:
             portfolio_snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
         ),
     )
-    adapter = TypeAdapter(AnalysisRequest)
+    adapter = TypeAdapter[AnalysisRequest](AnalysisRequest)
 
     assert tuple(
         type(adapter.validate_json(adapter.dump_json(request))) for request in requests
@@ -1326,11 +1327,15 @@ def test_account_scope_accepts_closed_aggregate_or_uuid4_alias(
 
 
 def test_account_scope_schema_exposes_only_aggregate_or_opaque_alias() -> None:
-    schema = TypeAdapter(DatasetSummary).json_schema()
-    account_scope_reference = schema["properties"]["account_scope"]["$ref"]
+    schema = _schema_object(TypeAdapter[DatasetSummary](DatasetSummary).json_schema())
+    properties = _schema_object(schema["properties"])
+    account_scope = _schema_object(properties["account_scope"])
+    account_scope_reference = account_scope["$ref"]
+    assert isinstance(account_scope_reference, str)
     account_scope_definition = account_scope_reference.rsplit("/", maxsplit=1)[-1]
+    definitions = _schema_object(schema["$defs"])
 
-    assert schema["$defs"][account_scope_definition] == {
+    assert definitions[account_scope_definition] == {
         "anyOf": [
             {
                 "enum": ["aggregate", "selected SIM account"],
@@ -1345,14 +1350,22 @@ def test_account_scope_schema_exposes_only_aggregate_or_opaque_alias() -> None:
 
 
 def test_account_scope_schema_rejects_non_uuid4_aliases_under_draft_2020_12() -> None:
-    schema = TypeAdapter(DatasetSummary).json_schema()
-    account_scope_reference = schema["properties"]["account_scope"]["$ref"]
+    schema = _schema_object(TypeAdapter[DatasetSummary](DatasetSummary).json_schema())
+    properties = _schema_object(schema["properties"])
+    account_scope = _schema_object(properties["account_scope"])
+    account_scope_reference = account_scope["$ref"]
+    assert isinstance(account_scope_reference, str)
     account_scope_definition = account_scope_reference.rsplit("/", maxsplit=1)[-1]
-    validator = Draft202012Validator(schema["$defs"][account_scope_definition])
+    account_scope_schema = _schema_object(
+        _schema_object(schema["$defs"])[account_scope_definition],
+    )
+    validator = Draft202012Validator(account_scope_schema)
+    validator_method = "is_valid"
+    is_valid = cast("Callable[[str], bool]", getattr(validator, validator_method))
 
-    assert validator.is_valid(_ACCOUNT_ALIAS)
-    assert not validator.is_valid("aa_00000000000010008000000000000000")
-    assert not validator.is_valid("aa_00000000000040007000000000000000")
+    assert is_valid(_ACCOUNT_ALIAS)
+    assert not is_valid("aa_00000000000010008000000000000000")
+    assert not is_valid("aa_00000000000040007000000000000000")
 
 
 def test_dataset_summary_uses_validated_source_revision_contract() -> None:
@@ -1456,26 +1469,35 @@ def test_output_models_round_trip_through_the_shared_union() -> None:
             **_degradation_payload(),
         ),
     )
-    adapter = TypeAdapter(AnalysisOutput)
+    adapter = TypeAdapter[AnalysisOutput](AnalysisOutput)
 
     for output in outputs:
         assert adapter.validate_json(adapter.dump_json(output)) == output
 
 
-def _walk_schema(value: object) -> list[dict[str, Any]]:
-    nodes: list[dict[str, Any]] = []
+def _schema_object(value: object) -> dict[str, object]:
+    assert isinstance(value, dict)
+    return cast("dict[str, object]", value)
+
+
+def _walk_schema(value: object) -> list[dict[str, object]]:
+    nodes: list[dict[str, object]] = []
     if isinstance(value, dict):
-        nodes.append(value)
-        for child in value.values():
+        node = cast("dict[str, object]", value)
+        nodes.append(node)
+        for child in node.values():
             nodes.extend(_walk_schema(child))
     elif isinstance(value, list):
-        for child in value:
+        for child in cast("list[object]", value):
             nodes.extend(_walk_schema(child))
     return nodes
 
 
 def test_generated_schema_forbids_extra_fields_and_freezes_request_discriminator() -> None:
-    schema = TypeAdapter(AnalysisOutput).json_schema()
+    schema = cast(
+        "dict[str, object]",
+        TypeAdapter[AnalysisOutput](AnalysisOutput).json_schema(),
+    )
     nodes = _walk_schema(schema)
     object_schemas = [node for node in nodes if node.get("type") == "object"]
     discriminators = [node["discriminator"] for node in nodes if "discriminator" in node]

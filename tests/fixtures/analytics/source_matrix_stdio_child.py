@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Final
+from typing import Final, cast
 
 SOURCE_MATRIX_CHILD_TOOLS_LITERAL: Final[tuple[str, ...]] = (
     "saxo_auth_status",
@@ -22,6 +22,17 @@ def _write_json(value: object) -> None:
     encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     sys.stdout.buffer.write(encoded + b"\n")
     sys.stdout.buffer.flush()
+
+
+def _object_mapping(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, object] = {}
+    for key, item in cast("dict[object, object]", value).items():
+        if not isinstance(key, str):
+            return None
+        result[key] = item
+    return result
 
 
 def _result_for(message: dict[str, object]) -> dict[str, object] | None:
@@ -69,8 +80,8 @@ def main() -> int:
     if scenario == "early_exit":
         return 0
     for line in sys.stdin.buffer:
-        message = json.loads(line.decode("utf-8", errors="strict"))
-        if not isinstance(message, dict):
+        message = _object_mapping(json.loads(line.decode("utf-8", errors="strict")))
+        if message is None:
             return 65
         if scenario == "malformed":
             sys.stdout.buffer.write(b"{malformed}\n")
