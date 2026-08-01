@@ -33,7 +33,9 @@ build-backend = "hatchling.build"
 packages = ["src/saxo_bank_mcp"]
 
 [tool.hatch.build.targets.wheel.force-include]
+"data/analytics/metric_definitions.json" = "saxo_bank_mcp/_analytics_metric_definitions/metric_definitions.json"
 "data/analytics/migrations" = "saxo_bank_mcp/_analytics_migrations"
+"data/analytics/proof_profiles.json" = "saxo_bank_mcp/_analytics_proof_profiles/proof_profiles.json"
 "data/analytics/source_contracts.json" = "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json"
 "data/analytics/source_matrix_candidate.json" = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
 "data/saxo/openapi_inventory.json" = "saxo_bank_mcp/_endpoint_registry/openapi_inventory.json"

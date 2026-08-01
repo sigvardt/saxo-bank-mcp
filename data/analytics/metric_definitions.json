@@ -1,0 +1,684 @@
+{
+  "schema_version": "1",
+  "catalog_version": "2026-08-01.1",
+  "production_metric_ids": [
+    "price_return", "adjusted_price_return", "total_return", "time_weighted_return",
+    "money_weighted_return", "xirr", "cagr", "daily_return", "weekly_return",
+    "monthly_return", "quarterly_return", "annual_return",
+    "contribution_withdrawal_aware_growth", "benchmark_relative_return", "active_return",
+    "tracking_error", "information_ratio", "alpha", "beta", "upside_capture",
+    "downside_capture", "rolling_return", "best_period_return", "worst_period_return",
+    "recovery_time", "volatility", "downside_deviation", "sharpe_ratio", "sortino_ratio",
+    "calmar_ratio", "maximum_drawdown", "underwater_duration", "historical_var",
+    "expected_shortfall", "parametric_var", "marginal_risk_contribution",
+    "component_risk_contribution", "concentration_index", "correlation", "covariance",
+    "rolling_beta", "rolling_correlation", "margin_utilization",
+    "distance_to_liquidation_approximation", "instrument_exposure", "asset_class_exposure",
+    "currency_exposure", "exchange_exposure", "long_exposure", "short_exposure",
+    "gross_exposure", "net_exposure", "leveraged_exposure", "unleveraged_exposure",
+    "delta_equivalent_options_exposure", "duration_exposure", "rate_exposure",
+    "settlement_currency_exposure", "upcoming_cash_obligation", "position_contribution",
+    "currency_contribution", "local_asset_contribution", "income_contribution", "cost_drag",
+    "trading_contribution", "allocation_attribution", "selection_attribution",
+    "snapshot_change", "fx_drag", "commission_cost", "spread_cost", "fx_conversion_cost",
+    "financing_cost", "borrow_cost", "carry_cost", "custody_cost", "exchange_fee_cost",
+    "tax_cost", "stamp_duty_cost", "turnover_cost", "cost_to_open", "cost_to_hold",
+    "cost_to_close", "estimated_round_trip_cost", "wrapper_cost_difference",
+    "realized_cost_drag", "regulatory_ex_ante_cost", "regulatory_ex_post_cost", "total_cost",
+    "cost_return_impact", "win_rate", "expectancy", "average_winner", "average_loser",
+    "holding_time_asymmetry", "disposition_effect_indicator", "averaging_down_rate",
+    "entry_timing_effect", "exit_timing_effect", "overtrading_rate", "turnover",
+    "concentration_after_loss", "concentration_after_win", "twr_mwr_behavior_gap",
+    "plan_outcome_variance", "do_nothing_counterfactual", "arrival_price", "midpoint_price",
+    "vwap", "bar_approximation_price", "slippage", "spread", "spread_quality",
+    "market_depth", "depth_imbalance", "quote_delay", "liquidity_score",
+    "historical_scenario_effect", "custom_shock_effect", "currency_shock_effect",
+    "volatility_shock_effect", "rate_shock_effect", "margin_stress_effect",
+    "combined_scenario_effect", "scenario_contribution", "goal_probability", "ruin_probability",
+    "sequence_of_returns_risk", "inflation_adjusted_outcome", "sensitivity_lower",
+    "sensitivity_upper", "moving_average", "rsi", "macd", "atr", "bollinger_lower",
+    "bollinger_middle", "bollinger_upper", "realized_volatility", "volume",
+    "volume_weighted_price", "support_level", "resistance_level", "relative_strength",
+    "momentum", "trend_state", "regime_state", "option_breakeven", "payoff_at_expiry",
+    "theoretical_option_value", "delta", "gamma", "theta", "vega", "rho",
+    "aggregate_delta", "aggregate_gamma", "aggregate_theta", "aggregate_vega",
+    "aggregate_rho", "implied_volatility", "iv_smile", "iv_skew", "iv_term_structure",
+    "probability_range", "option_margin", "option_cost", "futures_basis", "futures_carry",
+    "futures_term_structure", "futures_roll", "fx_forward", "fx_carry", "position_size",
+    "maximum_loss", "stop_distance", "volatility_position_size", "concentration_limit",
+    "margin_constraint", "buying_power_constraint", "estimated_transaction_cost",
+    "minimum_variance_objective", "risk_parity_contribution", "target_weight",
+    "current_weight", "current_to_target_delta", "optimizer_turnover", "optimizer_stability",
+    "yield_to_maturity", "modified_duration", "convexity", "bond_carry", "roll_down",
+    "curve_shock_effect", "account_value", "cash_balance", "settled_cash", "unsettled_cash",
+    "margin_headroom", "buying_power", "working_order_count", "position_count", "income_amount",
+    "dividend_amount", "settlement_obligation", "portfolio_weight"
+  ],
+  "policies": [
+    {
+      "policy_id": "instrument_return",
+      "input_units": ["ordered Saxo prices", "UTC timestamps"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Positive means the later supported value exceeds the earlier value; losses are negative.",
+      "timing_convention": "Use ordered source timestamps inside the inclusive requested UTC range and the declared exchange calendar; never use a future observation.",
+      "cash_flow_treatment": "Instrument price metrics ignore account cash flows and distributions unless the metric is explicitly labeled total_return.",
+      "fx_treatment": {
+        "source": "Saxo OpenAPI FX or price source bound by the proof profile.",
+        "direction": "No conversion unless a reporting currency is requested; then convert source currency to reporting currency and use a reciprocal only when explicitly recorded.",
+        "timestamp": "Use the latest eligible Saxo rate at or before each economic timestamp; never use a future rate."
+      },
+      "missing_data_policy": "Refuse when either required endpoint value is absent, stale, delayed beyond the profile limit, or not comparable; never replace a missing value with zero.",
+      "minimum_sample_count": 2,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-12, "relative": 1e-10, "currency_minor_unit_fraction": null, "rounding": "Compare unrounded binary64 results, then format only after verification."},
+      "independent_reference": "A scalar Decimal or Python-loop implementation over the frozen ordered input, sharing no production formula helper.",
+      "broker_reconciliation": "Compare with the compatible Saxo chart or performance value when available; otherwise record not_comparable with the exact price-series reason."
+    },
+    {
+      "policy_id": "portfolio_return",
+      "input_units": ["reporting-currency account values", "external cash flows", "UTC timestamps"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Positive means value growth under the named cash-flow method; losses are negative.",
+      "timing_convention": "Use the account cutoff, UTC-normalized economic dates, and cash-flow boundaries defined by the formula; same-timestamp events use stored source order.",
+      "cash_flow_treatment": "Classify deposits and withdrawals as external flows; fees, financing, taxes, income, and trading profit or loss remain internal unless the metric explicitly says otherwise.",
+      "fx_treatment": {"source": "Saxo OpenAPI account or FX values bound by the proof profile.", "direction": "Convert each value and flow from source currency to the declared reporting currency.", "timestamp": "Use the latest eligible Saxo rate at or before each valuation or flow timestamp; never backfill from the future."},
+      "missing_data_policy": "Refuse a verified result for an absent valuation, unclassified external flow, missing FX path, duplicate economic row, or unresolved correction.",
+      "minimum_sample_count": 2,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-11, "relative": 1e-9, "currency_minor_unit_fraction": null, "rounding": "Chain and compare unrounded subperiod values; round only the final display."},
+      "independent_reference": "A separate scalar cash-flow ledger and return chain over the frozen dataset.",
+      "broker_reconciliation": "Compare with Saxo performance only when cutoff, flow, fee, FX, account scope, and return method match; name every accepted difference."
+    },
+    {
+      "policy_id": "risk_ratio",
+      "input_units": ["ordered return ratios", "periods per year"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Risk magnitudes are nonnegative except signed covariance and correlation; drawdown and tail-loss outputs use the explicit loss convention in the formula.",
+      "timing_convention": "Use complete ordered returns on the declared calendar and fixed annualization count; do not interpolate missing periods silently.",
+      "cash_flow_treatment": "Use the already cash-flow-normalized return series for portfolio risk and the labeled price-return series for instrument risk.",
+      "fx_treatment": {"source": "The verified return series supplies already normalized currency treatment.", "direction": "No additional FX conversion inside the risk formula.", "timestamp": "Inherit each return observation timestamp."},
+      "missing_data_policy": "Refuse below the metric sample minimum or when a required interval is missing, stale, non-finite, or has unresolved duplication.",
+      "minimum_sample_count": 2,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-10, "relative": 1e-8, "currency_minor_unit_fraction": null, "rounding": "Compare unrounded results with both bounds; no tolerance widening by sample count."},
+      "independent_reference": "A slow two-pass scalar implementation with independently calculated means, moments, ranks, and tails.",
+      "broker_reconciliation": "Compare exposure, margin, or performance-derived values with Saxo only when concept and cutoff match; otherwise state not_comparable."
+    },
+    {
+      "policy_id": "money",
+      "input_units": ["Saxo monetary rows", "ISO 4217 currency", "UTC timestamps"],
+      "output_unit": "reporting_currency",
+      "unit_class": "monetary",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Positive increases owner value or available resources; charges, obligations, and losses are reported as positive magnitudes only when the metric name says cost or obligation.",
+      "timing_convention": "Use the economic timestamp and account cutoff recorded by the bound Saxo source contract.",
+      "cash_flow_treatment": "Preserve source event class; never count a transfer, fee, income item, or trade cash movement in two components.",
+      "fx_treatment": {"source": "Saxo OpenAPI monetary or FX source bound by the proof profile.", "direction": "Convert source currency to the declared reporting currency; record any reciprocal explicitly.", "timestamp": "Use the latest eligible Saxo rate at or before the economic timestamp."},
+      "missing_data_policy": "Refuse the affected money total for missing currency, amount, timestamp, FX path, source sign, or unresolved duplicate; missing is never zero.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "currency_minor_unit", "absolute": null, "relative": null, "currency_minor_unit_fraction": 0.5, "rounding": "Use Decimal arithmetic and half-even rounding only at the declared currency minor unit."},
+      "independent_reference": "An independent Decimal ledger grouped by immutable economic row identity.",
+      "broker_reconciliation": "Compare with the matching Saxo balance, booking, cost, margin, or performance total after scope and cutoff alignment."
+    },
+    {
+      "policy_id": "count",
+      "input_units": ["immutable normalized rows"],
+      "output_unit": "count",
+      "unit_class": "count",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Counts are nonnegative integers.",
+      "timing_convention": "Count rows whose economic timestamp falls inside the inclusive normalized scope.",
+      "cash_flow_treatment": "Cash-flow classification does not change row identity or count.",
+      "fx_treatment": {"source": "No FX input is used.", "direction": "No conversion.", "timestamp": "Not applicable; retain source row timestamps for lineage."},
+      "missing_data_policy": "Refuse when paging, deduplication, revision, or entitlement state makes the row set incomplete.",
+      "minimum_sample_count": 0,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "exact", "absolute": 0.0, "relative": 0.0, "currency_minor_unit_fraction": null, "rounding": "No rounding; require exact integer equality."},
+      "independent_reference": "An independent set count over immutable stable keys and revisions.",
+      "broker_reconciliation": "Compare with Saxo response counts where supplied and with consumed page totals exactly."
+    },
+    {
+      "policy_id": "duration",
+      "input_units": ["UTC timestamps"],
+      "output_unit": "days",
+      "unit_class": "duration",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Durations are nonnegative; negative ordering refuses the metric.",
+      "timing_convention": "Subtract normalized UTC instants while retaining the declared exchange economic date for boundary checks.",
+      "cash_flow_treatment": "Cash flows do not alter elapsed-time calculation.",
+      "fx_treatment": {"source": "No FX input is used.", "direction": "No conversion.", "timestamp": "Use the two bound source timestamps."},
+      "missing_data_policy": "Refuse when either timestamp is missing, ambiguous, non-UTC after normalization, or economically reversed.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-9, "relative": 1e-12, "currency_minor_unit_fraction": null, "rounding": "Compare seconds exactly before conversion to fractional days."},
+      "independent_reference": "Direct integer microsecond subtraction followed by an independent unit conversion.",
+      "broker_reconciliation": "No direct Saxo aggregate is assumed; reconcile the source timestamps exactly."
+    },
+    {
+      "policy_id": "quantity",
+      "input_units": ["Saxo quantity", "instrument contract size"],
+      "output_unit": "units",
+      "unit_class": "quantity",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Long quantities are positive and short quantities are negative; size limits use absolute quantity.",
+      "timing_convention": "Use the latest eligible position, order, or proposal state at the declared cutoff.",
+      "cash_flow_treatment": "Cash flows affect constraints only through explicit buying-power or margin inputs.",
+      "fx_treatment": {"source": "Saxo price and FX inputs bound by the profile when a money constraint is converted to quantity.", "direction": "Convert the money constraint into instrument currency before division by unit risk.", "timestamp": "Use the constraint and quote cutoff; no future rate or quote."},
+      "missing_data_policy": "Refuse for missing price, contract size, lot size, risk input, FX path, or applicable trading constraint.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "exact", "absolute": 0.0, "relative": 0.0, "currency_minor_unit_fraction": null, "rounding": "Apply the declared Saxo lot-size floor once and require exact resulting quantity."},
+      "independent_reference": "A scalar constraint minimum followed by an independent lot-size floor.",
+      "broker_reconciliation": "Compare with Saxo amount, lot size, buying power, margin, and cost constraints where available."
+    },
+    {
+      "policy_id": "price",
+      "input_units": ["Saxo price", "ISO 4217 currency", "UTC timestamp"],
+      "output_unit": "price_currency",
+      "unit_class": "monetary",
+      "default_metric_class": "broker_reported",
+      "sign_convention": "Prices are nonnegative; signed differences are positive when execution or later price exceeds the reference.",
+      "timing_convention": "Use the exact MCP-captured quote timestamp; a nearest chart bar is a separately labeled approximation.",
+      "cash_flow_treatment": "Account cash flows are not inputs to market price metrics.",
+      "fx_treatment": {"source": "The bound Saxo quote or chart source.", "direction": "Keep quote currency unless an explicit reporting-currency comparison is requested.", "timestamp": "Use the quote or chart timestamp; never relabel a bar as an arrival quote."},
+      "missing_data_policy": "Exact quote metrics refuse without the required captured field; an adequate bar may populate only the named approximation metric.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "currency_minor_unit", "absolute": null, "relative": null, "currency_minor_unit_fraction": 0.5, "rounding": "Use source price precision; do not infer currency precision from display formatting."},
+      "independent_reference": "Direct immutable source-field read plus independent midpoint or VWAP aggregation where named.",
+      "broker_reconciliation": "Require equality with the stored Saxo quote field or named chart observation after documented source rounding."
+    },
+    {
+      "policy_id": "percentage",
+      "input_units": ["verified numerator", "verified denominator"],
+      "output_unit": "percent",
+      "unit_class": "percentage",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Positive follows the named numerator direction; rates bounded by definition are checked against their exact bounds.",
+      "timing_convention": "Use one declared and complete measurement interval.",
+      "cash_flow_treatment": "Inherit the numerator and denominator cash-flow classification without reclassification.",
+      "fx_treatment": {"source": "Inherit verified inputs.", "direction": "No additional conversion after numerator and denominator share currency.", "timestamp": "Inherit the latest contributing source timestamp."},
+      "missing_data_policy": "Refuse a zero denominator, incomplete class, or any missing contributing input.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-10, "relative": 1e-8, "currency_minor_unit_fraction": null, "rounding": "Compute as ratio, multiply by 100 once, and round only for display."},
+      "independent_reference": "Independent exact numerator and denominator aggregation followed by one division.",
+      "broker_reconciliation": "Reconcile underlying broker totals before comparing any Saxo-reported percentage."
+    },
+    {
+      "policy_id": "model_probability",
+      "input_units": ["frozen model parameters", "verified source series", "explicit random seed"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "model_output",
+      "sign_convention": "Probabilities lie in [0,1]; scenario losses remain negative before threshold comparison.",
+      "timing_convention": "Use only observations available at the model cutoff and one explicit stored seed.",
+      "cash_flow_treatment": "Use explicit contribution and withdrawal schedules; no implicit future flow.",
+      "fx_treatment": {"source": "Verified Saxo-only return inputs and explicit user assumptions.", "direction": "Use the declared reporting currency before simulation.", "timestamp": "Normalize all calibration inputs at or before the model cutoff."},
+      "missing_data_policy": "Refuse without the seed, calibration sample, explicit assumptions, or stable finite output; never auto-fill an assumption.",
+      "minimum_sample_count": 30,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "model_calibration", "absolute": 1e-12, "relative": 1e-10, "currency_minor_unit_fraction": null, "rounding": "Same seed and inputs require bit-stable serialized output; cross-seed checks use separately declared calibration bounds."},
+      "independent_reference": "A separate seeded scalar simulation or analytical limiting case with no production random-stream helper.",
+      "broker_reconciliation": "No Saxo forecast is claimed; reconcile only the source portfolio state and model inputs."
+    },
+    {
+      "policy_id": "technical",
+      "input_units": ["ordered Saxo price bars", "declared lookback"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Follow the published indicator formula; labels are descriptive and never buy or sell signals.",
+      "timing_convention": "Use only bars closed at or before each output timestamp and the exact declared warm-up window.",
+      "cash_flow_treatment": "Account cash flows are not used.",
+      "fx_treatment": {"source": "Bound Saxo price-bar series.", "direction": "No conversion unless the indicator explicitly runs on a converted verified series.", "timestamp": "Inherit each closed bar timestamp."},
+      "missing_data_policy": "Refuse before warm-up or for missing bars that violate the interval policy; never silently interpolate.",
+      "minimum_sample_count": 2,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-10, "relative": 1e-8, "currency_minor_unit_fraction": null, "rounding": "Compare unrounded rolling state and output."},
+      "independent_reference": "A direct scalar rolling-window implementation using separately derived update equations.",
+      "broker_reconciliation": "Saxo supplies the bars, not the indicator; reconcile bar identity and compare with a published independent formula case."
+    },
+    {
+      "policy_id": "derivative",
+      "input_units": ["spot or futures price", "strike", "time in years", "volatility", "rate", "contract quantity"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "model_output",
+      "sign_convention": "Long-leg value and Greeks follow the standard option sign; short legs multiply every value and Greek by -1.",
+      "timing_convention": "Time to expiry uses UTC-normalized expiry and valuation instants with the profile day-count rule; zero time uses intrinsic payoff.",
+      "cash_flow_treatment": "Premium and modeled costs are separate money metrics; no account cash flow enters theoretical pricing.",
+      "fx_treatment": {"source": "Saxo option, underlying, and FX sources bound by the profile.", "direction": "Model in contract currency, then convert only reported money totals to reporting currency.", "timestamp": "Use synchronized eligible inputs at or before valuation time."},
+      "missing_data_policy": "Refuse unsupported product style, non-finite input, missing entitlement, invalid expiry, or absent required rate, volatility, dividend, or contract term.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-9, "relative": 1e-7, "currency_minor_unit_fraction": null, "rounding": "Compare unrounded model values; price display rounding follows contract currency."},
+      "independent_reference": "A separate scalar closed-form or root-finding path plus published cases and finite-difference Greeks.",
+      "broker_reconciliation": "Compare with entitled Saxo Greeks or costs when the product, timestamp, and inputs match; never average a disagreement."
+    },
+    {
+      "policy_id": "optimization",
+      "input_units": ["expected return ratios", "covariance", "current weights", "typed constraints"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "model_output",
+      "sign_convention": "Weights are positive for long and negative for allowed short exposure; objective values use the stated minimization sign.",
+      "timing_convention": "Estimate every input from one frozen window ending at the analysis cutoff.",
+      "cash_flow_treatment": "Cash is an explicit asset or constraint; no implicit contribution funds a target portfolio.",
+      "fx_treatment": {"source": "Verified Saxo-only return and cost inputs.", "direction": "Normalize all assets to the declared reporting currency before estimation.", "timestamp": "Use FX observations at each return timestamp and current constraints at cutoff."},
+      "missing_data_policy": "Refuse infeasible constraints, singular unsupported inputs, unstable solutions, or missing return, cost, margin, or minimum-trade data.",
+      "minimum_sample_count": 30,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-8, "relative": 1e-6, "currency_minor_unit_fraction": null, "rounding": "Verify unrounded solver output and constraints before display rounding."},
+      "independent_reference": "An independent small-problem formulation with residual and feasibility checks.",
+      "broker_reconciliation": "Reconcile current holdings, costs, margin, and trade-size constraints with Saxo; Saxo supplies no optimizer objective."
+    },
+    {
+      "policy_id": "fixed_income",
+      "input_units": ["cash-flow schedule", "clean or dirty price", "rate", "time in years"],
+      "output_unit": "ratio",
+      "unit_class": "ratio",
+      "default_metric_class": "calculated_verified",
+      "sign_convention": "Yield and convexity are nonnegative for supported standard cases; duration is positive; shock effects follow price-change sign.",
+      "timing_convention": "Use the explicit settlement date, payment calendar, and day-count convention available from the bound Saxo instrument data.",
+      "cash_flow_treatment": "Include only authoritative contractual cash flows; refuse when coupon, principal, accrued interest, or schedule is incomplete.",
+      "fx_treatment": {"source": "Bound Saxo instrument and FX source.", "direction": "Calculate in instrument currency; convert only reported money values to reporting currency.", "timestamp": "Use settlement-date inputs and the latest eligible FX rate at or before settlement."},
+      "missing_data_policy": "Refuse when Saxo lacks an authoritative schedule, price basis, day count, coupon, maturity, currency, or product support.",
+      "minimum_sample_count": 1,
+      "minimum_coverage_ratio": 1.0,
+      "tolerance": {"mode": "absolute_relative", "absolute": 1e-9, "relative": 1e-7, "currency_minor_unit_fraction": null, "rounding": "Compare unrounded discounted cash flows and root residuals."},
+      "independent_reference": "A separate scalar discounted-cash-flow and finite-difference implementation.",
+      "broker_reconciliation": "Compare with Saxo values only when Saxo supplies the same price basis, schedule, cutoff, and convention; otherwise refuse or mark not_comparable."
+    }
+  ],
+  "groups": [
+    {
+      "policy_id": "instrument_return",
+      "definition_version": "1",
+      "analysis_kinds": ["instrument_price_return", "instrument_risk", "market_comparison", "multi_instrument_comparison"],
+      "metrics": [
+        {"metric_id": "price_return", "meaning": "Unadjusted Saxo price change over the declared interval.", "formula": "P_end / P_start - 1; P_start and P_end are the first and last eligible unadjusted prices."},
+        {"metric_id": "adjusted_price_return", "meaning": "Return from a Saxo series explicitly proved adjusted for the declared corporate actions.", "formula": "AP_end / AP_start - 1 over the proved adjusted-price series."},
+        {"metric_id": "total_return", "meaning": "Growth including distributions and supported corporate actions.", "formula": "V_end / V_start - 1 for an explicitly distribution-inclusive source series; otherwise refuse."},
+        {"metric_id": "daily_return", "meaning": "One trading-day labeled return.", "formula": "P_t / P_previous_eligible_close - 1."},
+        {"metric_id": "weekly_return", "meaning": "Return between declared weekly cutoffs.", "formula": "P_week_end / P_previous_week_end - 1."},
+        {"metric_id": "monthly_return", "meaning": "Return between declared month-end cutoffs.", "formula": "P_month_end / P_previous_month_end - 1."},
+        {"metric_id": "quarterly_return", "meaning": "Return between declared quarter-end cutoffs.", "formula": "P_quarter_end / P_previous_quarter_end - 1."},
+        {"metric_id": "annual_return", "meaning": "Return between declared year-end cutoffs.", "formula": "P_year_end / P_previous_year_end - 1."},
+        {"metric_id": "rolling_return", "meaning": "Return over one exact rolling observation window.", "formula": "P_t / P_(t-window) - 1 with no shorter fallback."},
+        {"metric_id": "best_period_return", "meaning": "Largest eligible subperiod return.", "formula": "max(r_i) over the complete declared subperiod set."},
+        {"metric_id": "worst_period_return", "meaning": "Smallest eligible subperiod return.", "formula": "min(r_i) over the complete declared subperiod set."},
+        {"metric_id": "benchmark_relative_return", "meaning": "Difference between portfolio or instrument return and the disclosed Saxo proxy return.", "formula": "R_subject - R_proxy over identical cutoffs, currency method, and return label."},
+        {"metric_id": "active_return", "meaning": "Arithmetic subject return minus benchmark-proxy return.", "formula": "R_subject - R_proxy for each aligned period or the declared aggregate."}
+      ]
+    },
+    {
+      "policy_id": "portfolio_return",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_performance", "portfolio_attribution", "portfolio_overview", "portfolio_time_machine"],
+      "metrics": [
+        {"metric_id": "time_weighted_return", "meaning": "Cash-flow-neutral compounded portfolio return.", "formula": "product_i(1 + r_i) - 1, where r_i = (V_i - CF_i) / V_(i-1) - 1 at defined external-flow boundaries."},
+        {"metric_id": "money_weighted_return", "meaning": "Periodic internal rate that discounts all external flows and ending value to zero.", "formula": "Solve sum_i CF_i / (1+r)^t_i + V_end/(1+r)^t_end = 0 using the declared periodic time scale."},
+        {"metric_id": "xirr", "meaning": "Annualized money-weighted return using exact day fractions.", "formula": "Solve sum_i CF_i / (1+r)^((date_i-date_0)/365) = 0 with ending value as the final positive flow."},
+        {"metric_id": "cagr", "meaning": "Compound annual growth rate over a positive elapsed year fraction.", "formula": "(V_end / V_start)^(1/years) - 1 after the named cash-flow method; refuse nonpositive ratio or years."},
+        {"metric_id": "contribution_withdrawal_aware_growth", "meaning": "Portfolio growth after explicit external contributions and withdrawals.", "formula": "V_end - V_start - net_external_flows, with flows converted at their economic timestamps."},
+        {"metric_id": "tracking_error", "meaning": "Annualized sample standard deviation of aligned active returns.", "formula": "sample_std(R_subject_i - R_proxy_i) * sqrt(periods_per_year)."},
+        {"metric_id": "information_ratio", "meaning": "Annualized active return per unit of tracking error.", "formula": "annualized_mean(active_returns) / annualized_tracking_error; refuse zero denominator."},
+        {"metric_id": "alpha", "meaning": "Intercept of subject excess returns regressed on proxy excess returns.", "formula": "mean(y) - beta*mean(x), annualized by the declared period count, where x and y are aligned excess returns."},
+        {"metric_id": "beta", "meaning": "Sensitivity of subject returns to aligned proxy returns.", "formula": "covariance(subject, proxy) / variance(proxy); refuse zero proxy variance."},
+        {"metric_id": "upside_capture", "meaning": "Subject return relative to proxy return during positive proxy periods.", "formula": "geometric_mean(1+subject_up)-1 divided by geometric_mean(1+proxy_up)-1; refuse zero denominator."},
+        {"metric_id": "downside_capture", "meaning": "Subject return relative to proxy return during negative proxy periods.", "formula": "geometric_mean(1+subject_down)-1 divided by geometric_mean(1+proxy_down)-1; refuse zero denominator."},
+        {"metric_id": "recovery_time", "meaning": "Elapsed days from a drawdown trough until the prior peak is regained.", "formula": "first timestamp after trough with V_t >= prior_peak minus trough timestamp; unavailable if unrecovered.", "output_unit": "days", "unit_class": "duration"}
+      ]
+    },
+    {
+      "policy_id": "risk_ratio",
+      "definition_version": "1",
+      "analysis_kinds": ["instrument_risk", "portfolio_risk", "market_correlation_regime", "market_volatility_dispersion", "portfolio_margin"],
+      "metrics": [
+        {"metric_id": "volatility", "meaning": "Annualized sample standard deviation of periodic returns.", "formula": "sample_std(r_i) * sqrt(periods_per_year)."},
+        {"metric_id": "downside_deviation", "meaning": "Annualized root mean square of returns below the declared target.", "formula": "sqrt(mean(min(r_i-target,0)^2)) * sqrt(periods_per_year)."},
+        {"metric_id": "sharpe_ratio", "meaning": "Annualized excess return divided by annualized volatility.", "formula": "annualized_mean(r_i-rf_i) / annualized_sample_std(r_i); refuse zero volatility."},
+        {"metric_id": "sortino_ratio", "meaning": "Annualized excess return divided by downside deviation.", "formula": "annualized_mean(r_i-target_i) / downside_deviation; refuse zero downside deviation."},
+        {"metric_id": "calmar_ratio", "meaning": "Annualized return divided by maximum drawdown magnitude.", "formula": "annualized_return / abs(maximum_drawdown); refuse zero drawdown."},
+        {"metric_id": "maximum_drawdown", "meaning": "Largest peak-to-trough loss in a cumulative value series.", "formula": "min_t(V_t / max_(s<=t)(V_s) - 1); result is in [-1,0]."},
+        {"metric_id": "underwater_duration", "meaning": "Longest elapsed time below the prior cumulative peak.", "formula": "max over drawdown episodes of recovery_or_cutoff_timestamp - peak_timestamp.", "output_unit": "days", "unit_class": "duration"},
+        {"metric_id": "historical_var", "meaning": "Positive loss magnitude at the declared empirical confidence quantile.", "formula": "max(0, -quantile(return_series, 1-confidence, declared interpolation))."},
+        {"metric_id": "expected_shortfall", "meaning": "Positive mean loss at or beyond historical VaR.", "formula": "mean(-r_i for r_i <= -historical_var) under the declared tie rule."},
+        {"metric_id": "parametric_var", "meaning": "Positive loss magnitude under the declared parametric distribution.", "formula": "max(0, -(mu + sigma*z_(1-confidence))) for the explicit normal assumption."},
+        {"metric_id": "marginal_risk_contribution", "meaning": "Derivative of portfolio volatility with respect to one weight.", "formula": "(Sigma*w)_i / sqrt(w^T Sigma w); refuse zero portfolio volatility."},
+        {"metric_id": "component_risk_contribution", "meaning": "Weight-scaled marginal contribution to portfolio volatility.", "formula": "w_i * (Sigma*w)_i / sqrt(w^T Sigma w)."},
+        {"metric_id": "concentration_index", "meaning": "Herfindahl concentration of normalized absolute exposures.", "formula": "sum_i(abs(exposure_i)/sum_j(abs(exposure_j)))^2; refuse zero gross exposure."},
+        {"metric_id": "correlation", "meaning": "Pearson correlation of two aligned return series.", "formula": "covariance(x,y)/(sample_std(x)*sample_std(y)); refuse zero variance."},
+        {"metric_id": "covariance", "meaning": "Sample covariance of two aligned return series.", "formula": "sum_i((x_i-mean(x))*(y_i-mean(y)))/(n-1)."},
+        {"metric_id": "rolling_beta", "meaning": "Beta calculated on each complete rolling window.", "formula": "rolling_covariance(subject,proxy)/rolling_variance(proxy) for the exact window."},
+        {"metric_id": "rolling_correlation", "meaning": "Correlation calculated on each complete rolling window.", "formula": "rolling_covariance/(rolling_sample_std_subject*rolling_sample_std_proxy)."},
+        {"metric_id": "margin_utilization", "meaning": "Used margin as a fraction of the compatible Saxo margin base.", "formula": "used_margin / margin_base; refuse absent or zero base."},
+        {"metric_id": "distance_to_liquidation_approximation", "meaning": "Explicitly approximate adverse move before modeled margin headroom reaches zero.", "formula": "margin_headroom / absolute_modeled_margin_sensitivity; refuse absent sensitivity or unsupported liquidation rules.", "default_metric_class": "approximation"}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_exposure", "portfolio_overview", "portfolio_margin", "cash_and_settlement", "portfolio_scenario", "pretrade_impact"],
+      "metrics": [
+        {"metric_id": "instrument_exposure", "meaning": "Reporting-currency exposure assigned to one safe instrument handle.", "formula": "sum signed position amount * eligible price * contract multiplier, converted once to reporting currency."},
+        {"metric_id": "asset_class_exposure", "meaning": "Exposure grouped by authoritative Saxo asset type.", "formula": "sum instrument_exposure by bound Saxo asset type."},
+        {"metric_id": "currency_exposure", "meaning": "Exposure grouped by source or settlement currency.", "formula": "sum signed source-currency exposure converted once to reporting currency, grouped by original currency."},
+        {"metric_id": "exchange_exposure", "meaning": "Exposure grouped by authoritative Saxo exchange identifier.", "formula": "sum instrument_exposure by bound exchange; unavailable for missing exchange."},
+        {"metric_id": "long_exposure", "meaning": "Sum of positive signed exposures.", "formula": "sum max(exposure_i,0)."},
+        {"metric_id": "short_exposure", "meaning": "Positive magnitude of negative signed exposures.", "formula": "sum abs(min(exposure_i,0))."},
+        {"metric_id": "gross_exposure", "meaning": "Total absolute exposure.", "formula": "sum abs(exposure_i)."},
+        {"metric_id": "net_exposure", "meaning": "Signed total exposure.", "formula": "sum exposure_i = long_exposure - short_exposure."},
+        {"metric_id": "leveraged_exposure", "meaning": "Gross exposure from instruments or positions proved leveraged.", "formula": "sum abs(exposure_i) for leveraged_i = true."},
+        {"metric_id": "unleveraged_exposure", "meaning": "Gross exposure from instruments proved unleveraged.", "formula": "sum abs(exposure_i) for leveraged_i = false."},
+        {"metric_id": "delta_equivalent_options_exposure", "meaning": "Underlying-equivalent options exposure using verified delta.", "formula": "sum quantity_i * contract_multiplier_i * underlying_price_i * delta_i."},
+        {"metric_id": "duration_exposure", "meaning": "Money duration for supported fixed-income positions.", "formula": "sum market_value_i * modified_duration_i."},
+        {"metric_id": "rate_exposure", "meaning": "First-order portfolio money change for a one-unit rate move.", "formula": "-sum market_value_i * modified_duration_i * rate_change_unit."},
+        {"metric_id": "settlement_currency_exposure", "meaning": "Upcoming cash requirement grouped by settlement currency.", "formula": "sum signed unsettled obligations by authoritative settlement currency."},
+        {"metric_id": "upcoming_cash_obligation", "meaning": "Positive reporting-currency magnitude of confirmed upcoming cash outflows.", "formula": "sum max(-signed_unsettled_cash_i,0) over the declared horizon."},
+        {"metric_id": "margin_stress_effect", "meaning": "Change in margin headroom under one explicit shock map.", "formula": "stressed_margin_headroom - current_margin_headroom."},
+        {"metric_id": "account_value", "meaning": "Broker-reported or reconciled account value at cutoff.", "formula": "Use Saxo AccountValue when scope-compatible; local identity is cash plus supported position and unsettled components."},
+        {"metric_id": "cash_balance", "meaning": "Broker-reported cash balance at cutoff.", "formula": "Sum compatible Saxo cash balance components once by account and currency."},
+        {"metric_id": "settled_cash", "meaning": "Cash available after excluding unsettled obligations under the bound Saxo balance contract.", "formula": "cash_balance - positive unsettled obligations under the declared Saxo fields."},
+        {"metric_id": "unsettled_cash", "meaning": "Signed transactions and settlement amounts not yet booked.", "formula": "sum bound unbooked or settlement-reserved amounts without double counting."},
+        {"metric_id": "margin_headroom", "meaning": "Broker-compatible amount available before modeled margin exhaustion.", "formula": "margin_available_for_trading or reconciled compatible headroom; never infer liquidation policy."},
+        {"metric_id": "buying_power", "meaning": "Broker-reported spending power or compatible available amount at cutoff.", "formula": "Use one authoritative Saxo spending-power field selected by the source contract; do not sum alternatives."},
+        {"metric_id": "income_amount", "meaning": "Recognized income in the declared interval.", "formula": "sum eligible income bookings and transactions once after corrections."},
+        {"metric_id": "dividend_amount", "meaning": "Recognized dividend income in the declared interval.", "formula": "sum eligible dividend-classified rows once after taxes and corrections according to requested gross or net basis."},
+        {"metric_id": "settlement_obligation", "meaning": "Positive amount due on one confirmed settlement date.", "formula": "sum max(-signed_settlement_cash_i,0) for the exact date and currency."}
+      ]
+    },
+    {
+      "policy_id": "percentage",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_exposure", "portfolio_attribution", "pretrade_impact", "trading_mirror"],
+      "metrics": [
+        {"metric_id": "portfolio_weight", "meaning": "One position exposure as a percent of the declared portfolio denominator.", "formula": "100 * signed_position_exposure / declared_portfolio_exposure_denominator."},
+        {"metric_id": "position_contribution", "meaning": "One position contribution to portfolio return.", "formula": "100 * position_return_contribution under the declared attribution method; components must reconcile to total."},
+        {"metric_id": "currency_contribution", "meaning": "Return contribution from currency translation.", "formula": "100 * (converted_return - local_asset_return) under the declared linked attribution method."},
+        {"metric_id": "local_asset_contribution", "meaning": "Return contribution from local-currency asset movement.", "formula": "100 * locally linked asset contribution before currency translation."},
+        {"metric_id": "income_contribution", "meaning": "Income contribution to portfolio return.", "formula": "100 * linked_income_amount / linked_capital_base under the declared method."},
+        {"metric_id": "cost_drag", "meaning": "Reduction in return attributable to included costs.", "formula": "100 * (return_before_cost - return_after_cost)."},
+        {"metric_id": "trading_contribution", "meaning": "Linked contribution from realized trading changes under the declared method.", "formula": "100 * linked_trading_profit_loss / linked_capital_base."},
+        {"metric_id": "allocation_attribution", "meaning": "Allocation effect against the disclosed Saxo proxy weights.", "formula": "100 * sum_i((w_subject_i-w_proxy_i)*(r_proxy_i-r_proxy_total))."},
+        {"metric_id": "selection_attribution", "meaning": "Selection effect against the disclosed Saxo proxy returns.", "formula": "100 * sum_i(w_subject_i*(r_subject_i-r_proxy_i))."},
+        {"metric_id": "snapshot_change", "meaning": "One component of change between two immutable portfolio snapshots.", "formula": "100 * linked_component_change / declared opening capital base; components reconcile to total change."},
+        {"metric_id": "fx_drag", "meaning": "Difference between reporting-currency and local-asset return.", "formula": "100 * (reporting_currency_return - local_asset_return)."},
+        {"metric_id": "win_rate", "meaning": "Percent of completed eligible trades with positive net result.", "formula": "100 * winning_trade_count / eligible_completed_trade_count."},
+        {"metric_id": "disposition_effect_indicator", "meaning": "Difference between realized-gain and realized-loss proportions under the declared observation set.", "formula": "100 * (proportion_gains_realized - proportion_losses_realized)."},
+        {"metric_id": "averaging_down_rate", "meaning": "Percent of eligible add-on trades made below the position's prior weighted entry.", "formula": "100 * averaging_down_add_count / eligible_add_count."},
+        {"metric_id": "overtrading_rate", "meaning": "Observed turnover above the explicit comparison threshold as a percent of capital.", "formula": "100 * max(turnover - declared_threshold,0)."},
+        {"metric_id": "concentration_after_loss", "meaning": "Portfolio concentration measured immediately after eligible losses.", "formula": "100 * mean(post_loss_largest_absolute_weight)."},
+        {"metric_id": "concentration_after_win", "meaning": "Portfolio concentration measured immediately after eligible wins.", "formula": "100 * mean(post_win_largest_absolute_weight)."}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_attribution", "portfolio_time_machine", "trading_mirror"],
+      "metrics": [
+        {"metric_id": "do_nothing_counterfactual", "meaning": "Difference between actual ending value and a frozen no-new-trade path.", "formula": "actual_ending_value - counterfactual_ending_value using identical flows, costs, FX, and cutoff."},
+        {"metric_id": "plan_outcome_variance", "meaning": "Money difference between recorded approval-time thesis outcome and actual eligible outcome.", "formula": "actual_net_outcome - recorded_plan_reference_outcome; unavailable without an immutable thesis value."}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["cost_xray", "trading_conditions", "pretrade_impact", "regulatory_cost_report", "wrapper_comparison"],
+      "metrics": [
+        {"metric_id": "commission_cost", "meaning": "Positive commission charge magnitude.", "formula": "sum abs(commission-classified charges) once after corrections."},
+        {"metric_id": "spread_cost", "meaning": "Positive spread cost under an exact quote or labeled approximation.", "formula": "sum abs(quantity)*(execution_price-reference_midpoint) with side sign normalized to positive cost."},
+        {"metric_id": "fx_conversion_cost", "meaning": "Positive broker-reported or reconciled currency conversion charge.", "formula": "sum abs(FX conversion charge rows) once; no inferred generic rate."},
+        {"metric_id": "financing_cost", "meaning": "Positive financing charge magnitude.", "formula": "sum abs(financing-classified charges) once over the interval."},
+        {"metric_id": "borrow_cost", "meaning": "Positive securities-borrow charge magnitude.", "formula": "sum abs(borrow-classified charges) once over the interval."},
+        {"metric_id": "carry_cost", "meaning": "Positive net carrying charge magnitude for the named instrument wrapper.", "formula": "sum positive carrying charges minus explicit carrying credits, with sign disclosed."},
+        {"metric_id": "custody_cost", "meaning": "Positive custody charge magnitude.", "formula": "sum abs(custody-classified charges) once."},
+        {"metric_id": "exchange_fee_cost", "meaning": "Positive exchange fee magnitude.", "formula": "sum abs(exchange-fee-classified charges) once."},
+        {"metric_id": "tax_cost", "meaning": "Positive tax charge available from Saxo rows.", "formula": "sum abs(tax-classified charges) once; refuse authoritative tax claims without complete basis."},
+        {"metric_id": "stamp_duty_cost", "meaning": "Positive stamp-duty charge available from Saxo rows.", "formula": "sum abs(stamp-duty-classified charges) once."},
+        {"metric_id": "turnover_cost", "meaning": "Eligible cost attributed to observed turnover.", "formula": "sum included cost components for trades inside the turnover scope."},
+        {"metric_id": "cost_to_open", "meaning": "Estimated broker-specific cost to open the exact proposed position.", "formula": "sum eligible Saxo pre-trade opening cost components for the exact proposal."},
+        {"metric_id": "cost_to_hold", "meaning": "Estimated broker-specific holding cost over the explicit horizon.", "formula": "sum eligible daily or period carrying costs over the exact stated horizon."},
+        {"metric_id": "cost_to_close", "meaning": "Estimated broker-specific cost to close the exact proposed position.", "formula": "sum eligible Saxo pre-trade closing cost components for the exact quantity."},
+        {"metric_id": "estimated_round_trip_cost", "meaning": "Estimated total open, hold, and close cost.", "formula": "cost_to_open + cost_to_hold + cost_to_close with component identity proof."},
+        {"metric_id": "wrapper_cost_difference", "meaning": "Cost difference between two user-selected Saxo-tradable wrappers.", "formula": "total_cost_wrapper_a - total_cost_wrapper_b under identical exposure, horizon, and currency assumptions."},
+        {"metric_id": "realized_cost_drag", "meaning": "Realized money reduction attributable to included costs.", "formula": "sum included realized cost components over the declared interval."},
+        {"metric_id": "regulatory_ex_ante_cost", "meaning": "Saxo-supported ex-ante cost total for the declared jurisdiction and proposal.", "formula": "sum source-defined ex-ante components exactly once; refuse when jurisdiction or fields are incomplete."},
+        {"metric_id": "regulatory_ex_post_cost", "meaning": "Saxo-supported ex-post cost total for the declared jurisdiction and period.", "formula": "sum source-defined ex-post components exactly once; refuse incomplete classification."},
+        {"metric_id": "total_cost", "meaning": "Identity total of included cost components.", "formula": "commission + spread + fx_conversion + financing + borrow + carry + custody + exchange_fees + taxes + stamp_duties, each included once."},
+        {"metric_id": "estimated_transaction_cost", "meaning": "Transaction cost used by sizing, optimization, scenario, or backtest output.", "formula": "sum eligible broker-specific fixed and variable cost components for the exact typed transaction set."},
+        {"metric_id": "maximum_loss", "meaning": "User-supplied or scenario-derived money loss limit used for sizing.", "formula": "abs(user_confirmed_loss_limit); the engine never chooses this value."}
+      ]
+    },
+    {
+      "policy_id": "instrument_return",
+      "definition_version": "1",
+      "analysis_kinds": ["cost_xray", "portfolio_performance"],
+      "metrics": [
+        {"metric_id": "cost_return_impact", "meaning": "Return difference caused by included costs.", "formula": "return_before_included_costs - return_after_included_costs."}
+      ]
+    },
+    {
+      "policy_id": "instrument_return",
+      "definition_version": "1",
+      "analysis_kinds": ["trading_mirror", "execution_quality"],
+      "metrics": [
+        {"metric_id": "expectancy", "meaning": "Average net result per eligible completed trade in return units.", "formula": "win_rate_ratio*mean_winner_return + (1-win_rate_ratio)*mean_loser_return."},
+        {"metric_id": "average_winner", "meaning": "Mean net return of eligible winning trades.", "formula": "mean(net_trade_return_i for net_trade_return_i > 0)."},
+        {"metric_id": "average_loser", "meaning": "Mean net return of eligible losing trades.", "formula": "mean(net_trade_return_i for net_trade_return_i < 0)."},
+        {"metric_id": "entry_timing_effect", "meaning": "Observed entry price effect against the exact decision quote or labeled bar rule.", "formula": "side_sign*(reference_price-entry_price)/reference_price."},
+        {"metric_id": "exit_timing_effect", "meaning": "Observed exit price effect against the exact decision quote or labeled bar rule.", "formula": "side_sign*(exit_price-reference_price)/reference_price."},
+        {"metric_id": "twr_mwr_behavior_gap", "meaning": "Difference between time-weighted and money-weighted return.", "formula": "time_weighted_return - money_weighted_return."},
+        {"metric_id": "turnover", "meaning": "Gross traded value relative to average capital.", "formula": "sum(abs(trade_value_i)) / average_declared_capital_base."}
+      ]
+    },
+    {
+      "policy_id": "duration",
+      "definition_version": "1",
+      "analysis_kinds": ["trading_mirror"],
+      "metrics": [
+        {"metric_id": "holding_time_asymmetry", "meaning": "Difference between mean losing and winning trade holding time.", "formula": "mean(loser_holding_days) - mean(winner_holding_days)."}
+      ]
+    },
+    {
+      "policy_id": "price",
+      "definition_version": "1",
+      "analysis_kinds": ["execution_quality", "instrument_quote", "session_cockpit"],
+      "metrics": [
+        {"metric_id": "arrival_price", "meaning": "Exact MCP-captured market reference at decision time.", "formula": "Stored eligible quote price selected by the declared bid, ask, or midpoint rule; unavailable without capture."},
+        {"metric_id": "midpoint_price", "meaning": "Midpoint of one synchronized eligible bid and ask quote.", "formula": "(bid + ask) / 2."},
+        {"metric_id": "vwap", "meaning": "Volume-weighted average execution price.", "formula": "sum(price_i*volume_i)/sum(volume_i); refuse zero or missing eligible volume."},
+        {"metric_id": "bar_approximation_price", "meaning": "Explicit nearest Saxo chart-bar reference when no decision quote exists.", "formula": "Declared open, close, high, or low from the nearest eligible completed bar; never label as arrival or midpoint.", "default_metric_class": "approximation"},
+        {"metric_id": "slippage", "meaning": "Side-normalized execution price difference from the eligible reference.", "formula": "side_sign*(execution_price-reference_price), where positive is adverse cost."},
+        {"metric_id": "spread", "meaning": "Eligible ask minus bid.", "formula": "ask - bid; refuse missing or asynchronous sides."}
+      ]
+    },
+    {
+      "policy_id": "percentage",
+      "definition_version": "1",
+      "analysis_kinds": ["execution_quality", "market_microstructure", "session_cockpit"],
+      "metrics": [
+        {"metric_id": "spread_quality", "meaning": "Spread relative to quote midpoint.", "formula": "100 * (ask-bid)/midpoint; refuse nonpositive midpoint."},
+        {"metric_id": "depth_imbalance", "meaning": "Normalized bid-versus-ask market-depth imbalance.", "formula": "100 * (bid_depth-ask_depth)/(bid_depth+ask_depth); refuse absent or zero total depth."},
+        {"metric_id": "liquidity_score", "meaning": "Transparent normalized score from declared spread, depth, and volume components.", "formula": "100 * weighted_sum(normalized declared components), with weights and component bounds stored in parameters."}
+      ]
+    },
+    {
+      "policy_id": "count",
+      "definition_version": "1",
+      "analysis_kinds": ["market_microstructure"],
+      "metrics": [
+        {"metric_id": "market_depth", "meaning": "Count of eligible quoted depth units or levels under the declared field.", "formula": "sum eligible depth quantity or count eligible levels, as named by output parameters."}
+      ]
+    },
+    {
+      "policy_id": "duration",
+      "definition_version": "1",
+      "analysis_kinds": ["instrument_quote", "session_cockpit"],
+      "metrics": [
+        {"metric_id": "quote_delay", "meaning": "Elapsed delay between quote timestamp and analysis cutoff.", "formula": "analysis_cutoff - quote_timestamp, converted to minutes.", "output_unit": "minutes"}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_scenario", "scenario_historical", "scenario_custom", "scenario_currency", "scenario_volatility", "scenario_rate", "scenario_margin", "scenario_combined", "margin_fire_drill"],
+      "metrics": [
+        {"metric_id": "historical_scenario_effect", "meaning": "Portfolio money change under a dated historical shock replay.", "formula": "sum position_exposure_i * historical_shock_i plus modeled supported nonlinear effects and explicit FX shocks."},
+        {"metric_id": "custom_shock_effect", "meaning": "Portfolio money change under explicit user-confirmed shocks.", "formula": "sum component_effect_i under the exact stored shock map."},
+        {"metric_id": "currency_shock_effect", "meaning": "Portfolio money change caused by explicit currency shocks.", "formula": "sum currency_exposure_c * explicit_fx_shock_c."},
+        {"metric_id": "volatility_shock_effect", "meaning": "Supported derivative value change under an explicit volatility-point shock.", "formula": "reprice supported positions at volatility+shock minus current modeled value."},
+        {"metric_id": "rate_shock_effect", "meaning": "Supported position money change under an explicit rate shock.", "formula": "reprice supported positions at shocked curve minus current modeled value."},
+        {"metric_id": "combined_scenario_effect", "meaning": "Total money effect from one explicit combined shock map.", "formula": "sum scenario_contribution_i with nonlinear positions repriced jointly when required."},
+        {"metric_id": "scenario_contribution", "meaning": "One position or risk-driver contribution to total scenario effect.", "formula": "shocked_value_i - current_value_i; all contributions must sum to combined_scenario_effect."},
+        {"metric_id": "inflation_adjusted_outcome", "meaning": "Nominal modeled outcome converted by an explicit numeric inflation assumption.", "formula": "nominal_outcome / (1+inflation_assumption)^years; refuse absent assumption."},
+        {"metric_id": "sensitivity_lower", "meaning": "Lower modeled outcome at the declared lower assumption bound.", "formula": "model(explicit_lower_parameter_set)."},
+        {"metric_id": "sensitivity_upper", "meaning": "Upper modeled outcome at the declared upper assumption bound.", "formula": "model(explicit_upper_parameter_set)."}
+      ]
+    },
+    {
+      "policy_id": "model_probability",
+      "definition_version": "1",
+      "analysis_kinds": ["goal_model", "monte_carlo", "portfolio_scenario"],
+      "metrics": [
+        {"metric_id": "goal_probability", "meaning": "Seeded model-distribution fraction of paths meeting the explicit goal.", "formula": "count(path_final_value >= explicit_goal)/path_count."},
+        {"metric_id": "ruin_probability", "meaning": "Seeded model-distribution fraction of paths crossing the explicit ruin threshold.", "formula": "count(any(path_value <= explicit_ruin_threshold))/path_count."},
+        {"metric_id": "sequence_of_returns_risk", "meaning": "Difference in modeled failure probability caused by return ordering under fixed returns and flows.", "formula": "failure_probability_ordered - failure_probability_order_neutral_reference."}
+      ]
+    },
+    {
+      "policy_id": "technical",
+      "definition_version": "1",
+      "analysis_kinds": ["technical_indicators", "instrument_price_volume", "session_cockpit"],
+      "metrics": [
+        {"metric_id": "moving_average", "meaning": "Arithmetic mean over the exact rolling price window.", "formula": "sum(last_n_prices)/n."},
+        {"metric_id": "rsi", "meaning": "Wilder relative strength index over the declared period.", "formula": "100 - 100/(1 + smoothed_gain/smoothed_loss), with defined zero-loss limiting case."},
+        {"metric_id": "macd", "meaning": "Difference between declared fast and slow exponential moving averages.", "formula": "EMA_fast(price) - EMA_slow(price) using alpha=2/(period+1)."},
+        {"metric_id": "atr", "meaning": "Wilder average true range over the declared period.", "formula": "Wilder_mean(max(high-low,abs(high-prev_close),abs(low-prev_close))).", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "bollinger_lower", "meaning": "Lower Bollinger band.", "formula": "rolling_mean - k*population_std over the exact window.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "bollinger_middle", "meaning": "Middle Bollinger band.", "formula": "rolling_mean over the exact window.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "bollinger_upper", "meaning": "Upper Bollinger band.", "formula": "rolling_mean + k*population_std over the exact window.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "realized_volatility", "meaning": "Annualized realized volatility from declared bar returns.", "formula": "sample_std(log(P_t/P_(t-1))) * sqrt(periods_per_year)."},
+        {"metric_id": "volume", "meaning": "Broker-reported eligible bar volume.", "formula": "sum eligible source Volume fields over the declared interval.", "output_unit": "units", "unit_class": "quantity", "default_metric_class": "broker_reported"},
+        {"metric_id": "volume_weighted_price", "meaning": "Price weighted by eligible bar volume.", "formula": "sum(price_i*volume_i)/sum(volume_i); refuse zero or missing volume.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "support_level", "meaning": "Deterministic support from the declared local-minimum rule.", "formula": "most recent price satisfying the exact left/right local-minimum window and touch-count parameters.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "resistance_level", "meaning": "Deterministic resistance from the declared local-maximum rule.", "formula": "most recent price satisfying the exact left/right local-maximum window and touch-count parameters.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "relative_strength", "meaning": "Subject cumulative price return divided by proxy cumulative price return.", "formula": "(1+subject_return)/(1+proxy_return)-1 over aligned cutoffs."},
+        {"metric_id": "momentum", "meaning": "Price change over the exact declared lookback.", "formula": "P_t/P_(t-lookback)-1."},
+        {"metric_id": "trend_state", "meaning": "Ordinal deterministic trend state encoded by the declared moving-average and slope thresholds.", "formula": "-1, 0, or 1 from the exact stored threshold predicates.", "output_unit": "count", "unit_class": "count"},
+        {"metric_id": "regime_state", "meaning": "Ordinal deterministic regime state encoded by declared volatility and trend thresholds.", "formula": "integer state from the exact stored threshold table.", "output_unit": "count", "unit_class": "count"}
+      ]
+    },
+    {
+      "policy_id": "derivative",
+      "definition_version": "1",
+      "analysis_kinds": ["option_chain", "derivatives_model", "option_payoff", "option_greeks", "iv_surface", "derivatives_scenario", "futures_curve", "fx_forward_carry"],
+      "metrics": [
+        {"metric_id": "option_breakeven", "meaning": "Underlying expiry price where one supported strategy payoff equals zero.", "formula": "Solve sum leg_quantity*intrinsic_value(S,K,side) - net_premium - eligible_costs = 0 on each piecewise-linear interval.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "payoff_at_expiry", "meaning": "Supported strategy money payoff at expiry for one underlying price.", "formula": "sum quantity_i*multiplier_i*intrinsic_i(S_T) - net_premium - eligible_costs.", "output_unit": "reporting_currency", "unit_class": "monetary"},
+        {"metric_id": "theoretical_option_value", "meaning": "Supported European option model value.", "formula": "Black-Scholes or Black-76 closed form selected by product contract; zero time uses intrinsic value.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "delta", "meaning": "First derivative of option value with respect to underlying price.", "formula": "Analytical supported-model dV/dS with long-call positive and long-put negative sign."},
+        {"metric_id": "gamma", "meaning": "Second derivative of option value with respect to underlying price.", "formula": "Analytical supported-model d2V/dS2."},
+        {"metric_id": "theta", "meaning": "Change in option value per declared one-day passage of time.", "formula": "Analytical supported-model dV/dt divided by declared days per year."},
+        {"metric_id": "vega", "meaning": "Change in option value for one volatility-point change.", "formula": "Analytical supported-model dV/dsigma divided by 100."},
+        {"metric_id": "rho", "meaning": "Change in option value for one rate-point change.", "formula": "Analytical supported-model dV/dr divided by 100."},
+        {"metric_id": "aggregate_delta", "meaning": "Quantity and multiplier weighted strategy delta.", "formula": "sum quantity_i*multiplier_i*delta_i."},
+        {"metric_id": "aggregate_gamma", "meaning": "Quantity and multiplier weighted strategy gamma.", "formula": "sum quantity_i*multiplier_i*gamma_i."},
+        {"metric_id": "aggregate_theta", "meaning": "Quantity and multiplier weighted strategy theta.", "formula": "sum quantity_i*multiplier_i*theta_i."},
+        {"metric_id": "aggregate_vega", "meaning": "Quantity and multiplier weighted strategy vega.", "formula": "sum quantity_i*multiplier_i*vega_i."},
+        {"metric_id": "aggregate_rho", "meaning": "Quantity and multiplier weighted strategy rho.", "formula": "sum quantity_i*multiplier_i*rho_i."},
+        {"metric_id": "implied_volatility", "meaning": "Volatility that reproduces an eligible option price under the supported model.", "formula": "Unique sigma in declared bounds solving model_value(sigma)-observed_price=0; refuse no root."},
+        {"metric_id": "iv_smile", "meaning": "Implied volatility at one expiry indexed by strike or delta.", "formula": "independently invert each eligible option then preserve ordered strike or delta pairs."},
+        {"metric_id": "iv_skew", "meaning": "Declared difference or slope across two implied-volatility points.", "formula": "(IV_b-IV_a)/(x_b-x_a) for exact declared strikes or deltas."},
+        {"metric_id": "iv_term_structure", "meaning": "Implied volatility indexed by time to expiry at a declared moneyness or delta.", "formula": "eligible IV at each expiry after exact interpolation rule; refuse unsupported interpolation."},
+        {"metric_id": "probability_range", "meaning": "Stated-distribution probability that expiry price lies inside explicit bounds.", "formula": "CDF(upper; declared distribution) - CDF(lower; declared distribution)."},
+        {"metric_id": "futures_basis", "meaning": "Futures price minus eligible spot reference.", "formula": "FuturesPrice - SpotPrice."},
+        {"metric_id": "futures_carry", "meaning": "Annualized futures basis under the declared day count.", "formula": "(FuturesPrice/SpotPrice - 1)/time_to_expiry_years."},
+        {"metric_id": "futures_term_structure", "meaning": "Relative price change between ordered futures expiries.", "formula": "F_later/F_nearer - 1 for the declared pair."},
+        {"metric_id": "futures_roll", "meaning": "Modeled money effect of closing the near contract and opening the next contract.", "formula": "quantity*multiplier*(near_exit_price-next_entry_price) - eligible_roll_costs.", "output_unit": "reporting_currency", "unit_class": "monetary"},
+        {"metric_id": "fx_forward", "meaning": "Covered-interest-parity forward under explicit supported rate inputs.", "formula": "spot * (1+r_quote*T)/(1+r_base*T) under the declared currency pair orientation.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "fx_carry", "meaning": "Annualized relative forward premium for the declared pair orientation.", "formula": "(forward/spot - 1)/T."}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["option_payoff", "pretrade_impact"],
+      "metrics": [
+        {"metric_id": "option_margin", "meaning": "Saxo-reported or compatible modeled margin for the exact option strategy.", "formula": "Use the eligible Saxo margin value; local aggregation may sum only explicitly additive leg components."},
+        {"metric_id": "option_cost", "meaning": "Total eligible premium and broker cost for the exact option strategy.", "formula": "net_premium + commissions + spread + financing and other declared eligible components."}
+      ]
+    },
+    {
+      "policy_id": "quantity",
+      "definition_version": "1",
+      "analysis_kinds": ["position_sizing", "pretrade_impact"],
+      "metrics": [
+        {"metric_id": "position_size", "meaning": "Largest lot-aligned quantity satisfying every explicit user and broker constraint.", "formula": "floor_to_lot(min(maximum_loss/unit_loss, concentration_limit/price, buying_power_limit/price, margin_limit_per_unit))."},
+        {"metric_id": "volatility_position_size", "meaning": "Lot-aligned quantity from an explicit volatility risk method.", "formula": "floor_to_lot(maximum_loss/(volatility_measure*explicit_multiplier*value_per_price_unit))."}
+      ]
+    },
+    {
+      "policy_id": "price",
+      "definition_version": "1",
+      "analysis_kinds": ["position_sizing"],
+      "metrics": [
+        {"metric_id": "stop_distance", "meaning": "Absolute distance between explicit entry and stop or invalidation price.", "formula": "abs(entry_price-stop_price)."}
+      ]
+    },
+    {
+      "policy_id": "money",
+      "definition_version": "1",
+      "analysis_kinds": ["position_sizing", "pretrade_impact"],
+      "metrics": [
+        {"metric_id": "concentration_limit", "meaning": "Explicit money cap implied by the user-confirmed concentration constraint.", "formula": "portfolio_denominator * explicit_maximum_weight."},
+        {"metric_id": "margin_constraint", "meaning": "Maximum money exposure allowed by compatible margin headroom.", "formula": "compatible_margin_headroom / margin_requirement_per_money_unit."},
+        {"metric_id": "buying_power_constraint", "meaning": "Maximum money exposure allowed by authoritative Saxo buying power.", "formula": "eligible Saxo buying power less explicit reserved buffer and eligible costs."}
+      ]
+    },
+    {
+      "policy_id": "optimization",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_minimum_variance", "portfolio_risk_parity", "portfolio_comparison"],
+      "metrics": [
+        {"metric_id": "minimum_variance_objective", "meaning": "Portfolio variance at the feasible target weights.", "formula": "w^T Sigma w."},
+        {"metric_id": "risk_parity_contribution", "meaning": "Normalized component risk contribution for one target asset.", "formula": "component_risk_i / sum_j(component_risk_j)."},
+        {"metric_id": "target_weight", "meaning": "Proposed feasible portfolio weight for one safe instrument.", "formula": "solver decision variable after exact constraint verification."},
+        {"metric_id": "current_weight", "meaning": "Current position exposure divided by the declared current portfolio denominator.", "formula": "current_exposure_i/current_total_exposure."},
+        {"metric_id": "current_to_target_delta", "meaning": "Required change from current to target weight.", "formula": "target_weight_i-current_weight_i."},
+        {"metric_id": "optimizer_turnover", "meaning": "One-way portfolio turnover implied by target weights.", "formula": "0.5*sum_i(abs(target_weight_i-current_weight_i))."},
+        {"metric_id": "optimizer_stability", "meaning": "Maximum absolute weight change under the declared small input perturbations.", "formula": "max_i(abs(weight_i_perturbed-weight_i_base)) across the exact perturbation set."}
+      ]
+    },
+    {
+      "policy_id": "fixed_income",
+      "definition_version": "1",
+      "analysis_kinds": ["fixed_income"],
+      "metrics": [
+        {"metric_id": "yield_to_maturity", "meaning": "Rate that discounts authoritative future cash flows to the declared price basis.", "formula": "Solve sum cashflow_i/(1+y/frequency)^(frequency*time_i) - declared_price = 0."},
+        {"metric_id": "modified_duration", "meaning": "First-order price sensitivity to yield.", "formula": "MacaulayDuration/(1+yield/frequency), with MacaulayDuration=sum(time_i*PV_i)/price."},
+        {"metric_id": "convexity", "meaning": "Second-order price sensitivity to yield.", "formula": "sum(PV-weighted time curvature terms)/price under the declared compounding convention."},
+        {"metric_id": "bond_carry", "meaning": "Expected supported coupon and accrual effect over the explicit horizon with unchanged yield.", "formula": "coupon_cashflows + accrued_interest_change - financing_cost over the horizon."},
+        {"metric_id": "roll_down", "meaning": "Modeled price effect of moving down an unchanged supported curve.", "formula": "price_at_shorter_remaining_maturity_same_curve - current_price."},
+        {"metric_id": "curve_shock_effect", "meaning": "Modeled money price change under an explicit curve shock.", "formula": "reprice authoritative cash flows at shocked curve - current modeled price."}
+      ]
+    },
+    {
+      "policy_id": "count",
+      "definition_version": "1",
+      "analysis_kinds": ["portfolio_overview", "session_cockpit"],
+      "metrics": [
+        {"metric_id": "working_order_count", "meaning": "Count of eligible working orders at cutoff.", "formula": "count distinct current order stable keys with a working status."},
+        {"metric_id": "position_count", "meaning": "Count of eligible open position stable keys at cutoff.", "formula": "count distinct current open position stable keys."}
+      ]
+    }
+  ]
+}
