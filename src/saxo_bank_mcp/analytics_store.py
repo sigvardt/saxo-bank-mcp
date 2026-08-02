@@ -3057,7 +3057,7 @@ class AnalyticsStore:
         except StoreValidationError as error:
             raise DeletionTokenError("deletion token is invalid") from error
         token_sha256 = _fingerprint(token)
-        staged_files: tuple[_StagedArtifactDeletion, ...] = ()
+        staged_files: list[_StagedArtifactDeletion] = []
         outer_transaction = self._transaction_owner == get_ident()
         effect_registered = False
         receipt: DeletionReceipt
@@ -3069,10 +3069,11 @@ class AnalyticsStore:
                     current_revision=self._revision(connection),
                 )
                 plan = authorization.plan
-                staged_files = _stage_owned_artifact_deletions(
+                _stage_owned_artifact_deletions(
                     self._config,
                     connection,
                     plan.targets.get("artifacts", ()),
+                    staged_files,
                 )
                 if outer_transaction and staged_files:
                     self._register_file_effect(
@@ -3692,9 +3693,10 @@ def _stage_owned_artifact_deletions(
     config: AnalyticsConfig,
     connection: duckdb.DuckDBPyConnection,
     artifact_ids: Sequence[str],
-) -> tuple[_StagedArtifactDeletion, ...]:
+    staged: list[_StagedArtifactDeletion],
+) -> None:
     if not artifact_ids:
-        return ()
+        return
     rows = cast(
         "list[tuple[object, ...]]",
         connection.execute(
@@ -3706,43 +3708,37 @@ def _stage_owned_artifact_deletions(
             (list(artifact_ids),),
         ).fetchall(),
     )
-    staged: list[_StagedArtifactDeletion] = []
-    try:
-        for raw_artifact_id, raw_media_type, raw_sha256, raw_visibility in rows:
-            if _require_str(raw_visibility) != VisibilityMode.LOCAL_RESOURCE_LINK.value:
-                continue
-            artifact_id = _require_str(raw_artifact_id)
-            destination = _owned_artifact_path(
-                config,
-                artifact_id,
-                _require_str(raw_media_type),
+    for raw_artifact_id, raw_media_type, raw_sha256, raw_visibility in rows:
+        if _require_str(raw_visibility) != VisibilityMode.LOCAL_RESOURCE_LINK.value:
+            continue
+        artifact_id = _require_str(raw_artifact_id)
+        destination = _owned_artifact_path(
+            config,
+            artifact_id,
+            _require_str(raw_media_type),
+        )
+        expected_sha256 = _require_str(raw_sha256)
+        identity = _require_owner_artifact_file(destination, expected_sha256)
+        temporary = destination.with_name(
+            f".artifact-delete-{artifact_id}-{uuid4().hex}{destination.suffix}.pending",
+        )
+        staged.append(
+            _StagedArtifactDeletion(
+                destination=destination,
+                temporary=temporary,
+                expected_sha256=expected_sha256,
+                identity=identity,
+            ),
+        )
+        with _open_owner_artifact_directory(destination.parent) as directory:
+            _rename_owner_artifact(
+                directory,
+                source_name=_artifact_relative_name(directory, destination),
+                destination_name=_artifact_relative_name(directory, temporary),
+                expected_identity=identity,
+                expected_sha256=expected_sha256,
             )
-            expected_sha256 = _require_str(raw_sha256)
-            identity = _require_owner_artifact_file(destination, expected_sha256)
-            temporary = destination.with_name(
-                f".artifact-delete-{artifact_id}-{uuid4().hex}{destination.suffix}.pending",
-            )
-            with _open_owner_artifact_directory(destination.parent) as directory:
-                _rename_owner_artifact(
-                    directory,
-                    source_name=_artifact_relative_name(directory, destination),
-                    destination_name=_artifact_relative_name(directory, temporary),
-                    expected_identity=identity,
-                    expected_sha256=expected_sha256,
-                )
-            _fsync_artifact_directory(destination.parent)
-            staged.append(
-                _StagedArtifactDeletion(
-                    destination=destination,
-                    temporary=temporary,
-                    expected_sha256=expected_sha256,
-                    identity=identity,
-                ),
-            )
-    except BaseException:
-        _restore_staged_artifact_files(tuple(staged))
-        raise
-    return tuple(staged)
+        _fsync_artifact_directory(destination.parent)
 
 
 def _restore_staged_artifact_files(staged: Sequence[_StagedArtifactDeletion]) -> None:

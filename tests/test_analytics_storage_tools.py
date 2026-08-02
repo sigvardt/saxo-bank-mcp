@@ -58,6 +58,10 @@ class _CommitThenRaiseConnection:
         return getattr(self._connection, name)
 
 
+class _SyntheticInterruption(BaseException):
+    pass
+
+
 def _raise_after_next_real_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -555,6 +559,60 @@ def test_owned_artifact_publication_and_deletion_fsync_the_directory(
         )
         delete_analytics_data(preview.preview.token, store=store)
         assert calls >= 4
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("failure_type", [OSError, _SyntheticInterruption])
+def test_staged_deletion_fsync_failure_restores_every_recorded_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    fsync_directory = store_module._fsync_artifact_directory
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = tuple(
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=f"synthetic retained artifact {ordinal}".encode(),
+                description="Synthetic retained artifact",
+            )
+            for ordinal in range(2)
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=tuple(item.artifact_id for item in owned)),
+            store=store,
+        )
+
+        def interrupt_after_delete_rename(directory: Path) -> None:
+            if len(tuple(directory.glob(".artifact-delete-*.pending"))) == len(owned):
+                raise failure_type("synthetic post-rename fsync interruption")
+            fsync_directory(directory)
+
+        monkeypatch.setattr(
+            store_module,
+            "_fsync_artifact_directory",
+            interrupt_after_delete_rename,
+        )
+        with pytest.raises(failure_type, match="post-rename fsync interruption"):
+            delete_analytics_data(preview.preview.token, store=store)
+
+        entries = store.list_storage(
+            StorageScope(artifact_ids=tuple(item.artifact_id for item in owned)),
+        )
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert {entry.object_id for entry in entries} == {item.artifact_id for item in owned}
+        assert len(files) == len(owned)
+        assert all(not file.name.startswith(".") for file in files)
+        assert {file.read_bytes() for file in files} == {
+            b"synthetic retained artifact 0",
+            b"synthetic retained artifact 1",
+        }
     finally:
         store.close()
 
