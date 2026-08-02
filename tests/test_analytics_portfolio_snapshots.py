@@ -678,7 +678,7 @@ async def test_material_change_in_another_account_does_not_cross_alias_boundary(
 
     assert second.invalidated_analysis_count == 0
     assert first.account_alias != second.account_alias
-    assert first.position_handles != second.position_handles
+    assert first.position_handles == second.position_handles
     connection = duckdb.connect(str(config.paths.store_path), read_only=True)
     try:
         status = connection.execute(

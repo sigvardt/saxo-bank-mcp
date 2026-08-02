@@ -354,6 +354,13 @@ async def sync_price_bars(  # noqa: PLR0913
         end,
     )
     prior = _existing_bar_state(prior_bar_lineage, start, end)
+    prior_material_sha256 = _visible_price_series_fingerprint(
+        prior_bar_lineage,
+        instrument_handle,
+        interval,
+        start,
+        end,
+    )
     refresh_start = (
         start if prior is None or prior.coverage_start > start else max(start, prior.refresh_start)
     )
@@ -461,6 +468,9 @@ async def sync_price_bars(  # noqa: PLR0913
         normalized_series=refreshed_series,
         coverage=coverage,
         visible_bar_revisions=visible_bar_revisions,
+        invalidate_prior_analyses=(
+            prior_material_sha256 is not None and prior_material_sha256 != series.fingerprint_sha256
+        ),
     )
     summary = PriceBarDatasetSummary(
         dataset_id=dataset_id,
@@ -1932,6 +1942,27 @@ def _existing_bar_state(
     )
 
 
+def _visible_price_series_fingerprint(
+    visible_bar_lineage: Mapping[datetime, _VisibleBarReference],
+    instrument_handle: str,
+    interval: ChartInterval,
+    start: datetime,
+    end: datetime,
+) -> str | None:
+    if not visible_bar_lineage:
+        return None
+    prior = normalize_price_series(
+        rows=tuple(
+            reference.source_row for _bar_time, reference in sorted(visible_bar_lineage.items())
+        ),
+        instrument_handle=instrument_handle,
+        interval=interval,
+        start=start,
+        end=end,
+    )
+    return prior.fingerprint_sha256
+
+
 def _stored_sync_metadata(payload_json: object) -> dict[str, object]:
     if not isinstance(payload_json, str):
         raise SyncError("stored dataset metadata is invalid")
@@ -2109,6 +2140,7 @@ def _persist_chart_capture(  # noqa: PLR0913
     normalized_series: NormalizedPriceSeries,
     coverage: tuple[datetime, datetime],
     visible_bar_revisions: Mapping[datetime, str],
+    invalidate_prior_analyses: bool,
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("chart capture contains no source page")
@@ -2131,6 +2163,16 @@ def _persist_chart_capture(  # noqa: PLR0913
             for bar_time, revision in sorted(visible_bar_revisions.items())
         },
     }
+
+    def invalidate_dependent_analyses(connection: duckdb.DuckDBPyConnection) -> int:
+        return _invalidate_chart_dependent_analyses(
+            connection,
+            instrument_handle=instrument_handle,
+            interval=interval,
+            start=start,
+            end=end,
+        )
+
     return _persist_market_capture(
         config=config,
         pages=pages,
@@ -2146,6 +2188,9 @@ def _persist_chart_capture(  # noqa: PLR0913
             pages=pages,
             stored_page_ids=stored_page_ids,
             series=normalized_series,
+        ),
+        invalidate_dependent_analyses=(
+            invalidate_dependent_analyses if invalidate_prior_analyses else None
         ),
     )
 
@@ -2165,6 +2210,7 @@ def _persist_market_capture(  # noqa: PLR0913
         [duckdb.DuckDBPyConnection, Mapping[int, str]],
         None,
     ],
+    invalidate_dependent_analyses: Callable[[duckdb.DuckDBPyConnection], int] | None = None,
 ) -> tuple[dict[int, str], str]:
     if not pages:
         raise SyncError("market capture contains no source page")
@@ -2206,6 +2252,8 @@ def _persist_market_capture(  # noqa: PLR0913
                     )
                     stored_page_ids[source_page.page_number] = stored.page_id
                 persist_normalized(connection, stored_page_ids)
+                if invalidate_dependent_analyses is not None:
+                    invalidate_dependent_analyses(connection)
                 store.create_dataset(
                     dataset_id=dataset_id,
                     account_scope=pages[0].account_scope,
@@ -2223,6 +2271,65 @@ def _persist_market_capture(  # noqa: PLR0913
     finally:
         store.close()
     return stored_page_ids, dataset_id
+
+
+def _invalidate_chart_dependent_analyses(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    instrument_handle: str,
+    interval: ChartInterval,
+    start: datetime,
+    end: datetime,
+) -> int:
+    dependent = tuple(source_contracts_by_id()[_CHART_CONTRACT_ID].dependent_analysis_kinds)
+    if not dependent:
+        return 0
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
+            SELECT DISTINCT a.analysis_id, a.dataset_id
+            FROM analyses AS a
+            JOIN datasets AS d ON d.dataset_id = a.dataset_id
+            JOIN dataset_source_pages AS dsp ON dsp.dataset_id = d.dataset_id
+            JOIN source_pages AS p ON p.page_id = dsp.page_id
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE a.analysis_kind = ANY(?)
+              AND a.status != 'invalidated'
+              AND c.contract_name = ?
+              AND p.instrument_handle = ?
+              AND d.coverage_start <= ?
+              AND d.coverage_end >= ?
+            """,
+            (list(dependent), _CHART_CONTRACT_ID, instrument_handle, end, start),
+        ).fetchall(),
+    )
+    analysis_ids: list[str] = []
+    validated_datasets: dict[str, bool] = {}
+    for raw_analysis_id, raw_dataset_id in rows:
+        analysis_id = _required_text(raw_analysis_id, "stored analysis ID")
+        dataset_id = _required_text(raw_dataset_id, "stored analysis dataset ID")
+        matches_scope = validated_datasets.get(dataset_id)
+        if matches_scope is None:
+            metadata, _source_pages, _source_revision = _authenticated_dataset_metadata(
+                connection,
+                dataset_id,
+            )
+            matches_scope = (
+                metadata.get("data_kind") == "price_bars"
+                and metadata.get("instrument_handle") == instrument_handle
+                and metadata.get("interval") == interval.value
+            )
+            validated_datasets[dataset_id] = matches_scope
+        if matches_scope:
+            analysis_ids.append(analysis_id)
+    unique_analysis_ids = sorted(set(analysis_ids))
+    if unique_analysis_ids:
+        connection.execute(
+            "UPDATE analyses SET status = 'invalidated' WHERE analysis_id = ANY(?)",
+            (unique_analysis_ids,),
+        )
+    return len(unique_analysis_ids)
 
 
 def _persist_entitlement_refusal(  # noqa: PLR0913

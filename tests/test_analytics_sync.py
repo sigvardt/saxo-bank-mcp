@@ -14,12 +14,10 @@ import duckdb
 import httpx2
 import pytest
 
-import saxo_bank_mcp.analytics_resolver as resolver_module
 import saxo_bank_mcp.analytics_source_contracts as source_contracts_module
 import saxo_bank_mcp.analytics_sync as analytics_sync_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_market_data import ChartInterval
-from saxo_bank_mcp.analytics_models import HandleKind
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_resolver import InstrumentResolver
 from saxo_bank_mcp.analytics_store import (
@@ -1629,11 +1627,6 @@ async def test_every_chart_fingerprint_binds_retained_and_refreshed_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixed_handle = "ih_00000000000040008000000000000001"
-
-    def fixed_instrument_handle(_kind: HandleKind) -> str:
-        return fixed_handle
-
     async def scenario(root: Path, leading_close: float) -> dict[str, str]:
         uuids = iter(
             (
@@ -1643,11 +1636,6 @@ async def test_every_chart_fingerprint_binds_retained_and_refreshed_rows(
             ),
         )
         monkeypatch.setattr(source_contracts_module, "uuid4", lambda: next(uuids))
-        monkeypatch.setattr(
-            resolver_module,
-            "new_safe_handle",
-            fixed_instrument_handle,
-        )
         config = _config(root)
         handle = await _resolved_handle(config)
         executor = _PayloadExecutor(

@@ -17,8 +17,12 @@ import duckdb
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_instrument_identity import (
+    InstrumentIdentityError,
+    put_saxo_instrument_identity,
+)
 from saxo_bank_mcp.analytics_migrations import store_writer_lock_path
-from saxo_bank_mcp.analytics_models import HandleKind, InstrumentHandle, new_safe_handle
+from saxo_bank_mcp.analytics_models import InstrumentHandle
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_fingerprint,
@@ -126,6 +130,30 @@ class _CatalogEntry:
     @property
     def identity(self) -> tuple[str, int]:
         return (self.metadata.asset_type, self.metadata.identifier)
+
+
+def _unique_catalog_entries(
+    entries: Sequence[_CatalogEntry],
+) -> tuple[_CatalogEntry, ...]:
+    identities: set[tuple[str, int]] = set()
+    for entry in entries:
+        if entry.identity in identities:
+            raise ResolutionError("stored Saxo instrument identity is duplicated")
+        identities.add(entry.identity)
+    return tuple(entries)
+
+
+def _unique_source_instruments(
+    instruments: Sequence[_SourceInstrument],
+) -> tuple[_SourceInstrument, ...]:
+    by_identity: dict[tuple[str, int], _SourceInstrument] = {}
+    for instrument in instruments:
+        identity = (instrument.asset_type, instrument.identifier)
+        current = by_identity.get(identity)
+        if current is not None and current != instrument:
+            raise ResolutionError("Saxo returned conflicting rows for one instrument identity")
+        by_identity[identity] = instrument
+    return tuple(by_identity.values())
 
 
 @contextmanager
@@ -263,7 +291,7 @@ class _InstrumentCatalog:
             except ValidationError as error:
                 raise ResolutionError("stored instrument metadata is invalid") from error
             entries.append(_CatalogEntry(instrument_handle=handle, metadata=metadata))
-        return tuple(entries)
+        return _unique_catalog_entries(entries)
 
     def upsert(
         self,
@@ -272,11 +300,12 @@ class _InstrumentCatalog:
         source_revision: str,
         source_timestamp: datetime,
     ) -> tuple[ResolvedInstrument, ...]:
+        unique_instruments = _unique_source_instruments(instruments)
         with _write_transaction(self._config) as connection:
             existing = self._entries_in_connection(connection)
             by_identity = {entry.identity: entry for entry in existing}
             incoming_bytes = 0
-            for instrument in instruments:
+            for instrument in unique_instruments:
                 current = by_identity.get(
                     (instrument.asset_type, instrument.identifier),
                 )
@@ -295,7 +324,7 @@ class _InstrumentCatalog:
                     ) from error
             results: list[ResolvedInstrument] = []
             changed = False
-            for instrument in instruments:
+            for instrument in unique_instruments:
                 current = by_identity.get((instrument.asset_type, instrument.identifier))
                 result, did_change = self._upsert_one(
                     connection,
@@ -334,7 +363,7 @@ class _InstrumentCatalog:
             except ValidationError as error:
                 raise ResolutionError("stored instrument metadata is invalid") from error
             entries.append(_CatalogEntry(instrument_handle=handle, metadata=metadata))
-        return tuple(entries)
+        return _unique_catalog_entries(entries)
 
     def _upsert_one(
         self,
@@ -349,47 +378,31 @@ class _InstrumentCatalog:
         metadata = _stored_metadata(instrument, current)
         metadata_json = metadata.model_dump_json()
         fingerprint = _sha256(metadata_json)
-        handle = (
-            new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
-            if current is None
-            else current.instrument_handle
-        )
         renamed = current is not None and current.metadata != metadata
-        changed = current is None or renamed
-        if changed:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO safe_instruments (
-                    instrument_handle,
-                    asset_type,
-                    safe_label,
-                    source_revision,
-                    source_timestamp,
-                    fingerprint_sha256,
-                    metadata_json
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    handle,
-                    instrument.asset_type,
-                    label,
-                    source_revision,
-                    source_timestamp,
-                    fingerprint,
-                    metadata_json,
-                ),
+        try:
+            write = put_saxo_instrument_identity(
+                connection,
+                asset_type=instrument.asset_type,
+                uic=instrument.identifier,
+                safe_label=label,
+                source_revision=source_revision,
+                source_timestamp=source_timestamp,
+                fingerprint_sha256=fingerprint,
+                metadata_json=metadata_json,
+                update_existing=True,
             )
+        except InstrumentIdentityError as error:
+            raise ResolutionError(str(error)) from error
         return (
             ResolvedInstrument(
-                instrument_handle=handle,
+                instrument_handle=write.instrument_handle,
                 display_label=label,
                 symbol=safe_symbol,
                 asset_type=instrument.asset_type,
                 exchange=safe_exchange,
                 state=InstrumentState.RENAMED if renamed else InstrumentState.CURRENT,
             ),
-            changed,
+            write.changed,
         )
 
 

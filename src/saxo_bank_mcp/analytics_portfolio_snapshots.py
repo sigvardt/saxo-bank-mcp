@@ -20,6 +20,11 @@ from saxo_bank_mcp.analytics_account_data import (
     conservative_ingestion_reservation,
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_instrument_identity import (
+    InstrumentIdentityError,
+    instrument_handle_for_saxo_identity,
+    put_saxo_instrument_identity,
+)
 from saxo_bank_mcp.analytics_models import (
     DatasetId,
     HandleKind,
@@ -86,9 +91,10 @@ class _StrictModel(BaseModel):
 
 
 class PrivatePositionValue(_StrictModel):
-    """Private current-position values identified only by an opaque local handle."""
+    """Private current-position values with a safe position alias."""
 
-    instrument_handle: InstrumentHandle
+    position_alias: str = Field(pattern=r"^pa_[0-9a-f]{32}$")
+    instrument_handle: InstrumentHandle | None
     amount_value: float | None = Field(allow_inf_nan=False)
     open_price_value: float | None = Field(allow_inf_nan=False)
     current_price_value: float | None = Field(allow_inf_nan=False)
@@ -145,7 +151,8 @@ class PortfolioSnapshot(_StrictModel):
 
 @dataclass(frozen=True, slots=True)
 class _Position:
-    handle: str
+    position_alias: str
+    instrument_handle: str | None
     asset_type: str
     identifier: int | None
     amount_value: float | None
@@ -156,7 +163,8 @@ class _Position:
 
     def private_value(self) -> PrivatePositionValue:
         return PrivatePositionValue(
-            instrument_handle=self.handle,
+            position_alias=self.position_alias,
+            instrument_handle=self.instrument_handle,
             amount_value=self.amount_value,
             open_price_value=self.open_price_value,
             current_price_value=self.current_price_value,
@@ -169,8 +177,9 @@ class _Position:
             "amount_value": self.amount_value,
             "current_price_value": self.current_price_value,
             "exposure_value": self.exposure_value,
-            "instrument_handle": self.handle,
+            "instrument_handle": self.instrument_handle,
             "open_price_value": self.open_price_value,
+            "position_alias": self.position_alias,
             "profit_loss_value": self.profit_loss_value,
         }
 
@@ -279,6 +288,7 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
     values = _normalize_snapshot(pages_by_contract, validated_scope.alias)
     material_fingerprint = _material_fingerprint(pages_by_contract)
     warnings = _snapshot_warnings(values, envelope.pages)
+    identity_unavailable = any(position.instrument_handle is None for position in values.positions)
     truncated = len(values.positions) > config.limits.response_rows
     if truncated:
         warnings = tuple(
@@ -299,7 +309,9 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
     return PortfolioSnapshot(
         status=(
             "degraded"
-            if truncated or any(page.source_quality.state == "limited" for page in envelope.pages)
+            if truncated
+            or identity_unavailable
+            or any(page.source_quality.state == "limited" for page in envelope.pages)
             else "complete"
         ),
         snapshot_id=snapshot_id,
@@ -311,8 +323,10 @@ async def capture_portfolio_snapshot(  # noqa: PLR0913
         position_count=len(values.positions),
         order_count=len(values.order_identity_sha256s),
         position_handles=tuple(
-            position.handle for position in values.positions[: config.limits.response_rows]
-        ),
+            position.instrument_handle
+            for position in values.positions
+            if position.instrument_handle is not None
+        )[: config.limits.response_rows],
         invalidated_analysis_count=invalidated,
         warnings=warnings,
         fingerprints=fingerprints,
@@ -422,7 +436,10 @@ def _normalize_snapshot(
                 for page in pages_by_contract[_POSITIONS_CONTRACT]
                 for row in page.rows
             ),
-            key=lambda position: position.handle,
+            key=lambda position: (
+                position.instrument_handle or "",
+                position.position_alias,
+            ),
         ),
     )
     order_hashes = tuple(
@@ -480,9 +497,13 @@ def _normalize_position(
     asset_type = _optional_text(base.get("AssetType")) or "Unknown"
     identifier = _optional_integer(base.get("Uic"))
     return _Position(
-        handle=_opaque_handle(
-            "ih",
+        position_alias=_opaque_position_alias(
             {"account_alias": alias, "position_id": position_id},
+        ),
+        instrument_handle=(
+            None
+            if identifier is None
+            else instrument_handle_for_saxo_identity(asset_type, identifier)
         ),
         asset_type=asset_type,
         identifier=identifier,
@@ -506,6 +527,8 @@ def _snapshot_warnings(
         warnings.add("unsettled_cash_present")
     if any(page.source_quality.state == "limited" for page in pages):
         warnings.add("source_quality_limited")
+    if any(position.instrument_handle is None for position in values.positions):
+        warnings.add("position_instrument_unavailable")
     return tuple(sorted(warnings))
 
 
@@ -664,7 +687,7 @@ def _put_safe_position(
     source_revision: str,
     source_timestamp: datetime,
 ) -> None:
-    if position.identifier is None:
+    if position.identifier is None or position.instrument_handle is None:
         return
     metadata: dict[str, SourceJsonValue] = {
         "aliases": [],
@@ -675,25 +698,22 @@ def _put_safe_position(
         "symbol": None,
     }
     metadata_json = _canonical_json(metadata)
-    connection.execute(
-        """
-        INSERT INTO safe_instruments (
-            instrument_handle, asset_type, safe_label, source_revision,
-            source_timestamp, fingerprint_sha256, metadata_json
+    try:
+        write = put_saxo_instrument_identity(
+            connection,
+            asset_type=position.asset_type,
+            uic=position.identifier,
+            safe_label=f"{position.asset_type} position",
+            source_revision=source_revision,
+            source_timestamp=source_timestamp,
+            fingerprint_sha256=_fingerprint(metadata),
+            metadata_json=metadata_json,
+            update_existing=False,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (instrument_handle) DO NOTHING
-        """,
-        (
-            position.handle,
-            position.asset_type,
-            f"{position.asset_type} position",
-            source_revision,
-            source_timestamp,
-            _fingerprint(metadata),
-            metadata_json,
-        ),
-    )
+    except InstrumentIdentityError as error:
+        raise PortfolioSnapshotError(str(error)) from error
+    if write.instrument_handle != position.instrument_handle:
+        raise PortfolioSnapshotError("portfolio instrument identity is inconsistent")
 
 
 def _latest_material_fingerprint(
@@ -843,14 +863,14 @@ def _require_utc_clock(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _opaque_handle(prefix: str, material: Mapping[str, object]) -> str:
+def _opaque_position_alias(material: Mapping[str, object]) -> str:
     digest = bytearray(hashlib.sha256(_canonical_json(dict(material)).encode()).digest()[:16])
     digest[6] = (digest[6] & 0x0F) | 0x40
     digest[8] = (digest[8] & 0x3F) | 0x80
     opaque_uuid = UUID(bytes=bytes(digest))
     if opaque_uuid.version != _OPAQUE_UUID_VERSION or opaque_uuid.variant != RFC_4122:
         raise PortfolioSnapshotError("opaque portfolio handle construction failed")
-    return f"{prefix}_{opaque_uuid.hex}"
+    return f"pa_{opaque_uuid.hex}"
 
 
 def _thaw_mapping(

@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, Literal, cast
-from uuid import RFC_4122, UUID, uuid4
+from uuid import uuid4
 
 import duckdb
 from pydantic import (
@@ -22,6 +22,11 @@ from pydantic import (
 )
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_instrument_identity import (
+    InstrumentIdentityError,
+    instrument_handle_for_saxo_identity,
+    put_saxo_instrument_identity,
+)
 from saxo_bank_mcp.analytics_models import (
     DatasetId,
     HandleKind,
@@ -55,7 +60,6 @@ _CLOSED_POSITIONS_CONTRACT: Final = "closed_positions_history_v1"
 _COSTS_CONTRACT: Final = "costs_v1"
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 512
 _SOURCE_PAGE_SIZE: Final = 500
-_ACCOUNT_ALIAS_VERSION: Final = 4
 _MAX_SOURCE_TEXT_LENGTH: Final = 1_000
 _DUCKDB_ALLOCATION_RESERVE_BYTES: Final = 16 * 1024 * 1024
 _DUCKDB_BLOCK_BYTES: Final = 256 * 1024
@@ -834,14 +838,7 @@ def _normalize_closed_positions(
             instrument_handle = (
                 None
                 if identifier is None
-                else _opaque_handle(
-                    "ih",
-                    {
-                        "account_alias": alias,
-                        "asset_type": asset_type,
-                        "identifier": identifier,
-                    },
-                )
+                else instrument_handle_for_saxo_identity(asset_type, identifier)
             )
             closed_at_value = closed.get("ExecutionTimeClose")
             closed_at = None if closed_at_value is None else _required_timestamp(closed_at_value)
@@ -1288,25 +1285,22 @@ def _ensure_closed_position_instrument(
         "symbol": None,
     }
     metadata_json = _canonical_json(metadata)
-    connection.execute(
-        """
-        INSERT INTO safe_instruments (
-            instrument_handle, asset_type, safe_label, source_revision,
-            source_timestamp, fingerprint_sha256, metadata_json
+    try:
+        write = put_saxo_instrument_identity(
+            connection,
+            asset_type=asset_type,
+            uic=identifier,
+            safe_label=f"{asset_type} position",
+            source_revision=f"row:{record.source_row_sha256}",
+            source_timestamp=prepared.pages[0].source_timestamp,
+            fingerprint_sha256=_fingerprint(metadata),
+            metadata_json=metadata_json,
+            update_existing=False,
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (instrument_handle) DO NOTHING
-        """,
-        (
-            record.instrument_handle,
-            asset_type,
-            f"{asset_type} position",
-            f"row:{record.source_row_sha256}",
-            prepared.pages[0].source_timestamp,
-            _fingerprint(metadata),
-            metadata_json,
-        ),
-    )
+    except InstrumentIdentityError as error:
+        raise AccountSyncError(str(error)) from error
+    if write.instrument_handle != record.instrument_handle:
+        raise AccountSyncError("closed-position instrument identity is inconsistent")
 
 
 def _invalidate_dependent_analyses(
@@ -1480,16 +1474,6 @@ def _opaque_row_id(
         "costs": "co",
     }[data_kind]
     return f"{prefix}_{_fingerprint([alias, source_identity_sha256, source_row_sha256])}"
-
-
-def _opaque_handle(prefix: str, material: Mapping[str, object]) -> str:
-    digest = bytearray(hashlib.sha256(_canonical_json(dict(material)).encode()).digest()[:16])
-    digest[6] = (digest[6] & 0x0F) | 0x40
-    digest[8] = (digest[8] & 0x3F) | 0x80
-    opaque_uuid = UUID(bytes=bytes(digest))
-    if opaque_uuid.version != _ACCOUNT_ALIAS_VERSION or opaque_uuid.variant != RFC_4122:
-        raise AccountSyncError("opaque account-data handle construction failed")
-    return f"{prefix}_{opaque_uuid.hex}"
 
 
 def _required_text(value: object) -> str:
