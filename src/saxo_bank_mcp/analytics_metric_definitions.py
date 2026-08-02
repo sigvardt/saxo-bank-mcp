@@ -23,6 +23,9 @@ _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _FORMULA_INDEX_SUFFIX_PATTERN: Final = re.compile(
     r"\b[A-Za-z][A-Za-z0-9_]*_([a-z])\b",
 )
+_FORMULA_COMPOUND_INDEX_SUFFIX_PATTERN: Final = re.compile(
+    r"\b(?=[A-Za-z0-9]*[A-Z])[A-Za-z][A-Za-z0-9]*_([a-z]{2,3})\b",
+)
 _FORMULA_INDEX_EXPRESSION_PATTERN: Final = re.compile(
     r"\b[A-Za-z][A-Za-z0-9_]*_\(([^)]*)\)",
 )
@@ -32,6 +35,7 @@ _FORMULA_INDEX_REDUCER_PATTERN: Final = re.compile(
 _FORMULA_STANDALONE_INDEX_PATTERN: Final = re.compile(
     r"(?<![A-Za-z0-9_])([a-z])(?![A-Za-z0-9_])",
 )
+_FORMULA_ORDINARY_SUFFIXES: Final = frozenset({"id"})
 
 type ToleranceMode = Literal[
     "exact",
@@ -421,6 +425,11 @@ def _undefined_formula_indices(formula: str) -> tuple[str, ...]:
     ):
         for match in pattern.finditer(formula):
             indexes.update(_FORMULA_STANDALONE_INDEX_PATTERN.findall(match.group(1)))
+    directly_indexed = frozenset(indexes)
+    for match in _FORMULA_COMPOUND_INDEX_SUFFIX_PATTERN.finditer(formula):
+        suffix = match.group(1)
+        if suffix not in _FORMULA_ORDINARY_SUFFIXES and not directly_indexed.isdisjoint(suffix):
+            indexes.update(suffix)
     return tuple(
         sorted(
             index

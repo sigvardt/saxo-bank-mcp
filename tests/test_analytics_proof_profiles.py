@@ -333,6 +333,30 @@ def test_metric_definition_rejects_undefined_formula_indexes() -> None:
         )
 
 
+def test_metric_definition_rejects_undefined_compound_formula_index() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+
+    with pytest.raises(ValidationError, match=r"undefined formula indices.*i"):
+        MetricDefinition.model_validate(
+            definition.model_dump(mode="python")
+            | {"formula": "J={the complete ordered cash flows}; sum_{j in J}(CF_ij)."},
+        )
+
+
+def test_metric_definition_accepts_ordinary_identifier_suffix() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+    formula = (
+        "I={the complete ordered values}; P={the complete ordered periods}; "
+        "sum_{i in I,p in P}(value_i+subject_up); branch_id=linear."
+    )
+
+    validated = MetricDefinition.model_validate(
+        definition.model_dump(mode="python") | {"formula": formula},
+    )
+
+    assert validated.formula == formula
+
+
 def test_price_and_execution_metric_classes_match_their_calculation_origin() -> None:
     named = load_metric_definition_catalog().by_id()
     expected = {
