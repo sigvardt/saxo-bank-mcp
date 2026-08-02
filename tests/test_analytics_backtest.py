@@ -394,6 +394,51 @@ def test_solvent_short_realized_weight_below_negative_one_matches_reference() ->
     assert len(values.fills) == reference.fill_count
 
 
+def test_active_short_zero_equity_close_refuses_before_later_recovery() -> None:
+    bars = (
+        _bar(0, 100.0),
+        _bar(1, 100.0),
+        _bar(2, 300.0, open_price=100.0),
+        _bar(3, 100.0, open_price=100.0),
+        _bar(4, 100.0),
+        _bar(5, 100.0),
+    )
+    request = _request(
+        dataset=_dataset(bars=bars),
+        strategy=_always_in_strategy(interval_bars=10, direction="short"),
+    )
+    result = run_backtest(
+        request,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+    reference_error: ArithmeticError | None = None
+    try:
+        run_event_loop_reference(
+            tuple(
+                ReferenceBar(
+                    at=bar.at,
+                    open_price=bar.open_price,
+                    close_price=bar.close_price,
+                    lifecycle_state=bar.lifecycle_state,
+                )
+                for bar in bars
+            ),
+            request.strategy,
+            starting_equity=request.starting_equity,
+        )
+    except ArithmeticError as error:
+        reference_error = error
+
+    production_reason = (
+        result.reason_code if isinstance(result, ResearchRefusal) else None
+    )
+    assert (production_reason, reference_error is not None) == (
+        "backtest_measure_undefined",
+        True,
+    )
+
+
 def test_scheduled_rebalance_records_drift_turnover_and_fill() -> None:
     bars = (
         _bar(0, 100.0),

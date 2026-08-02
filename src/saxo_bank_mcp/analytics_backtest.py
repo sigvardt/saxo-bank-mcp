@@ -668,7 +668,15 @@ def _execute_path(  # noqa: PLR0915
             else:
                 turnover = 0.0
         equity = cash + position_units * current_close
-        if not math.isfinite(equity) or equity < 0:
+        if (
+            not math.isfinite(equity)
+            or equity < 0
+            or (
+                equity <= 0
+                and position_units != 0.0
+                and current.lifecycle_state != "delisted"
+            )
+        ):
             raise ArithmeticError("modeled backtest path is undefined")
         if current.lifecycle_state == "delisted":
             position_units = 0.0

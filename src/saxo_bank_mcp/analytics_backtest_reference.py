@@ -129,7 +129,15 @@ def run_event_loop_reference(  # noqa: C901, PLR0912, PLR0915
             else:
                 turnover = 0.0
         equity = cash + position_units * current_close
-        if not math.isfinite(equity) or equity < 0:
+        if (
+            not math.isfinite(equity)
+            or equity < 0
+            or (
+                equity <= 0
+                and position_units != 0.0
+                and current.lifecycle_state != "delisted"
+            )
+        ):
             raise ArithmeticError("reference path is undefined")
         turnover_total += turnover
         cost_total += cost
