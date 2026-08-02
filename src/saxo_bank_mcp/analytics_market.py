@@ -522,7 +522,7 @@ class SavedConditionResult(_StrictModel):
     warnings: tuple[str, ...]
 
 
-def check_saved_conditions(  # noqa: C901, PLR0911
+def check_saved_conditions(  # noqa: C901, PLR0911, PLR0912
     conditions: Sequence[SavedCondition],
     universe: BoundedResearchUniverse,
     *,
@@ -558,6 +558,22 @@ def check_saved_conditions(  # noqa: C901, PLR0911
                     dataset_ids=(condition.dataset_id,),
                     instrument_handles=(condition.instrument_handle,),
                     missing_fields=("quote_dataset",),
+                )
+            if (
+                quote_dataset.quality_state is QualityState.STALE
+                or quote_dataset.quote.freshness == "stale"
+            ):
+                quote_warnings = set(quote_dataset.warnings) | set(
+                    quote_dataset.quote.warnings,
+                )
+                quote_warnings.add("quote_stale")
+                return ResearchRefusal(
+                    analysis_kind="saved_condition_checks",
+                    reason_code="quote_data_unusable",
+                    reason="stale quote data cannot be evaluated for a saved condition",
+                    dataset_ids=(condition.dataset_id,),
+                    instrument_handles=(condition.instrument_handle,),
+                    warnings=tuple(sorted(quote_warnings)),
                 )
             quote_result = analyze_quote(quote_dataset)
             if isinstance(quote_result, ResearchRefusal):

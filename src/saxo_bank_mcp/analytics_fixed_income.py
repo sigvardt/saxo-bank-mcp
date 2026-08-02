@@ -342,6 +342,14 @@ def analyze_fixed_income(
         if dataset.same_curve_shorter_maturity_price is not None
         else None
     )
+    if (carry is not None and not math.isfinite(carry)) or (
+        roll_down is not None and not math.isfinite(roll_down)
+    ):
+        return _dataset_refusal(
+            dataset,
+            reason_code="fixed_income_measure_undefined",
+            reason="the supplied fields do not define stable bond measures",
+        )
     warnings = set(dataset.warnings)
     warnings.add(_UNBOUND_SOURCE_WARNING)
     if missing_optional:

@@ -162,6 +162,22 @@ def test_extreme_finite_inputs_return_measure_undefined_instead_of_dividing_by_z
     assert result.source_scope is None
 
 
+def test_optional_fixed_income_overflow_returns_measure_undefined() -> None:
+    dataset = _bond().model_copy(
+        update={
+            "horizon_coupon_cashflows": 1e308,
+            "accrued_interest_change": 1e308,
+            "financing_cost": 0.0,
+        },
+    )
+
+    result = analyze_fixed_income(dataset)
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "fixed_income_measure_undefined"
+    assert result.source_scope is None
+
+
 @seed(2026080203)
 @_PROPERTY_SETTINGS
 @given(

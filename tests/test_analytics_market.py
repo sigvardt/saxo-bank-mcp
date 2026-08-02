@@ -361,6 +361,33 @@ def test_saved_condition_checks_use_a_fixed_catalog_instead_of_expressions() -> 
         )
 
 
+def test_saved_spread_condition_refuses_stale_quote_before_evaluation() -> None:
+    quote = _quote(1, 109.0, 111.0)
+    stale_quote = quote.model_copy(
+        update={
+            "quality_state": QualityState.STALE,
+            "quote": quote.quote.model_copy(update={"freshness": "stale"}),
+        },
+    )
+    condition = SavedCondition(
+        condition_id="stale_spread_gate",
+        instrument_handle=stale_quote.instrument_handle,
+        dataset_id=stale_quote.dataset_id,
+        kind="spread_below",
+        threshold=3.0,
+    )
+
+    result = check_saved_conditions(
+        (condition,),
+        _universe((_series(2, (100.0, 101.0)),)),
+        quotes=(stale_quote,),
+    )
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.analysis_kind == "saved_condition_checks"
+    assert result.reason_code == "quote_data_unusable"
+
+
 @pytest.mark.parametrize("quality", [QualityState.STALE, QualityState.INVALID])
 def test_saved_price_conditions_refuse_unusable_price_quality(
     quality: QualityState,
