@@ -3,7 +3,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Final, Literal, cast
 
+from pydantic import BaseModel, ConfigDict
+
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.analytics_models import (
+    AnalysisId,
+    InstrumentHandle,
+    SafeAccountScope,
+    Sha256Fingerprint,
+)
 from saxo_bank_mcp.safety import AccountCurrencyRisk
 
 type JsonObject = dict[str, JsonValue]
@@ -18,6 +26,28 @@ TRADE_DOES_NOT_VERIFY: Final[tuple[str, ...]] = (
     "live-write permission",
 )
 DISCLAIMER_RESPONSE_ENDPOINT_PATH: Final = "/dm/v2/disclaimers"
+
+
+class AnalyticsTradePreviewInput(BaseModel):
+    """Value-free analytics pointer that grants no approval or execution authority."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+        hide_input_in_errors=True,
+    )
+
+    analysis_id: AnalysisId
+    proposal_fingerprint_sha256: Sha256Fingerprint
+    impact_card_fingerprint_sha256: Sha256Fingerprint
+    account_alias: SafeAccountScope
+    instrument_handle: InstrumentHandle
+    requires_fresh_saxo_precheck: Literal[True] = True
+    carries_approval: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
 
 
 def operation_id_for_order_kind(kind: OrderKind) -> str:
