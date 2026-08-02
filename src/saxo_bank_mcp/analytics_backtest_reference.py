@@ -14,6 +14,7 @@ from saxo_bank_mcp.analytics_strategy_schema import (
 )
 
 _MINIMUM_REFERENCE_BARS = 2
+_REFERENCE_TOLERANCE = 1e-12
 
 
 class _StrictModel(BaseModel):
@@ -54,7 +55,7 @@ class ReferenceBacktestSummary(_StrictModel):
     fill_count: int = Field(ge=0)
 
 
-def run_event_loop_reference(
+def run_event_loop_reference(  # noqa: C901, PLR0912, PLR0915
     bars: Sequence[ReferenceBar],
     strategy: StrategyDefinition,
     *,
@@ -75,65 +76,78 @@ def run_event_loop_reference(
         if indicator is not None
     )
     equity = starting_equity
-    current_target = 0.0
+    cash = starting_equity
+    position_units = 0.0
+    logical_target = 0.0
     pending_target = _next_target(
         bars,
         strategy,
         index=0,
-        current_target=current_target,
+        current_target=logical_target,
         warm_up=warm_up,
     )
+    if pending_target is not None:
+        logical_target = pending_target
     turnover_total = 0.0
     cost_total = 0.0
     fill_count = 0
-    direction = 1.0 if strategy.direction == "long" else -1.0
-    intended_weight = direction * strategy.sizing.target_weight
 
     for index in range(1, len(bars)):
-        previous = bars[index - 1]
         current = bars[index]
-        previous_close = _required_price(previous.close_price)
         current_open = _required_price(current.open_price)
         current_close = _required_price(current.close_price)
-        overnight_return = current_open / previous_close - 1.0
-        equity_at_open = equity * (1.0 + current_target * overnight_return)
-        target = pending_target
-        turnover = abs(target - current_target)
-        commission = (
-            equity_at_open
-            * turnover
-            * strategy.transaction_costs.commission_basis_points
-            / 10_000.0
-        )
-        fixed_fee = strategy.transaction_costs.fixed_cost_per_fill if turnover > 0.0 else 0.0
-        slippage = (
-            equity_at_open * turnover * strategy.slippage.basis_points / 10_000.0
-        )
-        cost = commission + fixed_fee + slippage
-        equity_after_cost = equity_at_open - cost
-        if not math.isfinite(equity_after_cost) or equity_after_cost < 0:
-            raise ArithmeticError("reference costs exhaust modeled equity")
-        intraday_return = current_close / current_open - 1.0
-        equity = equity_after_cost * (1.0 + target * intraday_return)
+        equity_at_open = cash + position_units * current_open
+        if not math.isfinite(equity_at_open) or equity_at_open <= 0.0:
+            raise ArithmeticError("reference equity is exhausted before fill")
+        turnover = 0.0
+        cost = 0.0
+        if pending_target is not None:
+            current_weight = position_units * current_open / equity_at_open
+            turnover = abs(pending_target - current_weight)
+            if turnover > _REFERENCE_TOLERANCE:
+                commission = (
+                    equity_at_open
+                    * turnover
+                    * strategy.transaction_costs.commission_basis_points
+                    / 10_000.0
+                )
+                fixed_fee = strategy.transaction_costs.fixed_cost_per_fill
+                slippage = (
+                    equity_at_open
+                    * turnover
+                    * strategy.slippage.basis_points
+                    / 10_000.0
+                )
+                cost = commission + fixed_fee + slippage
+                equity_after_cost = equity_at_open - cost
+                if not math.isfinite(equity_after_cost) or equity_after_cost < 0:
+                    raise ArithmeticError("reference costs exhaust modeled equity")
+                target_value = pending_target * equity_after_cost
+                position_units = target_value / current_open
+                cash = equity_after_cost - target_value
+                fill_count += 1
+            else:
+                turnover = 0.0
+        equity = cash + position_units * current_close
         if not math.isfinite(equity) or equity < 0:
             raise ArithmeticError("reference path is undefined")
-        if turnover > 0.0:
-            fill_count += 1
         turnover_total += turnover
         cost_total += cost
-        current_target = target
         if current.lifecycle_state == "delisted":
-            current_target = 0.0
-            pending_target = 0.0
+            position_units = 0.0
+            cash = equity
+            logical_target = 0.0
+            pending_target = None
         else:
             pending_target = _next_target(
                 bars,
                 strategy,
                 index=index,
-                current_target=current_target,
+                current_target=logical_target,
                 warm_up=warm_up,
-                intended_weight=intended_weight,
             )
+            if pending_target is not None:
+                logical_target = pending_target
 
     return ReferenceBacktestSummary(
         ending_equity=equity,
@@ -144,30 +158,30 @@ def run_event_loop_reference(
     )
 
 
-def _next_target(  # noqa: PLR0913
+def _next_target(
     bars: Sequence[ReferenceBar],
     strategy: StrategyDefinition,
     *,
     index: int,
     current_target: float,
     warm_up: int,
-    intended_weight: float | None = None,
-) -> float:
+) -> float | None:
     first_decision = warm_up - 1
     if index < first_decision:
-        return current_target
+        return None
     if (index - first_decision) % strategy.rebalancing.interval_bars:
-        return current_target
+        return None
     entry = _rule_matches(bars, strategy.entry, index)
     exit_ = _rule_matches(bars, strategy.exit, index)
+    direction = 1.0 if strategy.direction == "long" else -1.0
+    intended_weight = direction * strategy.sizing.target_weight
     if current_target == 0.0 and entry:
-        if intended_weight is not None:
-            return intended_weight
-        direction = 1.0 if strategy.direction == "long" else -1.0
-        return direction * strategy.sizing.target_weight
+        return intended_weight
     if current_target != 0.0 and exit_:
         return 0.0
-    return current_target
+    if current_target != 0.0:
+        return intended_weight
+    return None
 
 
 def _rule_matches(  # noqa: PLR0911

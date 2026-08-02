@@ -40,6 +40,7 @@ from saxo_bank_mcp.analytics_strategy_schema import (
 
 type FloatArray = NDArray[np.float64]
 type BacktestVerificationState = Literal["unverified", "verified"]
+type BacktestFillCause = Literal["entry", "exit", "rebalance"]
 
 _SOURCE_SCOPE: Final = "saxo_openapi"
 _BACKTEST_SOURCE_CONTRACTS: Final = ("chart_v3", "reference_instruments_v1")
@@ -138,7 +139,7 @@ class BacktestCostSummary(_StrictModel):
 class BacktestFill(_StrictModel):
     decision_at: UtcDateTime
     fill_at: UtcDateTime
-    cause: Literal["entry", "exit"]
+    cause: BacktestFillCause
     target_weight: float = Field(ge=-1, le=1, allow_inf_nan=False)
     turnover: float = Field(gt=0, le=2, allow_inf_nan=False)
     commission: float = Field(ge=0, allow_inf_nan=False)
@@ -474,7 +475,14 @@ def _assess_ghost_verification(
             "ghost_strategy_or_source_mismatch",
             "ghost verification is not equivalent to this dataset, strategy, and fill model",
         )
-    return "passed"
+    return _refusal(
+        request,
+        "ghost_authenticated_receipt_required",
+        (
+            "caller-constructed ghost verification lacks internal MCP receipt issuance "
+            "and ledger provenance"
+        ),
+    )
 
 
 def _warm_up_bars(strategy: StrategyDefinition) -> int:
@@ -555,10 +563,10 @@ def _decision_targets(
     entry: NDArray[np.bool_],
     exit_: NDArray[np.bool_],
     warm_up: int,
-) -> tuple[FloatArray, tuple[Literal["entry", "exit"] | None, ...]]:
+) -> tuple[FloatArray, tuple[BacktestFillCause | None, ...]]:
     count = len(request.dataset.bars)
     targets = np.zeros(count, dtype=np.float64)
-    causes: list[Literal["entry", "exit"] | None] = [None] * count
+    causes: list[BacktestFillCause | None] = [None] * count
     state = 0.0
     direction = 1.0 if request.strategy.direction == "long" else -1.0
     intended_weight = direction * request.strategy.sizing.target_weight
@@ -574,22 +582,26 @@ def _decision_targets(
             elif state != 0.0 and bool(exit_[index]):
                 state = 0.0
                 causes[index] = "exit"
+            elif state != 0.0:
+                state = intended_weight
+                causes[index] = "rebalance"
         if bar.lifecycle_state == "delisted":
             state = 0.0
         targets[index] = state
     return targets, tuple(causes)
 
 
-def _execute_path(
+def _execute_path(  # noqa: PLR0915
     request: BacktestRequest,
     *,
     decision_targets: FloatArray,
-    decision_causes: Sequence[Literal["entry", "exit"] | None],
+    decision_causes: Sequence[BacktestFillCause | None],
     cost_multiplier: float,
 ) -> _ExecutionRun:
     bars = request.dataset.bars
     equity = request.starting_equity
-    current_target = 0.0
+    cash = request.starting_equity
+    position_units = 0.0
     turnover_total = 0.0
     commission_total = 0.0
     fixed_total = 0.0
@@ -599,64 +611,84 @@ def _execute_path(
     for index in range(1, len(bars)):
         previous = bars[index - 1]
         current = bars[index]
-        previous_close = _price(previous.close_price)
         current_open = _price(current.open_price)
         current_close = _price(current.close_price)
-        overnight_return = current_open / previous_close - 1.0
-        equity_at_open = equity * (1.0 + current_target * overnight_return)
-        target = float(decision_targets[index - 1])
-        turnover = abs(target - current_target)
-        commission = (
-            equity_at_open
-            * turnover
-            * request.strategy.transaction_costs.commission_basis_points
-            / 10_000.0
-            * cost_multiplier
-        )
-        fixed_fee = (
-            request.strategy.transaction_costs.fixed_cost_per_fill * cost_multiplier
-            if turnover > 0.0
-            else 0.0
-        )
-        slippage = (
-            equity_at_open
-            * turnover
-            * request.strategy.slippage.basis_points
-            / 10_000.0
-            * cost_multiplier
-        )
-        total_cost = commission + fixed_fee + slippage
-        equity_after_cost = equity_at_open - total_cost
-        if not math.isfinite(equity_after_cost) or equity_after_cost < 0:
-            raise ArithmeticError("modeled transaction costs exhaust equity")
-        intraday_return = current_close / current_open - 1.0
-        equity = equity_after_cost * (1.0 + target * intraday_return)
+        equity_at_open = cash + position_units * current_open
+        if not math.isfinite(equity_at_open) or equity_at_open <= 0.0:
+            raise ArithmeticError("modeled equity is exhausted before fill")
+        cause = decision_causes[index - 1]
+        turnover = 0.0
+        commission = 0.0
+        fixed_fee = 0.0
+        slippage = 0.0
+        total_cost = 0.0
+        if cause is not None:
+            target = float(decision_targets[index - 1])
+            current_weight = position_units * current_open / equity_at_open
+            turnover = abs(target - current_weight)
+            if turnover > _FLOAT_TOLERANCE:
+                commission = (
+                    equity_at_open
+                    * turnover
+                    * request.strategy.transaction_costs.commission_basis_points
+                    / 10_000.0
+                    * cost_multiplier
+                )
+                fixed_fee = (
+                    request.strategy.transaction_costs.fixed_cost_per_fill
+                    * cost_multiplier
+                )
+                slippage = (
+                    equity_at_open
+                    * turnover
+                    * request.strategy.slippage.basis_points
+                    / 10_000.0
+                    * cost_multiplier
+                )
+                total_cost = commission + fixed_fee + slippage
+                equity_after_cost = equity_at_open - total_cost
+                if not math.isfinite(equity_after_cost) or equity_after_cost < 0:
+                    raise ArithmeticError("modeled transaction costs exhaust equity")
+                target_value = target * equity_after_cost
+                position_units = target_value / current_open
+                cash = equity_after_cost - target_value
+                fills.append(
+                    BacktestFill(
+                        decision_at=previous.at,
+                        fill_at=current.at,
+                        cause=cause,
+                        target_weight=target,
+                        turnover=turnover,
+                        commission=commission,
+                        fixed_fee=fixed_fee,
+                        slippage=slippage,
+                        total_cost=total_cost,
+                    )
+                )
+            else:
+                turnover = 0.0
+        equity = cash + position_units * current_close
         if not math.isfinite(equity) or equity < 0:
             raise ArithmeticError("modeled backtest path is undefined")
-        if turnover > 0.0:
-            cause = decision_causes[index - 1]
-            if cause is None:
-                raise ArithmeticError("fill lacks a bound prior-bar decision")
-            fills.append(
-                BacktestFill(
-                    decision_at=previous.at,
-                    fill_at=current.at,
-                    cause=cause,
-                    target_weight=target,
-                    turnover=turnover,
-                    commission=commission,
-                    fixed_fee=fixed_fee,
-                    slippage=slippage,
-                    total_cost=total_cost,
-                )
-            )
+        if current.lifecycle_state == "delisted":
+            position_units = 0.0
+            cash = equity
         turnover_total += turnover
         commission_total += commission
         fixed_total += fixed_fee
         slippage_total += slippage
-        current_target = 0.0 if current.lifecycle_state == "delisted" else target
         curve.append(BacktestEquityPoint(at=current.at, equity=equity))
     total_cost = commission_total + fixed_total + slippage_total
+    if equity == 0.0 and position_units != 0.0:
+        raise ArithmeticError("ending position weight is undefined after equity exhaustion")
+    ending_position_weight = (
+        0.0
+        if equity == 0.0
+        else position_units * _price(bars[-1].close_price) / equity
+    )
+    if not -1.0 - _FLOAT_TOLERANCE <= ending_position_weight <= 1.0 + _FLOAT_TOLERANCE:
+        raise ArithmeticError("ending position weight exceeds the bounded result contract")
+    ending_position_weight = min(1.0, max(-1.0, ending_position_weight))
     return _ExecutionRun(
         ending_equity=equity,
         total_return_ratio=equity / request.starting_equity - 1.0,
@@ -669,7 +701,7 @@ def _execute_path(
         ),
         fills=tuple(fills),
         equity_curve=tuple(curve),
-        ending_position_weight=current_target,
+        ending_position_weight=ending_position_weight,
     )
 
 

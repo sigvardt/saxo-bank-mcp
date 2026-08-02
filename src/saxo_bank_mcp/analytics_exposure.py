@@ -239,6 +239,12 @@ def analyze_portfolio_exposure(  # noqa: PLR0911
     )
     if isinstance(reconciliation, ResearchRefusal):
         return reconciliation
+    if all(exposure == 0 for exposure in exposures):
+        return _refusal(
+            dataset,
+            "zero_gross_exposure",
+            "delta-equivalent gross exposure is zero and allocation weights are undefined",
+        )
     values = _exposure_values(dataset.positions, exposures, dataset.reporting_currency)
     warnings = set(source_assessment)
     if dataset.quality_state is QualityState.PARTIAL:

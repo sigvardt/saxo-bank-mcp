@@ -144,7 +144,7 @@ def test_portfolio_accounting_identity_flows_corrections_and_costs() -> None:
     )
 
     assert not isinstance(result, ResearchRefusal)
-    assert result.status is ResearchStatus.COMPLETE
+    assert result.status is ResearchStatus.REDUCED
     values = result.private_values
     assert values is not None
     assert values.deposits == Decimal(200)
@@ -159,7 +159,33 @@ def test_portfolio_accounting_identity_flows_corrections_and_costs() -> None:
         values.closing_value
     )
     assert values.accounting_difference == Decimal(0)
-    assert values.period_return_percentage == Decimal("5.00")
+    assert values.period_return_percentage is None
+    assert values.period_return_state == "unavailable"
+    assert "twr_boundary_valuations_unavailable" in result.warnings
+
+
+def test_flow_free_period_keeps_exact_single_period_return() -> None:
+    dataset = _dataset(
+        benchmark=_benchmark(),
+        entries=(_entry("7", LedgerKind.TRADING_PNL, "50"),),
+        saxo_totals=SaxoPerformanceTotals(
+            closing_value=Decimal(1050),
+            total_profit_loss=Decimal(50),
+            currency="USD",
+        ),
+    ).model_copy(update={"closing_value": Decimal(1050)})
+
+    result = analyze_portfolio_truth(
+        dataset,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.status is ResearchStatus.COMPLETE
+    assert result.private_values is not None
+    assert result.private_values.period_return_state == "complete"
+    assert result.private_values.period_return_percentage == Decimal(5)
 
 
 def test_missing_and_proxy_benchmarks_are_explicitly_reduced() -> None:

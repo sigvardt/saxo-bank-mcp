@@ -301,6 +301,16 @@ def run_portfolio_scenario(  # noqa: C901, PLR0911
             "scenario_data_unusable",
             "scenario inputs are missing, invalid, or stale",
         )
+    if request.scenario_type == "historical":
+        return _refusal(
+            request,
+            "historical_replay_observations_unbound",
+            (
+                "historical replay requires exact bound start and end observations "
+                "with cutoff identity"
+            ),
+            missing_fields=("historical_endpoint_observations",),
+        )
     map_error = _validate_total_maps(request)
     if map_error is not None:
         return map_error

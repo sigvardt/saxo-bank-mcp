@@ -155,6 +155,30 @@ def _strategy(  # noqa: PLR0913
     )
 
 
+def _always_in_strategy(*, interval_bars: int) -> StrategyDefinition:
+    return _strategy(
+        commission_basis_points=0.0,
+        fixed_cost_per_fill=0.0,
+        slippage_basis_points=0.0,
+        interval_bars=interval_bars,
+    ).model_copy(
+        update={
+            "entry": SignalRule(
+                left=IndicatorSpec(kind="close", window=1),
+                comparison="greater_than",
+                right_indicator=None,
+                threshold=0.0,
+            ),
+            "exit": SignalRule(
+                left=IndicatorSpec(kind="close", window=1),
+                comparison="less_than",
+                right_indicator=None,
+                threshold=0.0,
+            ),
+        },
+    )
+
+
 def _dataset(  # noqa: PLR0913
     *,
     bars: tuple[HistoricalBar, ...] | None = None,
@@ -284,6 +308,69 @@ def test_rebalance_interval_changes_only_scheduled_decisions() -> None:
     }
     assert all(fill.decision_at in scheduled_decisions for fill in every_three.fills)
     assert daily.fills != every_three.fills
+
+
+def test_unscheduled_half_weight_position_drifts_as_buy_and_hold() -> None:
+    bars = tuple(
+        _bar(index, close)
+        for index, close in enumerate((100.0, 100.0, 200.0, 100.0, 100.0, 100.0))
+    )
+    request = _request(
+        dataset=_dataset(bars=bars),
+        strategy=_always_in_strategy(interval_bars=10),
+    )
+
+    _, values = _private(request)
+    reference = run_event_loop_reference(
+        tuple(
+            ReferenceBar(
+                at=bar.at,
+                open_price=bar.open_price,
+                close_price=bar.close_price,
+                lifecycle_state=bar.lifecycle_state,
+            )
+            for bar in bars
+        ),
+        request.strategy,
+        starting_equity=request.starting_equity,
+    )
+
+    assert values.ending_equity == pytest.approx(1000.0)
+    assert values.total_turnover == pytest.approx(0.5)
+    assert len(values.fills) == 1
+    assert reference.ending_equity == pytest.approx(1000.0)
+    assert reference.total_turnover == pytest.approx(0.5)
+
+
+def test_scheduled_rebalance_records_drift_turnover_and_fill() -> None:
+    bars = (
+        _bar(0, 100.0),
+        _bar(1, 100.0),
+        _bar(2, 200.0),
+        _bar(3, 100.0, open_price=200.0),
+    )
+    strategy = _always_in_strategy(interval_bars=2).model_copy(
+        update={
+            "evaluation_split": HoldoutSplit(
+                kind="holdout",
+                train_end_at=bars[1].at,
+                holdout_start_at=bars[2].at,
+            ),
+        },
+    )
+    request = _request(
+        dataset=_dataset(bars=bars),
+        strategy=strategy,
+    )
+
+    _, values = _private(request)
+    rebalance = tuple(fill for fill in values.fills if fill.cause == "rebalance")
+
+    assert len(rebalance) == 1
+    assert rebalance[0].decision_at == bars[2].at
+    assert rebalance[0].fill_at == bars[3].at
+    assert rebalance[0].turnover == pytest.approx(1.0 / 6.0)
+    assert values.total_turnover == pytest.approx(2.0 / 3.0)
 
 
 def test_holdout_and_walk_forward_splits_have_exact_nonoverlapping_windows() -> None:

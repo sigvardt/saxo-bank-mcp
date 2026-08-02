@@ -6,6 +6,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Literal
 
+import pytest
+from pydantic import ValidationError
+
 from saxo_bank_mcp.analytics_instruments import ResearchRefusal, ResearchStatus
 from saxo_bank_mcp.analytics_models import QualityState, VisibilityMode
 from saxo_bank_mcp.analytics_portfolio import SaxoSourceBinding
@@ -314,6 +317,133 @@ def test_trading_mirror_handles_partial_fills_corrections_and_behavior_metrics()
     assert values.report_card.winner_loser_asymmetry == Decimal("2.45")
     assert values.report_card.averaging_down_events == 1
     assert "causal_explanation" in result.does_not_verify
+
+
+@pytest.mark.parametrize(
+    ("entry_side", "exit_side"),
+    [("buy", "sell"), ("sell", "buy")],
+)
+def test_chronological_inventory_accepts_long_and_short_partial_fills(
+    entry_side: Literal["buy", "sell"],
+    exit_side: Literal["buy", "sell"],
+) -> None:
+    trade = ClosedTrade(
+        trade_key_sha256="a" * 64,
+        account_alias=_ALIAS,
+        instrument_handle=_HANDLE_A,
+        decision_at=_START,
+        fills=(
+            _fill(
+                "6",
+                role="entry",
+                side=entry_side,
+                quantity="2",
+                price="100",
+                at=_START + timedelta(minutes=1),
+            ),
+            _fill(
+                "7",
+                role="exit",
+                side=exit_side,
+                quantity="1",
+                price="101",
+                at=_START + timedelta(minutes=2),
+            ),
+            _fill(
+                "8",
+                role="entry",
+                side=entry_side,
+                quantity="1",
+                price="99",
+                at=_START + timedelta(minutes=3),
+            ),
+            _fill(
+                "9",
+                role="exit",
+                side=exit_side,
+                quantity="2",
+                price="102",
+                at=_START + timedelta(minutes=4),
+            ),
+        ),
+        costs=Decimal(0),
+        cost_currency="USD",
+        counterfactual_at=_START + timedelta(minutes=5),
+        counterfactual_price=Decimal(100),
+        decision_quote=None,
+        decision_bar=None,
+    )
+
+    assert len(trade.fills) == 4
+
+
+@pytest.mark.parametrize(
+    "fills",
+    [
+        (
+            _fill(
+                "a",
+                role="exit",
+                side="sell",
+                quantity="1",
+                price="101",
+                at=_START + timedelta(minutes=1),
+            ),
+            _fill(
+                "b",
+                role="entry",
+                side="buy",
+                quantity="1",
+                price="100",
+                at=_START + timedelta(minutes=2),
+            ),
+        ),
+        (
+            _fill(
+                "c",
+                role="entry",
+                side="sell",
+                quantity="1",
+                price="100",
+                at=_START + timedelta(minutes=1),
+            ),
+            _fill(
+                "d",
+                role="exit",
+                side="buy",
+                quantity="2",
+                price="99",
+                at=_START + timedelta(minutes=2),
+            ),
+            _fill(
+                "e",
+                role="entry",
+                side="sell",
+                quantity="1",
+                price="98",
+                at=_START + timedelta(minutes=3),
+            ),
+        ),
+    ],
+    ids=("exit_before_entry", "over_exit_before_later_entry"),
+)
+def test_exit_before_entry_or_over_exit_fails_closed(
+    fills: tuple[TradeFill, ...],
+) -> None:
+    with pytest.raises(ValidationError, match="chronological position inventory"):
+        ClosedTrade(
+            trade_key_sha256="f" * 64,
+            account_alias=_ALIAS,
+            instrument_handle=_HANDLE_A,
+            decision_at=_START,
+            fills=fills,
+            costs=Decimal(0),
+            cost_currency="USD",
+            counterfactual_at=_START + timedelta(minutes=5),
+            counterfactual_price=Decimal(100),
+            decision_quote=None,
+            decision_bar=None,
+        )
 
 
 def test_trade_review_money_is_owner_only_and_public_evidence_is_redacted() -> None:

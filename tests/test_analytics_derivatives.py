@@ -61,6 +61,7 @@ _FIRST_EXPIRY_DAYS = 10
 _EXPECTED_BASIS = 2.0
 _EXPECTED_ROLL = -41.0
 _FX_SPOT = 7.0
+_DIRECT_RESPONSE_ROWS = 500
 
 
 def _source(
@@ -215,6 +216,34 @@ def test_option_model_and_strategy_are_owner_only_reduced_proposals() -> None:
     assert option_result.execution_authority is False
     assert option_result.is_not_forecast is True
     assert not hasattr(option_result, "order")
+
+
+def test_option_payoff_grid_enforces_direct_response_row_limit() -> None:
+    accepted = analyze_option_strategy(
+        _dataset(),
+        _strategy(),
+        expiry_reference_prices=tuple(
+            float(index + 1) for index in range(_DIRECT_RESPONSE_ROWS)
+        ),
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+    refused = analyze_option_strategy(
+        _dataset(),
+        _strategy(),
+        expiry_reference_prices=tuple(
+            float(index + 1) for index in range(_DIRECT_RESPONSE_ROWS + 1)
+        ),
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+
+    assert isinstance(accepted, DerivativeAnalyticsResult)
+    accepted_values = cast("StrategyAnalyticsValues", _private(accepted))
+    assert len(accepted_values.payoff_points) == _DIRECT_RESPONSE_ROWS
+    assert isinstance(refused, ResearchRefusal)
+    assert refused.reason_code == "option_payoff_direct_response_limit_exceeded"
+    assert "bounded_job_required" in refused.warnings
 
 
 def test_public_derivative_evidence_redacts_model_and_strategy_values() -> None:

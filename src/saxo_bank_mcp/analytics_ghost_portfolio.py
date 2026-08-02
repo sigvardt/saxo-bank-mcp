@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from typing import Final, Literal
 
@@ -358,23 +356,15 @@ def reconcile_ghost_lifecycle(  # noqa: C901, PLR0911
             "before and after brokerage fingerprints and counts are not equal",
             warnings=("writes_frozen", "blind_retry_forbidden"),
         )
-    return GhostPortfolioVerification(
-        candidate_commit=request.candidate_commit,
-        dataset_id=request.dataset_id,
-        account_alias=request.account_alias,
-        instrument_handle=request.instrument_handle,
-        strategy_fingerprint_sha256=request.strategy_fingerprint_sha256,
-        fill_model=request.fill_model,
-        state_equality=GhostStateEquality(
-            balance=True,
-            orders=True,
-            order_count=True,
-            positions=True,
-            position_count=True,
-            trade_messages=True,
-            trade_message_count=True,
+    return _refusal(
+        request,
+        "ghost_authenticated_receipt_required",
+        "caller-supplied lifecycle evidence cannot issue an authenticated MCP ledger receipt",
+        warnings=(
+            "writes_frozen",
+            "blind_retry_forbidden",
+            "synthetic_evidence_cannot_verify",
         ),
-        evidence_fingerprint_sha256=_evidence_fingerprint(evidence),
     )
 
 
@@ -408,13 +398,6 @@ def _state_equality(
         ),
         "trade_message_count": before.trade_message_count == after.trade_message_count,
     }
-
-
-def _evidence_fingerprint(evidence: GhostLifecycleEvidence) -> str:
-    payload = evidence.model_dump(mode="json")
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
-    ).hexdigest()
 
 
 def _refusal(

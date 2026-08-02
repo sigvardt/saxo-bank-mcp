@@ -181,14 +181,6 @@ def _private(request: PortfolioScenarioRequest):  # noqa: ANN202
     [
         (
             _request(
-                scenario_type="historical",
-                component_shocks=(_shock(price=Decimal("-0.20")),),
-            ),
-            Decimal(-20),
-            Decimal(0),
-        ),
-        (
-            _request(
                 scenario_type="equity",
                 component_shocks=(_shock(price=Decimal("-0.10")),),
             ),
@@ -257,6 +249,21 @@ def test_each_typed_scenario_map_has_an_explicit_numeric_effect(
     assert result.is_not_forecast is True
     assert values.total_effect == expected_effect
     assert values.margin_stress_effect == expected_margin_effect
+
+
+def test_historical_replay_refuses_without_bound_endpoint_observations() -> None:
+    result = run_portfolio_scenario(
+        _request(
+            scenario_type="historical",
+            component_shocks=(_shock(price=Decimal("-0.20")),),
+        ),
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "historical_replay_observations_unbound"
+    assert result.missing_fields == ("historical_endpoint_observations",)
 
 
 def test_zero_shock_is_identity_and_preserves_margin_headroom() -> None:

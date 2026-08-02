@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import timedelta
 from decimal import Decimal
+from itertools import groupby
 from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -132,7 +133,7 @@ class ClosedTrade(_StrictModel):
     decision_bar: DecisionBarReference | None
 
     @model_validator(mode="after")
-    def validate_trade(self) -> Self:  # noqa: C901
+    def validate_trade(self) -> Self:  # noqa: C901, PLR0912
         if any(fill.account_alias != self.account_alias for fill in self.fills):
             raise ValueError("trade fill account alias must match the trade account alias")
         if any(fill.instrument_handle != self.instrument_handle for fill in self.fills):
@@ -155,6 +156,19 @@ class ClosedTrade(_StrictModel):
         exit_quantity = sum((fill.quantity for fill in exits), Decimal(0))
         if entry_quantity != exit_quantity:
             raise ValueError("closed trade entry and exit quantities must reconcile")
+        inventory = Decimal(0)
+        for _, fills_at in groupby(latest, key=lambda fill: fill.occurred_at):
+            inventory += sum(
+                (
+                    fill.quantity if fill.role == "entry" else -fill.quantity
+                    for fill in fills_at
+                ),
+                Decimal(0),
+            )
+            if inventory < 0:
+                raise ValueError(
+                    "closed trade chronological position inventory cannot be negative",
+                )
         if len({fill.currency for fill in latest}) != 1:
             raise ValueError("one closed trade must use one instrument currency")
         if self.counterfactual_at < max(fill.occurred_at for fill in exits):

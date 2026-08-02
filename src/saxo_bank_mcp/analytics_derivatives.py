@@ -6,6 +6,7 @@ from typing import Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from saxo_bank_mcp.analytics_config import AnalyticsLimits
 from saxo_bank_mcp.analytics_instruments import ResearchRefusal, ResearchStatus
 from saxo_bank_mcp.analytics_models import (
     ContractName,
@@ -68,6 +69,7 @@ _LIFECYCLE_SOURCE_CONTRACTS: Final = (
 )
 _GREEK_FIELD_NAMES: Final = frozenset({"delta", "gamma", "theta", "vega", "rho"})
 _GREEK_ABSOLUTE_TOLERANCE: Final = 1e-9
+_DIRECT_RESPONSE_ROW_LIMIT: Final = AnalyticsLimits().response_rows
 _GREEK_RELATIVE_TOLERANCE: Final = 1e-7
 _MAXIMUM_SURFACE_POINTS: Final = 100
 _MAXIMUM_LIFECYCLE_POSITIONS: Final = 200
@@ -565,7 +567,7 @@ def _schema_field_names(schema: SourceValueSchema) -> tuple[str, ...]:
     return tuple(names)
 
 
-def analyze_option_strategy(
+def analyze_option_strategy(  # noqa: PLR0911
     dataset: DerivativeDataset,
     request: OptionStrategyRequest,
     *,
@@ -582,6 +584,15 @@ def analyze_option_strategy(
             ),
         ),
     )
+    if len(expiry_reference_prices) > _DIRECT_RESPONSE_ROW_LIMIT:
+        return _refusal(
+            dataset,
+            analysis_kind="option_payoff",
+            reason_code="option_payoff_direct_response_limit_exceeded",
+            reason="option payoff grids above 500 rows require the bounded analytics job path",
+            instrument_handles=handles,
+            warnings=("bounded_job_required",),
+        )
     assessment = _assess_dataset(
         dataset,
         analysis_kind="option_payoff",

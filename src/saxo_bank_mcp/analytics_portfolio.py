@@ -226,7 +226,16 @@ class PrivatePortfolioTruth(_StrictModel):
     external_cash_flow: Decimal = Field(allow_inf_nan=False)
     total_profit_loss: Decimal = Field(allow_inf_nan=False)
     accounting_difference: Decimal = Field(allow_inf_nan=False)
-    period_return_percentage: Decimal = Field(allow_inf_nan=False)
+    period_return_percentage: Decimal | None = Field(default=None, allow_inf_nan=False)
+    period_return_state: Literal["complete", "unavailable"]
+
+    @model_validator(mode="after")
+    def validate_period_return(self) -> Self:
+        if (self.period_return_state == "complete") != (
+            self.period_return_percentage is not None
+        ):
+            raise ValueError("portfolio return state must match return availability")
+        return self
 
 
 class ReconciliationSummary(_StrictModel):
@@ -398,7 +407,7 @@ def require_delivery_boundary(
     return False
 
 
-def analyze_portfolio_truth(
+def analyze_portfolio_truth(  # noqa: C901
     dataset: PortfolioPeriodDataset,
     *,
     visibility: VisibilityMode,
@@ -454,6 +463,8 @@ def analyze_portfolio_truth(
         warnings.add("benchmark_proxy_not_official")
     if reconciliation.state == "named_difference":
         warnings.add("performance_reconciled_with_named_difference")
+    if values.period_return_state == "unavailable":
+        warnings.add("twr_boundary_valuations_unavailable")
     evidence = build_public_evidence(
         analysis_kind="portfolio_performance",
         dataset_ids=(dataset.dataset_id,),
@@ -572,7 +583,8 @@ def _portfolio_values(
     fx_quotes: Sequence[FxQuote],
 ) -> PrivatePortfolioTruth:
     totals = {kind: Decimal(0) for kind in LedgerKind}
-    for entry in _latest_entries(dataset.ledger_entries):
+    latest_entries = _latest_entries(dataset.ledger_entries)
+    for entry in latest_entries:
         totals[entry.kind] += convert_amount(
             entry.amount,
             entry.currency,
@@ -597,6 +609,11 @@ def _portfolio_values(
     accounting_difference = (
         dataset.closing_value - dataset.opening_value - external_flow - profit_loss
     )
+    has_external_flow = any(
+        entry.amount > 0
+        and entry.kind in {LedgerKind.DEPOSIT, LedgerKind.WITHDRAWAL}
+        for entry in latest_entries
+    )
     return PrivatePortfolioTruth(
         reporting_currency=dataset.reporting_currency,
         opening_value=dataset.opening_value,
@@ -609,7 +626,12 @@ def _portfolio_values(
         external_cash_flow=external_flow,
         total_profit_loss=profit_loss,
         accounting_difference=accounting_difference,
-        period_return_percentage=profit_loss / dataset.opening_value * Decimal(100),
+        period_return_percentage=(
+            None
+            if has_external_flow
+            else profit_loss / dataset.opening_value * Decimal(100)
+        ),
+        period_return_state="unavailable" if has_external_flow else "complete",
     )
 
 

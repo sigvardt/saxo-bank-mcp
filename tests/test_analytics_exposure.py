@@ -197,6 +197,44 @@ def test_exposure_refuses_derivative_without_delta_and_reduces_partial_history()
     assert "partial_history" in partial.warnings
 
 
+def test_zero_delta_equivalent_gross_exposure_returns_typed_refusal() -> None:
+    dataset = ExposureDataset(
+        dataset_id=_DATASET,
+        account_alias=_ALIAS_A,
+        as_of=_AT,
+        reporting_currency="USD",
+        positions=(
+            _position(
+                _OPTION,
+                kind="option",
+                quantity="2",
+                price="50",
+                currency="USD",
+                multiplier="10",
+                delta="0",
+                broker_exposure="0",
+            ),
+        ),
+        fx_quotes=(),
+        source_bindings=(
+            _source("positions_v1"),
+            _source("exposure_instruments_v1"),
+        ),
+        quality_state=QualityState.COMPLETE,
+        missing_fields=(),
+        named_differences=(),
+    )
+
+    result = analyze_portfolio_exposure(
+        dataset,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "zero_gross_exposure"
+
+
 def test_exposure_account_alias_isolation_and_public_redaction() -> None:
     with pytest.raises(ValidationError, match="account alias"):
         ExposureDataset(

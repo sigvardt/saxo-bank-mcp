@@ -17,13 +17,14 @@ from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostLifecycleEvidence,
     GhostPortfolioVerification,
     GhostSessionPreconditions,
+    GhostStateEquality,
     GhostStateFingerprint,
     GhostWorkflowPlan,
     GhostWorkflowRequest,
     prepare_ghost_workflow,
     reconcile_ghost_lifecycle,
 )
-from saxo_bank_mcp.analytics_instruments import ResearchRefusal, ResearchStatus
+from saxo_bank_mcp.analytics_instruments import ResearchRefusal
 from saxo_bank_mcp.analytics_models import QualityState, VisibilityMode
 from saxo_bank_mcp.analytics_portfolio import SaxoSourceBinding
 from saxo_bank_mcp.analytics_source_contracts import (
@@ -215,10 +216,32 @@ def _evidence(**updates: object) -> GhostLifecycleEvidence:
     return GhostLifecycleEvidence.model_validate(values)
 
 
-def _verification() -> GhostPortfolioVerification:
-    result = reconcile_ghost_lifecycle(_request(), _evidence())
-    assert isinstance(result, GhostPortfolioVerification)
-    return result
+def _caller_constructed_verification(
+    *,
+    dataset_id: str = _DATASET,
+    account_alias: str = _ALIAS,
+    instrument_handle: str = _HANDLE,
+    strategy_fingerprint_sha256: str = _STRATEGY_FINGERPRINT,
+    candidate_commit: str = _COMMIT,
+) -> GhostPortfolioVerification:
+    return GhostPortfolioVerification(
+        candidate_commit=candidate_commit,
+        dataset_id=dataset_id,
+        account_alias=account_alias,
+        instrument_handle=instrument_handle,
+        strategy_fingerprint_sha256=strategy_fingerprint_sha256,
+        fill_model="next_bar_open",
+        state_equality=GhostStateEquality(
+            balance=True,
+            orders=True,
+            order_count=True,
+            positions=True,
+            position_count=True,
+            trade_messages=True,
+            trade_message_count=True,
+        ),
+        evidence_fingerprint_sha256="8" * 64,
+    )
 
 
 def test_plan_requires_current_sim_capabilities_not_only_local_auth() -> None:
@@ -280,23 +303,12 @@ def test_unsafe_or_missing_preconditions_refuse_without_a_plan(
     assert "no_mcp_write_attempted" in result.warnings
 
 
-def test_complete_lifecycle_proves_safe_counts_cleanup_and_state_equality() -> None:
-    result = _verification()
+def test_synthetic_complete_lifecycle_cannot_issue_authenticated_receipt() -> None:
+    result = reconcile_ghost_lifecycle(_request(), _evidence())
 
-    assert result.status is ResearchStatus.COMPLETE
-    assert result.verification_state == "verified"
-    assert result.environment == "SIM"
-    assert result.preview_count == 1
-    assert result.place_attempt_count == 1
-    assert result.cancel_attempt_count == 1
-    assert result.cleanup_state == "proved_equal"
-    assert result.state_equality.balance is True
-    assert result.state_equality.orders is True
-    assert result.state_equality.positions is True
-    assert result.state_equality.trade_messages is True
-    assert result.request_ledger_state == "complete_and_last"
-    assert result.order_creation_authority is False
-    assert result.execution_authority is False
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "ghost_authenticated_receipt_required"
+    assert "synthetic_evidence_cannot_verify" in result.warnings
 
 
 @pytest.mark.parametrize(
@@ -367,7 +379,7 @@ def test_lifecycle_schema_forbids_a_second_attempt() -> None:
         _evidence(cancel_attempt_count=2)
 
 
-def test_equivalent_ghost_receipt_is_required_before_backtest_verification() -> None:
+def test_synthetic_lifecycle_for_equivalent_backtest_remains_unverified() -> None:
     request = _backtest_request()
     unverified = run_backtest(
         request,
@@ -392,19 +404,36 @@ def test_equivalent_ghost_receipt_is_required_before_backtest_verification() -> 
         instrument_handle=request.dataset.instrument_handle,
         strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
     )
-    verification = reconcile_ghost_lifecycle(ghost_request, evidence)
-    assert isinstance(verification, GhostPortfolioVerification)
-    verified = run_backtest(
+    synthetic = reconcile_ghost_lifecycle(ghost_request, evidence)
+    assert isinstance(synthetic, ResearchRefusal)
+    assert synthetic.reason_code == "ghost_authenticated_receipt_required"
+
+
+@pytest.mark.parametrize(
+    "candidate_commit",
+    ["0" * 40, "f" * 40],
+    ids=("stale_candidate", "arbitrary_candidate"),
+)
+def test_forged_caller_receipt_cannot_verify_any_candidate(
+    candidate_commit: str,
+) -> None:
+    request = _backtest_request()
+    forged_receipt = _caller_constructed_verification(
+        dataset_id=request.dataset.dataset_id,
+        account_alias=request.dataset.account_alias,
+        instrument_handle=request.dataset.instrument_handle,
+        strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
+        candidate_commit=candidate_commit,
+    )
+    refused = run_backtest(
         request,
         visibility=VisibilityMode.FINGERPRINT_ONLY,
         trusted_local_host=True,
-        ghost_verification=verification,
+        ghost_verification=forged_receipt,
     )
 
-    assert isinstance(verified, BacktestResult)
-    assert verified.verification_state == "verified"
-    assert verified.ghost_validation_state == "passed"
-    assert "backtest_unverified_pending_equivalent_sim_ghost" not in verified.warnings
+    assert isinstance(refused, ResearchRefusal)
+    assert refused.reason_code == "ghost_authenticated_receipt_required"
 
 
 def test_non_equivalent_ghost_receipt_refuses_backtest_promotion() -> None:
@@ -412,7 +441,7 @@ def test_non_equivalent_ghost_receipt_refuses_backtest_promotion() -> None:
         _backtest_request(),
         visibility=VisibilityMode.FINGERPRINT_ONLY,
         trusted_local_host=True,
-        ghost_verification=_verification(),
+        ghost_verification=_caller_constructed_verification(),
     )
 
     assert isinstance(result, ResearchRefusal)
@@ -420,7 +449,7 @@ def test_non_equivalent_ghost_receipt_refuses_backtest_promotion() -> None:
 
 
 def test_public_ghost_verification_contains_no_identifiers_money_or_authority() -> None:
-    result = _verification()
+    result = _caller_constructed_verification()
     payload = result.model_dump(mode="json")
     encoded = json.dumps(payload, sort_keys=True)
 
@@ -439,7 +468,7 @@ def test_public_ghost_verification_contains_no_identifiers_money_or_authority() 
 
 
 def test_candidate_and_strategy_bindings_are_stable_safe_fingerprints() -> None:
-    result = _verification()
+    result = _caller_constructed_verification()
 
     assert result.candidate_commit == _COMMIT
     assert result.strategy_fingerprint_sha256 == _STRATEGY_FINGERPRINT
