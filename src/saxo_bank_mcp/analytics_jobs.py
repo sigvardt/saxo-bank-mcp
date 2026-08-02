@@ -1,0 +1,866 @@
+# pyright: reportPrivateUsage=false
+# ruff: noqa: SLF001
+
+"""Bounded cooperative analytics jobs owned by one running MCP process."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import math
+import re
+import shutil
+import stat
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Annotated, Final, Literal, Protocol, Self, cast
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    model_validator,
+)
+
+from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_models import (
+    AnalysisId,
+    ArtifactId,
+    DatasetId,
+    HandleKind,
+    InstrumentHandle,
+    JobId,
+    JobSummary,
+    VisibilityMode,
+    new_safe_handle,
+)
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreError
+
+type JobKind = Literal["monte_carlo", "optimization", "backtest", "report_generation"]
+type JobState = Literal[
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+]
+type JobStatusCode = Literal[
+    "job_queued",
+    "job_running",
+    "job_completed",
+    "job_failed",
+    "job_cancelled",
+    "job_expired",
+    "job_interrupted_restart_required",
+]
+type JobParameterValue = str | int | float | bool | None
+
+_OWNER_DIRECTORY_MODE: Final = 0o700
+_WORKSPACE_DIRECTORY: Final = "job-workspaces"
+_DEFAULT_JOB_TTL: Final = timedelta(minutes=30)
+_MAX_JOB_TTL: Final = timedelta(days=1)
+_MAX_PARAMETERS: Final = 100
+_MAX_PARAMETER_TEXT: Final = 256
+_SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
+_SAFE_PARAMETER_NAME: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+_FORBIDDEN_PARAMETER_NAME: Final = re.compile(
+    r"(?i)^(?:(?:account|client|order|position|instrument)_?(?:id|key|number)|"
+    r"display_?name|.*(?:token|secret|password|path|url|sql|python|callback).*)$",
+)
+_UNSAFE_TEXT: Final = re.compile(
+    r"(?i)(?:\b(?:https?|ftp|file|wss?)://|(?:^|\s)(?:/|~/|[a-z]:[\\/])|"
+    r"\b(?:select|insert|update|delete|drop|attach|copy|pragma|python|lambda|eval|exec|"
+    r"import|fetch|socket|curl)\b|\b(?:accountkey|clientkey|accountid|password|secret|"
+    r"access_token|refresh_token)\b)",
+)
+_JOB_ID_ADAPTER: Final[TypeAdapter[JobId]] = TypeAdapter(JobId)
+_ANALYSIS_ID_ADAPTER: Final[TypeAdapter[AnalysisId]] = TypeAdapter(AnalysisId)
+
+
+class JobError(RuntimeError):
+    """Base error for bounded local analytics job operations."""
+
+
+class JobCapacityError(JobError):
+    """Raised when four active jobs already occupy the owner session."""
+
+
+class JobNotFoundError(JobError):
+    """Raised when a safe job handle is not present in the owner store."""
+
+
+class JobStateError(JobError):
+    """Raised when persisted job state is invalid or cannot transition safely."""
+
+
+class JobExpiredError(JobError):
+    """Internal signal that a running job crossed its persisted expiry."""
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        revalidate_instances="always",
+        hide_input_in_errors=True,
+    )
+
+
+class JobParameter(_StrictModel):
+    """One bounded deterministic scalar job parameter."""
+
+    name: Annotated[str, StringConstraints(strict=True, min_length=1, max_length=64)]
+    value: JobParameterValue
+
+    @model_validator(mode="after")
+    def _validate_parameter(self) -> Self:
+        if (
+            _SAFE_PARAMETER_NAME.fullmatch(self.name) is None
+            or _FORBIDDEN_PARAMETER_NAME.fullmatch(self.name) is not None
+        ):
+            raise ValueError("job parameter name is invalid")
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError("job parameter must be finite")
+        if isinstance(self.value, str) and (
+            not self.value
+            or len(self.value) > _MAX_PARAMETER_TEXT
+            or _UNSAFE_TEXT.search(self.value)
+        ):
+            raise ValueError("job parameter text is unsafe")
+        return self
+
+
+class JobRequest(_StrictModel):
+    """Typed deterministic work description; it contains no executable callback or path."""
+
+    job_kind: JobKind
+    dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=100)
+    analysis_ids: tuple[AnalysisId, ...] = Field(default=(), max_length=100)
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(default=(), max_length=100)
+    parameters: tuple[JobParameter, ...] = Field(default=(), max_length=_MAX_PARAMETERS)
+    total_work_units: int = Field(ge=1, le=5_000_000)
+    restart_interrupted: bool = False
+
+    @model_validator(mode="after")
+    def _normalize_request(self) -> Self:
+        names = tuple(parameter.name for parameter in self.parameters)
+        if len(set(names)) != len(names):
+            raise ValueError("job parameter names must be unique")
+        object.__setattr__(self, "dataset_ids", tuple(sorted(set(self.dataset_ids))))
+        object.__setattr__(self, "analysis_ids", tuple(sorted(set(self.analysis_ids))))
+        object.__setattr__(
+            self,
+            "instrument_handles",
+            tuple(sorted(set(self.instrument_handles))),
+        )
+        object.__setattr__(
+            self,
+            "parameters",
+            tuple(sorted(self.parameters, key=lambda parameter: parameter.name)),
+        )
+        return self
+
+
+class JobConclusion(_StrictModel):
+    """Safe handles made visible only after a job completes."""
+
+    analysis_id: AnalysisId | None
+    artifact_ids: tuple[ArtifactId, ...] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def _require_conclusion_handle(self) -> Self:
+        artifact_ids = tuple(sorted(set(self.artifact_ids)))
+        object.__setattr__(self, "artifact_ids", artifact_ids)
+        if self.analysis_id is None and not artifact_ids:
+            raise ValueError("a completed job requires a safe conclusion handle")
+        return self
+
+
+class JobProgress(_StrictModel):
+    """Value-free work counts with no partial analytical conclusion."""
+
+    completed_units: int = Field(ge=0)
+    total_units: int = Field(ge=1, le=5_000_000)
+    remaining_units: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_counts(self) -> Self:
+        if self.completed_units > self.total_units:
+            raise ValueError("job progress exceeds total work")
+        if self.remaining_units != self.total_units - self.completed_units:
+            raise ValueError("job remaining work is inconsistent")
+        return self
+
+
+class JobStatus(_StrictModel):
+    """Owner-safe job state; partial work never carries conclusion handles."""
+
+    job_id: JobId
+    state: JobState
+    status_code: JobStatusCode
+    request_fingerprint: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[a-f0-9]{64}$"),
+    ]
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
+    progress: JobProgress
+    analysis_id: AnalysisId | None
+    artifact_ids: tuple[ArtifactId, ...]
+    conclusion_available: bool
+    restart_allowed: bool
+
+    def to_job_summary(self) -> JobSummary:
+        """Project safe state through the existing frozen owner-facing job contract."""
+        return JobSummary(
+            schema_version="1",
+            visibility=VisibilityMode.FINGERPRINT_ONLY,
+            job_id=self.job_id,
+            state=self.state,
+            request_fingerprint=self.request_fingerprint,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+            analysis_id=self.analysis_id,
+            artifact_ids=self.artifact_ids,
+            message=self.status_code,
+        )
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> Self:
+        for value in (self.created_at, self.updated_at, self.expires_at):
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise ValueError("job timestamps must use UTC")
+        if self.updated_at < self.created_at or self.expires_at < self.created_at:
+            raise ValueError("job timestamps are inconsistent")
+        completed = self.state == "completed"
+        has_conclusion = self.analysis_id is not None or bool(self.artifact_ids)
+        if completed != has_conclusion or self.conclusion_available != completed:
+            raise ValueError("job conclusion availability does not match state")
+        if not completed and (self.analysis_id is not None or self.artifact_ids):
+            raise ValueError("partial job state cannot expose a conclusion")
+        if completed and self.progress.completed_units != self.progress.total_units:
+            raise ValueError("completed job progress is incomplete")
+        allowed_codes: dict[JobState, frozenset[JobStatusCode]] = {
+            "queued": frozenset({"job_queued"}),
+            "running": frozenset({"job_running"}),
+            "completed": frozenset({"job_completed"}),
+            "failed": frozenset({"job_failed", "job_interrupted_restart_required"}),
+            "cancelled": frozenset({"job_cancelled", "job_expired"}),
+        }
+        if self.status_code not in allowed_codes[self.state]:
+            raise ValueError("job status code does not match state")
+        restart_allowed = self.status_code == "job_interrupted_restart_required"
+        if self.restart_allowed != restart_allowed:
+            raise ValueError("job restart availability does not match state")
+        return self
+
+
+class _PersistedJobState(_StrictModel):
+    completed_units: int = Field(ge=0)
+    total_units: int = Field(ge=1, le=5_000_000)
+    expires_at: datetime
+    status_code: JobStatusCode
+    artifact_ids: tuple[ArtifactId, ...]
+
+    @model_validator(mode="after")
+    def _validate_persisted_state(self) -> Self:
+        if self.completed_units > self.total_units:
+            raise ValueError("persisted job progress exceeds total work")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() != timedelta(0):
+            raise ValueError("persisted job expiry must use UTC")
+        return self
+
+
+class _JobRow(_StrictModel):
+    job_id: JobId
+    state: JobState
+    request_fingerprint: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[a-f0-9]{64}$"),
+    ]
+    created_at: datetime
+    updated_at: datetime
+    analysis_id: AnalysisId | None
+    request_json: str
+    persisted: _PersistedJobState
+
+
+type ProgressReporter = Callable[[int], Awaitable[None]]
+
+
+class JobExecutionContext:
+    """Trusted in-process execution context; paths never enter a public result."""
+
+    __slots__ = ("_reporter", "_workspace", "total_work_units")
+
+    def __init__(
+        self,
+        *,
+        workspace: Path,
+        total_work_units: int,
+        reporter: ProgressReporter,
+    ) -> None:
+        """Bind one private workspace and its manager-owned progress reporter."""
+        self._workspace = workspace
+        self.total_work_units = total_work_units
+        self._reporter = reporter
+
+    @property
+    def workspace(self) -> Path:
+        """Return the private workspace only to the registered in-process handler."""
+        return self._workspace
+
+    async def report_progress(self, completed_units: int) -> None:
+        """Persist safe work counts without accepting a partial conclusion."""
+        await self._reporter(completed_units)
+
+
+class JobHandler(Protocol):
+    """Registered in-process handler contract; handlers are never accepted in a job request."""
+
+    async def __call__(
+        self,
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        """Execute one deterministic request in the current event loop."""
+        ...
+
+
+type HandlerMap = Mapping[JobKind, JobHandler]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class AnalyticsJobManager:
+    """At-most-four cooperative tasks tied to the lifetime of one MCP process."""
+
+    def __init__(
+        self,
+        *,
+        store: AnalyticsStore,
+        config: AnalyticsConfig,
+        handlers: HandlerMap,
+        job_ttl: timedelta = _DEFAULT_JOB_TTL,
+    ) -> None:
+        """Bind one store, fixed limits, and an allowlist of in-process handlers."""
+        validated = AnalyticsConfig.model_validate(config)
+        if job_ttl <= timedelta(0) or job_ttl > _MAX_JOB_TTL:
+            raise ValueError("analytics job TTL is invalid")
+        self._store = store
+        self._config = validated
+        self._handlers = dict(handlers)
+        self._job_ttl = job_ttl
+        self._workspace_root = _prepare_workspace_root(validated)
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._recover_interrupted_rows()
+
+    async def start_job(self, request: JobRequest) -> JobStatus:
+        """Start, deduplicate, or explicitly restart one deterministic local job."""
+        self._require_open()
+        validated = JobRequest.model_validate(request)
+        handler = self._handlers.get(validated.job_kind)
+        if handler is None:
+            raise JobStateError("analytics job kind has no registered in-process handler")
+        fingerprint, request_json = _request_identity(validated)
+        launch = False
+        async with self._lock:
+            row = self._find_by_fingerprint(fingerprint)
+            if row is not None:
+                if row.request_json != request_json:
+                    raise JobStateError("analytics job fingerprint binding is invalid")
+                if (
+                    validated.restart_interrupted
+                    and row.persisted.status_code == "job_interrupted_restart_required"
+                ):
+                    row = self._restart_row(row)
+                    launch = True
+            else:
+                row = self._insert_row(fingerprint, request_json, validated.total_work_units)
+                launch = True
+
+            if launch:
+                persisted_request = JobRequest.model_validate_json(row.request_json)
+                workspace = self._prepare_workspace(row.job_id)
+                task = asyncio.create_task(
+                    self._run_job(row.job_id, persisted_request, workspace, handler),
+                    name=f"analytics-{row.job_id}",
+                )
+                self._tasks[row.job_id] = task
+        await asyncio.sleep(0)
+        return await self.get_job(row.job_id)
+
+    async def get_job(self, job_id: str) -> JobStatus:
+        """Return safe state and expire active work without exposing partial conclusions."""
+        self._require_open()
+        validated_job_id = _JOB_ID_ADAPTER.validate_python(job_id)
+        task: asyncio.Task[None] | None = None
+        async with self._lock:
+            row = self._require_row(validated_job_id)
+            if row.state in {"queued", "running"} and _utc_now() >= row.persisted.expires_at:
+                row = self._set_terminal(row, state="cancelled", status_code="job_expired")
+                task = self._tasks.get(validated_job_id)
+                if task is not None:
+                    task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        return _status_from_row(row)
+
+    async def cancel_job(self, job_id: str) -> JobStatus:
+        """Cancel one active local job; repeated cancellation is idempotent."""
+        self._require_open()
+        validated_job_id = _JOB_ID_ADAPTER.validate_python(job_id)
+        task: asyncio.Task[None] | None = None
+        async with self._lock:
+            row = self._require_row(validated_job_id)
+            if row.state in {"queued", "running"}:
+                row = self._set_terminal(row, state="cancelled", status_code="job_cancelled")
+                task = self._tasks.get(validated_job_id)
+                if task is not None:
+                    task.cancel()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        return _status_from_row(row)
+
+    async def shutdown(self) -> None:
+        """Stop process-owned work as interrupted; never auto-resume it later."""
+        tasks: tuple[asyncio.Task[None], ...]
+        async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            tasks = tuple(self._tasks.values())
+            for job_id, task in tuple(self._tasks.items()):
+                row = self._row(job_id)
+                if row is not None and row.state in {"queued", "running"}:
+                    self._set_terminal(
+                        row,
+                        state="failed",
+                        status_code="job_interrupted_restart_required",
+                    )
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _run_job(
+        self,
+        job_id: str,
+        request: JobRequest,
+        workspace: Path,
+        handler: JobHandler,
+    ) -> None:
+        try:
+            async with self._lock:
+                row = self._require_row(job_id)
+                if row.state != "queued":
+                    return
+                self._write_row(
+                    row,
+                    state="running",
+                    persisted=row.persisted.model_copy(update={"status_code": "job_running"}),
+                )
+            context = JobExecutionContext(
+                workspace=workspace,
+                total_work_units=request.total_work_units,
+                reporter=lambda completed: self._record_progress(job_id, completed),
+            )
+            conclusion = await handler(request, context)
+            validated_conclusion = JobConclusion.model_validate(conclusion)
+            async with self._lock:
+                row = self._require_row(job_id)
+                if row.state not in {"queued", "running"}:
+                    return
+                if _utc_now() >= row.persisted.expires_at:
+                    self._set_terminal(row, state="cancelled", status_code="job_expired")
+                    return
+                persisted = row.persisted.model_copy(
+                    update={
+                        "completed_units": row.persisted.total_units,
+                        "status_code": "job_completed",
+                        "artifact_ids": validated_conclusion.artifact_ids,
+                    },
+                )
+                self._write_row(
+                    row,
+                    state="completed",
+                    persisted=persisted,
+                    analysis_id=validated_conclusion.analysis_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except JobExpiredError:
+            async with self._lock:
+                row = self._row(job_id)
+                if row is not None and row.state in {"queued", "running"}:
+                    self._set_terminal(row, state="cancelled", status_code="job_expired")
+        except Exception:  # noqa: BLE001
+            async with self._lock:
+                row = self._row(job_id)
+                if row is not None and row.state in {"queued", "running"}:
+                    self._set_terminal(row, state="failed", status_code="job_failed")
+        finally:
+            _cleanup_workspace(self._workspace_root, job_id)
+            self._tasks.pop(job_id, None)
+
+    async def _record_progress(self, job_id: str, completed_units: int) -> None:
+        if type(completed_units) is not int:
+            raise JobStateError("job progress must use integer work units")
+        async with self._lock:
+            row = self._require_row(job_id)
+            if row.state != "running":
+                raise JobStateError("job progress requires a running job")
+            if _utc_now() >= row.persisted.expires_at:
+                raise JobExpiredError("analytics job expired")
+            if not row.persisted.completed_units <= completed_units <= row.persisted.total_units:
+                raise JobStateError("job progress must be monotone and bounded")
+            persisted = row.persisted.model_copy(update={"completed_units": completed_units})
+            self._write_row(row, state="running", persisted=persisted)
+
+    def _insert_row(
+        self,
+        fingerprint: str,
+        request_json: str,
+        total_units: int,
+    ) -> _JobRow:
+        now = _utc_now()
+        persisted = _PersistedJobState(
+            completed_units=0,
+            total_units=total_units,
+            expires_at=now + self._job_ttl,
+            status_code="job_queued",
+            artifact_ids=(),
+        )
+        job_id = new_safe_handle(HandleKind.JOB_ID)
+        with self._store._write_connection() as connection:
+            active_row = connection.execute(
+                "SELECT count(*) FROM jobs WHERE state IN ('queued', 'running')",
+            ).fetchone()
+            if active_row is None or type(active_row[0]) is not int:
+                raise StoreError("analytics job capacity state is invalid")
+            if active_row[0] >= self._config.limits.concurrent_jobs:
+                raise JobCapacityError("at most four analytics jobs may run concurrently")
+            connection.execute(
+                """
+                INSERT INTO jobs (
+                    job_id, state, request_fingerprint, created_at, updated_at,
+                    analysis_id, message, request_json
+                ) VALUES (?, 'queued', ?, ?, ?, NULL, ?, ?)
+                """,
+                (
+                    job_id,
+                    fingerprint,
+                    now,
+                    now,
+                    persisted.model_dump_json(),
+                    request_json,
+                ),
+            )
+            self._store._bump_revision(connection)
+        return self._require_row(job_id)
+
+    def _restart_row(self, row: _JobRow) -> _JobRow:
+        now = _utc_now()
+        persisted = _PersistedJobState(
+            completed_units=0,
+            total_units=row.persisted.total_units,
+            expires_at=now + self._job_ttl,
+            status_code="job_queued",
+            artifact_ids=(),
+        )
+        with self._store._write_connection() as connection:
+            active_row = connection.execute(
+                "SELECT count(*) FROM jobs WHERE state IN ('queued', 'running')",
+            ).fetchone()
+            if active_row is None or type(active_row[0]) is not int:
+                raise StoreError("analytics job capacity state is invalid")
+            if active_row[0] >= self._config.limits.concurrent_jobs:
+                raise JobCapacityError("at most four analytics jobs may run concurrently")
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state = 'queued', updated_at = ?, analysis_id = NULL, message = ?
+                WHERE job_id = ? AND state = 'failed'
+                """,
+                (now, persisted.model_dump_json(), row.job_id),
+            )
+            self._store._bump_revision(connection)
+        return self._require_row(row.job_id)
+
+    def _set_terminal(
+        self,
+        row: _JobRow,
+        *,
+        state: Literal["failed", "cancelled"],
+        status_code: JobStatusCode,
+    ) -> _JobRow:
+        persisted = row.persisted.model_copy(
+            update={"status_code": status_code, "artifact_ids": ()},
+        )
+        return self._write_row(
+            row,
+            state=state,
+            persisted=persisted,
+            analysis_id=None,
+        )
+
+    def _write_row(
+        self,
+        row: _JobRow,
+        *,
+        state: JobState,
+        persisted: _PersistedJobState,
+        analysis_id: str | None | object = ...,
+    ) -> _JobRow:
+        updated_at = _utc_now()
+        next_analysis_id = row.analysis_id if analysis_id is ... else analysis_id
+        with self._store._write_connection() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET state = ?, updated_at = ?, analysis_id = ?, message = ?
+                WHERE job_id = ?
+                """,
+                (
+                    state,
+                    updated_at,
+                    next_analysis_id,
+                    persisted.model_dump_json(),
+                    row.job_id,
+                ),
+            )
+            self._store._bump_revision(connection)
+        return self._require_row(row.job_id)
+
+    def _find_by_fingerprint(self, fingerprint: str) -> _JobRow | None:
+        if _SHA256_PATTERN.fullmatch(fingerprint) is None:
+            raise JobStateError("analytics job fingerprint is invalid")
+        with self._store._read_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT job_id, state, request_fingerprint, epoch_us(created_at),
+                    epoch_us(updated_at), analysis_id, message, request_json
+                FROM jobs
+                WHERE request_fingerprint = ?
+                ORDER BY created_at, job_id
+                LIMIT 1
+                """,
+                (fingerprint,),
+            ).fetchone()
+        return None if raw is None else _parse_row(raw)
+
+    def _row(self, job_id: str) -> _JobRow | None:
+        with self._store._read_connection() as connection:
+            raw = connection.execute(
+                """
+                SELECT job_id, state, request_fingerprint, epoch_us(created_at),
+                    epoch_us(updated_at), analysis_id, message, request_json
+                FROM jobs WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        return None if raw is None else _parse_row(raw)
+
+    def _require_row(self, job_id: str) -> _JobRow:
+        row = self._row(job_id)
+        if row is None:
+            raise JobNotFoundError("analytics job handle was not found")
+        return row
+
+    def _recover_interrupted_rows(self) -> None:
+        now = _utc_now()
+        recovered: list[str] = []
+        workspace_job_ids: list[str] = []
+        with self._store._write_connection() as connection:
+            rows = cast(
+                "list[tuple[object, ...]]",
+                connection.execute(
+                    """
+                    SELECT job_id, state, message FROM jobs
+                    ORDER BY job_id
+                    """,
+                ).fetchall(),
+            )
+            for raw_job_id, raw_state, raw_message in rows:
+                job_id = _JOB_ID_ADAPTER.validate_python(raw_job_id)
+                workspace_job_ids.append(job_id)
+                if raw_state not in {"queued", "running"}:
+                    continue
+                persisted = _PersistedJobState.model_validate_json(str(raw_message))
+                interrupted = persisted.model_copy(
+                    update={
+                        "status_code": "job_interrupted_restart_required",
+                        "artifact_ids": (),
+                    },
+                )
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'failed', updated_at = ?, analysis_id = NULL, message = ?
+                    WHERE job_id = ?
+                    """,
+                    (now, interrupted.model_dump_json(), job_id),
+                )
+                recovered.append(job_id)
+            if recovered:
+                self._store._bump_revision(connection)
+        for job_id in workspace_job_ids:
+            _cleanup_workspace(self._workspace_root, job_id)
+
+    def _prepare_workspace(self, job_id: str) -> Path:
+        _cleanup_workspace(self._workspace_root, job_id)
+        workspace = self._workspace_root / job_id
+        workspace.mkdir(mode=_OWNER_DIRECTORY_MODE)
+        workspace.chmod(_OWNER_DIRECTORY_MODE)
+        if stat.S_IMODE(workspace.stat().st_mode) != _OWNER_DIRECTORY_MODE:
+            raise JobStateError("analytics job workspace is not owner-only")
+        return workspace
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise JobStateError("analytics job manager is closed")
+
+
+def _request_identity(request: JobRequest) -> tuple[str, str]:
+    payload = request.model_dump(mode="json", exclude={"restart_interrupted"})
+    payload["restart_interrupted"] = False
+    request_json = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return hashlib.sha256(request_json.encode()).hexdigest(), request_json
+
+
+def _parse_row(raw: tuple[object, ...]) -> _JobRow:
+    try:
+        message = _required_string(raw[6])
+        analysis_id = None if raw[5] is None else _ANALYSIS_ID_ADAPTER.validate_python(raw[5])
+        return _JobRow(
+            job_id=_JOB_ID_ADAPTER.validate_python(raw[0]),
+            state=cast("JobState", raw[1]),
+            request_fingerprint=str(raw[2]),
+            created_at=_database_datetime(raw[3]),
+            updated_at=_database_datetime(raw[4]),
+            analysis_id=analysis_id,
+            request_json=str(raw[7]),
+            persisted=_PersistedJobState.model_validate_json(message),
+        )
+    except (IndexError, TypeError, ValueError) as error:
+        raise JobStateError("persisted analytics job state is invalid") from error
+
+
+def _required_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("persisted job field must be text")
+    return value
+
+
+def _database_datetime(value: object) -> datetime:
+    if isinstance(value, datetime):
+        result = value
+    elif type(value) is int:
+        result = datetime.fromtimestamp(value / 1_000_000, tz=UTC)
+    else:
+        raise JobStateError("persisted analytics job timestamp is invalid")
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=UTC)
+    return result.astimezone(UTC)
+
+
+def _status_from_row(row: _JobRow) -> JobStatus:
+    completed = row.state == "completed"
+    return JobStatus(
+        job_id=row.job_id,
+        state=row.state,
+        status_code=row.persisted.status_code,
+        request_fingerprint=row.request_fingerprint,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        expires_at=row.persisted.expires_at,
+        progress=JobProgress(
+            completed_units=row.persisted.completed_units,
+            total_units=row.persisted.total_units,
+            remaining_units=row.persisted.total_units - row.persisted.completed_units,
+        ),
+        analysis_id=row.analysis_id if completed else None,
+        artifact_ids=row.persisted.artifact_ids if completed else (),
+        conclusion_available=completed,
+        restart_allowed=row.persisted.status_code == "job_interrupted_restart_required",
+    )
+
+
+def _prepare_workspace_root(config: AnalyticsConfig) -> Path:
+    root = config.paths.analytics_root / _WORKSPACE_DIRECTORY
+    if root.is_symlink():
+        raise JobStateError("analytics job workspace root cannot be a symlink")
+    root.mkdir(mode=_OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    root.chmod(_OWNER_DIRECTORY_MODE)
+    resolved = root.resolve(strict=True)
+    if not resolved.is_relative_to(config.paths.analytics_root.resolve(strict=True)):
+        raise JobStateError("analytics job workspace escapes the owner store")
+    if stat.S_IMODE(resolved.stat().st_mode) != _OWNER_DIRECTORY_MODE:
+        raise JobStateError("analytics job workspace root is not owner-only")
+    return resolved
+
+
+def _cleanup_workspace(root: Path, job_id: str) -> None:
+    validated_job_id = _JOB_ID_ADAPTER.validate_python(job_id)
+    workspace = root / validated_job_id
+    if workspace.is_symlink():
+        workspace.unlink()
+        return
+    if workspace.exists():
+        resolved = workspace.resolve(strict=True)
+        if resolved.parent != root.resolve(strict=True):
+            raise JobStateError("analytics job cleanup escaped its owner-only root")
+        shutil.rmtree(resolved)
+
+
+async def start_job(
+    request: JobRequest,
+    *,
+    manager: AnalyticsJobManager,
+) -> JobStatus:
+    """Start a job through the configured MCP-owned manager."""
+    return await manager.start_job(request)
+
+
+async def get_job(job_id: str, *, manager: AnalyticsJobManager) -> JobStatus:
+    """Read one safe job status through the configured manager."""
+    return await manager.get_job(job_id)
+
+
+async def cancel_job(job_id: str, *, manager: AnalyticsJobManager) -> JobStatus:
+    """Cancel one safe job handle through the configured manager."""
+    return await manager.cancel_job(job_id)
+
+
+__all__ = [
+    "AnalyticsJobManager",
+    "JobCapacityError",
+    "JobConclusion",
+    "JobError",
+    "JobExecutionContext",
+    "JobExpiredError",
+    "JobHandler",
+    "JobNotFoundError",
+    "JobParameter",
+    "JobRequest",
+    "JobStateError",
+    "JobStatus",
+    "cancel_job",
+    "get_job",
+    "start_job",
+]
