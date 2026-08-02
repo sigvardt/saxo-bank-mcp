@@ -1,0 +1,50 @@
+{
+  "schema_version": "1",
+  "black_scholes": {
+    "reference_price": 100.0,
+    "strike": 100.0,
+    "time_to_expiry_years": 1.0,
+    "volatility": 0.2,
+    "risk_free_rate": 0.05,
+    "dividend_yield": 0.0,
+    "call": {
+      "value": 10.450583572185565,
+      "delta": 0.6368306511756191,
+      "gamma": 0.018762017345846895,
+      "theta_per_day": -0.01757267820941972,
+      "vega_per_volatility_point": 0.3752403469169379,
+      "rho_per_rate_point": 0.5323248154537634
+    },
+    "put": {
+      "value": 5.573526022256971,
+      "delta": -0.3631693488243809,
+      "gamma": 0.018762017345846895,
+      "theta_per_day": -0.004542138147766099,
+      "vega_per_volatility_point": 0.3752403469169379,
+      "rho_per_rate_point": -0.4189046090469506
+    }
+  },
+  "black_76": {
+    "reference_price": 100.0,
+    "strike": 100.0,
+    "time_to_expiry_years": 1.0,
+    "volatility": 0.2,
+    "risk_free_rate": 0.05,
+    "call": {
+      "value": 7.57708214642728,
+      "delta": 0.5135001229824934,
+      "gamma": 0.018879647164532515,
+      "theta_per_day": -0.009307055686534628,
+      "vega_per_volatility_point": 0.3775929432906503,
+      "rho_per_rate_point": -0.0757708214642728
+    },
+    "put": {
+      "value": 7.57708214642728,
+      "delta": -0.43772930151822065,
+      "gamma": 0.018879647164532515,
+      "theta_per_day": -0.009307055686534628,
+      "vega_per_volatility_point": 0.3775929432906503,
+      "rho_per_rate_point": -0.0757708214642728
+    }
+  }
+}
