@@ -103,7 +103,7 @@ _FORBIDDEN_RAW_KEYS: Final = frozenset(
 )
 _IDENTIFIER_KEY_PATTERN: Final = re.compile(
     r"(?:account|client|order|position|user|trade|transaction|application|app|instrument)"
-    r"[a-z0-9]*(?:id|identifier|key|number|name|ref|reference)[a-z0-9]*$",
+    r"[a-z0-9]*(?:identifier|key|number|name|reference|ref|id)[a-z0-9]*",
 )
 _PARQUET_TYPES: Final = {
     "string": "VARCHAR",
@@ -147,7 +147,7 @@ class ExportColumn(_StrictModel):
         if (
             self.key in _RESERVED_STAMP_COLUMNS
             or normalized_key in _FORBIDDEN_RAW_KEYS
-            or _IDENTIFIER_KEY_PATTERN.fullmatch(normalized_key) is not None
+            or _IDENTIFIER_KEY_PATTERN.search(normalized_key) is not None
         ):
             raise ValueError("export column key is reserved or contains a raw broker field")
         for value in self.values:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -119,6 +120,26 @@ class _SlowCancellingHandler(_ControlledHandler):
             self.cancelling.set()
             await self.allow_stop.wait()
             raise
+
+
+class _CancellationSuppressingHandler(_ControlledHandler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled = asyncio.Event()
+
+    async def __call__(
+        self,
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        try:
+            return await super().__call__(request, context)
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            return JobConclusion(
+                analysis_id=new_safe_handle(HandleKind.ANALYSIS_ID),
+                artifact_ids=(),
+            )
 
 
 async def _wait_for_state(
@@ -619,6 +640,126 @@ async def test_explicit_cancellation_is_idempotent_and_cleans_temporary_files(
 
 
 @pytest.mark.anyio
+async def test_second_manager_cannot_interrupt_live_rows_and_releases_lease_on_shutdown(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _ControlledHandler()
+    first = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+    )
+    second: AnalyticsJobManager | None = None
+    replacement: AnalyticsJobManager | None = None
+    try:
+        started = await first.start_job(_request())
+        await handler.started.wait()
+
+        with pytest.raises(JobStateError, match=r"manager.*lease"):
+            second = AnalyticsJobManager(store=store, config=config, handlers={})
+        assert (await first.get_job(started.job_id)).state == "running"
+
+        await first.shutdown()
+        replacement = AnalyticsJobManager(store=store, config=config, handlers={})
+        recovered = await replacement.get_job(started.job_id)
+        assert recovered.state == "failed"
+        assert recovered.status_code == "job_interrupted_restart_required"
+    finally:
+        handler.release.set()
+        if second is not None:
+            await second.shutdown()
+        await first.shutdown()
+        if replacement is not None:
+            await replacement.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_cancel_stop_intent_blocks_a_suppressed_cancellation_conclusion(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _CancellationSuppressingHandler()
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+    )
+    try:
+        started = await manager.start_job(_request())
+        await handler.started.wait()
+
+        stopped = await manager.cancel_job(started.job_id)
+
+        assert handler.cancelled.is_set()
+        assert stopped.state == "cancelled"
+        assert stopped.status_code == "job_cancelled"
+        assert stopped.conclusion_available is False
+        assert stopped.analysis_id is None
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_shutdown_stop_intent_blocks_a_suppressed_cancellation_conclusion(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _CancellationSuppressingHandler()
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+    )
+    try:
+        started = await manager.start_job(_request())
+        await handler.started.wait()
+
+        await manager.shutdown()
+        row = manager._require_row(started.job_id)
+
+        assert handler.cancelled.is_set()
+        assert row.state == "failed"
+        assert row.persisted.status_code == "job_interrupted_restart_required"
+        assert row.analysis_id is None
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_immediate_prestart_cancellation_cleans_task_and_workspace(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": _ControlledHandler()},
+    )
+    try:
+        started = await manager.start_job(_request())
+        task = manager._tasks[started.job_id]
+        workspace = manager._workspace_root / started.job_id
+        task.cancel()
+
+        cancelled = await manager.cancel_job(started.job_id)
+
+        assert cancelled.state == "cancelled"
+        assert started.job_id not in manager._tasks
+        assert not workspace.exists()
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
 async def test_restart_cleans_an_orphaned_terminal_job_workspace(tmp_path: Path) -> None:
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
@@ -678,6 +819,35 @@ def test_startup_removes_orphan_workspace_with_owner_read_only_children(
         store.close()
 
 
+def test_workspace_cleanup_refuses_hardlink_without_changing_external_inode(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    workspace_root = config.paths.analytics_root / "job-workspaces"
+    workspace_root.mkdir(mode=0o700)
+    orphan = workspace_root / new_safe_handle(HandleKind.JOB_ID)
+    orphan.mkdir(mode=0o700)
+    external = config.paths.analytics_root / "synthetic-external-workspace-file"
+    content = b"synthetic hardlink boundary content"
+    external.write_bytes(content)
+    external.chmod(0o400)
+    original_mode = stat.S_IMODE(external.stat().st_mode)
+    os.link(external, orphan / "linked.bin")
+
+    store = AnalyticsStore.open(config)
+    manager: AnalyticsJobManager | None = None
+    try:
+        with pytest.raises(JobStateError, match="owner-contained"):
+            manager = AnalyticsJobManager(store=store, config=config, handlers={})
+        assert external.read_bytes() == content
+        assert stat.S_IMODE(external.stat().st_mode) == original_mode
+        assert external.stat().st_nlink == 2
+    finally:
+        if manager is not None:
+            asyncio.run(manager.shutdown())
+        store.close()
+
+
 def test_job_request_rejects_paths_network_code_and_duplicate_parameters() -> None:
     unsafe_values = (
         "https://example.invalid/input",
@@ -716,4 +886,5 @@ def test_job_workspace_root_is_owner_only(tmp_path: Path) -> None:
         assert stat.S_IMODE(manager._workspace_root.stat().st_mode) == 0o700
         assert manager._workspace_root.is_relative_to(config.paths.analytics_root)
     finally:
+        asyncio.run(manager.shutdown())
         store.close()

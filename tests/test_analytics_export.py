@@ -412,6 +412,43 @@ def test_identifier_shaped_export_keys_are_refused_for_every_value_type(
         ExportColumn.model_validate_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    ("value_type", "values"),
+    [
+        ("string", ("synthetic",)),
+        ("number", (1.0,)),
+        ("integer", (1,)),
+        ("boolean", (True,)),
+        ("decimal", ("1",)),
+    ],
+)
+def test_prefixed_identifier_shaped_export_keys_are_refused_for_every_value_type(
+    value_type: str,
+    values: tuple[object, ...],
+) -> None:
+    payload = {
+        "key": "raw_client_id",
+        "label": "Synthetic identifier",
+        "value_type": value_type,
+        "values": values,
+    }
+
+    with pytest.raises(ValidationError, match="raw broker field"):
+        ExportColumn.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("safe_key", ["metric_id", "liquidity_ratio", "return_metric"])
+def test_ordinary_metric_keys_remain_allowed(safe_key: str) -> None:
+    column = ExportColumn(
+        key=safe_key,
+        label="Synthetic metric",
+        value_type="number",
+        values=(1.0,),
+    )
+
+    assert column.key == safe_key
+
+
 def test_unbound_caller_export_refuses_instead_of_claiming_saxo_provenance(
     tmp_path: Path,
 ) -> None:

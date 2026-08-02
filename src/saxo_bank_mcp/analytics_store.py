@@ -558,6 +558,15 @@ class _OwnedArtifactMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class _ArtifactAnalysisBinding:
+    analysis_id: str
+    analysis_kind: str
+    dataset_id: str
+    source_revision: str
+    result_fingerprint_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class _DatasetBinding:
     account_scope: str
     source_scope: str
@@ -705,6 +714,7 @@ class AnalyticsStore:
         self._transaction_reserved_bytes = 0
         self._transaction_commit_actions: list[Callable[[], None]] = []
         self._transaction_rollback_actions: list[Callable[[], None]] = []
+        self._file_state_poisoned = False
         self._closed = False
 
     @classmethod
@@ -764,14 +774,22 @@ class AnalyticsStore:
                 self._transaction_rollback_actions = []
                 try:
                     yield self
-                except BaseException:
+                except BaseException as transaction_error:
                     with suppress(duckdb.Error):
                         writer.execute("ROLLBACK")
-                    _run_file_actions(reversed(self._transaction_rollback_actions))
+                    try:
+                        _run_file_actions(reversed(self._transaction_rollback_actions))
+                    except BaseException as cleanup_error:
+                        self._file_state_poisoned = True
+                        raise cleanup_error from transaction_error
                     raise
                 else:
                     writer.execute("COMMIT")
-                    _run_file_actions(self._transaction_commit_actions)
+                    try:
+                        _run_file_actions(self._transaction_commit_actions)
+                    except BaseException:
+                        self._file_state_poisoned = True
+                        raise
                 finally:
                     self._active_writer = None
                     self._transaction_owner = None
@@ -895,6 +913,10 @@ class AnalyticsStore:
     def _require_open(self) -> None:
         if self._closed:
             raise StoreError("analytics store is closed")
+        if self._file_state_poisoned:
+            raise StoreError(
+                "analytics artifact file state requires close and safe reopen",
+            )
 
     @classmethod
     def ensure_owner_capacity(
@@ -2272,13 +2294,26 @@ class AnalyticsStore:
             created_at=_require_datetime(row[4]),
         )
 
-    def put_artifact(self, artifact: ArtifactSummary) -> StoredArtifact:
+    def put_artifact(
+        self,
+        artifact: ArtifactSummary,
+        *,
+        analysis_binding: _ArtifactAnalysisBinding | None = None,
+    ) -> StoredArtifact:
         """Persist typed artifact metadata without accepting a caller path."""
         if artifact.visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
             raise StoreValidationError(
                 "local resource links require put_owned_artifact and an owned artifact file",
             )
         with self._write_connection() as connection:
+            if analysis_binding is None:
+                _require_stored_analysis(connection, artifact.analysis_id)
+            else:
+                _require_artifact_analysis_binding(
+                    connection,
+                    artifact.analysis_id,
+                    analysis_binding,
+                )
             existing = self._artifact_by_id(connection, artifact.artifact_id)
             if existing is not None:
                 if (
@@ -2290,8 +2325,6 @@ class AnalyticsStore:
                         "artifact handle already identifies different content",
                     )
                 return existing
-            if self._analysis_by_id(connection, artifact.analysis_id) is None:
-                raise StoreNotFoundError("artifact analysis does not exist")
             self._ensure_capacity(artifact.byte_count)
             connection.execute(
                 """
@@ -2324,7 +2357,7 @@ class AnalyticsStore:
                 raise StoreError("stored artifact cannot be read back")
             return stored
 
-    def put_owned_artifact(
+    def put_owned_artifact(  # noqa: PLR0913
         self,
         *,
         analysis_id: str,
@@ -2332,6 +2365,7 @@ class AnalyticsStore:
         extension: str,
         content: bytes,
         description: str,
+        analysis_binding: _ArtifactAnalysisBinding | None = None,
     ) -> StoredArtifact:
         """Persist an owner-only artifact file and metadata without accepting a path."""
         expected_extension = _ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE.get(media_type)
@@ -2361,7 +2395,14 @@ class AnalyticsStore:
         stored: StoredArtifact | None = None
         try:
             with self._write_connection() as connection:
-                _require_stored_analysis(connection, artifact.analysis_id)
+                if analysis_binding is None:
+                    _require_stored_analysis(connection, artifact.analysis_id)
+                else:
+                    _require_artifact_analysis_binding(
+                        connection,
+                        artifact.analysis_id,
+                        analysis_binding,
+                    )
                 self._ensure_capacity(artifact.byte_count)
                 _write_owner_artifact_file(staged, content)
                 _fsync_artifact_directory(staged.parent)
@@ -2402,7 +2443,11 @@ class AnalyticsStore:
                 _discard_staged_artifact(staged)
             raise
         if not outer_transaction:
-            _publish_staged_artifact(destination, staged, artifact.sha256)
+            try:
+                _publish_staged_artifact(destination, staged, artifact.sha256)
+            except BaseException:
+                self._file_state_poisoned = True
+                raise
         return stored
 
     @staticmethod
@@ -3043,7 +3088,11 @@ class AnalyticsStore:
                 _restore_staged_artifact_files(staged_files)
             raise
         if not outer_transaction:
-            _remove_staged_artifact_files(staged_files)
+            try:
+                _remove_staged_artifact_files(staged_files)
+            except BaseException:
+                self._file_state_poisoned = True
+                raise
         return receipt
 
 
@@ -3106,6 +3155,54 @@ def _require_stored_analysis(
         raise StoreNotFoundError("artifact analysis does not exist")
 
 
+def _artifact_analysis_binding(  # pyright: ignore[reportUnusedFunction]
+    result: AnalysisResult,
+) -> _ArtifactAnalysisBinding:
+    result_json = _canonical_json(result.model_dump(mode="json"))
+    return _ArtifactAnalysisBinding(
+        analysis_id=result.analysis_id,
+        analysis_kind=result.analysis_kind,
+        dataset_id=result.provenance.dataset_id,
+        source_revision=result.provenance.source_revision,
+        result_fingerprint_sha256=_fingerprint(result_json),
+    )
+
+
+def _require_artifact_analysis_binding(
+    connection: duckdb.DuckDBPyConnection,
+    analysis_id: str,
+    binding: _ArtifactAnalysisBinding,
+) -> None:
+    if binding.analysis_id != analysis_id:
+        raise StoreValidationError("artifact analysis binding does not match")
+    row = connection.execute(
+        """
+        SELECT dataset_id, analysis_kind, status, source_revision,
+               fingerprint_sha256, result_json
+        FROM analyses WHERE analysis_id = ?
+        """,
+        (analysis_id,),
+    ).fetchone()
+    if row is None:
+        raise StoreNotFoundError("artifact analysis does not exist")
+    result_json = _require_str(row[5])
+    if (
+        _require_str(row[0]) != binding.dataset_id
+        or _require_str(row[1]) != binding.analysis_kind
+        or _require_str(row[2]) != "verified"
+        or _require_str(row[3]) != binding.source_revision
+        or _require_str(row[4]) != binding.result_fingerprint_sha256
+        or _fingerprint(result_json) != binding.result_fingerprint_sha256
+    ):
+        raise StoreValidationError("artifact analysis binding is no longer verified")
+    dataset_row = connection.execute(
+        "SELECT source_revision FROM datasets WHERE dataset_id = ?",
+        (binding.dataset_id,),
+    ).fetchone()
+    if dataset_row is None or _require_str(dataset_row[0]) != binding.source_revision:
+        raise StoreValidationError("artifact dataset binding is no longer current")
+
+
 def _require_new_artifact_destination(destination: Path) -> None:
     if destination.exists() or destination.is_symlink():
         raise StoreConflictError("artifact handle already has a physical file")
@@ -3162,19 +3259,7 @@ def _owned_artifact_path(
     extension = _ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE.get(media_type)
     if extension is None:
         raise StoreValidationError("artifact media type is not supported")
-    artifacts_dir = config.paths.artifacts_dir
-    if artifacts_dir.is_symlink():
-        raise StoreValidationError("artifact directory cannot be a symlink")
-    try:
-        resolved_dir = artifacts_dir.resolve(strict=True)
-        resolved_root = config.paths.analytics_root.resolve(strict=True)
-    except OSError as error:
-        raise StoreValidationError("artifact directory is unavailable") from error
-    if (
-        not resolved_dir.is_relative_to(resolved_root)
-        or stat.S_IMODE(resolved_dir.stat().st_mode) != _OWNER_DIRECTORY_MODE
-    ):
-        raise StoreValidationError("artifact directory is not owner-only")
+    resolved_dir = _require_owner_artifact_directory(config)
     return resolved_dir / f"{artifact_id}.{extension}"
 
 
@@ -3215,10 +3300,9 @@ def _publish_staged_artifact(
 
 
 def _discard_staged_artifact(staged: Path) -> None:
-    try:
-        staged.unlink()
-    except FileNotFoundError:
+    if not _require_owner_artifact_node(staged, missing_ok=True):
         return
+    staged.unlink()
     _fsync_artifact_directory(staged.parent)
 
 
@@ -3231,18 +3315,40 @@ def _fsync_artifact_directory(directory: Path) -> None:
 
 
 def _run_file_actions(actions: Iterable[Callable[[], None]]) -> None:
+    first_error: BaseException | None = None
     for action in actions:
-        action()
+        try:
+            action()
+        except BaseException as error:  # noqa: BLE001
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 def _require_owner_artifact_file(path: Path, expected_sha256: str) -> None:
+    _require_owner_artifact_node(path)
+    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
+        raise StoreError("owner artifact file integrity check failed")
+
+
+def _require_owner_artifact_node(path: Path, *, missing_ok: bool = False) -> bool:
+    try:
+        node = path.lstat()
+    except FileNotFoundError:
+        if missing_ok:
+            return False
+        raise StoreError("owner artifact file integrity check failed") from None
+    except OSError as error:
+        raise StoreError("owner artifact file integrity check failed") from error
     if (
-        path.is_symlink()
-        or not path.is_file()
-        or stat.S_IMODE(path.stat().st_mode) != _OWNER_FILE_MODE
-        or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
+        not stat.S_ISREG(node.st_mode)
+        or node.st_uid != os.getuid()
+        or node.st_nlink != 1
+        or stat.S_IMODE(node.st_mode) != _OWNER_FILE_MODE
     ):
         raise StoreError("owner artifact file integrity check failed")
+    return True
 
 
 def _stage_owned_artifact_deletions(
@@ -3289,30 +3395,49 @@ def _stage_owned_artifact_deletions(
 
 
 def _restore_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
+    first_error: BaseException | None = None
     for destination, temporary in reversed(staged):
-        if not temporary.exists():
-            continue
-        if destination.exists() or destination.is_symlink():
-            raise StoreError("artifact deletion rollback target is occupied")
-        temporary.replace(destination)
-        destination.chmod(_OWNER_FILE_MODE)
-        _fsync_artifact_directory(destination.parent)
+        try:
+            if not temporary.exists():
+                continue
+            _require_owner_artifact_node(temporary)
+            _require_available_artifact_restore_destination(destination)
+            temporary.replace(destination)
+            destination.chmod(_OWNER_FILE_MODE)
+            _fsync_artifact_directory(destination.parent)
+        except BaseException as error:  # noqa: BLE001
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        raise first_error
 
 
 def _remove_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
-    try:
-        for _destination, temporary in staged:
+    first_error: BaseException | None = None
+    for _destination, temporary in staged:
+        try:
+            _require_owner_artifact_node(temporary)
             temporary.unlink()
             _fsync_artifact_directory(temporary.parent)
-    except OSError as error:
-        raise StoreError("artifact physical deletion cleanup failed") from error
+        except BaseException as error:  # noqa: BLE001
+            if first_error is None:
+                first_error = error
+    if first_error is not None:
+        if isinstance(first_error, Exception):
+            raise StoreError("artifact physical deletion cleanup failed") from first_error
+        raise first_error
+
+
+def _require_available_artifact_restore_destination(destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise StoreError("artifact deletion rollback target is occupied")
 
 
 def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
     config: AnalyticsConfig,
     metadata: Mapping[str, _OwnedArtifactMetadata],
 ) -> None:
-    directory = config.paths.artifacts_dir.resolve(strict=True)
+    directory = _require_owner_artifact_directory(config)
     canonical: dict[str, Path] = {}
     staged_writes: dict[str, list[Path]] = {}
     staged_deletes: dict[str, list[Path]] = {}
@@ -3380,14 +3505,39 @@ def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
 
 
 def _quarantine_unreferenced_artifact(path: Path, artifact_id: str) -> None:
-    if path.is_symlink() or not path.is_file():
-        raise StoreError("unreferenced artifact is not an owner file")
+    _require_owner_artifact_node(path)
     quarantined = path.with_name(
         f".artifact-orphan-{artifact_id}-{uuid4().hex}{path.suffix}",
     )
     path.replace(quarantined)
     quarantined.chmod(_OWNER_FILE_MODE)
     _fsync_artifact_directory(quarantined.parent)
+
+
+def _require_owner_artifact_directory(config: AnalyticsConfig) -> Path:
+    directory = config.paths.artifacts_dir
+    root = config.paths.analytics_root
+    try:
+        directory_node = directory.lstat()
+        root_node = root.lstat()
+        resolved_directory = directory.resolve(strict=True)
+        resolved_root = root.resolve(strict=True)
+    except OSError as error:
+        raise StoreValidationError("artifact directory is unavailable") from error
+    if (
+        stat.S_ISLNK(directory_node.st_mode)
+        or not stat.S_ISDIR(directory_node.st_mode)
+        or directory_node.st_uid != os.getuid()
+        or stat.S_IMODE(directory_node.st_mode) != _OWNER_DIRECTORY_MODE
+        or stat.S_ISLNK(root_node.st_mode)
+        or not stat.S_ISDIR(root_node.st_mode)
+        or root_node.st_uid != os.getuid()
+        or stat.S_IMODE(root_node.st_mode) != _OWNER_DIRECTORY_MODE
+        or resolved_directory == resolved_root
+        or not resolved_directory.is_relative_to(resolved_root)
+    ):
+        raise StoreValidationError("artifact directory is not owner-contained")
+    return resolved_directory
 
 
 def _count_targets(

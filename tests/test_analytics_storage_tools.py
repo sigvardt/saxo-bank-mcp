@@ -26,6 +26,7 @@ from saxo_bank_mcp.analytics_store import (
     StorageDataType,
     StorageScope,
     StoreBusyError,
+    StoreError,
     StoreQuotaError,
     StoreValidationError,
     TableCount,
@@ -506,6 +507,173 @@ def test_owned_artifact_publication_and_deletion_fsync_the_directory(
         assert calls >= 4
     finally:
         store.close()
+
+
+def test_postcommit_publish_actions_drain_then_require_safe_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    publish = store_module._publish_staged_artifact
+    attempted: list[str] = []
+
+    def fail_first_publish(
+        destination: Path,
+        staged: Path,
+        expected_sha256: str,
+    ) -> None:
+        attempted.append(destination.name)
+        if len(attempted) == 1:
+            raise OSError("synthetic postcommit publish interruption")
+        publish(destination, staged, expected_sha256)
+
+    monkeypatch.setattr(store_module, "_publish_staged_artifact", fail_first_publish)
+    owned_ids: list[str] = []
+
+    def publish_two() -> None:
+        with store.transaction():
+            for ordinal in range(2):
+                owned = store.put_owned_artifact(
+                    analysis_id=analysis_id,
+                    media_type="text/plain",
+                    extension="txt",
+                    content=f"synthetic committed artifact {ordinal}".encode(),
+                    description="Synthetic committed artifact",
+                )
+                owned_ids.append(owned.artifact_id)
+
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        with pytest.raises(OSError, match="publish interruption"):
+            publish_two()
+
+        assert len(attempted) == 2
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        store.close()
+
+    monkeypatch.setattr(store_module, "_publish_staged_artifact", publish)
+    recovered = AnalyticsStore.open(config)
+    try:
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files) == 2
+        assert all(any(artifact_id in path.name for path in files) for artifact_id in owned_ids)
+        assert all(not path.name.startswith(".") for path in files)
+    finally:
+        recovered.close()
+
+
+def test_postcommit_delete_actions_drain_then_require_safe_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    original_unlink = Path.unlink
+    attempted: list[str] = []
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = tuple(
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=f"synthetic deleted artifact {ordinal}".encode(),
+                description="Synthetic deleted artifact",
+            )
+            for ordinal in range(2)
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=tuple(item.artifact_id for item in owned)),
+            store=store,
+        )
+
+        def fail_first_pending_unlink(path: Path, *, missing_ok: bool = False) -> None:
+            if path.name.startswith(".artifact-delete-"):
+                attempted.append(path.name)
+                if len(attempted) == 1:
+                    raise OSError("synthetic postcommit deletion interruption")
+            original_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", fail_first_pending_unlink)
+        with (
+            pytest.raises(StoreError, match="physical deletion cleanup failed"),
+            store.transaction(),
+        ):
+            delete_analytics_data(preview.preview.token, store=store)
+
+        assert len(attempted) == 2
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        monkeypatch.setattr(Path, "unlink", original_unlink)
+        store.close()
+
+    recovered = AnalyticsStore.open(config)
+    try:
+        assert tuple(config.paths.artifacts_dir.iterdir()) == ()
+    finally:
+        recovered.close()
+
+
+def test_startup_refuses_swapped_artifact_directory_without_touching_sibling(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    initialized = AnalyticsStore.open(config)
+    initialized.close()
+    sibling = config.paths.analytics_root / "synthetic-sibling"
+    sibling.mkdir(mode=0o700)
+    artifact_id = new_safe_handle(HandleKind.ARTIFACT_ID)
+    external = sibling / f"{artifact_id}.txt"
+    content = b"synthetic sibling owner content"
+    external.write_bytes(content)
+    external.chmod(0o600)
+    config.paths.artifacts_dir.rmdir()
+    config.paths.artifacts_dir.symlink_to(sibling, target_is_directory=True)
+
+    opened: AnalyticsStore | None = None
+    try:
+        with pytest.raises(StoreValidationError, match="artifact directory"):
+            opened = AnalyticsStore.open(config)
+        assert external.exists()
+        assert external.read_bytes() == content
+        assert stat.S_IMODE(external.stat().st_mode) == 0o600
+        assert tuple(sibling.iterdir()) == (external,)
+    finally:
+        if opened is not None:
+            opened.close()
+
+
+def test_startup_refuses_hardlinked_artifact_without_mutating_external_inode(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    initialized = AnalyticsStore.open(config)
+    initialized.close()
+    external = config.paths.analytics_root / "synthetic-external-owner-file"
+    content = b"synthetic multiply linked owner content"
+    external.write_bytes(content)
+    external.chmod(0o640)
+    original_mode = stat.S_IMODE(external.stat().st_mode)
+    artifact_id = new_safe_handle(HandleKind.ARTIFACT_ID)
+    linked = config.paths.artifacts_dir / f"{artifact_id}.txt"
+    linked.hardlink_to(external)
+
+    opened: AnalyticsStore | None = None
+    try:
+        with pytest.raises(StoreError, match="artifact"):
+            opened = AnalyticsStore.open(config)
+        assert external.exists()
+        assert external.read_bytes() == content
+        assert stat.S_IMODE(external.stat().st_mode) == original_mode
+        assert external.stat().st_nlink == 2
+        assert linked.exists()
+    finally:
+        if opened is not None:
+            opened.close()
 
 
 def test_expired_deletion_token_refuses_without_deleting(

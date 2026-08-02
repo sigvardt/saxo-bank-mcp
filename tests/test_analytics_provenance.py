@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+from collections.abc import Generator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import RFC_4122, UUID
@@ -625,11 +627,11 @@ def test_store_verified_binding_renders_exports_and_reports_without_caller_stamp
         artifact_template_ids=("relative_performance",),
     )
     _seed_store(config, result)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
     monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
     bindings = binding_registry_type(
         config=config,
         proof_registry=registry,
-        environment="SIM",
     )
     issued = bindings.issue(result.analysis_id)
     store = AnalyticsStore.open(config)
@@ -696,11 +698,11 @@ def test_verified_delivery_preserves_exact_25_mib_inline_boundary_and_link_fallb
     result = _analysis_result()
     registry, _ = _registry()
     _seed_store(config, result)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
     monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
     bindings = binding_registry_type(
         config=config,
         proof_registry=registry,
-        environment="SIM",
     )
     issued = bindings.issue(result.analysis_id)
     inline_stamps = bindings._stamps_for(
@@ -765,11 +767,11 @@ def test_server_issued_artifact_binding_refuses_after_source_revision_changes(
         artifact_template_ids=("relative_performance",),
     )
     _seed_store(config, result)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
     monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
     bindings = binding_registry_type(
         config=config,
         proof_registry=registry,
-        environment="SIM",
     )
     issued = bindings.issue(result.analysis_id)
     connection = duckdb.connect(str(config.paths.store_path))
@@ -800,6 +802,155 @@ def test_server_issued_artifact_binding_refuses_after_source_revision_changes(
 
     assert isinstance(delivery, render_module.ArtifactRefusal)
     assert delivery.reason_code == "artifact_analysis_binding_invalid"
+
+
+def test_artifact_runtime_environment_and_host_trust_are_not_caller_switches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    stored_render_request_type = getattr(render_module, "StoredRenderRequest")
+    config = _config(tmp_path)
+    result = _analysis_result(analysis_kind="market_comparison")
+    registry, _ = _registry(
+        analysis_kind="market_comparison",
+        artifact_template_ids=("relative_performance",),
+    )
+    _seed_store(config, result)
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+
+    with pytest.raises(TypeError):
+        binding_registry_type(
+            config=config,
+            proof_registry=registry,
+            environment="SIM",
+        )
+    with pytest.raises(TypeError):
+        binding_registry_type(
+            config=config,
+            proof_registry=registry,
+            trusted_local_host=True,
+        )
+
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    bindings = binding_registry_type(config=config, proof_registry=registry)
+    issued = bindings.issue(result.analysis_id)
+    store = AnalyticsStore.open(config)
+    try:
+        delivery = render_module.render_analysis(
+            stored_render_request_type(
+                binding_id=issued.binding_id,
+                template_id="relative_performance",
+                output_format="png",
+                width=1200,
+                height=675,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    finally:
+        store.close()
+
+    assert isinstance(delivery, render_module.ArtifactResourceLink)
+    assert delivery.owner_only is True
+    assert any(line == "Environment: LIVE" for line in delivery.visible_stamps)
+
+
+@pytest.mark.parametrize(
+    ("delivery_mode", "mutation"),
+    [
+        ("inline", "status"),
+        ("inline", "fingerprint"),
+        ("link", "dataset_revision"),
+        ("link", "analysis_revision"),
+    ],
+)
+def test_artifact_registration_atomically_rechecks_the_issued_analysis_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delivery_mode: str,
+    mutation: str,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    config = _config(tmp_path)
+    result = _analysis_result()
+    use_link = delivery_mode == "link"
+    if use_link:
+        result = result.model_copy(update={"visibility": VisibilityMode.LOCAL_RESOURCE_LINK})
+    registry, _ = _registry()
+    _seed_store(config, result)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+    bindings = binding_registry_type(config=config, proof_registry=registry)
+    issued = bindings.issue(result.analysis_id)
+    expected_visibility = (
+        VisibilityMode.LOCAL_RESOURCE_LINK if use_link else VisibilityMode.INLINE_PRIVATE
+    )
+    payload = render_module.build_artifact_payload(
+        media_type="text/plain",
+        extension="txt",
+        content=b"synthetic race-bound artifact",
+        semantics_sha256="8" * 64,
+        stamps=bindings._stamps_for(
+            issued.binding_id,
+            visibility=expected_visibility,
+        ),
+    )
+    store = AnalyticsStore.open(config)
+    original_writer = store._write_connection
+    raced = False
+
+    @contextmanager
+    def invalidate_before_registration() -> Generator[duckdb.DuckDBPyConnection]:
+        nonlocal raced
+        if not raced:
+            raced = True
+            with original_writer() as connection:
+                if mutation == "status":
+                    connection.execute(
+                        "UPDATE analyses SET status = 'invalidated' WHERE analysis_id = ?",
+                        (result.analysis_id,),
+                    )
+                elif mutation == "fingerprint":
+                    connection.execute(
+                        "UPDATE analyses SET fingerprint_sha256 = ? WHERE analysis_id = ?",
+                        ("0" * 64, result.analysis_id),
+                    )
+                elif mutation == "dataset_revision":
+                    connection.execute(
+                        "UPDATE datasets SET source_revision = 'revision-raced' "
+                        "WHERE dataset_id = ?",
+                        (result.provenance.dataset_id,),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE analyses SET source_revision = 'revision-raced' "
+                        "WHERE analysis_id = ?",
+                        (result.analysis_id,),
+                    )
+                store._bump_revision(connection)
+        with original_writer() as connection:
+            yield connection
+
+    monkeypatch.setattr(store, "_write_connection", invalidate_before_registration)
+    try:
+        delivery = render_module._deliver_bound_payload(
+            payload,
+            binding_id=issued.binding_id,
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+        with store._read_connection() as connection:
+            artifact_count = connection.execute("SELECT count(*) FROM artifacts").fetchone()
+    finally:
+        store.close()
+
+    assert raced is True
+    assert isinstance(delivery, render_module.ArtifactRefusal)
+    assert delivery.reason_code == "artifact_analysis_binding_invalid"
+    assert artifact_count == (0,)
 
 
 @pytest.mark.parametrize("mutation", ["payload", "lineage"])

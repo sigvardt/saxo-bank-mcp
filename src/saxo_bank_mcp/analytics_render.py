@@ -8,6 +8,7 @@ import hashlib
 import html
 import json
 import math
+import os
 import re
 import textwrap
 from collections.abc import Callable, Sequence
@@ -30,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.analytics_chart_semantics import (
     PRIVACY_FOOTER,
+    ArtifactEnvironment,
     ArtifactStamps,
     ChartSemantics,
     ChartSeries,
@@ -53,7 +55,12 @@ from saxo_bank_mcp.analytics_models import (
 )
 from saxo_bank_mcp.analytics_proof_profiles import ProofRegistry
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
-from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreError
+from saxo_bank_mcp.analytics_store import (
+    AnalyticsStore,
+    StoreError,
+    _artifact_analysis_binding,
+    _ArtifactAnalysisBinding,
+)
 
 mpl.use("Agg", force=True)
 
@@ -238,14 +245,14 @@ class ArtifactBindingRegistry:
         *,
         config: AnalyticsConfig,
         proof_registry: ProofRegistry,
-        environment: Literal["SIM", "LIVE"],
     ) -> None:
-        """Bind runtime-owned configuration, proof registry, and environment."""
+        """Bind proof state to the current server-owned runtime environment."""
         self._config = config
         self._proof_registry = proof_registry
-        self._environment: Literal["SIM", "LIVE"] = environment
+        self._environment: ArtifactEnvironment = _current_artifact_environment()
         self._results: dict[str, AnalysisResult] = {}
         self._template_ids: dict[str, frozenset[str]] = {}
+        self._analysis_bindings: dict[str, _ArtifactAnalysisBinding] = {}
 
     def issue(self, analysis_id: str) -> ArtifactBindingReceipt:
         """Replay exact persisted proof material before issuing a random binding."""
@@ -261,9 +268,12 @@ class ArtifactBindingRegistry:
         binding_id = f"ab_{uuid4().hex}"
         self._results[binding_id] = result
         self._template_ids[binding_id] = frozenset(profile.artifact_template_ids)
+        self._analysis_bindings[binding_id] = _artifact_analysis_binding(result)
         return ArtifactBindingReceipt(binding_id=binding_id, analysis_id=result.analysis_id)
 
     def _result_for(self, binding_id: str) -> AnalysisResult:
+        if _current_artifact_environment() != self._environment:
+            raise ValueError("artifact runtime environment changed after binding")
         result = self._results.get(binding_id)
         if result is None:
             raise ValueError("artifact binding is unknown or stale")
@@ -280,6 +290,13 @@ class ArtifactBindingRegistry:
             raise ValueError("artifact binding no longer identifies the issued result")
         return current
 
+    def _analysis_binding_for(self, binding_id: str) -> _ArtifactAnalysisBinding:
+        result = self._result_for(binding_id)
+        binding = self._analysis_bindings.get(binding_id)
+        if binding is None or binding.analysis_id != result.analysis_id:
+            raise ValueError("artifact analysis binding is unknown or stale")
+        return binding
+
     def _allows_template(self, binding_id: str, template_id: str) -> bool:
         self._result_for(binding_id)
         return template_id in self._template_ids[binding_id]
@@ -287,6 +304,8 @@ class ArtifactBindingRegistry:
     def _base_visibility(self, binding_id: str) -> VisibilityMode:
         visibility = self._result_for(binding_id).visibility
         if visibility in {VisibilityMode.PRIVATE_USER_RESULT, VisibilityMode.INLINE_PRIVATE}:
+            if self._environment == "LIVE":
+                return VisibilityMode.LOCAL_RESOURCE_LINK
             return VisibilityMode.INLINE_PRIVATE
         if visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
             return VisibilityMode.LOCAL_RESOURCE_LINK
@@ -750,6 +769,7 @@ def _deliver_bound_payload(
                 extension=payload.extension,
                 content=payload.content,
                 description="stored verified analytics artifact",
+                analysis_binding=bindings._analysis_binding_for(binding_id),
             )
             return ArtifactResourceLink(
                 artifact_id=stored.artifact_id,
@@ -777,6 +797,7 @@ def _deliver_bound_payload(
                 created_at=_utc_now(),
                 description="stored verified inline analytics artifact",
             ),
+            analysis_binding=bindings._analysis_binding_for(binding_id),
         )
         return InlineArtifact(
             artifact_id=artifact_id,
@@ -789,6 +810,13 @@ def _deliver_bound_payload(
         )
     except (StoreError, ValueError):
         return _binding_refusal()
+
+
+def _current_artifact_environment() -> Literal["SIM", "LIVE"]:
+    value = os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
+    if value not in {"SIM", "LIVE"}:
+        raise ValueError("artifact runtime environment is invalid")
+    return cast("Literal['SIM', 'LIVE']", value)
 
 
 def _build_figure(

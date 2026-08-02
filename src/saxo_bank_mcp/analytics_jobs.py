@@ -15,7 +15,9 @@ import shutil
 import stat
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
+from threading import RLock
 from typing import Annotated, Final, Literal, Protocol, Self, cast
 
 from pydantic import (
@@ -61,7 +63,6 @@ type JobStatusCode = Literal[
 type JobParameterValue = str | int | float | bool | None
 
 _OWNER_DIRECTORY_MODE: Final = 0o700
-_OWNER_FILE_MODE: Final = 0o600
 _WORKSPACE_DIRECTORY: Final = "job-workspaces"
 _DEFAULT_JOB_TTL: Final = timedelta(minutes=30)
 _MAX_JOB_TTL: Final = timedelta(days=1)
@@ -81,6 +82,8 @@ _UNSAFE_TEXT: Final = re.compile(
 )
 _JOB_ID_ADAPTER: Final[TypeAdapter[JobId]] = TypeAdapter(JobId)
 _ANALYSIS_ID_ADAPTER: Final[TypeAdapter[AnalysisId]] = TypeAdapter(AnalysisId)
+_MANAGER_LEASE_LOCK: Final = RLock()
+_MANAGER_LEASES: set[Path] = set()
 
 
 class JobError(RuntimeError):
@@ -357,15 +360,24 @@ class AnalyticsJobManager:
         validated = AnalyticsConfig.model_validate(config)
         if job_ttl <= timedelta(0) or job_ttl > _MAX_JOB_TTL:
             raise ValueError("analytics job TTL is invalid")
+        lease_key = _acquire_manager_lease(validated)
+        self._lease_key = lease_key
+        self._lease_held = True
         self._store = store
         self._config = validated
         self._handlers = dict(handlers)
         self._job_ttl = job_ttl
-        self._workspace_root = _prepare_workspace_root(validated)
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._lock = asyncio.Lock()
-        self._closed = False
-        self._recover_interrupted_rows()
+        try:
+            self._workspace_root = _prepare_workspace_root(validated)
+            self._tasks: dict[str, asyncio.Task[None]] = {}
+            self._stop_intents: dict[str, JobStatusCode] = {}
+            self._cleanup_failures: set[str] = set()
+            self._lock = asyncio.Lock()
+            self._closed = False
+            self._recover_interrupted_rows()
+        except BaseException:
+            self._release_lease()
+            raise
 
     async def start_job(self, request: JobRequest) -> JobStatus:
         """Start, deduplicate, or explicitly restart one deterministic local job."""
@@ -424,6 +436,9 @@ class AnalyticsJobManager:
                     _cleanup_workspace(self._workspace_root, row.job_id)
                     raise
                 self._tasks[row.job_id] = task
+                task.add_done_callback(
+                    partial(self._finish_task, row.job_id),
+                )
             return _status_from_row(row)
 
     async def get_job(self, job_id: str) -> JobStatus:
@@ -436,6 +451,7 @@ class AnalyticsJobManager:
             if row.state in {"queued", "running"} and _utc_now() >= row.persisted.expires_at:
                 task = self._tasks.get(validated_job_id)
                 if task is not None:
+                    self._stop_intents.setdefault(validated_job_id, "job_expired")
                     task.cancel()
                 else:
                     row = self._set_terminal(
@@ -445,6 +461,7 @@ class AnalyticsJobManager:
                     )
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+            self._finish_task(validated_job_id, task)
             async with self._lock:
                 row = self._require_row(validated_job_id)
                 if row.state in {"queued", "running"}:
@@ -453,6 +470,7 @@ class AnalyticsJobManager:
                         state="cancelled",
                         status_code="job_expired",
                     )
+                self._stop_intents.pop(validated_job_id, None)
         return _status_from_row(row)
 
     async def cancel_job(self, job_id: str) -> JobStatus:
@@ -465,6 +483,7 @@ class AnalyticsJobManager:
             if row.state in {"queued", "running"}:
                 task = self._tasks.get(validated_job_id)
                 if task is not None:
+                    self._stop_intents.setdefault(validated_job_id, "job_cancelled")
                     task.cancel()
                 else:
                     row = self._set_terminal(
@@ -474,6 +493,7 @@ class AnalyticsJobManager:
                     )
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+            self._finish_task(validated_job_id, task)
             async with self._lock:
                 row = self._require_row(validated_job_id)
                 if row.state in {"queued", "running"}:
@@ -482,31 +502,40 @@ class AnalyticsJobManager:
                         state="cancelled",
                         status_code="job_cancelled",
                     )
+                self._stop_intents.pop(validated_job_id, None)
         return _status_from_row(row)
 
     async def shutdown(self) -> None:
         """Stop process-owned work as interrupted; never auto-resume it later."""
         tasks: tuple[asyncio.Task[None], ...]
         job_ids: tuple[str, ...]
-        async with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            tasks = tuple(self._tasks.values())
-            job_ids = tuple(self._tasks)
-            for task in tasks:
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        async with self._lock:
-            for job_id in job_ids:
-                row = self._row(job_id)
-                if row is not None and row.state in {"queued", "running"}:
-                    self._set_terminal(
-                        row,
-                        state="failed",
-                        status_code="job_interrupted_restart_required",
+        try:
+            async with self._lock:
+                self._closed = True
+                tasks = tuple(self._tasks.values())
+                job_ids = tuple(self._tasks)
+                for job_id, task in tuple(self._tasks.items()):
+                    self._stop_intents.setdefault(
+                        job_id,
+                        "job_interrupted_restart_required",
                     )
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                for job_id, task in zip(job_ids, tasks, strict=True):
+                    self._finish_task(job_id, task)
+            async with self._lock:
+                for job_id in job_ids:
+                    row = self._row(job_id)
+                    if row is not None and row.state in {"queued", "running"}:
+                        self._set_terminal(
+                            row,
+                            state="failed",
+                            status_code="job_interrupted_restart_required",
+                        )
+                    self._stop_intents.pop(job_id, None)
+        finally:
+            self._release_lease()
 
     async def _run_job(
         self,
@@ -536,6 +565,8 @@ class AnalyticsJobManager:
                 row = self._require_row(job_id)
                 if row.state not in {"queued", "running"}:
                     return
+                if job_id in self._stop_intents:
+                    return
                 if _utc_now() >= row.persisted.expires_at:
                     self._set_terminal(row, state="cancelled", status_code="job_expired")
                     return
@@ -557,18 +588,21 @@ class AnalyticsJobManager:
         except JobExpiredError:
             async with self._lock:
                 row = self._row(job_id)
-                if row is not None and row.state in {"queued", "running"}:
+                if (
+                    job_id not in self._stop_intents
+                    and row is not None
+                    and row.state in {"queued", "running"}
+                ):
                     self._set_terminal(row, state="cancelled", status_code="job_expired")
         except Exception:  # noqa: BLE001
             async with self._lock:
                 row = self._row(job_id)
-                if row is not None and row.state in {"queued", "running"}:
+                if (
+                    job_id not in self._stop_intents
+                    and row is not None
+                    and row.state in {"queued", "running"}
+                ):
                     self._set_terminal(row, state="failed", status_code="job_failed")
-        finally:
-            try:
-                _cleanup_workspace(self._workspace_root, job_id)
-            finally:
-                self._tasks.pop(job_id, None)
 
     async def _record_progress(self, job_id: str, completed_units: int) -> None:
         if type(completed_units) is not int:
@@ -577,6 +611,8 @@ class AnalyticsJobManager:
             row = self._require_row(job_id)
             if row.state != "running":
                 raise JobStateError("job progress requires a running job")
+            if job_id in self._stop_intents:
+                raise JobStateError("job progress is unavailable after stop intent")
             if _utc_now() >= row.persisted.expires_at:
                 raise JobExpiredError("analytics job expired")
             if not row.persisted.completed_units <= completed_units <= row.persisted.total_units:
@@ -812,6 +848,25 @@ class AnalyticsJobManager:
             raise JobStateError("analytics job workspace is not owner-only")
         return workspace
 
+    def _finish_task(
+        self,
+        job_id: str,
+        task: asyncio.Task[None],
+    ) -> None:
+        try:
+            _cleanup_workspace(self._workspace_root, job_id)
+        except (JobError, OSError):
+            self._cleanup_failures.add(job_id)
+        finally:
+            if self._tasks.get(job_id) is task:
+                self._tasks.pop(job_id, None)
+
+    def _release_lease(self) -> None:
+        if not self._lease_held:
+            return
+        _release_manager_lease(self._lease_key)
+        self._lease_held = False
+
     def _require_open(self) -> None:
         if self._closed:
             raise JobStateError("analytics job manager is closed")
@@ -944,7 +999,6 @@ def _recover_workspace_permissions(workspace: Path) -> None:
                 child.unlink()
                 continue
             _require_owner_workspace_node(child, directory=False)
-            child.chmod(_OWNER_FILE_MODE)
 
 
 def _require_contained_workspace_path(workspace: Path, candidate: Path) -> None:
@@ -958,8 +1012,22 @@ def _require_owner_workspace_node(path: Path, *, directory: bool) -> None:
     except OSError as error:
         raise JobStateError("analytics job workspace node is unavailable") from error
     expected_kind = stat.S_ISDIR(node.st_mode) if directory else stat.S_ISREG(node.st_mode)
-    if not expected_kind or node.st_uid != os.getuid():
+    if not expected_kind or node.st_uid != os.getuid() or (not directory and node.st_nlink != 1):
         raise JobStateError("analytics job workspace node is not owner-contained")
+
+
+def _acquire_manager_lease(config: AnalyticsConfig) -> Path:
+    key = config.paths.store_path.resolve(strict=True)
+    with _MANAGER_LEASE_LOCK:
+        if key in _MANAGER_LEASES:
+            raise JobStateError("analytics job manager lease is already held")
+        _MANAGER_LEASES.add(key)
+    return key
+
+
+def _release_manager_lease(key: Path) -> None:
+    with _MANAGER_LEASE_LOCK:
+        _MANAGER_LEASES.discard(key)
 
 
 async def start_job(
