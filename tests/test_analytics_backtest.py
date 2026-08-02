@@ -52,6 +52,7 @@ _EXPECTED_WARM_UP = 2
 _EXPECTED_PARAMETER_COUNT = 4
 _EXPECTED_PARAMETER_LIMIT = 12
 _EXPECTED_WALK_FORWARD_WINDOWS = 4
+_FINAL_SHORT_BAR_INDEX = 5
 
 
 def _source(
@@ -155,8 +156,13 @@ def _strategy(  # noqa: PLR0913
     )
 
 
-def _always_in_strategy(*, interval_bars: int) -> StrategyDefinition:
+def _always_in_strategy(
+    *,
+    interval_bars: int,
+    direction: Literal["long", "short"] = "long",
+) -> StrategyDefinition:
     return _strategy(
+        direction=direction,
         commission_basis_points=0.0,
         fixed_cost_per_fill=0.0,
         slippage_basis_points=0.0,
@@ -340,6 +346,52 @@ def test_unscheduled_half_weight_position_drifts_as_buy_and_hold() -> None:
     assert len(values.fills) == 1
     assert reference.ending_equity == pytest.approx(1000.0)
     assert reference.total_turnover == pytest.approx(0.5)
+
+
+def test_solvent_short_realized_weight_below_negative_one_matches_reference() -> None:
+    bars = tuple(
+        _bar(
+            index,
+            close,
+            open_price=100.0 if index == _FINAL_SHORT_BAR_INDEX else close,
+        )
+        for index, close in enumerate((100.0, 100.0, 100.0, 100.0, 100.0, 180.0))
+    )
+    request = _request(
+        dataset=_dataset(bars=bars),
+        strategy=_always_in_strategy(interval_bars=10, direction="short"),
+    )
+    result = run_backtest(
+        request,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+    )
+    reference = run_event_loop_reference(
+        tuple(
+            ReferenceBar(
+                at=bar.at,
+                open_price=bar.open_price,
+                close_price=bar.close_price,
+                lifecycle_state=bar.lifecycle_state,
+            )
+            for bar in bars
+        ),
+        request.strategy,
+        starting_equity=request.starting_equity,
+    )
+
+    assert isinstance(result, BacktestResult)
+    assert result.private_values is not None
+    values = result.private_values
+    assert values.ending_equity == pytest.approx(600.0)
+    assert values.total_return_ratio == pytest.approx(-0.4)
+    assert values.total_turnover == pytest.approx(0.5)
+    assert values.ending_position_weight == pytest.approx(-1.5)
+    assert len(values.fills) == 1
+    assert values.ending_equity == pytest.approx(reference.ending_equity)
+    assert values.total_return_ratio == pytest.approx(reference.total_return_ratio)
+    assert values.total_turnover == pytest.approx(reference.total_turnover)
+    assert len(values.fills) == reference.fill_count
 
 
 def test_scheduled_rebalance_records_drift_turnover_and_fill() -> None:

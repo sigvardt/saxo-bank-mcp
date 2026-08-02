@@ -211,7 +211,7 @@ class PrivateBacktestValues(_StrictModel):
     fills: tuple[BacktestFill, ...]
     equity_curve: tuple[BacktestEquityPoint, ...] = Field(min_length=2)
     split_windows: tuple[BacktestSplitWindow, ...] = Field(min_length=2)
-    ending_position_weight: float = Field(ge=-1, le=1, allow_inf_nan=False)
+    ending_position_weight: float = Field(le=1, allow_inf_nan=False)
     delisting_event_count: int = Field(ge=0, le=1)
 
     @model_validator(mode="after")
@@ -686,9 +686,8 @@ def _execute_path(  # noqa: PLR0915
         if equity == 0.0
         else position_units * _price(bars[-1].close_price) / equity
     )
-    if not -1.0 - _FLOAT_TOLERANCE <= ending_position_weight <= 1.0 + _FLOAT_TOLERANCE:
-        raise ArithmeticError("ending position weight exceeds the bounded result contract")
-    ending_position_weight = min(1.0, max(-1.0, ending_position_weight))
+    if not math.isfinite(ending_position_weight) or ending_position_weight > 1.0:
+        raise ArithmeticError("ending position weight is outside the solvent cash model")
     return _ExecutionRun(
         ending_equity=equity,
         total_return_ratio=equity / request.starting_equity - 1.0,
