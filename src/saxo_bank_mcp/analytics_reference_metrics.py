@@ -82,7 +82,10 @@ def reference_cumulative_returns(returns: Iterable[float]) -> tuple[float, ...]:
         if value < -1.0:
             raise ValueError("return is below minus one")
         growth *= 1.0 + value
-        result.append(growth - 1.0)
+        cumulative = growth - 1.0
+        if not math.isfinite(cumulative):
+            raise ValueError("cumulative returns are not finite")
+        result.append(cumulative)
     return tuple(result)
 
 
@@ -186,7 +189,11 @@ def reference_cagr(start_value: float, end_value: float, years: float) -> float:
     start = _reference_positive(start_value, "starting value")
     end = _reference_positive(end_value, "ending value")
     elapsed = _reference_positive(years, "elapsed years")
-    return (end / start) ** (1.0 / elapsed) - 1.0
+    try:
+        result = math.expm1((math.log(end) - math.log(start)) / elapsed)
+    except OverflowError as error:
+        raise ValueError("CAGR result is not finite") from error
+    return _reference_output_scalar(result, "CAGR result")
 
 
 def reference_active_returns(
@@ -199,15 +206,17 @@ def reference_active_returns(
         benchmark_returns,
         minimum_count=1,
     )
-    return tuple(left - right for left, right in zip(subject, benchmark, strict=True))
+    result = tuple(left - right for left, right in zip(subject, benchmark, strict=True))
+    return _reference_output_vector(result, "active returns")
 
 
 def reference_active_return(subject_return: float, benchmark_return: float) -> float:
     """Subtract an aggregate benchmark return from an aggregate subject return."""
-    return _reference_scalar(subject_return, "subject return") - _reference_scalar(
+    result = _reference_scalar(subject_return, "subject return") - _reference_scalar(
         benchmark_return,
         "benchmark return",
     )
+    return _reference_output_scalar(result, "active return")
 
 
 def reference_tracking_error(
@@ -219,8 +228,10 @@ def reference_tracking_error(
     active = reference_active_returns(subject_returns, benchmark_returns)
     if len(active) < _REFERENCE_MIN_SAMPLE_COUNT:
         raise ValueError("tracking error requires two observations")
-    return _reference_sample_deviation(active) * math.sqrt(
-        _reference_positive(periods_per_year, "periods per year"),
+    return _reference_decimal_rescale(
+        _reference_sample_deviation(active),
+        (math.sqrt(_reference_positive(periods_per_year, "periods per year")),),
+        "tracking error",
     )
 
 
@@ -243,8 +254,10 @@ def reference_downside_capture(
 def reference_volatility(returns: Iterable[float], periods_per_year: float) -> float:
     """Compute annualized sample volatility through scalar deviations."""
     values = _reference_vector(returns, "returns", minimum_count=2)
-    return _reference_sample_deviation(values) * math.sqrt(
-        _reference_positive(periods_per_year, "periods per year"),
+    return _reference_decimal_rescale(
+        _reference_sample_deviation(values),
+        (math.sqrt(_reference_positive(periods_per_year, "periods per year")),),
+        "volatility",
     )
 
 
@@ -279,12 +292,15 @@ def reference_drawdown_series(values: Iterable[float]) -> tuple[float, ...]:
     for value in series:
         peak = max(peak, value)
         result.append(value / peak - 1.0)
-    return tuple(result)
+    return _reference_output_vector(tuple(result), "drawdowns")
 
 
 def reference_maximum_drawdown(values: Iterable[float]) -> float:
     """Return the lowest scalar reference drawdown."""
-    return min(reference_drawdown_series(values))
+    return _reference_output_scalar(
+        min(reference_drawdown_series(values)),
+        "maximum drawdown",
+    )
 
 
 def reference_sharpe_ratio(
@@ -296,13 +312,20 @@ def reference_sharpe_ratio(
     values = _reference_vector(returns, "returns", minimum_count=2)
     risk_free = _reference_rates(risk_free_returns, len(values), "risk-free returns")
     annualization = _reference_positive(periods_per_year, "periods per year")
-    denominator = _reference_sample_deviation(values) * math.sqrt(annualization)
+    denominator = _reference_decimal_rescale(
+        _reference_sample_deviation(values),
+        (math.sqrt(annualization),),
+        "Sharpe denominator",
+    )
     if denominator == 0.0:
         raise ValueError("Sharpe denominator is zero")
-    excess_sum = 0.0
-    for value, rate in zip(values, risk_free, strict=True):
-        excess_sum += value - rate
-    return (excess_sum / len(values) * annualization) / denominator
+    numerator = _reference_mean_difference(
+        values,
+        risk_free,
+        annualization,
+        "Sharpe numerator",
+    )
+    return _reference_output_scalar(numerator / denominator, "Sharpe ratio")
 
 
 def reference_sortino_ratio(
@@ -317,10 +340,13 @@ def reference_sortino_ratio(
     denominator = reference_downside_deviation(values, targets, annualization)
     if denominator == 0.0:
         raise ValueError("Sortino denominator is zero")
-    difference_sum = 0.0
-    for value, target in zip(values, targets, strict=True):
-        difference_sum += value - target
-    return (difference_sum / len(values) * annualization) / denominator
+    numerator = _reference_mean_difference(
+        values,
+        targets,
+        annualization,
+        "Sortino numerator",
+    )
+    return _reference_output_scalar(numerator / denominator, "Sortino ratio")
 
 
 def reference_calmar_ratio(
@@ -332,7 +358,7 @@ def reference_calmar_ratio(
     drawdown = _reference_scalar(maximum_drawdown_value, "maximum drawdown")
     if drawdown > 0.0 or drawdown < -1.0 or drawdown == 0.0:
         raise ValueError("maximum drawdown is invalid")
-    return annual / abs(drawdown)
+    return _reference_output_scalar(annual / abs(drawdown), "Calmar ratio")
 
 
 def reference_historical_var(
@@ -344,8 +370,13 @@ def reference_historical_var(
     """Compute empirical lower-tail VaR with a hand-written quantile."""
     values = sorted(_reference_vector(returns, "returns", minimum_count=1))
     probability = _reference_confidence(confidence)
-    quantile = _reference_quantile(values, 1.0 - probability, method)
-    return max(0.0, -quantile)
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return 0.0
+    normalized = [value / scale for value in values]
+    quantile = _reference_quantile(normalized, 1.0 - probability, method)
+    normalized_loss = max(0.0, -quantile)
+    return _reference_decimal_rescale(normalized_loss, (scale,), "historical VaR")
 
 
 def reference_expected_shortfall(
@@ -360,7 +391,11 @@ def reference_expected_shortfall(
     tail = [-value for value in values if value <= -threshold]
     if not tail:
         raise ValueError("expected-shortfall tail is empty")
-    return sum(tail) / len(tail)
+    scale = max(abs(value) for value in tail)
+    if scale == 0.0:
+        return 0.0
+    normalized_mean = math.fsum(value / scale for value in tail) / len(tail)
+    return _reference_decimal_rescale(normalized_mean, (scale,), "expected shortfall")
 
 
 def reference_parametric_var(
@@ -375,7 +410,14 @@ def reference_parametric_var(
         raise ValueError("standard deviation cannot be negative")
     probability = _reference_confidence(confidence)
     lower_tail_z = NormalDist().inv_cdf(1.0 - probability)
-    return max(0.0, -(mean + deviation * lower_tail_z))
+    scale = max(abs(mean), abs(deviation))
+    if scale == 0.0:
+        return 0.0
+    normalized_loss = max(
+        0.0,
+        -(mean / scale + deviation / scale * lower_tail_z),
+    )
+    return _reference_decimal_rescale(normalized_loss, (scale,), "parametric VaR")
 
 
 def reference_covariance(x: Iterable[float], y: Iterable[float]) -> float:
@@ -465,11 +507,14 @@ def reference_alpha(
     ):
         subject_excess.append(subject_value - rate)
         benchmark_excess.append(benchmark_value - rate)
+    _reference_output_vector(tuple(subject_excess), "subject excess returns")
+    _reference_output_vector(tuple(benchmark_excess), "benchmark excess returns")
     sensitivity = reference_beta(subject_excess, benchmark_excess)
-    intercept = sum(subject_excess) / len(subject_excess) - sensitivity * (
-        sum(benchmark_excess) / len(benchmark_excess)
+    intercept = math.fsum(subject_excess) / len(subject_excess) - sensitivity * (
+        math.fsum(benchmark_excess) / len(benchmark_excess)
     )
-    return intercept * _reference_positive(periods_per_year, "periods per year")
+    result = intercept * _reference_positive(periods_per_year, "periods per year")
+    return _reference_output_scalar(result, "alpha")
 
 
 def reference_fx_convert(  # noqa: PLR0913
@@ -573,6 +618,21 @@ def _reference_scalar(value: float, label: str) -> float:
     return result
 
 
+def _reference_output_scalar(value: float, label: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"{label} is not finite")
+    return value
+
+
+def _reference_output_vector(
+    values: tuple[float, ...],
+    label: str,
+) -> tuple[float, ...]:
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError(f"{label} are not finite")
+    return values
+
+
 def _reference_positive(value: float, label: str) -> float:
     result = _reference_scalar(value, label)
     if result <= 0.0:
@@ -608,6 +668,28 @@ def _reference_sample_deviation(values: tuple[float, ...]) -> float:
         math.fsum(value * value for value in centered) / (len(values) - 1),
     )
     return _reference_decimal_rescale(normalized, (scale,), "sample deviation")
+
+
+def _reference_mean_difference(
+    left: tuple[float, ...],
+    right: tuple[float, ...],
+    multiplier: float,
+    label: str,
+) -> float:
+    with localcontext() as context:
+        context.prec = _REFERENCE_DECIMAL_PRECISION
+        total = sum(
+            Decimal(str(left_value)) - Decimal(str(right_value))
+            for left_value, right_value in zip(left, right, strict=True)
+        )
+        result_decimal = total / Decimal(len(left)) * Decimal(str(multiplier))
+    try:
+        result = float(result_decimal)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{label} is not finite") from error
+    if not math.isfinite(result) or (result == 0.0 and result_decimal != 0):
+        raise ValueError(f"{label} is not finite")
+    return result
 
 
 def _reference_scaled_centered(
@@ -656,24 +738,45 @@ def _reference_capture(
         benchmark_returns,
         minimum_count=1,
     )
-    subject_growth = 1.0
-    benchmark_growth = 1.0
-    count = 0
+    selected_subject: list[float] = []
+    selected_benchmark: list[float] = []
     for subject_value, benchmark_value in zip(subject, benchmark, strict=True):
         selected = benchmark_value > 0.0 if positive else benchmark_value < 0.0
         if selected:
             if subject_value < -1.0 or benchmark_value < -1.0:
                 raise ValueError("capture return is below minus one")
-            subject_growth *= 1.0 + subject_value
-            benchmark_growth *= 1.0 + benchmark_value
-            count += 1
-    if count == 0:
+            selected_subject.append(subject_value)
+            selected_benchmark.append(benchmark_value)
+    if not selected_subject:
         raise ValueError("no capture observations")
-    subject_geometric = subject_growth ** (1.0 / count) - 1.0
-    benchmark_geometric = benchmark_growth ** (1.0 / count) - 1.0
+    subject_geometric = _reference_geometric_mean_return(
+        tuple(selected_subject),
+        "subject capture return",
+    )
+    benchmark_geometric = _reference_geometric_mean_return(
+        tuple(selected_benchmark),
+        "benchmark capture return",
+    )
     if benchmark_geometric == 0.0:
         raise ValueError("capture denominator is zero")
-    return subject_geometric / benchmark_geometric
+    return _reference_output_scalar(
+        subject_geometric / benchmark_geometric,
+        "capture ratio",
+    )
+
+
+def _reference_geometric_mean_return(
+    values: tuple[float, ...],
+    label: str,
+) -> float:
+    if any(value == -1.0 for value in values):
+        return -1.0
+    mean_log_growth = math.fsum(math.log1p(value) for value in values) / len(values)
+    try:
+        result = math.expm1(mean_log_growth)
+    except OverflowError as error:
+        raise ValueError(f"{label} is not finite") from error
+    return _reference_output_scalar(result, label)
 
 
 def _reference_validate_rate_inputs(

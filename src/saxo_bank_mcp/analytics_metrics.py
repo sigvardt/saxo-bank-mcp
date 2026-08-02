@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, DecimalException, localcontext
 from itertools import pairwise
 from statistics import NormalDist
 from typing import Literal, cast
@@ -17,6 +18,9 @@ _ROOT_ITERATIONS = 200
 _ROOT_RELATIVE_TOLERANCE = 1e-12
 _ROOT_INTERVAL_TOLERANCE = 1e-13
 _ROOT_DUPLICATE_TOLERANCE = 1e-11
+_BOUNDARY_DECIMAL_PRECISION = 80
+_BOUNDARY_ROOT_TOLERANCE = Decimal("1e-45")
+_BOUNDARY_INTERIOR_STEP = Decimal("1e-12")
 _MIN_ONE_PLUS_RATE = 1e-12
 _MAX_RATE = 1_000_000.0
 _MIN_SAMPLE_COUNT = 2
@@ -52,7 +56,9 @@ def cumulative_returns(returns: ArrayLike) -> FloatVector:
     values = _as_vector(returns, "returns", minimum_count=1)
     if np.any(values < -1.0):
         raise FinancialMetricError("returns cannot imply a loss greater than the investment")
-    return np.asarray(np.cumprod(1.0 + values) - 1.0, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = np.asarray(np.cumprod(1.0 + values) - 1.0, dtype=np.float64)
+    return _finite_output_vector(result, "cumulative returns")
 
 
 def cumulative_return(returns: ArrayLike) -> float:
@@ -148,7 +154,7 @@ def cagr(start_value: float, end_value: float, years: float) -> float:
     end = _positive_scalar(end_value, "ending value")
     elapsed = _positive_scalar(years, "elapsed years")
     try:
-        result = math.pow(end / start, 1.0 / elapsed) - 1.0
+        result = math.expm1((math.log(end) - math.log(start)) / elapsed)
     except OverflowError as error:
         raise FinancialMetricError("CAGR result is not finite") from error
     if not math.isfinite(result):
@@ -163,15 +169,17 @@ def active_returns(subject_returns: ArrayLike, benchmark_returns: ArrayLike) -> 
         benchmark_returns,
         minimum_count=1,
     )
-    return np.asarray(subject - benchmark, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = np.asarray(subject - benchmark, dtype=np.float64)
+    return _finite_output_vector(result, "active returns")
 
 
 def active_return(subject_return: float, benchmark_return: float) -> float:
     """Return aggregate arithmetic subject return minus benchmark return."""
-    return _finite_scalar(subject_return, "subject return") - _finite_scalar(
-        benchmark_return,
-        "benchmark return",
+    result = _finite_scalar(subject_return, "subject return") - _finite_scalar(
+        benchmark_return, "benchmark return"
     )
+    return _finite_output_scalar(result, "active return")
 
 
 def tracking_error(
@@ -184,7 +192,11 @@ def tracking_error(
     if active.size < _MIN_SAMPLE_COUNT:
         raise FinancialMetricError("tracking error requires at least two aligned periods")
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    return float(np.std(active, ddof=1) * math.sqrt(annualization))
+    return _rescale_product(
+        _scaled_sample_deviation(active),
+        (math.sqrt(annualization),),
+        "tracking error",
+    )
 
 
 def upside_capture(subject_returns: ArrayLike, benchmark_returns: ArrayLike) -> float:
@@ -201,8 +213,11 @@ def volatility(returns: ArrayLike, periods_per_year: float) -> float:
     """Return annualized sample standard deviation of complete periodic returns."""
     values = _as_vector(returns, "returns", minimum_count=2)
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    result = _scaled_sample_deviation(values) * math.sqrt(annualization)
-    return _finite_output_scalar(result, "volatility")
+    return _rescale_product(
+        _scaled_sample_deviation(values),
+        (math.sqrt(annualization),),
+        "volatility",
+    )
 
 
 def downside_deviation(
@@ -236,12 +251,13 @@ def drawdown_series(values: ArrayLike) -> FloatVector:
     running_peaks = np.maximum.accumulate(series)
     if np.any(running_peaks <= 0.0):
         raise FinancialMetricError("drawdown running peaks must stay positive")
-    return np.asarray(series / running_peaks - 1.0, dtype=np.float64)
+    result = np.asarray(series / running_peaks - 1.0, dtype=np.float64)
+    return _finite_output_vector(result, "drawdowns")
 
 
 def maximum_drawdown(values: ArrayLike) -> float:
     """Return the most negative point in the complete drawdown series."""
-    return float(np.min(drawdown_series(values)))
+    return _finite_output_scalar(float(np.min(drawdown_series(values))), "maximum drawdown")
 
 
 def sharpe_ratio(
@@ -257,11 +273,20 @@ def sharpe_ratio(
         "risk-free returns",
     )
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    denominator = float(np.std(values, ddof=1) * math.sqrt(annualization))
+    denominator = _rescale_product(
+        _scaled_sample_deviation(values),
+        (math.sqrt(annualization),),
+        "Sharpe denominator",
+    )
     if denominator == 0.0:
         raise FinancialMetricError("Sharpe ratio is undefined for zero volatility")
-    numerator = float(np.mean(values - risk_free) * annualization)
-    return numerator / denominator
+    numerator = _scaled_mean_difference(
+        values,
+        risk_free,
+        annualization,
+        "Sharpe numerator",
+    )
+    return _finite_output_scalar(numerator / denominator, "Sharpe ratio")
 
 
 def sortino_ratio(
@@ -276,7 +301,13 @@ def sortino_ratio(
     denominator = downside_deviation(values, targets, annualization)
     if denominator == 0.0:
         raise FinancialMetricError("Sortino ratio is undefined for zero downside deviation")
-    return float(np.mean(values - targets) * annualization) / denominator
+    numerator = _scaled_mean_difference(
+        values,
+        targets,
+        annualization,
+        "Sortino numerator",
+    )
+    return _finite_output_scalar(numerator / denominator, "Sortino ratio")
 
 
 def calmar_ratio(annualized_return_value: float, maximum_drawdown_value: float) -> float:
@@ -287,7 +318,7 @@ def calmar_ratio(annualized_return_value: float, maximum_drawdown_value: float) 
         raise FinancialMetricError("maximum drawdown must be in the interval [-1, 0]")
     if drawdown == 0.0:
         raise FinancialMetricError("Calmar ratio is undefined for zero drawdown")
-    return annual / abs(drawdown)
+    return _finite_output_scalar(annual / abs(drawdown), "Calmar ratio")
 
 
 def historical_var(
@@ -301,8 +332,12 @@ def historical_var(
     probability = _confidence(confidence)
     if method not in _QUANTILE_METHODS:
         raise FinancialMetricError("historical VaR quantile method is unsupported")
-    quantile = float(np.quantile(values, 1.0 - probability, method=method))
-    return max(0.0, -quantile)
+    scale = float(np.max(np.abs(values)))
+    if scale == 0.0:
+        return 0.0
+    quantile = float(np.quantile(values / scale, 1.0 - probability, method=method))
+    normalized_loss = max(0.0, -quantile)
+    return _rescale_product(normalized_loss, (scale,), "historical VaR")
 
 
 def expected_shortfall(
@@ -317,7 +352,11 @@ def expected_shortfall(
     tail = values[values <= -value_at_risk]
     if tail.size == 0:
         raise FinancialMetricError("expected shortfall tail is empty")
-    return float(np.mean(-tail))
+    scale = float(np.max(np.abs(tail)))
+    if scale == 0.0:
+        return 0.0
+    normalized_mean_loss = float(np.mean(-(tail / scale)))
+    return _rescale_product(normalized_mean_loss, (scale,), "expected shortfall")
 
 
 def parametric_var(mean_return: float, standard_deviation: float, confidence: float) -> float:
@@ -328,7 +367,14 @@ def parametric_var(mean_return: float, standard_deviation: float, confidence: fl
         raise FinancialMetricError("standard deviation cannot be negative")
     probability = _confidence(confidence)
     lower_tail_z = NormalDist().inv_cdf(1.0 - probability)
-    return max(0.0, -(mean + deviation * lower_tail_z))
+    scale = max(abs(mean), abs(deviation))
+    if scale == 0.0:
+        return 0.0
+    normalized_loss = max(
+        0.0,
+        -(mean / scale + deviation / scale * lower_tail_z),
+    )
+    return _rescale_product(normalized_loss, (scale,), "parametric VaR")
 
 
 def covariance(x: ArrayLike, y: ArrayLike) -> float:
@@ -391,12 +437,16 @@ def alpha(
         "risk-free returns",
     )
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    subject_excess = subject - risk_free
-    benchmark_excess = benchmark - risk_free
+    with np.errstate(over="ignore", invalid="ignore"):
+        subject_excess = np.asarray(subject - risk_free, dtype=np.float64)
+        benchmark_excess = np.asarray(benchmark - risk_free, dtype=np.float64)
+    _finite_output_vector(subject_excess, "subject excess returns")
+    _finite_output_vector(benchmark_excess, "benchmark excess returns")
     sensitivity = beta(subject_excess, benchmark_excess)
-    return float(
+    result = float(
         (np.mean(subject_excess) - sensitivity * np.mean(benchmark_excess)) * annualization,
     )
+    return _finite_output_scalar(result, "alpha")
 
 
 def _capture_ratio(
@@ -417,12 +467,28 @@ def _capture_ratio(
     selected_benchmark = benchmark[mask]
     if np.any(selected_subject < -1.0) or np.any(selected_benchmark < -1.0):
         raise FinancialMetricError("capture ratio cannot compound a return below -100 percent")
-    count = int(np.count_nonzero(mask))
-    subject_geometric = math.pow(float(np.prod(1.0 + selected_subject)), 1.0 / count) - 1.0
-    benchmark_geometric = math.pow(float(np.prod(1.0 + selected_benchmark)), 1.0 / count) - 1.0
+    subject_geometric = _geometric_mean_return(selected_subject, "subject capture return")
+    benchmark_geometric = _geometric_mean_return(
+        selected_benchmark,
+        "benchmark capture return",
+    )
     if benchmark_geometric == 0.0:
         raise FinancialMetricError("capture ratio benchmark return is zero")
-    return subject_geometric / benchmark_geometric
+    return _finite_output_scalar(
+        subject_geometric / benchmark_geometric,
+        "capture ratio",
+    )
+
+
+def _geometric_mean_return(values: FloatVector, label: str) -> float:
+    if np.any(values == -1.0):
+        return -1.0
+    mean_log_growth = float(np.mean(np.log1p(values)))
+    try:
+        result = math.expm1(mean_log_growth)
+    except OverflowError as error:
+        raise FinancialMetricError(f"{label} is not finite") from error
+    return _finite_output_scalar(result, label)
 
 
 def _as_vector(values: ArrayLike, label: str, *, minimum_count: int) -> FloatVector:
@@ -523,6 +589,19 @@ def _scaled_sample_deviation(values: FloatVector) -> float:
     return _rescale_product(normalized_deviation, (scale,), "sample deviation")
 
 
+def _scaled_mean_difference(
+    left: FloatVector,
+    right: FloatVector,
+    multiplier: float,
+    label: str,
+) -> float:
+    scale = max(float(np.max(np.abs(left))), float(np.max(np.abs(right))))
+    if scale == 0.0:
+        return 0.0
+    normalized_mean = float(np.mean(left / scale - right / scale))
+    return _rescale_product(normalized_mean * multiplier, (scale,), label)
+
+
 def _rescale_product(value: float, scales: tuple[float, ...], label: str) -> float:
     if value == 0.0 or any(scale == 0.0 for scale in scales):
         return 0.0
@@ -565,11 +644,86 @@ def _solve_discount_rate(flows: FloatVector, periods: FloatVector) -> float:
         lower_y,
         upper_y,
     )
+    roots = [
+        root
+        for root in roots
+        if _discount_root_is_inside_declared_boundaries(
+            flows,
+            periods,
+            root[0],
+            lower_y,
+            upper_y,
+        )
+    ]
     if not roots:
         raise FinancialMetricError("money-weighted return has no bounded real solution")
     if len(roots) != 1 or roots[0][1]:
         raise FinancialMetricError("money-weighted return has multiple bounded real solutions")
-    return math.expm1(roots[0][0])
+    return _finite_output_scalar(math.expm1(roots[0][0]), "money-weighted return")
+
+
+def _discount_root_is_inside_declared_boundaries(
+    flows: FloatVector,
+    periods: FloatVector,
+    root: float,
+    lower: float,
+    upper: float,
+) -> bool:
+    if root == lower:
+        return _high_precision_boundary_root(flows, periods, lower=True)
+    if root == upper:
+        return _high_precision_boundary_root(flows, periods, lower=False)
+    return True
+
+
+def _high_precision_boundary_root(
+    flows: FloatVector,
+    periods: FloatVector,
+    *,
+    lower: bool,
+) -> bool:
+    with localcontext() as context:
+        context.prec = _BOUNDARY_DECIMAL_PRECISION
+        growth = Decimal("1e-12") if lower else Decimal(1_000_001)
+        inside_growth = growth * (
+            Decimal(1) + _BOUNDARY_INTERIOR_STEP if lower else Decimal(1) - _BOUNDARY_INTERIOR_STEP
+        )
+        boundary_value, boundary_magnitude = _decimal_discounted_value(
+            flows,
+            periods,
+            growth,
+        )
+        inside_value, inside_magnitude = _decimal_discounted_value(
+            flows,
+            periods,
+            inside_growth,
+        )
+    boundary_is_root = abs(boundary_value) <= _BOUNDARY_ROOT_TOLERANCE * boundary_magnitude
+    inside_is_distinct = abs(inside_value) > _BOUNDARY_ROOT_TOLERANCE * inside_magnitude
+    return boundary_is_root and inside_is_distinct
+
+
+def _decimal_discounted_value(
+    flows: FloatVector,
+    periods: FloatVector,
+    growth: Decimal,
+) -> tuple[Decimal, Decimal]:
+    total = Decimal(0)
+    magnitude = Decimal(0)
+    try:
+        for flow, period in zip(flows, periods, strict=True):
+            coefficient = Decimal(str(float(flow)))
+            exponent = Decimal(str(float(period)))
+            if exponent == exponent.to_integral_value():
+                weight = growth ** -int(exponent)
+            else:
+                weight = (-exponent * growth.ln()).exp()
+            term = coefficient * weight
+            total += term
+            magnitude += abs(term)
+    except DecimalException as error:
+        raise FinancialMetricError("cash-flow boundary cannot be evaluated") from error
+    return total, magnitude
 
 
 def _normalized_discount_terms(

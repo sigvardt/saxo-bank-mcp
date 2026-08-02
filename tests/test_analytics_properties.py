@@ -194,7 +194,7 @@ def test_property_cagr_is_monotone_in_ending_value(
     ),
     flows=st.lists(
         st.floats(
-            min_value=-10.0,
+            min_value=-5.0,
             max_value=10.0,
             allow_nan=False,
             allow_infinity=False,
@@ -211,6 +211,9 @@ def test_property_twr_is_neutral_to_external_cash_flows(
     for flow in flows:
         valuations.append(valuations[-1] * (1.0 + periodic_return) + flow)
     expected = (1.0 + periodic_return) ** len(flows) - 1.0
+
+    assert all(value > 0.0 for value in valuations[:-1])
+    assert valuations[-1] >= 0.0
 
     assert math.isclose(
         time_weighted_return(valuations, flows),

@@ -846,7 +846,10 @@ def test_mwr_and_xirr_include_declared_rate_boundaries(
     _assert_close(reference_xirr(flows, economic_dates), expected_rate)
 
 
-@pytest.mark.parametrize("terminal_flow", [1e-13, 2_000_001.0])
+@pytest.mark.parametrize(
+    "terminal_flow",
+    [9.999999999995e-13, 1e-13, 1_000_001.0000005, 2_000_001.0],
+)
 def test_mwr_and_xirr_refuse_roots_outside_declared_boundaries(
     terminal_flow: float,
 ) -> None:
@@ -952,6 +955,256 @@ def test_extreme_finite_inputs_never_emit_nonfinite_or_false_metrics() -> None:
         covariance([-1e308, 1e308], [-1e308, 1e308])
     with pytest.raises(ValueError, match="covariance is not finite"):
         reference_covariance([-1e308, 1e308], [-1e308, 1e308])
+
+
+def _assert_finite_metric_output(value: object) -> None:
+    values = np.asarray(value, dtype=np.float64)
+    assert np.all(np.isfinite(values))
+
+
+@pytest.mark.parametrize(
+    ("name", "production_call", "reference_call"),
+    [
+        (
+            "simple_returns",
+            lambda: simple_returns([1e-300, 1e-200]),
+            lambda: reference_simple_returns([1e-300, 1e-200]),
+        ),
+        (
+            "log_returns",
+            lambda: log_returns([5e-324, 1e308]),
+            lambda: reference_log_returns([5e-324, 1e308]),
+        ),
+        (
+            "cumulative_returns",
+            lambda: cumulative_returns([1e150, 1e150]),
+            lambda: reference_cumulative_returns([1e150, 1e150]),
+        ),
+        (
+            "cumulative_return",
+            lambda: cumulative_return([1e150, 1e150]),
+            lambda: reference_cumulative_return([1e150, 1e150]),
+        ),
+        (
+            "annualized_return",
+            lambda: annualized_return(1e300, 1, 1.0),
+            lambda: reference_annualized_return(1e300, 1, 1.0),
+        ),
+        (
+            "time_weighted_return",
+            lambda: time_weighted_return([1e300, 1e300], [0.0]),
+            lambda: reference_time_weighted_return([1e300, 1e300], [0.0]),
+        ),
+        (
+            "money_weighted_return",
+            lambda: money_weighted_return([-1e300, 1e300], [0.0, 1.0]),
+            lambda: reference_money_weighted_return([-1e300, 1e300], [0.0, 1.0]),
+        ),
+        (
+            "xirr",
+            lambda: xirr([-1e300, 1e300], [date(2021, 1, 1), date(2022, 1, 1)]),
+            lambda: reference_xirr(
+                [-1e300, 1e300],
+                [date(2021, 1, 1), date(2022, 1, 1)],
+            ),
+        ),
+        (
+            "cagr",
+            lambda: cagr(1e-300, 1e300, 2.0),
+            lambda: reference_cagr(1e-300, 1e300, 2.0),
+        ),
+        (
+            "active_returns",
+            lambda: active_returns([1e308], [5e307]),
+            lambda: reference_active_returns([1e308], [5e307]),
+        ),
+        (
+            "active_return",
+            lambda: active_return(1e308, 5e307),
+            lambda: reference_active_return(1e308, 5e307),
+        ),
+        (
+            "tracking_error",
+            lambda: tracking_error([-1e308, 1e308], [0.0, 0.0], 1.0),
+            lambda: reference_tracking_error([-1e308, 1e308], [0.0, 0.0], 1.0),
+        ),
+        (
+            "upside_capture",
+            lambda: upside_capture([1e308, 1e308], [1.0, 1.0]),
+            lambda: reference_upside_capture([1e308, 1e308], [1.0, 1.0]),
+        ),
+        (
+            "downside_capture",
+            lambda: downside_capture([-1.0, -0.5], [-0.5, -0.25]),
+            lambda: reference_downside_capture([-1.0, -0.5], [-0.5, -0.25]),
+        ),
+        (
+            "volatility",
+            lambda: volatility([-1e308, 1e308], 1.0),
+            lambda: reference_volatility([-1e308, 1e308], 1.0),
+        ),
+        (
+            "downside_deviation",
+            lambda: downside_deviation([-1e308, 0.0], 0.0, 1.0),
+            lambda: reference_downside_deviation([-1e308, 0.0], 0.0, 1.0),
+        ),
+        (
+            "drawdown_series",
+            lambda: drawdown_series([5e-324, 1e308, 5e-324]),
+            lambda: reference_drawdown_series([5e-324, 1e308, 5e-324]),
+        ),
+        (
+            "maximum_drawdown",
+            lambda: maximum_drawdown([5e-324, 1e308, 5e-324]),
+            lambda: reference_maximum_drawdown([5e-324, 1e308, 5e-324]),
+        ),
+        (
+            "sharpe_ratio",
+            lambda: sharpe_ratio([5e307, 1e308], 0.0, 1.0),
+            lambda: reference_sharpe_ratio([5e307, 1e308], 0.0, 1.0),
+        ),
+        (
+            "sortino_ratio",
+            lambda: sortino_ratio([-1e308, 0.0], 0.0, 1.0),
+            lambda: reference_sortino_ratio([-1e308, 0.0], 0.0, 1.0),
+        ),
+        (
+            "calmar_ratio",
+            lambda: calmar_ratio(1e308, -1.0),
+            lambda: reference_calmar_ratio(1e308, -1.0),
+        ),
+        (
+            "historical_var",
+            lambda: historical_var([-1e308, 1e308], 0.5),
+            lambda: reference_historical_var([-1e308, 1e308], 0.5),
+        ),
+        (
+            "expected_shortfall",
+            lambda: expected_shortfall([-1e308, -1e308], 0.95),
+            lambda: reference_expected_shortfall([-1e308, -1e308], 0.95),
+        ),
+        (
+            "parametric_var",
+            lambda: parametric_var(1e308, 1e308, 0.975),
+            lambda: reference_parametric_var(1e308, 1e308, 0.975),
+        ),
+        (
+            "covariance",
+            lambda: covariance([-1e154, 1e154] * 50, [-1e154, 1e154] * 50),
+            lambda: reference_covariance(
+                [-1e154, 1e154] * 50,
+                [-1e154, 1e154] * 50,
+            ),
+        ),
+        (
+            "correlation",
+            lambda: correlation([-1e308, 1e308], [-1e308, 1e308]),
+            lambda: reference_correlation([-1e308, 1e308], [-1e308, 1e308]),
+        ),
+        (
+            "beta",
+            lambda: beta([-1e308, 1e308], [-5e307, 5e307]),
+            lambda: reference_beta([-1e308, 1e308], [-5e307, 5e307]),
+        ),
+        (
+            "alpha",
+            lambda: alpha([-1e308, 1e308], [-5e307, 5e307], 0.0, 1.0),
+            lambda: reference_alpha(
+                [-1e308, 1e308],
+                [-5e307, 5e307],
+                0.0,
+                1.0,
+            ),
+        ),
+    ],
+)
+def test_every_public_metric_returns_only_finite_values_for_extreme_finite_inputs(
+    name: str,
+    production_call: Callable[[], object],
+    reference_call: Callable[[], object],
+) -> None:
+    assert name
+    _assert_finite_metric_output(production_call())
+    _assert_finite_metric_output(reference_call())
+
+
+def test_scaled_arithmetic_preserves_representable_extreme_metric_results() -> None:
+    expected_tracking_error = math.sqrt(2.0) * 1e308
+    expected_sharpe = 3.0 / math.sqrt(2.0)
+    expected_sortino = -3.0 / math.sqrt(10.0)
+    expected_parametric_var = (1.9599639845400536 - 1.0) * 1e308
+
+    calls = (
+        (tracking_error([-1e308, 1e308], [0.0, 0.0], 1.0), expected_tracking_error),
+        (
+            reference_tracking_error([-1e308, 1e308], [0.0, 0.0], 1.0),
+            expected_tracking_error,
+        ),
+        (upside_capture([1e308, 1e308], [1.0, 1.0]), 1e308),
+        (reference_upside_capture([1e308, 1e308], [1.0, 1.0]), 1e308),
+        (sharpe_ratio([5e307, 1e308], 0.0, 1.0), expected_sharpe),
+        (reference_sharpe_ratio([5e307, 1e308], 0.0, 1.0), expected_sharpe),
+        (sharpe_ratio([5e307, 1e308], -1e308, 1.0), 7.0 / math.sqrt(2.0)),
+        (
+            reference_sharpe_ratio([5e307, 1e308], -1e308, 1.0),
+            7.0 / math.sqrt(2.0),
+        ),
+        (sortino_ratio([-1e308, 0.0], 1e308, 1.0), expected_sortino),
+        (reference_sortino_ratio([-1e308, 0.0], 1e308, 1.0), expected_sortino),
+        (historical_var([-1e308, 1e308], 0.5), 0.0),
+        (reference_historical_var([-1e308, 1e308], 0.5), 0.0),
+        (expected_shortfall([-1e308, -1e308], 0.95), 1e308),
+        (reference_expected_shortfall([-1e308, -1e308], 0.95), 1e308),
+        (parametric_var(1e308, 1e308, 0.975), expected_parametric_var),
+        (reference_parametric_var(1e308, 1e308, 0.975), expected_parametric_var),
+        (cagr(1e-300, 1e300, 2.0), 1e300),
+        (reference_cagr(1e-300, 1e300, 2.0), 1e300),
+    )
+    for actual, expected in calls:
+        _assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("production_call", "reference_call"),
+    [
+        (
+            lambda: cumulative_returns([1e308, 1.0]),
+            lambda: reference_cumulative_returns([1e308, 1.0]),
+        ),
+        (
+            lambda: active_returns([1e308], [-1e308]),
+            lambda: reference_active_returns([1e308], [-1e308]),
+        ),
+        (
+            lambda: active_return(1e308, -1e308),
+            lambda: reference_active_return(1e308, -1e308),
+        ),
+        (
+            lambda: tracking_error([-1e308, 1e308], [0.0, 0.0], 4.0),
+            lambda: reference_tracking_error([-1e308, 1e308], [0.0, 0.0], 4.0),
+        ),
+        (
+            lambda: upside_capture([1e308, 1e308], [0.5, 0.5]),
+            lambda: reference_upside_capture([1e308, 1e308], [0.5, 0.5]),
+        ),
+        (
+            lambda: calmar_ratio(1e308, -5e-324),
+            lambda: reference_calmar_ratio(1e308, -5e-324),
+        ),
+        (
+            lambda: parametric_var(-1e308, 1e308, 0.975),
+            lambda: reference_parametric_var(-1e308, 1e308, 0.975),
+        ),
+    ],
+)
+def test_public_metrics_refuse_unrepresentable_finite_results(
+    production_call: Callable[[], object],
+    reference_call: Callable[[], object],
+) -> None:
+    with pytest.raises(FinancialMetricError, match="not finite"):
+        production_call()
+    with pytest.raises(ValueError, match="not finite"):
+        reference_call()
 
 
 def test_cash_flow_and_fx_edges_refuse_missing_or_ambiguous_values(
