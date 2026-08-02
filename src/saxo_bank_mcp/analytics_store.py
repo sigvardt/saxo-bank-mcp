@@ -6,7 +6,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterable, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -73,6 +73,31 @@ _ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE: Final[Mapping[str, str]] = MappingProxyType(
         "text/html": "html",
         "text/plain": "txt",
     },
+)
+_ARTIFACT_HANDLE_TEXT: Final = r"ar_[0-9a-f]{32}"
+_ARTIFACT_EXTENSION_TEXT: Final = (
+    "(?:" + "|".join(sorted(set(_ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE.values()))) + ")"
+)
+_OWNED_ARTIFACT_PATTERN: Final = re.compile(
+    rf"^(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})\.(?P<extension>{_ARTIFACT_EXTENSION_TEXT})$",
+)
+_STAGED_ARTIFACT_WRITE_PATTERN: Final = re.compile(
+    rf"^\.artifact-write-(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})-[0-9a-f]{{32}}"
+    rf"\.(?P<extension>{_ARTIFACT_EXTENSION_TEXT})\.pending$",
+)
+_STAGED_ARTIFACT_DELETE_PATTERN: Final = re.compile(
+    rf"^\.artifact-delete-(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})-[0-9a-f]{{32}}"
+    rf"\.(?P<extension>{_ARTIFACT_EXTENSION_TEXT})\.pending$",
+)
+_LEGACY_STAGED_ARTIFACT_WRITE_PATTERN: Final = re.compile(
+    rf"^\.(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})\.[0-9a-f]{{32}}\.tmp$",
+)
+_LEGACY_STAGED_ARTIFACT_DELETE_PATTERN: Final = re.compile(
+    rf"^\.deleting-(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})-[0-9a-f]{{32}}\.tmp$",
+)
+_QUARANTINED_ARTIFACT_PATTERN: Final = re.compile(
+    rf"^\.artifact-orphan-(?P<artifact_id>{_ARTIFACT_HANDLE_TEXT})-[0-9a-f]{{32}}"
+    rf"\.(?P<extension>{_ARTIFACT_EXTENSION_TEXT})$",
 )
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
@@ -525,6 +550,14 @@ class _DeletionAuthorization:
 
 
 @dataclass(frozen=True, slots=True)
+class _OwnedArtifactMetadata:
+    artifact_id: str
+    media_type: str
+    sha256: str
+    visibility: str
+
+
+@dataclass(frozen=True, slots=True)
 class _DatasetBinding:
     account_scope: str
     source_scope: str
@@ -670,6 +703,8 @@ class AnalyticsStore:
         self._transaction_owner: int | None = None
         self._transaction_depth = 0
         self._transaction_reserved_bytes = 0
+        self._transaction_commit_actions: list[Callable[[], None]] = []
+        self._transaction_rollback_actions: list[Callable[[], None]] = []
         self._closed = False
 
     @classmethod
@@ -684,7 +719,9 @@ class AnalyticsStore:
         flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(lock_path, flags)
         try:
-            return cls(validated, descriptor)
+            store = cls(validated, descriptor)
+            store._reconcile_owned_artifacts()
+            return store  # noqa: TRY300
         except BaseException:
             os.close(descriptor)
             raise
@@ -723,19 +760,25 @@ class AnalyticsStore:
                 self._transaction_owner = owner
                 self._transaction_depth = 1
                 self._transaction_reserved_bytes = 0
+                self._transaction_commit_actions = []
+                self._transaction_rollback_actions = []
                 try:
                     yield self
                 except BaseException:
                     with suppress(duckdb.Error):
                         writer.execute("ROLLBACK")
+                    _run_file_actions(reversed(self._transaction_rollback_actions))
                     raise
                 else:
                     writer.execute("COMMIT")
+                    _run_file_actions(self._transaction_commit_actions)
                 finally:
                     self._active_writer = None
                     self._transaction_owner = None
                     self._transaction_depth = 0
                     self._transaction_reserved_bytes = 0
+                    self._transaction_commit_actions = []
+                    self._transaction_rollback_actions = []
             finally:
                 writer.close()
 
@@ -808,6 +851,46 @@ class AnalyticsStore:
             yield connection
         finally:
             connection.close()
+
+    def _register_file_effect(
+        self,
+        *,
+        after_commit: Callable[[], None],
+        after_rollback: Callable[[], None],
+    ) -> None:
+        if self._transaction_owner != get_ident():
+            raise StoreError("artifact file effect requires an active store transaction")
+        self._transaction_commit_actions.append(after_commit)
+        self._transaction_rollback_actions.append(after_rollback)
+
+    def _reconcile_owned_artifacts(self) -> None:
+        with self._writer_lock():
+            connection = _connect_store_database(
+                self._config.paths.store_path,
+                read_only=False,
+            )
+            try:
+                rows = cast(
+                    "list[tuple[object, ...]]",
+                    connection.execute(
+                        """
+                        SELECT artifact_id, media_type, sha256, visibility
+                        FROM artifacts ORDER BY artifact_id
+                        """,
+                    ).fetchall(),
+                )
+            finally:
+                connection.close()
+            metadata = {
+                _require_str(row[0]): _OwnedArtifactMetadata(
+                    artifact_id=_require_str(row[0]),
+                    media_type=_require_str(row[1]),
+                    sha256=_require_str(row[2]),
+                    visibility=_require_str(row[3]),
+                )
+                for row in rows
+            }
+            _reconcile_owned_artifact_directory(self._config, metadata)
 
     def _require_open(self) -> None:
         if self._closed:
@@ -2191,6 +2274,10 @@ class AnalyticsStore:
 
     def put_artifact(self, artifact: ArtifactSummary) -> StoredArtifact:
         """Persist typed artifact metadata without accepting a caller path."""
+        if artifact.visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
+            raise StoreValidationError(
+                "local resource links require put_owned_artifact and an owned artifact file",
+            )
         with self._write_connection() as connection:
             existing = self._artifact_by_id(connection, artifact.artifact_id)
             if existing is not None:
@@ -2268,19 +2355,16 @@ class AnalyticsStore:
             artifact.artifact_id,
             artifact.media_type,
         )
-        temporary = destination.with_name(f".{artifact.artifact_id}.{uuid4().hex}.tmp")
-        destination_created = False
+        staged = _staged_artifact_write_path(destination, artifact.artifact_id)
+        outer_transaction = self._transaction_owner == get_ident()
+        effect_registered = False
+        stored: StoredArtifact | None = None
         try:
             with self._write_connection() as connection:
                 _require_stored_analysis(connection, artifact.analysis_id)
                 self._ensure_capacity(artifact.byte_count)
-                _write_owner_artifact_file(temporary, content)
-                _require_new_artifact_destination(destination)
-                os.link(temporary, destination, follow_symlinks=False)
-                destination_created = True
-                temporary.unlink()
-                destination.chmod(_OWNER_FILE_MODE)
-                _require_owner_artifact_file(destination, artifact.sha256)
+                _write_owner_artifact_file(staged, content)
+                _fsync_artifact_directory(staged.parent)
                 connection.execute(
                     """
                     INSERT INTO artifacts (
@@ -2300,17 +2384,25 @@ class AnalyticsStore:
                     ),
                 )
                 self._bump_revision(connection)
+                stored = self._artifact_by_id(connection, artifact.artifact_id)
+                if stored is None:
+                    raise StoreError("stored artifact cannot be read back")  # noqa: TRY301
+                if outer_transaction:
+                    self._register_file_effect(
+                        after_commit=lambda: _publish_staged_artifact(
+                            destination,
+                            staged,
+                            artifact.sha256,
+                        ),
+                        after_rollback=lambda: _discard_staged_artifact(staged),
+                    )
+                    effect_registered = True
         except BaseException:
-            with suppress(FileNotFoundError):
-                temporary.unlink()
-            if destination_created:
-                with suppress(FileNotFoundError):
-                    destination.unlink()
+            if not effect_registered:
+                _discard_staged_artifact(staged)
             raise
-        with self._read_connection() as connection:
-            stored = self._artifact_by_id(connection, artifact.artifact_id)
-        if stored is None:
-            raise StoreError("stored artifact cannot be read back")
+        if not outer_transaction:
+            _publish_staged_artifact(destination, staged, artifact.sha256)
         return stored
 
     @staticmethod
@@ -2876,6 +2968,8 @@ class AnalyticsStore:
             raise DeletionTokenError("deletion token is invalid") from error
         token_sha256 = _fingerprint(token)
         staged_files: tuple[tuple[Path, Path], ...] = ()
+        outer_transaction = self._transaction_owner == get_ident()
+        effect_registered = False
         receipt: DeletionReceipt
         try:
             with self._write_connection() as connection:
@@ -2890,6 +2984,12 @@ class AnalyticsStore:
                     connection,
                     plan.targets.get("artifacts", ()),
                 )
+                if outer_transaction and staged_files:
+                    self._register_file_effect(
+                        after_commit=lambda: _remove_staged_artifact_files(staged_files),
+                        after_rollback=lambda: _restore_staged_artifact_files(staged_files),
+                    )
+                    effect_registered = True
                 for table in _DELETION_ORDER:
                     ids = plan.targets.get(table, ())
                     if ids:
@@ -2939,9 +3039,11 @@ class AnalyticsStore:
                     store_revision_after=next_revision,
                 )
         except BaseException:
-            _restore_staged_artifact_files(staged_files)
+            if not effect_registered:
+                _restore_staged_artifact_files(staged_files)
             raise
-        _remove_staged_artifact_files(staged_files)
+        if not outer_transaction:
+            _remove_staged_artifact_files(staged_files)
         return receipt
 
 
@@ -3093,6 +3195,46 @@ def _write_owner_artifact_file(path: Path, content: bytes) -> None:
             os.close(descriptor)
 
 
+def _staged_artifact_write_path(destination: Path, artifact_id: str) -> Path:
+    return destination.with_name(
+        f".artifact-write-{artifact_id}-{uuid4().hex}{destination.suffix}.pending",
+    )
+
+
+def _publish_staged_artifact(
+    destination: Path,
+    staged: Path,
+    expected_sha256: str,
+) -> None:
+    _require_new_artifact_destination(destination)
+    _require_owner_artifact_file(staged, expected_sha256)
+    staged.replace(destination)
+    destination.chmod(_OWNER_FILE_MODE)
+    _require_owner_artifact_file(destination, expected_sha256)
+    _fsync_artifact_directory(destination.parent)
+
+
+def _discard_staged_artifact(staged: Path) -> None:
+    try:
+        staged.unlink()
+    except FileNotFoundError:
+        return
+    _fsync_artifact_directory(staged.parent)
+
+
+def _fsync_artifact_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _run_file_actions(actions: Iterable[Callable[[], None]]) -> None:
+    for action in actions:
+        action()
+
+
 def _require_owner_artifact_file(path: Path, expected_sha256: str) -> None:
     if (
         path.is_symlink()
@@ -3134,10 +3276,11 @@ def _stage_owned_artifact_deletions(
             )
             _require_owner_artifact_file(destination, _require_str(raw_sha256))
             temporary = destination.with_name(
-                f".deleting-{artifact_id}-{uuid4().hex}.tmp",
+                f".artifact-delete-{artifact_id}-{uuid4().hex}{destination.suffix}.pending",
             )
             destination.replace(temporary)
             temporary.chmod(_OWNER_FILE_MODE)
+            _fsync_artifact_directory(destination.parent)
             staged.append((destination, temporary))
     except BaseException:
         _restore_staged_artifact_files(tuple(staged))
@@ -3153,14 +3296,98 @@ def _restore_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
             raise StoreError("artifact deletion rollback target is occupied")
         temporary.replace(destination)
         destination.chmod(_OWNER_FILE_MODE)
+        _fsync_artifact_directory(destination.parent)
 
 
 def _remove_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
     try:
         for _destination, temporary in staged:
             temporary.unlink()
+            _fsync_artifact_directory(temporary.parent)
     except OSError as error:
         raise StoreError("artifact physical deletion cleanup failed") from error
+
+
+def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
+    config: AnalyticsConfig,
+    metadata: Mapping[str, _OwnedArtifactMetadata],
+) -> None:
+    directory = config.paths.artifacts_dir.resolve(strict=True)
+    canonical: dict[str, Path] = {}
+    staged_writes: dict[str, list[Path]] = {}
+    staged_deletes: dict[str, list[Path]] = {}
+    for path in tuple(directory.iterdir()):
+        name = path.name
+        if _QUARANTINED_ARTIFACT_PATTERN.fullmatch(name) is not None:
+            continue
+        canonical_match = _OWNED_ARTIFACT_PATTERN.fullmatch(name)
+        write_match = _STAGED_ARTIFACT_WRITE_PATTERN.fullmatch(name)
+        delete_match = _STAGED_ARTIFACT_DELETE_PATTERN.fullmatch(name)
+        legacy_write_match = _LEGACY_STAGED_ARTIFACT_WRITE_PATTERN.fullmatch(name)
+        legacy_delete_match = _LEGACY_STAGED_ARTIFACT_DELETE_PATTERN.fullmatch(name)
+        if canonical_match is not None:
+            artifact_id = canonical_match.group("artifact_id")
+            if artifact_id in canonical:
+                raise StoreError("owned artifact directory contains duplicate handles")
+            canonical[artifact_id] = path
+        elif write_match is not None or legacy_write_match is not None:
+            matched = write_match or legacy_write_match
+            if matched is None:
+                raise StoreError("owned artifact write marker is invalid")
+            staged_writes.setdefault(matched.group("artifact_id"), []).append(path)
+        elif delete_match is not None or legacy_delete_match is not None:
+            matched = delete_match or legacy_delete_match
+            if matched is None:
+                raise StoreError("owned artifact delete marker is invalid")
+            staged_deletes.setdefault(matched.group("artifact_id"), []).append(path)
+
+    local_metadata = {
+        artifact_id: item
+        for artifact_id, item in metadata.items()
+        if item.visibility == VisibilityMode.LOCAL_RESOURCE_LINK.value
+    }
+    for artifact_id, item in local_metadata.items():
+        destination = _owned_artifact_path(config, artifact_id, item.media_type)
+        current = canonical.pop(artifact_id, None)
+        writes = staged_writes.pop(artifact_id, [])
+        deletes = staged_deletes.pop(artifact_id, [])
+        if current is not None:
+            if current != destination or deletes:
+                raise StoreError("owned artifact recovery state is ambiguous")
+            _require_owner_artifact_file(current, item.sha256)
+            for staged in writes:
+                _require_owner_artifact_file(staged, item.sha256)
+                _discard_staged_artifact(staged)
+            continue
+        candidates = [*writes, *deletes]
+        if len(candidates) != 1:
+            raise StoreError("owned artifact metadata has no deterministic physical state")
+        staged = candidates[0]
+        _require_owner_artifact_file(staged, item.sha256)
+        if writes:
+            _publish_staged_artifact(destination, staged, item.sha256)
+        else:
+            _restore_staged_artifact_files(((destination, staged),))
+
+    for paths in (*staged_writes.values(), *staged_deletes.values()):
+        for staged in paths:
+            _discard_staged_artifact(staged)
+    for artifact_id, path in canonical.items():
+        item = metadata.get(artifact_id)
+        if item is not None and item.visibility == VisibilityMode.LOCAL_RESOURCE_LINK.value:
+            raise StoreError("owned artifact recovery did not resolve registered metadata")
+        _quarantine_unreferenced_artifact(path, artifact_id)
+
+
+def _quarantine_unreferenced_artifact(path: Path, artifact_id: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise StoreError("unreferenced artifact is not an owner file")
+    quarantined = path.with_name(
+        f".artifact-orphan-{artifact_id}-{uuid4().hex}{path.suffix}",
+    )
+    path.replace(quarantined)
+    quarantined.chmod(_OWNER_FILE_MODE)
+    _fsync_artifact_directory(quarantined.parent)
 
 
 def _count_targets(

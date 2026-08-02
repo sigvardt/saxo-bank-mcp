@@ -389,6 +389,36 @@ def _seed_dependency_chain(
     return page, dataset, analysis, artifact
 
 
+def test_put_artifact_rejects_local_resource_metadata_without_owned_file(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(store)
+        dataset = _dataset(store, page.page_id)
+        analysis = _analysis_result(
+            dataset.dataset_id,
+            new_safe_handle(HandleKind.ANALYSIS_ID),
+        )
+        store.put_analysis(analysis)
+        metadata_only = _artifact(
+            analysis.analysis_id,
+            new_safe_handle(HandleKind.ARTIFACT_ID),
+        ).model_copy(update={"visibility": VisibilityMode.LOCAL_RESOURCE_LINK})
+
+        with pytest.raises(StoreValidationError, match="owned artifact"):
+            store.put_artifact(metadata_only)
+
+        assert (
+            store.list_storage(
+                StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+            )
+            == ()
+        )
+    finally:
+        store.close()
+
+
 def _seed_normalized_scope(
     store: AnalyticsStore,
     data_type: StorageDataType,

@@ -1,3 +1,6 @@
+# pyright: reportPrivateUsage=false
+# ruff: noqa: B009, SLF001
+
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +13,8 @@ from uuid import RFC_4122, UUID
 import duckdb
 import pytest
 
+import saxo_bank_mcp.analytics_export as export_module
+import saxo_bank_mcp.analytics_render as render_module
 from saxo_bank_mcp import analytics_provenance as provenance_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_metric_definitions import (
@@ -42,6 +47,7 @@ from saxo_bank_mcp.analytics_models import (
     new_safe_handle,
 )
 from saxo_bank_mcp.analytics_proof_profiles import (
+    ArtifactOwnerBinding,
     EngineProofBinding,
     ProfileActivationState,
     ProofProfile,
@@ -93,12 +99,14 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     return load_analytics_config({"XDG_STATE_HOME": str(tmp_path / "state")})
 
 
-def _registry(
+def _registry(  # noqa: PLR0913
     *,
     engine_version: str = "1",
     required_metric_ids: tuple[str, ...] = ("price_return",),
     definition_updates: dict[str, object] | None = None,
     config: AnalyticsConfig | None = None,
+    analysis_kind: str = "replay_unit_test",
+    artifact_template_ids: tuple[str, ...] = (),
 ) -> tuple[ProofRegistry, ProofProfile]:
     definitions = load_metric_definition_catalog()
     if definition_updates is not None:
@@ -120,11 +128,11 @@ def _registry(
         field_paths=("CloseBid", "Time"),
     )
     profile = ProofProfile(
-        proof_profile_id="vp_replay_unit_test_v1",
+        proof_profile_id=f"vp_{analysis_kind}_v1",
         profile_version="1",
         activation_state=ProfileActivationState.ACTIVE,
         quarantine_reason=None,
-        analysis_kind="replay_unit_test",
+        analysis_kind=analysis_kind,
         schema_version="1",
         metric_definitions=tuple(
             MetricDefinitionBinding(
@@ -142,7 +150,7 @@ def _registry(
                 code_commit="abcdef0",
             ),
         ),
-        artifact_template_ids=(),
+        artifact_template_ids=artifact_template_ids,
         definition_catalog_sha256=definitions.fingerprint_sha256,
         source_catalog_sha256=source_contract_catalog_sha256(),
         valid_until=_NOW + timedelta(days=1),
@@ -154,7 +162,14 @@ def _registry(
         source_catalog_sha256=source_contract_catalog_sha256(),
         production_metric_ids=required_metric_ids,
         production_analysis_kinds=(profile.analysis_kind,),
-        production_artifact_template_ids=(),
+        production_artifact_template_ids=artifact_template_ids,
+        artifact_owners=tuple(
+            ArtifactOwnerBinding(
+                template_id=template_id,
+                analysis_kind=analysis_kind,
+            )
+            for template_id in artifact_template_ids
+        ),
         source_field_coverage=(source,),
         profiles=(profile,),
     )
@@ -166,11 +181,11 @@ def _registry(
     return registry, profile
 
 
-def _analysis_result() -> AnalysisResult:
+def _analysis_result(*, analysis_kind: str = "replay_unit_test") -> AnalysisResult:
     dataset_id = new_safe_handle(HandleKind.DATASET_ID)
     request = MarketAnalysisRequest(
         request_kind="market",
-        analysis_kind="replay_unit_test",
+        analysis_kind=analysis_kind,
         dataset_id=dataset_id,
         parameters=AnalysisParameterBinding(
             start_at=_NOW - timedelta(days=2),
@@ -188,7 +203,7 @@ def _analysis_result() -> AnalysisResult:
         ),
     )
     identity = provenance_module.build_analysis_identity(
-        _identity_inputs(dataset_id),
+        _identity_inputs(dataset_id, analysis_kind=analysis_kind),
         _engine_versions(),
         None,
     )
@@ -202,12 +217,12 @@ def _analysis_result() -> AnalysisResult:
         engine_version="1",
         code_commit="abcdef0",
     )
-    proof_profile_id = "vp_replay_unit_test_v1"
+    proof_profile_id = f"vp_{analysis_kind}_v1"
     return AnalysisResult(
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         tool_name="saxo_analyze_market",
         analysis_id=identity.analysis_id,
-        analysis_kind="replay_unit_test",
+        analysis_kind=analysis_kind,
         request=request,
         account_scope="aggregate",
         as_of=_NOW,
@@ -247,7 +262,7 @@ def _analysis_result() -> AnalysisResult:
             proof_receipts=(
                 ActiveProofReceipt(
                     state="active",
-                    analysis_kind="replay_unit_test",
+                    analysis_kind=analysis_kind,
                     schema_version="1",
                     source_binding=source_binding,
                     engine_binding=engine_binding,
@@ -265,7 +280,10 @@ def _analysis_result() -> AnalysisResult:
             engine_version="1",
             code_commit="abcdef0",
             analysis_input_sha256=identity.input_sha256,
-            analysis_parameters_sha256=_analysis_parameters_sha256(dataset_id),
+            analysis_parameters_sha256=_analysis_parameters_sha256(
+                dataset_id,
+                analysis_kind=analysis_kind,
+            ),
             analysis_engine_sha256=identity.engine_sha256,
             analysis_seed_sha256=identity.seed_sha256,
             random_seed=None,
@@ -281,13 +299,20 @@ def _analysis_result() -> AnalysisResult:
     )
 
 
-def _identity_inputs(dataset_id: str) -> dict[str, object]:
+def _identity_inputs(
+    dataset_id: str,
+    *,
+    analysis_kind: str = "replay_unit_test",
+) -> dict[str, object]:
     return {
         "dataset_fingerprint_sha256": _DATASET_FINGERPRINT,
         "dataset_id": dataset_id,
         "source_revision": "revision-a",
         "tool_name": "saxo_analyze_market",
-        "analysis_parameters_sha256": _analysis_parameters_sha256(dataset_id),
+        "analysis_parameters_sha256": _analysis_parameters_sha256(
+            dataset_id,
+            analysis_kind=analysis_kind,
+        ),
     }
 
 
@@ -295,14 +320,15 @@ def _analysis_parameters_sha256(
     dataset_id: str,
     *,
     account_scope: str = "aggregate",
+    analysis_kind: str = "replay_unit_test",
 ) -> str:
     material: dict[str, object] = {
         "account_scope": account_scope,
-        "analysis_kind": "replay_unit_test",
+        "analysis_kind": analysis_kind,
         "assumptions": [],
         "as_of": _NOW.isoformat(),
         "request": {
-            "analysis_kind": "replay_unit_test",
+            "analysis_kind": analysis_kind,
             "dataset_id": dataset_id,
             "parameters": {
                 "as_of": "2026-08-01T12:00:00Z",
@@ -379,13 +405,14 @@ def _seed_store(config: AnalyticsConfig, result: AnalysisResult) -> None:
         connection.execute(
             """
             INSERT INTO analyses VALUES (
-                ?, ?, 'aggregate', 'replay_unit_test', 'verified',
+                ?, ?, 'aggregate', ?, 'verified',
                 'revision-a', ?, ?, ?, ?, ?
             )
             """,
             (
                 result.analysis_id,
                 result.provenance.dataset_id,
+                result.analysis_kind,
                 result.as_of,
                 _NOW,
                 len(result_json.encode()),
@@ -581,6 +608,198 @@ def test_replay_reads_owner_store_and_returns_byte_equal_result(tmp_path: Path) 
     assert second == result
     assert first.model_dump_json() == second.model_dump_json()
     assert stat.S_IMODE(config.paths.store_path.stat().st_mode) == _OWNER_FILE_MODE
+
+
+def test_store_verified_binding_renders_exports_and_reports_without_caller_stamps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    stored_render_request_type = getattr(render_module, "StoredRenderRequest")
+    stored_table_request_type = getattr(export_module, "StoredTableExportRequest")
+    stored_report_request_type = getattr(export_module, "StoredReportExportRequest")
+    config = _config(tmp_path)
+    result = _analysis_result(analysis_kind="market_comparison")
+    registry, _ = _registry(
+        analysis_kind="market_comparison",
+        artifact_template_ids=("relative_performance",),
+    )
+    _seed_store(config, result)
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+    bindings = binding_registry_type(
+        config=config,
+        proof_registry=registry,
+        environment="SIM",
+    )
+    issued = bindings.issue(result.analysis_id)
+    store = AnalyticsStore.open(config)
+    try:
+        chart = render_module.render_analysis(
+            stored_render_request_type(
+                binding_id=issued.binding_id,
+                template_id="relative_performance",
+                output_format="png",
+                width=1200,
+                height=675,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+        table = export_module.export_analysis(
+            stored_table_request_type(
+                binding_id=issued.binding_id,
+                output_format="json",
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+        report = export_module.export_analysis(
+            stored_report_request_type(
+                binding_id=issued.binding_id,
+                template_id="relative_performance",
+                output_format="pdf",
+                viewport_width=1280,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    finally:
+        store.close()
+
+    assert isinstance(chart, render_module.InlineArtifact)
+    assert chart.content.startswith(b"\x89PNG")
+    assert isinstance(table, render_module.InlineArtifact)
+    table_document = json.loads(table.content)
+    assert table_document["rows"] == [
+        {
+            "metric_currency": None,
+            "metric_id": "price_return",
+            "metric_unit": "ratio",
+            "metric_value": 0.125,
+        },
+    ]
+    assert isinstance(report, render_module.InlineArtifact)
+    assert report.content.startswith(b"%PDF")
+    assert all("unverified caller" not in line for line in chart.visible_stamps)
+
+
+def test_verified_delivery_preserves_exact_25_mib_inline_boundary_and_link_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    deliver_bound = getattr(render_module, "_deliver_bound_payload")
+    config = _config(tmp_path)
+    result = _analysis_result()
+    registry, _ = _registry()
+    _seed_store(config, result)
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+    bindings = binding_registry_type(
+        config=config,
+        proof_registry=registry,
+        environment="SIM",
+    )
+    issued = bindings.issue(result.analysis_id)
+    inline_stamps = bindings._stamps_for(
+        issued.binding_id,
+        visibility=VisibilityMode.INLINE_PRIVATE,
+    )
+    link_stamps = bindings._stamps_for(
+        issued.binding_id,
+        visibility=VisibilityMode.LOCAL_RESOURCE_LINK,
+    )
+    limit = config.limits.artifact_bytes
+    at_limit = render_module.build_artifact_payload(
+        media_type="application/octet-stream",
+        extension="bin",
+        content=b"x" * limit,
+        semantics_sha256="1" * 64,
+        stamps=inline_stamps,
+    )
+    over_limit = render_module.build_artifact_payload(
+        media_type="application/octet-stream",
+        extension="bin",
+        content=b"y" * (limit + 1),
+        semantics_sha256="2" * 64,
+        stamps=link_stamps,
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        inline = deliver_bound(
+            at_limit,
+            binding_id=issued.binding_id,
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+        linked = deliver_bound(
+            over_limit,
+            binding_id=issued.binding_id,
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    finally:
+        store.close()
+
+    assert isinstance(inline, render_module.InlineArtifact)
+    assert inline.byte_count == limit
+    assert isinstance(linked, render_module.ArtifactResourceLink)
+    assert linked.byte_count == limit + 1
+    assert linked.reason_code == "artifact_return_limit"
+
+
+def test_server_issued_artifact_binding_refuses_after_source_revision_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    stored_render_request_type = getattr(render_module, "StoredRenderRequest")
+    config = _config(tmp_path)
+    result = _analysis_result(analysis_kind="market_comparison")
+    registry, _ = _registry(
+        analysis_kind="market_comparison",
+        artifact_template_ids=("relative_performance",),
+    )
+    _seed_store(config, result)
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+    bindings = binding_registry_type(
+        config=config,
+        proof_registry=registry,
+        environment="SIM",
+    )
+    issued = bindings.issue(result.analysis_id)
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute(
+            "UPDATE datasets SET source_revision = 'revision-b' WHERE dataset_id = ?",
+            (result.provenance.dataset_id,),
+        )
+    finally:
+        connection.close()
+
+    store = AnalyticsStore.open(config)
+    try:
+        delivery = render_module.render_analysis(
+            stored_render_request_type(
+                binding_id=issued.binding_id,
+                template_id="relative_performance",
+                output_format="png",
+                width=1200,
+                height=675,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    finally:
+        store.close()
+
+    assert isinstance(delivery, render_module.ArtifactRefusal)
+    assert delivery.reason_code == "artifact_analysis_binding_invalid"
 
 
 @pytest.mark.parametrize("mutation", ["payload", "lineage"])

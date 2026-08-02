@@ -260,6 +260,254 @@ def test_resource_artifact_refuses_when_store_quota_refuses(
         store.close()
 
 
+def test_owned_artifact_write_rolls_back_physical_and_metadata_state(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, legacy_artifact_id, _ = _seed_dependency_chain(store)
+
+        def write_then_rollback() -> None:
+            with store.transaction():
+                store.put_owned_artifact(
+                    analysis_id=analysis_id,
+                    media_type="text/plain",
+                    extension="txt",
+                    content=b"synthetic rollback artifact",
+                    description="Synthetic rollback artifact",
+                )
+                raise RuntimeError("synthetic rollback")
+
+        with pytest.raises(RuntimeError, match="synthetic rollback"):
+            write_then_rollback()
+
+        entries = store.list_storage(
+            StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+        )
+        assert {entry.object_id for entry in entries} == {legacy_artifact_id}
+        assert tuple(config.paths.artifacts_dir.iterdir()) == ()
+    finally:
+        store.close()
+
+
+def test_owned_artifact_delete_restores_file_when_outer_transaction_rolls_back(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=b"synthetic retained artifact",
+            description="Synthetic retained artifact",
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=(owned.artifact_id,)),
+            store=store,
+        )
+
+        def delete_then_rollback() -> None:
+            with store.transaction():
+                delete_analytics_data(preview.preview.token, store=store)
+                raise RuntimeError("synthetic rollback")
+
+        with pytest.raises(RuntimeError, match="synthetic rollback"):
+            delete_then_rollback()
+
+        entries = store.list_storage(StorageScope(artifact_ids=(owned.artifact_id,)))
+        assert tuple(entry.object_id for entry in entries) == (owned.artifact_id,)
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files) == 1
+        assert owned.artifact_id in files[0].name
+    finally:
+        store.close()
+
+
+def test_startup_finishes_owned_artifact_publish_interrupted_after_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    analysis_id, legacy_artifact_id, _ = _seed_dependency_chain(store)
+    publish = getattr(store_module, "_publish_staged_artifact")  # noqa: B009
+
+    def interrupt_publish(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store_module, "_publish_staged_artifact", interrupt_publish)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=b"synthetic committed artifact",
+                description="Synthetic committed artifact",
+            )
+    finally:
+        store.close()
+    monkeypatch.setattr(store_module, "_publish_staged_artifact", publish)
+
+    recovered = AnalyticsStore.open(config)
+    try:
+        entries = recovered.list_storage(
+            StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+        )
+        assert len(entries) == 2
+        assert legacy_artifact_id in {entry.object_id for entry in entries}
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files) == 1
+        assert not files[0].name.startswith(".")
+        assert stat.S_IMODE(files[0].stat().st_mode) == 0o600
+    finally:
+        recovered.close()
+
+
+def test_startup_finishes_owned_artifact_delete_interrupted_after_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    analysis_id, legacy_artifact_id, _ = _seed_dependency_chain(store)
+    owned = store.put_owned_artifact(
+        analysis_id=analysis_id,
+        media_type="text/plain",
+        extension="txt",
+        content=b"synthetic deleted artifact",
+        description="Synthetic deleted artifact",
+    )
+    preview = preview_deletion(
+        StorageScope(artifact_ids=(owned.artifact_id,)),
+        store=store,
+    )
+
+    def interrupt_cleanup(_staged: object) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store_module, "_remove_staged_artifact_files", interrupt_cleanup)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            delete_analytics_data(preview.preview.token, store=store)
+    finally:
+        store.close()
+    monkeypatch.undo()
+
+    recovered = AnalyticsStore.open(config)
+    try:
+        entries = recovered.list_storage(
+            StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+        )
+        assert {entry.object_id for entry in entries} == {legacy_artifact_id}
+        assert tuple(config.paths.artifacts_dir.iterdir()) == ()
+    finally:
+        recovered.close()
+
+
+def test_startup_reconciles_owned_artifact_precommit_interruption_markers(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    analysis_id, _, _ = _seed_dependency_chain(store)
+    owned = store.put_owned_artifact(
+        analysis_id=analysis_id,
+        media_type="text/plain",
+        extension="txt",
+        content=b"synthetic precommit retained artifact",
+        description="Synthetic precommit retained artifact",
+    )
+    canonical = next(
+        path for path in config.paths.artifacts_dir.iterdir() if owned.artifact_id in path.name
+    )
+    delete_pending = canonical.with_name(
+        f".artifact-delete-{owned.artifact_id}-{'2' * 32}.txt.pending",
+    )
+    canonical.replace(delete_pending)
+    orphan_id = new_safe_handle(HandleKind.ARTIFACT_ID)
+    write_pending = config.paths.artifacts_dir / (
+        f".artifact-write-{orphan_id}-{'1' * 32}.txt.pending"
+    )
+    write_pending.write_bytes(b"synthetic uncommitted artifact")
+    write_pending.chmod(0o600)
+    store.close()
+
+    recovered = AnalyticsStore.open(config)
+    try:
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files) == 1
+        assert files[0].name == canonical.name
+        assert files[0].read_bytes() == b"synthetic precommit retained artifact"
+        assert tuple(
+            entry.object_id
+            for entry in recovered.list_storage(StorageScope(artifact_ids=(owned.artifact_id,)))
+        ) == (owned.artifact_id,)
+    finally:
+        recovered.close()
+
+
+def test_startup_quarantines_unreferenced_owner_artifact_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    initialized = AnalyticsStore.open(config)
+    initialized.close()
+    artifact_id = new_safe_handle(HandleKind.ARTIFACT_ID)
+    orphan = config.paths.artifacts_dir / f"{artifact_id}.txt"
+    content = b"synthetic owner data without committed metadata"
+    orphan.write_bytes(content)
+    orphan.chmod(0o600)
+
+    recovered = AnalyticsStore.open(config)
+    try:
+        retained = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(retained) == 1
+        assert retained[0].name.startswith(f".artifact-orphan-{artifact_id}-")
+        assert retained[0].read_bytes() == content
+        assert stat.S_IMODE(retained[0].stat().st_mode) == 0o600
+    finally:
+        recovered.close()
+
+
+def test_owned_artifact_publication_and_deletion_fsync_the_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    fsync_directory = getattr(store_module, "_fsync_artifact_directory")  # noqa: B009
+    calls = 0
+
+    def record_fsync(path: Path) -> None:
+        nonlocal calls
+        calls += 1
+        fsync_directory(path)
+
+    monkeypatch.setattr(store_module, "_fsync_artifact_directory", record_fsync)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=b"synthetic durable artifact",
+            description="Synthetic durable artifact",
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=(owned.artifact_id,)),
+            store=store,
+        )
+        delete_analytics_data(preview.preview.token, store=store)
+        assert calls >= 4
+    finally:
+        store.close()
+
+
 def test_expired_deletion_token_refuses_without_deleting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

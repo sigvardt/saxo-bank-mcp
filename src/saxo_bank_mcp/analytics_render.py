@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false, reportUnknownMemberType=false
-# ruff: noqa: E501
+# ruff: noqa: E501, SLF001
 from __future__ import annotations
 
 import base64
@@ -10,11 +10,13 @@ import json
 import math
 import re
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from functools import cache
 from importlib.resources import files
 from io import BytesIO
-from typing import Final, Literal, Self
+from typing import Final, Literal, Self, cast
+from uuid import uuid4
 
 import matplotlib as mpl
 import numpy as np
@@ -23,6 +25,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
+from matplotlib.transforms import Bbox
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.analytics_chart_semantics import (
@@ -30,6 +33,7 @@ from saxo_bank_mcp.analytics_chart_semantics import (
     ArtifactStamps,
     ChartSemantics,
     ChartSeries,
+    ChartTemplateId,
     chart_kind_for,
     chart_semantics_sha256,
 )
@@ -37,8 +41,19 @@ from saxo_bank_mcp.analytics_chart_semantics import (
     _bound_visible_stamp_lines as visible_stamp_lines,
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
-from saxo_bank_mcp.analytics_models import ArtifactId, Sha256Fingerprint
-from saxo_bank_mcp.analytics_store import AnalyticsStore
+from saxo_bank_mcp.analytics_models import (
+    AnalysisId,
+    AnalysisResult,
+    ArtifactId,
+    ArtifactSummary,
+    HandleKind,
+    Sha256Fingerprint,
+    VisibilityMode,
+    new_safe_handle,
+)
+from saxo_bank_mcp.analytics_proof_profiles import ProofRegistry
+from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreError
 
 mpl.use("Agg", force=True)
 
@@ -59,6 +74,7 @@ _MAX_DISPLAY_TICKS: Final = 8
 _MIN_READABLE_FONT_PX: Final = 12
 _INK_THRESHOLD: Final = 248
 _CANVAS_TOLERANCE: Final = 0.5
+_MAX_STAMP_WARNINGS: Final = 16
 _PLOTLY_RESOURCE: Final = "package_data/plotly.min.js"
 _NETWORK_RUNTIME_PATTERNS: Final = (
     re.compile(rb"https?://", re.IGNORECASE),
@@ -195,6 +211,116 @@ class RenderRequest(_StrictModel):
     output_format: RenderFormat
     width: int = Field(ge=_MIN_WIDTH, le=_MAX_WIDTH)
     height: int = Field(ge=_MIN_HEIGHT, le=_MAX_HEIGHT)
+
+
+class StoredRenderRequest(_StrictModel):
+    """Bound chart request containing no caller-provided values or provenance."""
+
+    binding_id: str = Field(pattern=r"^ab_[0-9a-f]{32}$")
+    template_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    output_format: RenderFormat
+    width: int = Field(ge=_MIN_WIDTH, le=_MAX_WIDTH)
+    height: int = Field(ge=_MIN_HEIGHT, le=_MAX_HEIGHT)
+
+
+class ArtifactBindingReceipt(_StrictModel):
+    """Value-free receipt for one proof-replayed, in-process analysis binding."""
+
+    binding_id: str = Field(pattern=r"^ab_[0-9a-f]{32}$")
+    analysis_id: AnalysisId
+
+
+class ArtifactBindingRegistry:
+    """Hold proof-replayed results behind server-issued opaque handles."""
+
+    def __init__(
+        self,
+        *,
+        config: AnalyticsConfig,
+        proof_registry: ProofRegistry,
+        environment: Literal["SIM", "LIVE"],
+    ) -> None:
+        """Bind runtime-owned configuration, proof registry, and environment."""
+        self._config = config
+        self._proof_registry = proof_registry
+        self._environment: Literal["SIM", "LIVE"] = environment
+        self._results: dict[str, AnalysisResult] = {}
+        self._template_ids: dict[str, frozenset[str]] = {}
+
+    def issue(self, analysis_id: str) -> ArtifactBindingReceipt:
+        """Replay exact persisted proof material before issuing a random binding."""
+        result = replay_analysis(
+            analysis_id,
+            config=self._config,
+            registry=self._proof_registry,
+            at=_utc_now(),
+        )
+        profile = self._proof_registry.profile(result.analysis_kind)
+        if profile is None:
+            raise ValueError("stored analysis has no artifact proof profile")
+        binding_id = f"ab_{uuid4().hex}"
+        self._results[binding_id] = result
+        self._template_ids[binding_id] = frozenset(profile.artifact_template_ids)
+        return ArtifactBindingReceipt(binding_id=binding_id, analysis_id=result.analysis_id)
+
+    def _result_for(self, binding_id: str) -> AnalysisResult:
+        result = self._results.get(binding_id)
+        if result is None:
+            raise ValueError("artifact binding is unknown or stale")
+        try:
+            current = replay_analysis(
+                result.analysis_id,
+                config=self._config,
+                registry=self._proof_registry,
+                at=_utc_now(),
+            )
+        except AnalysisReplayRefused as error:
+            raise ValueError("artifact binding no longer replays as verified") from error
+        if current != result:
+            raise ValueError("artifact binding no longer identifies the issued result")
+        return current
+
+    def _allows_template(self, binding_id: str, template_id: str) -> bool:
+        self._result_for(binding_id)
+        return template_id in self._template_ids[binding_id]
+
+    def _base_visibility(self, binding_id: str) -> VisibilityMode:
+        visibility = self._result_for(binding_id).visibility
+        if visibility in {VisibilityMode.PRIVATE_USER_RESULT, VisibilityMode.INLINE_PRIVATE}:
+            return VisibilityMode.INLINE_PRIVATE
+        if visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
+            return VisibilityMode.LOCAL_RESOURCE_LINK
+        raise ValueError("stored analysis visibility cannot authorize owner value delivery")
+
+    def _stamps_for(
+        self,
+        binding_id: str,
+        *,
+        visibility: VisibilityMode,
+    ) -> ArtifactStamps:
+        result = self._result_for(binding_id)
+        base_visibility = self._base_visibility(binding_id)
+        if visibility not in {base_visibility, VisibilityMode.LOCAL_RESOURCE_LINK}:
+            raise ValueError("artifact visibility does not match its stored analysis")
+        warning_codes = {
+            warning.code for warning in (*result.warnings, *result.data_quality.warnings)
+        }
+        warning_codes.add("artifact_market_metadata_unavailable")
+        if len(warning_codes) > _MAX_STAMP_WARNINGS:
+            raise ValueError("stored analysis warnings exceed the artifact contract")
+        return ArtifactStamps(
+            environment=self._environment,
+            data_cutoff=result.as_of,
+            quote_delay="not_available",
+            price_type="not_available",
+            currency=result.request.parameters.reporting_currency,
+            adjustment_status="not_available",
+            warnings=tuple(sorted(warning_codes)),
+            analysis_id=result.analysis_id,
+            source_scope=result.provenance.source_scope,
+            source_revision=result.provenance.source_revision,
+            visibility=visibility,
+        )
 
 
 def render_png(
@@ -444,10 +570,225 @@ def deliver_artifact(
     return _unbound_analysis_refusal()
 
 
-def render_analysis(request: RenderRequest, *, config: AnalyticsConfig) -> ArtifactDelivery:
-    """Refuse caller-composed semantics until a stored-analysis adapter binds values."""
-    del request, config
-    return _unbound_analysis_refusal()
+def render_analysis(
+    request: RenderRequest | StoredRenderRequest,
+    *,
+    config: AnalyticsConfig,
+    store: AnalyticsStore | None = None,
+    bindings: ArtifactBindingRegistry | None = None,
+) -> ArtifactDelivery:
+    """Render only values derived from a server-issued proof-replayed binding."""
+    if isinstance(request, RenderRequest) or store is None or bindings is None:
+        return _unbound_analysis_refusal()
+
+    def produce(stamps: ArtifactStamps) -> ArtifactPayload | ArtifactRefusal:
+        semantics = _bound_chart_semantics(
+            request.binding_id,
+            request.template_id,
+            stamps=stamps,
+            bindings=bindings,
+        )
+        if isinstance(semantics, ArtifactRefusal):
+            return semantics
+        if request.output_format == "png":
+            return _render_png_payload(semantics, width=request.width, height=request.height)
+        return _render_plotly_html_payload(
+            semantics,
+            viewport_width=request.width,
+            height=request.height,
+        )
+
+    return _produce_and_deliver_bound(
+        binding_id=request.binding_id,
+        producer=produce,
+        config=config,
+        store=store,
+        bindings=bindings,
+    )
+
+
+def _bound_chart_semantics(  # noqa: PLR0911
+    binding_id: str,
+    template_id: str,
+    *,
+    stamps: ArtifactStamps,
+    bindings: ArtifactBindingRegistry,
+) -> ChartSemantics | ArtifactRefusal:
+    """Derive one truthful exact-value chart from the stored result metrics."""
+    try:
+        result = bindings._result_for(binding_id)
+        allowed = bindings._allows_template(binding_id, template_id)
+    except ValueError:
+        return _binding_refusal()
+    if not allowed:
+        return ArtifactRefusal(
+            reason_code="artifact_template_unbound",
+            reason="the stored proof profile does not bind this artifact template",
+            next_action="request a template registered for the stored analysis kind",
+        )
+    metric_units = {metric.unit for metric in result.metrics}
+    kind = chart_kind_for(cast("ChartTemplateId", template_id))
+    if kind in {"scatter", "heatmap", "surface", "waterfall", "composite"}:
+        return ArtifactRefusal(
+            reason_code="artifact_template_values_unavailable",
+            reason="the stored result does not contain the exact shape required by this template",
+            next_action="store a verified analysis result with the template's exact value shape",
+        )
+    if kind in {"dashboard", "card"} and len(metric_units) != 1:
+        return ArtifactRefusal(
+            reason_code="artifact_template_values_unavailable",
+            reason="the stored metrics do not share the unit required by this template",
+            next_action="request a verified template with one truthful unit envelope",
+        )
+    if kind == "card" and len(result.metrics) != 1:
+        return ArtifactRefusal(
+            reason_code="artifact_template_values_unavailable",
+            reason="the stored result has more values than the single-value card can render",
+            next_action="request a chart template that renders every stored metric",
+        )
+    if len(metric_units) != 1:
+        return ArtifactRefusal(
+            reason_code="artifact_template_values_unavailable",
+            reason="the stored metrics require separate axes that this result does not bind",
+            next_action="store exact per-axis chart semantics through a verified analysis adapter",
+        )
+    unit = next(iter(metric_units))
+    try:
+        return ChartSemantics(
+            template_id=cast("ChartTemplateId", template_id),
+            analysis_kind=result.analysis_kind,
+            title=template_id.replace("_", " ").title(),
+            subtitle="Stored verified Saxo analysis",
+            x_axis_title="Analysis cutoff",
+            y_axis_title=f"Value ({unit})",
+            secondary_y_axis_title=None,
+            labels=(result.as_of.isoformat().replace("+00:00", "Z"),),
+            series=tuple(
+                ChartSeries(
+                    name=metric.metric_id.replace("_", " ").title(),
+                    values=(metric.value,),
+                    unit=metric.unit,
+                    style="line",
+                    axis="primary",
+                )
+                for metric in result.metrics
+            ),
+            stamps=stamps,
+        )
+    except (KeyError, ValueError):
+        return ArtifactRefusal(
+            reason_code="artifact_template_values_unavailable",
+            reason="the stored result cannot satisfy the exact registered chart semantics",
+            next_action="request a verified template compatible with every stored metric",
+        )
+
+
+def _produce_and_deliver_bound(
+    *,
+    binding_id: str,
+    producer: Callable[[ArtifactStamps], ArtifactPayload | ArtifactRefusal],
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+    bindings: ArtifactBindingRegistry,
+) -> ArtifactDelivery:
+    """Render with derived visibility, rerendering when size requires a link stamp."""
+    try:
+        visibility = bindings._base_visibility(binding_id)
+        payload = producer(bindings._stamps_for(binding_id, visibility=visibility))
+        if isinstance(payload, ArtifactRefusal):
+            return payload
+        if payload.byte_count > config.limits.artifact_bytes and (
+            visibility is not VisibilityMode.LOCAL_RESOURCE_LINK
+        ):
+            payload = producer(
+                bindings._stamps_for(
+                    binding_id,
+                    visibility=VisibilityMode.LOCAL_RESOURCE_LINK,
+                ),
+            )
+            if isinstance(payload, ArtifactRefusal):
+                return payload
+        return _deliver_bound_payload(
+            payload,
+            binding_id=binding_id,
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    except (StoreError, ValueError):
+        return _binding_refusal()
+
+
+def _deliver_bound_payload(
+    payload: ArtifactPayload,
+    *,
+    binding_id: str,
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+    bindings: ArtifactBindingRegistry,
+) -> ArtifactDelivery:
+    """Persist and deliver only a payload matching the exact stored binding stamps."""
+    try:
+        result = bindings._result_for(binding_id)
+        base_visibility = bindings._base_visibility(binding_id)
+        use_link = (
+            base_visibility is VisibilityMode.LOCAL_RESOURCE_LINK
+            or payload.byte_count > config.limits.artifact_bytes
+        )
+        expected_visibility = (
+            VisibilityMode.LOCAL_RESOURCE_LINK if use_link else VisibilityMode.INLINE_PRIVATE
+        )
+        if payload.stamps != bindings._stamps_for(
+            binding_id,
+            visibility=expected_visibility,
+        ):
+            return _binding_refusal()
+        if use_link:
+            stored = store.put_owned_artifact(
+                analysis_id=result.analysis_id,
+                media_type=payload.media_type,
+                extension=payload.extension,
+                content=payload.content,
+                description="stored verified analytics artifact",
+            )
+            return ArtifactResourceLink(
+                artifact_id=stored.artifact_id,
+                resource_uri=f"saxo-analytics://artifacts/{stored.artifact_id}",
+                media_type=payload.media_type,
+                byte_count=payload.byte_count,
+                sha256=payload.sha256,
+                semantics_sha256=payload.semantics_sha256,
+                reason_code=(
+                    "artifact_return_limit"
+                    if payload.byte_count > config.limits.artifact_bytes
+                    else "local_resource_link_requested"
+                ),
+                visible_stamps=visible_stamp_lines(payload.stamps),
+            )
+        artifact_id = new_safe_handle(HandleKind.ARTIFACT_ID)
+        store.put_artifact(
+            ArtifactSummary(
+                visibility=VisibilityMode.INLINE_PRIVATE,
+                artifact_id=artifact_id,
+                analysis_id=result.analysis_id,
+                media_type=payload.media_type,
+                byte_count=payload.byte_count,
+                sha256=payload.sha256,
+                created_at=_utc_now(),
+                description="stored verified inline analytics artifact",
+            ),
+        )
+        return InlineArtifact(
+            artifact_id=artifact_id,
+            media_type=payload.media_type,
+            content=payload.content,
+            byte_count=payload.byte_count,
+            sha256=payload.sha256,
+            semantics_sha256=payload.semantics_sha256,
+            visible_stamps=visible_stamp_lines(payload.stamps),
+        )
+    except (StoreError, ValueError):
+        return _binding_refusal()
 
 
 def _build_figure(
@@ -462,7 +803,7 @@ def _build_figure(
         facecolor="white",
     )
     canvas = FigureCanvasAgg(figure)
-    axis = figure.add_axes((0.09, 0.27, 0.84, 0.58))
+    axis = figure.add_axes((0.09, 0.27, 0.84, 0.50))
     bounded_texts: list[Text] = [
         figure.text(
             0.04,
@@ -484,11 +825,13 @@ def _build_figure(
     secondary_axis = _draw_chart(axis, semantics)
     axis.set_xlabel(semantics.x_axis_title, fontsize=9, labelpad=7)
     axis.set_ylabel(semantics.y_axis_title, fontsize=9, labelpad=7)
+    bounded_texts.extend((axis.xaxis.label, axis.yaxis.label))
     if secondary_axis is not None:
         secondary_title = semantics.secondary_y_axis_title
         if secondary_title is None:
             raise ValueError("secondary chart axis is missing its title")
         secondary_axis.set_ylabel(secondary_title, fontsize=9, labelpad=7)
+        bounded_texts.append(secondary_axis.yaxis.label)
     axis.grid(visible=True, axis="y", linewidth=0.5, color="#d9e2ef", alpha=0.8)
     axis.tick_params(labelsize=8)
     kind = chart_kind_for(semantics.template_id)
@@ -496,7 +839,11 @@ def _build_figure(
         _bounded_ticks(axis, semantics.labels)
     else:
         axis.xaxis.set_major_locator(MaxNLocator(nbins=6, prune="both"))
-    label_texts = tuple(axis.get_xticklabels())
+    label_texts = (
+        *axis.get_xticklabels(),
+        *axis.get_yticklabels(),
+        *(secondary_axis.get_yticklabels() if secondary_axis is not None else ()),
+    )
     handles, legend_labels = axis.get_legend_handles_labels()
     if secondary_axis is not None:
         secondary_handles, secondary_labels = secondary_axis.get_legend_handles_labels()
@@ -670,11 +1017,14 @@ def _bounded_ticks(axis: Axes, labels: Sequence[str]) -> None:
     positions = np.arange(len(labels), dtype=np.float64)
     sampled = _sample_tick_positions(positions)
     axis.set_xticks(sampled)
-    axis.set_xticklabels(
+    tick_labels = axis.set_xticklabels(
         tuple(_short_label(labels[int(position)], 18) for position in sampled),
         rotation=18,
-        ha="right",
+        ha="center",
     )
+    if tick_labels:
+        tick_labels[0].set_horizontalalignment("left")
+        tick_labels[-1].set_horizontalalignment("right")
 
 
 def _sample_tick_positions(
@@ -710,11 +1060,17 @@ def _pixel_and_text_qa(
         ),
     )
     renderer = canvas.get_renderer()
+    rendered_texts = tuple(canvas.figure.findobj(match=Text))
+    qa_texts = tuple(
+        {id(item): item for item in (*bounded_texts, *label_texts, *rendered_texts)}.values(),
+    )
     clipped = 0
-    for item in (*bounded_texts, *label_texts):
+    visible_bounds: list[Bbox] = []
+    for item in qa_texts:
         if not item.get_visible() or not item.get_text():
             continue
         bounds = item.get_window_extent(renderer=renderer)
+        visible_bounds.append(bounds)
         if (
             bounds.x0 < -_CANVAS_TOLERANCE
             or bounds.y0 < -_CANVAS_TOLERANCE
@@ -722,15 +1078,10 @@ def _pixel_and_text_qa(
             or bounds.y1 > height + _CANVAS_TOLERANCE
         ):
             clipped += 1
-    visible_labels = tuple(
-        label.get_window_extent(renderer=renderer)
-        for label in label_texts
-        if label.get_visible() and label.get_text()
-    )
     overlapping = sum(
         int(first.overlaps(second))
-        for index, first in enumerate(visible_labels)
-        for second in visible_labels[index + 1 :]
+        for index, first in enumerate(visible_bounds)
+        for second in visible_bounds[index + 1 :]
     )
     return VisualQa(
         width=width,
@@ -995,3 +1346,15 @@ def _unbound_analysis_refusal() -> ArtifactRefusal:
         reason="caller-composed values cannot establish stored Saxo analysis provenance",
         next_action="render from a server-issued stored analysis binding",
     )
+
+
+def _binding_refusal() -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code="artifact_analysis_binding_invalid",
+        reason="the server-issued stored analysis binding is missing, stale, or inconsistent",
+        next_action="replay the current verified analysis and request a new opaque binding",
+    )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)

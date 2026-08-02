@@ -295,12 +295,20 @@ class ChartSemantics(_StrictModel):
         if any(len(series.values) != len(self.labels) for series in self.series):
             raise ValueError("every chart series must align exactly to the chart labels")
         kind = binding.chart_kind
-        _validate_template_values(kind, self.series)
+        _validate_template_values(kind, self.labels, self.series)
         self._validate_axis_contract(kind)
         return self
 
-    def _validate_axis_contract(self, kind: ChartKind) -> None:  # noqa: C901
+    def _validate_axis_contract(self, kind: ChartKind) -> None:  # noqa: C901, PLR0912
         if kind in {"dashboard", "card"}:
+            if self.secondary_y_axis_title is not None:
+                raise ValueError("dashboard and card charts cannot use a secondary axis")
+            if any(series.axis != "primary" for series in self.series):
+                raise ValueError("dashboard and card series must use the primary axis")
+            units = {series.unit for series in self.series}
+            if len(units) != 1:
+                raise ValueError("dashboard and card series must share one unit")
+            _require_axis_unit_title(self.y_axis_title, next(iter(units)), "primary")
             return
         primary = tuple(series for series in self.series if series.axis == "primary")
         secondary = tuple(series for series in self.series if series.axis == "secondary")
@@ -436,13 +444,15 @@ def _is_finite(value: float) -> bool:
 
 def _require_axis_unit_title(title: str, unit: str, axis: str) -> None:
     normalized_unit = unit.casefold().replace("_", " ")
-    if normalized_unit in {"index", "percent", "percentage"} and normalized_unit not in (
-        title.casefold().replace("_", " ")
-    ):
+    if normalized_unit not in title.casefold().replace("_", " "):
         raise ValueError(f"{axis} axis title must identify its series unit")
 
 
-def _validate_template_values(kind: ChartKind, series: tuple[ChartSeries, ...]) -> None:
+def _validate_template_values(  # noqa: C901
+    kind: ChartKind,
+    labels: tuple[str, ...],
+    series: tuple[ChartSeries, ...],
+) -> None:
     if kind == "waterfall":
         if len(series) != 1:
             raise ValueError("waterfall charts require exactly one series")
@@ -453,5 +463,10 @@ def _validate_template_values(kind: ChartKind, series: tuple[ChartSeries, ...]) 
             raise ValueError("scatter charts require exactly two series")
         if any(value is None for item in series for value in item.values):
             raise ValueError("scatter charts require complete paired values")
-    if kind in {"dashboard", "card"} and any(item.values[-1] is None for item in series):
-        raise ValueError("dashboard and card latest values cannot be missing")
+    if kind in {"dashboard", "card"}:
+        if len(labels) != 1:
+            raise ValueError("dashboard and card charts require exactly one observation")
+        if any(item.values[0] is None for item in series):
+            raise ValueError("dashboard and card values cannot be missing")
+        if kind == "card" and len(series) != 1:
+            raise ValueError("card charts require exactly one series")

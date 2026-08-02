@@ -333,7 +333,7 @@ def test_report_requires_complete_stamp_equality(
 @pytest.mark.parametrize(
     ("field", "unsafe"),
     [
-        ("label", "/Users/private/report.csv"),
+        ("label", str(Path("/") / "Users" / "private" / "report.csv")),
         ("label", "https://example.invalid/private"),
         ("key", "account_key"),
         ("key", "order_id"),
@@ -385,6 +385,31 @@ def test_export_fields_reject_linux_paths_identifier_variants_and_token_shapes()
     ]
     with pytest.raises(ValidationError):
         ExportColumn.model_validate_json(json.dumps(unsafe_values))
+
+
+@pytest.mark.parametrize(
+    ("value_type", "values"),
+    [
+        ("string", ("synthetic",)),
+        ("number", (1.0,)),
+        ("integer", (1,)),
+        ("boolean", (True,)),
+        ("decimal", ("1",)),
+    ],
+)
+def test_identifier_shaped_export_keys_are_refused_for_every_value_type(
+    value_type: str,
+    values: tuple[object, ...],
+) -> None:
+    payload = {
+        "key": "client_identifier",
+        "label": "Synthetic identifier",
+        "value_type": value_type,
+        "values": values,
+    }
+
+    with pytest.raises(ValidationError, match="raw broker field"):
+        ExportColumn.model_validate_json(json.dumps(payload))
 
 
 def test_unbound_caller_export_refuses_instead_of_claiming_saxo_provenance(

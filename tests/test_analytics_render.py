@@ -104,7 +104,24 @@ def _chart_for(binding: TemplateBinding) -> ChartSemantics:
     elif binding.chart_kind == "waterfall":
         payload.update({"secondary_y_axis_title": None, "series": series[:1]})
     elif binding.chart_kind in {"dashboard", "card"}:
-        payload["secondary_y_axis_title"] = None
+        dashboard_series = [
+            {
+                **item,
+                "values": [cast("list[float]", item["values"])[-1]],
+                "axis": "primary",
+            }
+            for item in (series[0], series[2])
+        ]
+        payload.update(
+            {
+                "labels": [cast("list[str]", payload["labels"])[-1]],
+                "y_axis_title": "Index",
+                "secondary_y_axis_title": None,
+                "series": dashboard_series[:1]
+                if binding.chart_kind == "card"
+                else dashboard_series,
+            },
+        )
     else:
         payload.update(
             {
@@ -286,7 +303,7 @@ def test_plotly_html_is_self_contained_sanitized_deterministic_and_responsive() 
     ("field", "unsafe"),
     [
         ("title", "Unsafe https://example.invalid/chart"),
-        ("subtitle", "/Volumes/private/account.json"),
+        ("subtitle", str(Path("/") / "Volumes" / "private" / "account.json")),
         ("x_axis_title", "<script>unsafe()</script>"),
         ("y_axis_title", "fetch('/private')"),
     ],
@@ -464,16 +481,77 @@ def test_template_cardinality_and_missing_values_cannot_be_silently_changed() ->
             **base,
             "template_id": template_id,
             "analysis_kind": analysis_kind,
+            "labels": [base["labels"][-1]],
+            "y_axis_title": "Index",
+            "secondary_y_axis_title": None,
             "series": [
                 {
-                    **series,
-                    "values": [*series["values"][:-1], None],
+                    **base["series"][0],
+                    "values": [None],
+                    "axis": "primary",
                 }
-                for series in base["series"]
             ],
         }
-        with pytest.raises(ValidationError, match="latest"):
+        with pytest.raises(ValidationError, match="missing"):
             ChartSemantics.model_validate_json(json.dumps(dashboard_or_card))
+
+
+def test_dashboard_and_card_render_every_accepted_value_with_one_truthful_unit() -> None:
+    base = _chart().model_dump(mode="json")
+    dashboard = {
+        **base,
+        "template_id": "portfolio_tearsheet",
+        "analysis_kind": "portfolio_performance",
+        "secondary_y_axis_title": None,
+    }
+    with pytest.raises(ValidationError, match="one observation"):
+        ChartSemantics.model_validate_json(json.dumps(dashboard))
+
+    latest_series = [
+        {
+            **series,
+            "values": [series["values"][-1]],
+            "axis": "primary",
+        }
+        for series in base["series"][:2]
+    ]
+    mixed_dashboard = {
+        **dashboard,
+        "labels": [base["labels"][-1]],
+        "series": latest_series,
+    }
+    with pytest.raises(ValidationError, match="unit"):
+        ChartSemantics.model_validate_json(json.dumps(mixed_dashboard))
+
+    multi_series_card = {
+        **mixed_dashboard,
+        "template_id": "pretrade_impact_card",
+        "analysis_kind": "pretrade_impact",
+        "series": [{**series, "unit": "index"} for series in latest_series],
+    }
+    with pytest.raises(ValidationError, match="exactly one series"):
+        ChartSemantics.model_validate_json(json.dumps(multi_series_card))
+
+
+def test_axis_title_must_identify_currency_instead_of_percent() -> None:
+    base = _chart().model_dump(mode="json")
+    misleading = {
+        **base,
+        "template_id": "relative_performance",
+        "analysis_kind": "market_comparison",
+        "y_axis_title": "Percent",
+        "secondary_y_axis_title": None,
+        "series": [
+            {
+                **base["series"][0],
+                "unit": "currency",
+                "axis": "primary",
+            },
+        ],
+    }
+
+    with pytest.raises(ValidationError, match="unit"):
+        ChartSemantics.model_validate_json(json.dumps(misleading))
 
 
 def test_composite_axes_have_honest_units_titles_and_one_complete_legend() -> None:
@@ -576,6 +654,17 @@ def test_png_delivery_is_blocked_when_actual_visual_qa_detects_clipping(
 
     monkeypatch.setattr(render_module, "_pixel_and_text_qa", clipped)
     result = _render_png_payload(_chart(), width=_PNG_WIDTH, height=_PNG_HEIGHT)
+
+    assert isinstance(result, ArtifactRefusal)
+    assert result.reason_code == "artifact_visual_qa_failed"
+
+
+def test_naturally_clipped_valid_axis_title_blocks_png_delivery() -> None:
+    payload = _chart().model_dump(mode="json")
+    payload["y_axis_title"] = "Index " + "extended-axis-title-" * 11
+    chart = ChartSemantics.model_validate_json(json.dumps(payload))
+
+    result = _render_png_payload(chart, width=_PNG_WIDTH, height=_PNG_HEIGHT)
 
     assert isinstance(result, ArtifactRefusal)
     assert result.reason_code == "artifact_visual_qa_failed"

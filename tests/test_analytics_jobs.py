@@ -102,6 +102,25 @@ class _ControlledHandler:
         )
 
 
+class _SlowCancellingHandler(_ControlledHandler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelling = asyncio.Event()
+        self.allow_stop = asyncio.Event()
+
+    async def __call__(
+        self,
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        try:
+            return await super().__call__(request, context)
+        except asyncio.CancelledError:
+            self.cancelling.set()
+            await self.allow_stop.wait()
+            raise
+
+
 async def _wait_for_state(
     manager: AnalyticsJobManager,
     job_id: str,
@@ -179,6 +198,84 @@ async def test_active_jobs_cannot_be_deleted_or_free_false_capacity(tmp_path: Pa
             await manager.start_job(_request(5))
         assert len(manager._tasks) == 4
     finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_cancelling_job_remains_deletion_protected_until_task_stops(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _SlowCancellingHandler()
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+    )
+    cancellation: asyncio.Task[jobs_module.JobStatus] | None = None
+    try:
+        await manager.start_job(_request())
+        await handler.started.wait()
+        cancellation = asyncio.create_task(manager.cancel_job(next(iter(manager._tasks))))
+        await handler.cancelling.wait()
+
+        with pytest.raises(StoreValidationError, match="active jobs"):
+            preview_deletion(
+                StorageScope(data_types=(StorageDataType.JOBS,)),
+                store=store,
+            )
+
+        handler.allow_stop.set()
+        cancelled = await cancellation
+        assert cancelled.state == "cancelled"
+    finally:
+        handler.allow_stop.set()
+        if cancellation is not None:
+            await asyncio.gather(cancellation, return_exceptions=True)
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_cancelling_task_remains_counted_until_it_stops(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    cancelling_handler = _SlowCancellingHandler()
+    active_handlers = [_ControlledHandler() for _ in range(3)]
+    selected = iter((cancelling_handler, *active_handlers))
+
+    async def dispatch(
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        return await next(selected)(request, context)
+
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": dispatch},
+    )
+    cancellation: asyncio.Task[jobs_module.JobStatus] | None = None
+    try:
+        first = await manager.start_job(_request(1))
+        await cancelling_handler.started.wait()
+        cancellation = asyncio.create_task(manager.cancel_job(first.job_id))
+        await cancelling_handler.cancelling.wait()
+
+        await asyncio.gather(*(manager.start_job(_request(index)) for index in range(2, 5)))
+        with pytest.raises(JobCapacityError, match="four"):
+            await manager.start_job(_request(5))
+
+        cancelling_handler.allow_stop.set()
+        await cancellation
+    finally:
+        cancelling_handler.allow_stop.set()
+        for handler in active_handlers:
+            handler.release.set()
+        if cancellation is not None:
+            await asyncio.gather(cancellation, return_exceptions=True)
         await manager.shutdown()
         store.close()
 
@@ -546,6 +643,38 @@ async def test_restart_cleans_an_orphaned_terminal_job_workspace(tmp_path: Path)
         assert (await recovered_manager.get_job(completed.job_id)).state == "completed"
     finally:
         await recovered_manager.shutdown()
+        store.close()
+
+
+def test_startup_removes_orphan_workspace_with_owner_read_only_children(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    workspace_root = config.paths.analytics_root / "job-workspaces"
+    workspace_root.mkdir(mode=0o700)
+    orphan = workspace_root / new_safe_handle(HandleKind.JOB_ID)
+    nested = orphan / "nested"
+    nested.mkdir(mode=0o700, parents=True)
+    scratch = nested / "scratch.bin"
+    scratch.write_bytes(b"synthetic-interrupted-workspace")
+    scratch.chmod(0o400)
+    nested.chmod(0o400)
+    orphan.chmod(0o500)
+
+    store = AnalyticsStore.open(config)
+    manager: AnalyticsJobManager | None = None
+    try:
+        manager = AnalyticsJobManager(store=store, config=config, handlers={})
+        assert not orphan.exists()
+    finally:
+        if orphan.exists():
+            orphan.chmod(0o700)
+            if nested.exists():
+                nested.chmod(0o700)
+            if scratch.exists():
+                scratch.chmod(0o600)
+        if manager is not None:
+            asyncio.run(manager.shutdown())
         store.close()
 
 

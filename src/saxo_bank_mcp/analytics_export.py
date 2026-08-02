@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false
-# ruff: noqa: E501
+# ruff: noqa: E501, SLF001
 from __future__ import annotations
 
 import csv
@@ -37,12 +37,20 @@ from saxo_bank_mcp.analytics_chart_semantics import (
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_models import ContractName
 from saxo_bank_mcp.analytics_render import (
+    ArtifactBindingRegistry,
     ArtifactDelivery,
     ArtifactPayload,
     ArtifactRefusal,
+    _bound_chart_semantics,
+    _produce_and_deliver_bound,
     build_artifact_payload,
 )
-from saxo_bank_mcp.analytics_reports import AnalysisReport
+from saxo_bank_mcp.analytics_reports import (
+    AnalysisReport,
+    _render_report_html_payload,
+    _render_report_pdf_payload,
+)
+from saxo_bank_mcp.analytics_store import AnalyticsStore
 
 type ExportValue = str | int | float | bool | None
 type ExportValueType = Literal["string", "number", "integer", "boolean", "decimal"]
@@ -93,6 +101,10 @@ _FORBIDDEN_RAW_KEYS: Final = frozenset(
         "url",
     },
 )
+_IDENTIFIER_KEY_PATTERN: Final = re.compile(
+    r"(?:account|client|order|position|user|trade|transaction|application|app|instrument)"
+    r"[a-z0-9]*(?:id|identifier|key|number|name|ref|reference)[a-z0-9]*$",
+)
 _PARQUET_TYPES: Final = {
     "string": "VARCHAR",
     "number": "DOUBLE",
@@ -132,7 +144,11 @@ class ExportColumn(_StrictModel):
     @model_validator(mode="after")
     def validate_column(self) -> Self:
         normalized_key = re.sub(r"[^a-z0-9]", "", self.key.casefold())
-        if self.key in _RESERVED_STAMP_COLUMNS or normalized_key in _FORBIDDEN_RAW_KEYS:
+        if (
+            self.key in _RESERVED_STAMP_COLUMNS
+            or normalized_key in _FORBIDDEN_RAW_KEYS
+            or _IDENTIFIER_KEY_PATTERN.fullmatch(normalized_key) is not None
+        ):
             raise ValueError("export column key is reserved or contains a raw broker field")
         for value in self.values:
             _validate_export_value(value, self.value_type)
@@ -178,20 +194,115 @@ class ReportExportRequest(_StrictModel):
     viewport_width: int = Field(default=1280, ge=320, le=2560)
 
 
-type ExportRequest = TableExportRequest | ChartExportRequest | ReportExportRequest
+class StoredTableExportRequest(_StrictModel):
+    """Export request whose values are derived from a proof-replayed binding."""
+
+    request_kind: Literal["stored_table"] = "stored_table"
+    binding_id: str = Field(pattern=r"^ab_[0-9a-f]{32}$")
+    output_format: TableExportFormat
+
+
+class StoredReportExportRequest(_StrictModel):
+    """Report request containing only a binding, registered template, and format."""
+
+    request_kind: Literal["stored_report"] = "stored_report"
+    binding_id: str = Field(pattern=r"^ab_[0-9a-f]{32}$")
+    template_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    output_format: ReportExportFormat
+    viewport_width: int = Field(default=1280, ge=320, le=2560)
+
+
+type ExportRequest = (
+    TableExportRequest
+    | ChartExportRequest
+    | ReportExportRequest
+    | StoredTableExportRequest
+    | StoredReportExportRequest
+)
 
 
 def export_analysis(
     request: ExportRequest,
     *,
     config: AnalyticsConfig,
+    store: AnalyticsStore | None = None,
+    bindings: ArtifactBindingRegistry | None = None,
 ) -> ArtifactDelivery:
-    """Refuse caller-composed exports until stored analysis values are bound internally."""
-    del request, config
-    return ArtifactRefusal(
-        reason_code="artifact_analysis_unbound",
-        reason="caller-composed export values cannot establish stored Saxo provenance",
-        next_action="export from a server-issued stored analysis binding",
+    """Export only exact values derived from a server-issued stored binding."""
+    if (
+        isinstance(request, (TableExportRequest, ChartExportRequest, ReportExportRequest))
+        or store is None
+        or bindings is None
+    ):
+        return _unbound_export_refusal()
+    if isinstance(request, StoredTableExportRequest):
+
+        def produce(stamps: ArtifactStamps) -> ArtifactPayload | ArtifactRefusal:
+            try:
+                result = bindings._result_for(request.binding_id)
+                table = ExportTable(
+                    title="Stored verified analytics metrics",
+                    analysis_kind=result.analysis_kind,
+                    columns=(
+                        ExportColumn(
+                            key="metric_id",
+                            label="Metric",
+                            value_type="string",
+                            values=tuple(metric.metric_id for metric in result.metrics),
+                        ),
+                        ExportColumn(
+                            key="metric_value",
+                            label="Value",
+                            value_type="number",
+                            values=tuple(metric.value for metric in result.metrics),
+                        ),
+                        ExportColumn(
+                            key="metric_unit",
+                            label="Unit",
+                            value_type="string",
+                            values=tuple(metric.unit for metric in result.metrics),
+                        ),
+                        ExportColumn(
+                            key="metric_currency",
+                            label="Currency",
+                            value_type="string",
+                            values=tuple(metric.currency for metric in result.metrics),
+                        ),
+                    ),
+                    stamps=stamps,
+                )
+            except ValueError:
+                return _bound_export_refusal()
+            return _export_table_payload(table, request.output_format, config=config)
+
+        return _produce_and_deliver_bound(
+            binding_id=request.binding_id,
+            producer=produce,
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+
+    def produce_report(stamps: ArtifactStamps) -> ArtifactPayload | ArtifactRefusal:
+        semantics = _bound_chart_semantics(
+            request.binding_id,
+            request.template_id,
+            stamps=stamps,
+            bindings=bindings,
+        )
+        if isinstance(semantics, ArtifactRefusal):
+            return semantics
+        report = AnalysisReport(title="Stored verified analytics report", charts=(semantics,))
+        if request.output_format == "html":
+            return _render_report_html_payload(report, viewport_width=request.viewport_width)
+        return _render_report_pdf_payload(report)
+
+    return _produce_and_deliver_bound(
+        binding_id=request.binding_id,
+        producer=produce_report,
+        config=config,
+        store=store,
+        bindings=bindings,
     )
 
 
@@ -429,3 +540,19 @@ def _validate_export_value(  # noqa: C901
             raise ValueError("boolean export columns require boolean values")
     elif type(value) is not str or _DECIMAL_PATTERN.fullmatch(value) is None:
         raise ValueError("decimal export columns require canonical decimal strings")
+
+
+def _unbound_export_refusal() -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code="artifact_analysis_unbound",
+        reason="caller-composed export values cannot establish stored Saxo provenance",
+        next_action="export from a server-issued stored analysis binding",
+    )
+
+
+def _bound_export_refusal() -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code="artifact_export_values_undefined",
+        reason="the stored verified result cannot satisfy the exact typed export schema",
+        next_action="request a supported export for the stored analysis metrics",
+    )

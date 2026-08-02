@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import stat
@@ -60,6 +61,7 @@ type JobStatusCode = Literal[
 type JobParameterValue = str | int | float | bool | None
 
 _OWNER_DIRECTORY_MODE: Final = 0o700
+_OWNER_FILE_MODE: Final = 0o600
 _WORKSPACE_DIRECTORY: Final = "job-workspaces"
 _DEFAULT_JOB_TTL: Final = timedelta(minutes=30)
 _MAX_JOB_TTL: Final = timedelta(days=1)
@@ -432,12 +434,25 @@ class AnalyticsJobManager:
         async with self._lock:
             row = self._require_row(validated_job_id)
             if row.state in {"queued", "running"} and _utc_now() >= row.persisted.expires_at:
-                row = self._set_terminal(row, state="cancelled", status_code="job_expired")
                 task = self._tasks.get(validated_job_id)
                 if task is not None:
                     task.cancel()
+                else:
+                    row = self._set_terminal(
+                        row,
+                        state="cancelled",
+                        status_code="job_expired",
+                    )
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+            async with self._lock:
+                row = self._require_row(validated_job_id)
+                if row.state in {"queued", "running"}:
+                    row = self._set_terminal(
+                        row,
+                        state="cancelled",
+                        status_code="job_expired",
+                    )
         return _status_from_row(row)
 
     async def cancel_job(self, job_id: str) -> JobStatus:
@@ -448,23 +463,43 @@ class AnalyticsJobManager:
         async with self._lock:
             row = self._require_row(validated_job_id)
             if row.state in {"queued", "running"}:
-                row = self._set_terminal(row, state="cancelled", status_code="job_cancelled")
                 task = self._tasks.get(validated_job_id)
                 if task is not None:
                     task.cancel()
+                else:
+                    row = self._set_terminal(
+                        row,
+                        state="cancelled",
+                        status_code="job_cancelled",
+                    )
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
+            async with self._lock:
+                row = self._require_row(validated_job_id)
+                if row.state in {"queued", "running"}:
+                    row = self._set_terminal(
+                        row,
+                        state="cancelled",
+                        status_code="job_cancelled",
+                    )
         return _status_from_row(row)
 
     async def shutdown(self) -> None:
         """Stop process-owned work as interrupted; never auto-resume it later."""
         tasks: tuple[asyncio.Task[None], ...]
+        job_ids: tuple[str, ...]
         async with self._lock:
             if self._closed:
                 return
             self._closed = True
             tasks = tuple(self._tasks.values())
-            for job_id, task in tuple(self._tasks.items()):
+            job_ids = tuple(self._tasks)
+            for task in tasks:
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._lock:
+            for job_id in job_ids:
                 row = self._row(job_id)
                 if row is not None and row.state in {"queued", "running"}:
                     self._set_terminal(
@@ -472,9 +507,6 @@ class AnalyticsJobManager:
                         state="failed",
                         status_code="job_interrupted_restart_required",
                     )
-                task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _run_job(
         self,
@@ -732,7 +764,6 @@ class AnalyticsJobManager:
     def _recover_interrupted_rows(self) -> None:
         now = _utc_now()
         recovered: list[str] = []
-        workspace_job_ids: list[str] = []
         with self._store._write_connection() as connection:
             rows = cast(
                 "list[tuple[object, ...]]",
@@ -745,7 +776,6 @@ class AnalyticsJobManager:
             )
             for raw_job_id, raw_state, raw_message in rows:
                 job_id = _JOB_ID_ADAPTER.validate_python(raw_job_id)
-                workspace_job_ids.append(job_id)
                 if raw_state not in {"queued", "running"}:
                     continue
                 persisted = _PersistedJobState.model_validate_json(str(raw_message))
@@ -766,7 +796,11 @@ class AnalyticsJobManager:
                 recovered.append(job_id)
             if recovered:
                 self._store._bump_revision(connection)
-        for job_id in workspace_job_ids:
+        for workspace in tuple(self._workspace_root.iterdir()):
+            try:
+                job_id = _JOB_ID_ADAPTER.validate_python(workspace.name)
+            except ValueError as error:
+                raise JobStateError("analytics workspace root contains an unknown entry") from error
             _cleanup_workspace(self._workspace_root, job_id)
 
     def _prepare_workspace(self, job_id: str) -> Path:
@@ -878,7 +912,54 @@ def _cleanup_workspace(root: Path, job_id: str) -> None:
         resolved = workspace.resolve(strict=True)
         if resolved.parent != root.resolve(strict=True):
             raise JobStateError("analytics job cleanup escaped its owner-only root")
+        _recover_workspace_permissions(resolved)
         shutil.rmtree(resolved)
+
+
+def _recover_workspace_permissions(workspace: Path) -> None:
+    _require_owner_workspace_node(workspace, directory=True)
+    workspace.chmod(_OWNER_DIRECTORY_MODE)
+    for current, directory_names, file_names in os.walk(
+        workspace,
+        topdown=True,
+        followlinks=False,
+    ):
+        current_path = Path(current)
+        _require_contained_workspace_path(workspace, current_path)
+        _require_owner_workspace_node(current_path, directory=True)
+        current_path.chmod(_OWNER_DIRECTORY_MODE)
+        for name in tuple(directory_names):
+            child = current_path / name
+            _require_contained_workspace_path(workspace, child)
+            if child.is_symlink():
+                child.unlink()
+                directory_names.remove(name)
+                continue
+            _require_owner_workspace_node(child, directory=True)
+            child.chmod(_OWNER_DIRECTORY_MODE)
+        for name in file_names:
+            child = current_path / name
+            _require_contained_workspace_path(workspace, child)
+            if child.is_symlink():
+                child.unlink()
+                continue
+            _require_owner_workspace_node(child, directory=False)
+            child.chmod(_OWNER_FILE_MODE)
+
+
+def _require_contained_workspace_path(workspace: Path, candidate: Path) -> None:
+    if candidate != workspace and not candidate.is_relative_to(workspace):
+        raise JobStateError("analytics job cleanup escaped its workspace")
+
+
+def _require_owner_workspace_node(path: Path, *, directory: bool) -> None:
+    try:
+        node = path.lstat()
+    except OSError as error:
+        raise JobStateError("analytics job workspace node is unavailable") from error
+    expected_kind = stat.S_ISDIR(node.st_mode) if directory else stat.S_ISREG(node.st_mode)
+    if not expected_kind or node.st_uid != os.getuid():
+        raise JobStateError("analytics job workspace node is not owner-contained")
 
 
 async def start_job(
