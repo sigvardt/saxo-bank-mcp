@@ -293,7 +293,8 @@ def _run_checked(
     if env is not None:
         subprocess_environment = dict(env)
         for name in ("TMPDIR", "TMP", "TEMP"):
-            if value := os.environ.get(name):
+            value = os.environ.get(name)
+            if value is not None:
                 subprocess_environment[name] = value
     return subprocess.run(
         tuple(os.fspath(argument) for argument in command),

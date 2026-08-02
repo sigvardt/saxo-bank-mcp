@@ -1,30 +1,4 @@
-#!/bin/sh
-set -eu
-umask 077
+#!/usr/bin/env python3
+from pytest_launcher import main
 
-test_temp_root=/Volumes/ssd_1/codex/tmp/saxo-bank-mcp-analytics
-temporary_files="$test_temp_root/tmp"
-pytest_basetemp="$test_temp_root/p$$"
-
-case $0 in
-    */*) launcher_dir=${0%/*} ;;
-    *) launcher_dir=. ;;
-esac
-launcher_dir=$(CDPATH= cd -P -- "$launcher_dir" && pwd -P)
-repository_root=$(CDPATH= cd -P -- "$launcher_dir/.." && pwd -P)
-
-mkdir -p "$temporary_files"
-resolved_temp_root=$(CDPATH= cd -P -- "$test_temp_root" && pwd -P)
-if [ "$resolved_temp_root" != "$test_temp_root" ]; then
-    echo "pytest temp root must resolve to $test_temp_root" >&2
-    exit 1
-fi
-chmod 700 "$test_temp_root" "$temporary_files"
-
-TMPDIR=$temporary_files
-TMP=$temporary_files
-TEMP=$temporary_files
-export TMPDIR TMP TEMP
-
-cd "$repository_root"
-exec uv run pytest "$@" --basetemp="$pytest_basetemp"
+raise SystemExit(main())

@@ -13,6 +13,8 @@ from importlib.metadata import distribution
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
+
 _SEALED_DIRECTORY_MODE = 0o500
 _SEALED_FILE_MODE = 0o400
 _SEALED_EXECUTABLE_MODE = 0o500
@@ -250,7 +252,7 @@ def _validate_internal_python_runtime(runtime: Path) -> None:
             ),
         ),
         cwd=runtime.parent,
-        env={},
+        env=preserve_parent_temp_environment({}),
         check=False,
         capture_output=True,
         text=True,

@@ -14,6 +14,11 @@ uv run basedpyright src tests
 uv run python -c "import saxo_bank_mcp"
 ```
 
+On macOS, `scripts/run-pytest` requires the mounted `/Volumes/ssd_1` temp root and
+at least 50 GiB free on the system Data volume. On Linux and other POSIX
+platforms it uses a private per-run directory under the platform temporary
+directory.
+
 Run the local MCP server:
 
 ```bash

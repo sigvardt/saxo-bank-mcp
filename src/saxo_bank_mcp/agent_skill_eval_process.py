@@ -17,6 +17,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     terminate_process_group,
 )
 from saxo_bank_mcp.agent_skill_eval_commands import path_with_cli_dirs
+from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
 TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
@@ -58,7 +59,7 @@ class EvalProcessManager:
         # callers can distinguish it from a missing CLI binary.
         if not cwd.is_dir():
             raise FileNotFoundError(2, "No such file or directory", str(cwd))
-        child_env = dict(env)
+        child_env = preserve_parent_temp_environment(env)
         path_value = child_env.get("PATH") or os.environ.get("PATH") or "/usr/bin:/bin"
         child_env["PATH"] = path_with_cli_dirs(
             path_value,

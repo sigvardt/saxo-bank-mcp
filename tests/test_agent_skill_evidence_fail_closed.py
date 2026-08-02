@@ -427,6 +427,42 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     assert (out.parent / "probe-receipts" / "sim-tool-matrix.json").is_file()
 
 
+def test_command_runner_preserves_only_parent_temp_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp = tmp_path / "parent-temp"
+    temp.mkdir()
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        monkeypatch.setenv(name, str(temp))
+    monkeypatch.setenv("SAXO_TEST_AMBIENT_SECRET", "must-not-leak")
+
+    result = run_command(
+        "temp_environment_probe",
+        (
+            sys.executable,
+            "-c",
+            (
+                "import json,os; print(json.dumps({"
+                "name: os.environ.get(name) for name in "
+                "('TMPDIR','TMP','TEMP','SAXO_TEST_AMBIENT_SECRET')}))"
+            ),
+        ),
+        cwd=ROOT,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": str(tmp_path),
+        },
+    )
+
+    assert result.json_stdout() == {
+        "TMPDIR": str(temp),
+        "TMP": str(temp),
+        "TEMP": str(temp),
+        "SAXO_TEST_AMBIENT_SECRET": None,
+    }
+
+
 def test_matrix_rejects_stale_install_commit(
     tmp_path: Path,
     installed_report: InstallFixture,

@@ -33,6 +33,7 @@ from saxo_bank_mcp.server_eval_tool_filter import (
     derive_eval_tool_filter_env,
     resolve_eval_tool_filter,
 )
+from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
 SOURCE_MATRIX_CHILD_TOOLS: Final[tuple[str, ...]] = (
     "saxo_auth_status",
@@ -99,7 +100,7 @@ _SIM_REDIRECT_URI_ENV: Final = "SAXO_MCP_SIM_REDIRECT_URI"
 _SIM_AUTH_URL_ENV: Final = "SAXO_MCP_SIM_AUTH_URL"
 _SIM_TOKEN_URL_ENV: Final = "SAXO_MCP_SIM_TOKEN_URL"  # noqa: S105
 _TOKEN_CACHE_PATH_ENV: Final = "SAXO_MCP_TOKEN_CACHE_PATH"  # noqa: S105
-_TMPDIR_ENV: Final = "TMPDIR"
+_TEMP_ENV_KEYS: Final = ("TMPDIR", "TMP", "TEMP")
 _REGISTRY_PAGE_SIZE: Final = 100
 _MAX_PROTOCOL_LINE_BYTES: Final = 1_048_576
 _READ_CHUNK_BYTES: Final = 65_536
@@ -125,7 +126,7 @@ _CHILD_ENV_KEYS: Final[frozenset[str]] = frozenset(
         _SIM_AUTH_URL_ENV,
         _SIM_TOKEN_URL_ENV,
         _TOKEN_CACHE_PATH_ENV,
-        _TMPDIR_ENV,
+        *_TEMP_ENV_KEYS,
         "LC_ALL",
         "LANG",
         "SSL_CERT_FILE",
@@ -390,7 +391,7 @@ class OneShotProcessSession(ProcessMatrixSession):
                 stdin=child_stdin,
                 stdout=child_stdout,
                 stderr=child_stderr,
-                env=self._config.environment,
+                env=preserve_parent_temp_environment(self._config.environment),
                 cwd=self._config.cwd,
                 start_new_session=True,
             )
@@ -1211,7 +1212,7 @@ def build_child_environment(
         _SIM_AUTH_URL_ENV: settings.authorization_url,
         _SIM_TOKEN_URL_ENV: settings.token_url,
         _TOKEN_CACHE_PATH_ENV: str(settings.cache_path),
-        _TMPDIR_ENV: str(tmpdir),
+        **{key: str(tmpdir) for key in _TEMP_ENV_KEYS},
         "LC_ALL": "C",
         "LANG": "C",
     }

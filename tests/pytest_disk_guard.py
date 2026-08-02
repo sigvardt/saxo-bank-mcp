@@ -41,7 +41,9 @@ def current_pytest_disk_guard_snapshot(basetemp: Path | None) -> PytestDiskGuard
     )
 
 
-def pytest_disk_guard_errors(snapshot: PytestDiskGuardSnapshot) -> tuple[str, ...]:
+def pytest_disk_guard_errors(  # noqa: C901
+    snapshot: PytestDiskGuardSnapshot,
+) -> tuple[str, ...]:
     if snapshot.platform != "darwin":
         return ()
 
@@ -65,6 +67,8 @@ def pytest_disk_guard_errors(snapshot: PytestDiskGuardSnapshot) -> tuple[str, ..
             errors.append(
                 f"{name} resolves outside /Volumes/ssd_1: {path.resolve(strict=False)}",
             )
+    if not _temporary_paths_share_private_run_root(snapshot):
+        errors.append("pytest temporary paths do not share one private run root")
     if snapshot.data_volume_free_bytes is None:
         errors.append("system Data volume free space could not be measured")
     elif snapshot.data_volume_free_bytes < MIN_SYSTEM_DATA_FREE_BYTES:
@@ -80,3 +84,20 @@ def _is_beneath_external_volume(path: Path) -> bool:
     resolved_root = EXTERNAL_VOLUME_ROOT.resolve(strict=False)
     resolved_path = path.expanduser().resolve(strict=False)
     return resolved_path == resolved_root or resolved_path.is_relative_to(resolved_root)
+
+
+def _temporary_paths_share_private_run_root(snapshot: PytestDiskGuardSnapshot) -> bool:
+    if snapshot.basetemp is None or any(path is None for _name, path in snapshot.temp_environment):
+        return False
+    effective_temp = snapshot.effective_temp.resolve(strict=False)
+    basetemp = snapshot.basetemp.resolve(strict=False)
+    environment_paths = tuple(
+        path.resolve(strict=False)
+        for _name, path in snapshot.temp_environment
+        if path is not None
+    )
+    return (
+        basetemp.parent == effective_temp.parent
+        and all(path == effective_temp for path in environment_paths)
+        and effective_temp != effective_temp.parent
+    )

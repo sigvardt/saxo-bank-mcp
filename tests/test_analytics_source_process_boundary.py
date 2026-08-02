@@ -971,6 +971,9 @@ def test_child_command_uses_exact_installed_interpreter_and_isolated_bootstrap(
     )
     assert config.command[7] == CHILD_BOOTSTRAP
     assert config.cwd == sealed_child_paths.workdir
+    assert config.environment["TMPDIR"] == str(sealed_child_paths.tmpdir)
+    assert config.environment["TMP"] == str(sealed_child_paths.tmpdir)
+    assert config.environment["TEMP"] == str(sealed_child_paths.tmpdir)
     assert "--transport" not in config.command[8:]
     assert "stdio" not in config.command[8:]
 
@@ -1123,7 +1126,7 @@ def test_isolated_bootstrap_imports_from_the_installed_site_packages(tmp_path: P
         ),
         check=False,
         cwd=work,
-        env={"TMPDIR": str(temp)},
+        env={"TMPDIR": str(temp), "TMP": str(temp), "TEMP": str(temp)},
         capture_output=True,
         text=True,
     )

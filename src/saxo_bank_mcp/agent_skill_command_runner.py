@@ -15,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
+from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 TERM_WAIT_SECONDS = 1.0
@@ -87,7 +88,7 @@ def run_command(  # noqa: C901, PLR0915
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=dict(env),
+            env=preserve_parent_temp_environment(env),
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

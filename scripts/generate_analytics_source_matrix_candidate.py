@@ -54,6 +54,8 @@ def main() -> int:
             **os.environ,
             "SAXO_BANK_MCP_OFFICIAL_ISOLATED_LAUNCHER": "dev",
             "TMPDIR": os.fspath(tmp),
+            "TMP": os.fspath(tmp),
+            "TEMP": os.fspath(tmp),
         }
         completed = subprocess.run(
             arguments,

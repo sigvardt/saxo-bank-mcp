@@ -19,11 +19,12 @@ _EXTERNAL_TEMP_ROOT = Path("/Volumes/ssd_1/codex/tmp/saxo-bank-mcp-analytics")
 
 
 def _snapshot() -> PytestDiskGuardSnapshot:
-    external_tmp = _EXTERNAL_TEMP_ROOT / "tmp"
+    run_root = _EXTERNAL_TEMP_ROOT / "rabc"
+    external_tmp = run_root / "t"
     return PytestDiskGuardSnapshot(
         platform="darwin",
         effective_temp=external_tmp,
-        basetemp=_EXTERNAL_TEMP_ROOT / "pytest",
+        basetemp=run_root / "b",
         temp_environment=(("TMPDIR", external_tmp), ("TMP", external_tmp), ("TEMP", external_tmp)),
         data_volume_free_bytes=MIN_SYSTEM_DATA_FREE_BYTES,
     )
@@ -66,6 +67,23 @@ def test_macos_guard_refuses_low_or_unknown_system_data_free_space() -> None:
 
     assert low_errors == ("system Data volume has less than 50 GiB free",)
     assert unknown_errors == ("system Data volume free space could not be measured",)
+
+
+def test_macos_guard_refuses_external_paths_without_one_private_run_root() -> None:
+    errors = pytest_disk_guard_errors(
+        replace(
+            _snapshot(),
+            effective_temp=_EXTERNAL_TEMP_ROOT / "first/t",
+            basetemp=_EXTERNAL_TEMP_ROOT / "second/b",
+            temp_environment=(
+                ("TMPDIR", _EXTERNAL_TEMP_ROOT / "first/t"),
+                ("TMP", _EXTERNAL_TEMP_ROOT / "first/t"),
+                ("TEMP", _EXTERNAL_TEMP_ROOT / "first/t"),
+            ),
+        ),
+    )
+
+    assert errors == ("pytest temporary paths do not share one private run root",)
 
 
 def test_linux_guard_has_an_explicit_noop_platform_boundary() -> None:

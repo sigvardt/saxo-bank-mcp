@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from saxo_bank_mcp.request_ledger import safe_query_names
 from saxo_bank_mcp.strict_json import StrictJsonError, parse_json_value
+from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
 type BoundaryPhase = Literal["attempted", "completed"]
 type BoundaryHostRole = Literal["gateway", "oauth", "other"]
@@ -83,7 +84,7 @@ def capture_transport_boundary() -> Generator[TransportBoundaryCapture]:
     process = subprocess.Popen(
         [sys.executable, str(_COLLECTOR), str(event_read), str(result_write)],
         close_fds=True,
-        env={"PYTHONIOENCODING": "utf-8"},
+        env=preserve_parent_temp_environment({"PYTHONIOENCODING": "utf-8"}),
         pass_fds=(event_read, result_write),
     )
     os.close(event_read)
