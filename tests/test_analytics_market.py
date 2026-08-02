@@ -44,8 +44,16 @@ def _dataset_id(index: int) -> str:
     return f"ds_0000000000004000800000000000{index:04x}"
 
 
-def _series(index: int, closes: tuple[float, ...]) -> PriceSeriesDataset:
+def _series(
+    index: int,
+    closes: tuple[float, ...],
+    *,
+    day_offsets: tuple[int, ...] | None = None,
+) -> PriceSeriesDataset:
     handle = _handle(index)
+    offsets = day_offsets if day_offsets is not None else tuple(range(len(closes)))
+    if len(offsets) != len(closes):
+        raise ValueError("test price offsets must match closes")
     return PriceSeriesDataset(
         dataset_id=_dataset_id(index),
         instrument_handle=handle,
@@ -61,7 +69,7 @@ def _series(index: int, closes: tuple[float, ...]) -> PriceSeriesDataset:
                 volume_value=1_000.0,
                 adjusted=False,
             )
-            for offset, close in enumerate(closes)
+            for offset, close in zip(offsets, closes, strict=True)
         ),
         quality_state=QualityState.COMPLETE,
         missing_interval_count=0,
@@ -159,6 +167,37 @@ def test_universe_hard_limit_refuses_more_than_25_safe_instruments() -> None:
         _universe(tuple(_series(index, (100.0, 101.0, 102.0)) for index in range(1, 27)))
 
 
+def test_correlation_aligns_both_period_endpoints_before_enforcing_minimum() -> None:
+    left = _series(1, (100.0, 101.0, 102.0, 103.0))
+    right = _series(
+        2,
+        (200.0, 202.0, 204.0),
+        day_offsets=(0, 2, 3),
+    )
+
+    result = analyze_bounded_market(_universe((left, right)), periods_per_year=252.0)
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.correlations == ()
+    assert "correlation_alignment_insufficient" in result.warnings
+
+
+def test_missing_regime_inputs_are_unavailable_instead_of_low() -> None:
+    result = analyze_bounded_market(
+        _universe((_series(1, (100.0, 101.0)),)),
+        periods_per_year=252.0,
+    )
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.status is ResearchStatus.REDUCED
+    assert result.correlation_regime is None
+    assert result.volatility_regime is None
+    assert set(result.warnings) >= {
+        "correlation_regime_unavailable",
+        "volatility_regime_unavailable",
+    }
+
+
 def test_entitled_depth_computes_spread_depth_and_imbalance() -> None:
     dataset = MarketDepthDataset(
         dataset_id=_dataset_id(50),
@@ -174,11 +213,33 @@ def test_entitled_depth_computes_spread_depth_and_imbalance() -> None:
     result = analyze_entitled_depth(dataset)
 
     assert not isinstance(result, ResearchRefusal)
-    assert result.status is ResearchStatus.COMPLETE
+    assert result.status is ResearchStatus.REDUCED
+    assert result.source_scope is None
+    assert "market_depth_source_contract_unbound" in result.warnings
     assert result.spread == pytest.approx(2.0)
     assert result.bid_depth == pytest.approx(15.0)
     assert result.ask_depth == pytest.approx(10.0)
-    assert result.depth_imbalance == pytest.approx(0.2)
+    assert result.depth_imbalance == pytest.approx(20.0)
+
+
+def test_caller_availability_cannot_claim_unbound_depth_saxo_provenance() -> None:
+    dataset = MarketDepthDataset(
+        dataset_id=_dataset_id(53),
+        instrument_handle=_handle(1),
+        captured_at=_START,
+        quality_state=QualityState.COMPLETE,
+        entitlement_state="available",
+        delayed_by_minutes=0,
+        bids=(DepthLevel(price=99.0, size=1.0),),
+        asks=(DepthLevel(price=101.0, size=1.0),),
+    )
+
+    result = analyze_entitled_depth(dataset)
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.status is ResearchStatus.REDUCED
+    assert result.source_scope is None
+    assert "market_depth_source_contract_unbound" in result.warnings
 
 
 @pytest.mark.parametrize("entitlement", ["denied", "partial"])
@@ -200,6 +261,8 @@ def test_depth_refuses_when_entitlement_is_not_complete(
 
     assert isinstance(result, ResearchRefusal)
     assert result.reason_code == "market_depth_entitlement_insufficient"
+    assert result.source_scope is None
+    assert "saxo" not in result.reason.casefold()
 
 
 def test_delayed_depth_is_reduced_without_hiding_the_delay() -> None:
@@ -296,6 +359,53 @@ def test_saved_condition_checks_use_a_fixed_catalog_instead_of_expressions() -> 
                 "threshold": 0.0,
             },
         )
+
+
+@pytest.mark.parametrize("quality", [QualityState.STALE, QualityState.INVALID])
+def test_saved_price_conditions_refuse_unusable_price_quality(
+    quality: QualityState,
+) -> None:
+    series = _series(1, (100.0, 110.0)).model_copy(update={"quality_state": quality})
+    condition = SavedCondition(
+        condition_id="unsafe_price_gate",
+        instrument_handle=series.instrument_handle,
+        dataset_id=series.dataset_id,
+        kind="price_above",
+        threshold=105.0,
+    )
+
+    result = check_saved_conditions((condition,), _universe((series,)))
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "price_data_unusable"
+
+
+def test_saved_price_conditions_propagate_gaps_and_source_warnings() -> None:
+    series = _series(1, (100.0, 110.0)).model_copy(
+        update={
+            "quality_state": QualityState.PARTIAL,
+            "missing_interval_count": 1,
+            "warnings": ("observed_interval_gap", "source_quality_limited"),
+        },
+    )
+    condition = SavedCondition(
+        condition_id="partial_price_gate",
+        instrument_handle=series.instrument_handle,
+        dataset_id=series.dataset_id,
+        kind="price_above",
+        threshold=105.0,
+    )
+
+    result = check_saved_conditions((condition,), _universe((series,)))
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.status is ResearchStatus.REDUCED
+    assert result.checks[0].matched is True
+    assert set(result.warnings) >= {
+        "incomplete_price_coverage",
+        "observed_interval_gap",
+        "source_quality_limited",
+    }
 
 
 def test_session_preparation_is_bounded_and_reports_quote_quality() -> None:

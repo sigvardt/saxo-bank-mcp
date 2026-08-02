@@ -12,10 +12,10 @@ from saxo_bank_mcp.analytics_models import DatasetId, InstrumentHandle
 
 type FixedIncomeEntitlement = Literal["available", "partial", "denied"]
 
-_SOURCE_SCOPE: Final = "saxo_openapi"
 _ROOT_ITERATIONS: Final = 256
 _ROOT_PRICE_TOLERANCE: Final = 1e-13
 _MAX_YIELD_BOUND: Final = 1_000_000.0
+_UNBOUND_SOURCE_WARNING: Final = "fixed_income_source_contract_unbound"
 
 
 class _StrictModel(BaseModel):
@@ -34,7 +34,7 @@ class FixedIncomeCashFlow(_StrictModel):
 
 
 class FixedIncomeDataset(_StrictModel):
-    """Authoritative Saxo fields required for bounded bond measures."""
+    """Unbound fields required for bounded bond measures."""
 
     dataset_id: DatasetId
     instrument_handle: InstrumentHandle
@@ -74,7 +74,7 @@ class FixedIncomeResearch(_StrictModel):
     analysis_kind: Literal["fixed_income_measures"] = "fixed_income_measures"
     dataset_id: DatasetId
     instrument_handle: InstrumentHandle
-    source_scope: Literal["saxo_openapi"] = _SOURCE_SCOPE
+    source_scope: Literal["saxo_openapi"] | None = None
     as_of: datetime
     dirty_price: float = Field(gt=0, allow_inf_nan=False)
     yield_to_maturity: float = Field(allow_inf_nan=False)
@@ -116,7 +116,7 @@ def price_from_yield(
     annual_yield: float,
     compounding_frequency: int,
 ) -> float:
-    """Discount authoritative cash flows under declared periodic compounding."""
+    """Discount declared cash flows under declared periodic compounding."""
     values = _validated_cash_flows(cash_flows)
     frequency = _frequency(compounding_frequency)
     if not math.isfinite(annual_yield):
@@ -129,7 +129,7 @@ def price_from_yield(
             item.amount / math.pow(periodic_base, frequency * item.years_from_settlement)
             for item in values
         )
-    except OverflowError as error:
+    except (OverflowError, ZeroDivisionError) as error:
         raise ValueError("discounted fixed-income price is not finite") from error
     if not math.isfinite(price) or price <= 0.0:
         raise ValueError("discounted fixed-income price must be positive and finite")
@@ -142,7 +142,7 @@ def yield_to_maturity(
     dirty_price: float,
     compounding_frequency: int,
 ) -> float:
-    """Solve the unique periodic yield for positive authoritative cash flows."""
+    """Solve the unique periodic yield for positive declared cash flows."""
     values = _validated_cash_flows(cash_flows)
     frequency = _frequency(compounding_frequency)
     if not math.isfinite(dirty_price) or dirty_price <= 0.0:
@@ -184,15 +184,18 @@ def modified_duration(
     periodic_base = 1.0 + annual_yield / frequency
     if periodic_base <= 0.0:
         raise ValueError("yield is outside the periodic-compounding domain")
-    macaulay = (
-        math.fsum(
-            item.years_from_settlement
-            * item.amount
-            / math.pow(periodic_base, frequency * item.years_from_settlement)
-            for item in values
+    try:
+        macaulay = (
+            math.fsum(
+                item.years_from_settlement
+                * item.amount
+                / math.pow(periodic_base, frequency * item.years_from_settlement)
+                for item in values
+            )
+            / dirty_price
         )
-        / dirty_price
-    )
+    except (OverflowError, ZeroDivisionError) as error:
+        raise ValueError("modified duration is not finite") from error
     result = macaulay / periodic_base
     if not math.isfinite(result) or result <= 0.0:
         raise ValueError("modified duration is not positive and finite")
@@ -214,16 +217,19 @@ def convexity(
     periodic_base = 1.0 + annual_yield / frequency
     if periodic_base <= 0.0:
         raise ValueError("yield is outside the periodic-compounding domain")
-    result = (
-        math.fsum(
-            item.amount
-            * item.years_from_settlement
-            * (item.years_from_settlement + 1.0 / frequency)
-            / math.pow(periodic_base, frequency * item.years_from_settlement + 2.0)
-            for item in values
+    try:
+        result = (
+            math.fsum(
+                item.amount
+                * item.years_from_settlement
+                * (item.years_from_settlement + 1.0 / frequency)
+                / math.pow(periodic_base, frequency * item.years_from_settlement + 2.0)
+                for item in values
+            )
+            / dirty_price
         )
-        / dirty_price
-    )
+    except (OverflowError, ZeroDivisionError) as error:
+        raise ValueError("convexity is not finite") from error
     if not math.isfinite(result) or result <= 0.0:
         raise ValueError("convexity is not positive and finite")
     return result
@@ -259,25 +265,26 @@ def _dataset_refusal(
         instrument_handles=(dataset.instrument_handle,),
         missing_fields=tuple(sorted(set(missing_fields))),
         warnings=dataset.warnings,
+        source_scope=None,
     )
 
 
 def analyze_fixed_income(
     dataset: FixedIncomeDataset,
 ) -> FixedIncomeResearch | ResearchRefusal:
-    """Compute bond measures only when authoritative Saxo fields are sufficient."""
+    """Compute bond measures from sufficient fields without asserting unbound provenance."""
     if dataset.entitlement_state != "available":
         return _dataset_refusal(
             dataset,
             reason_code="fixed_income_entitlement_insufficient",
-            reason="Saxo entitlement is insufficient for fixed-income measures",
+            reason="declared entitlement is insufficient for fixed-income measures",
         )
     missing_core = _core_missing_fields(dataset)
     if missing_core:
         return _dataset_refusal(
             dataset,
             reason_code="fixed_income_fields_insufficient",
-            reason="authoritative Saxo fixed-income fields are incomplete",
+            reason="the supplied fixed-income fields are incomplete",
             missing_fields=missing_core,
         )
     dirty_price = dataset.dirty_price
@@ -303,11 +310,11 @@ def analyze_fixed_income(
             frequency,
             dirty_price=dirty_price,
         )
-    except ValueError:
+    except (ArithmeticError, ValueError):
         return _dataset_refusal(
             dataset,
             reason_code="fixed_income_measure_undefined",
-            reason="the authoritative Saxo fields do not define stable bond measures",
+            reason="the supplied fields do not define stable bond measures",
         )
 
     optional_fields = {
@@ -336,6 +343,7 @@ def analyze_fixed_income(
         else None
     )
     warnings = set(dataset.warnings)
+    warnings.add(_UNBOUND_SOURCE_WARNING)
     if missing_optional:
         warnings.add("optional_fixed_income_fields_missing")
     return FixedIncomeResearch(

@@ -60,7 +60,7 @@ class ResearchRefusal(_StrictModel):
     instrument_handles: tuple[InstrumentHandle, ...]
     missing_fields: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    source_scope: Literal["saxo_openapi"] = _SOURCE_SCOPE
+    source_scope: Literal["saxo_openapi"] | None = _SOURCE_SCOPE
 
 
 class PriceSeriesDataset(_StrictModel):
@@ -206,6 +206,31 @@ def _refusal(  # noqa: PLR0913
     )
 
 
+def assess_price_quality(
+    dataset: PriceSeriesDataset,
+    *,
+    analysis_kind: str,
+) -> tuple[str, ...] | ResearchRefusal:
+    """Apply one price-quality gate and preserve every upstream limitation."""
+    if dataset.quality_state in {
+        QualityState.MISSING,
+        QualityState.INVALID,
+        QualityState.STALE,
+    }:
+        return _refusal(
+            analysis_kind=analysis_kind,
+            reason_code="price_data_unusable",
+            reason="the bounded Saxo price dataset is missing, invalid, or stale",
+            datasets=(dataset.dataset_id,),
+            handles=(dataset.instrument_handle,),
+            warnings=dataset.warnings,
+        )
+    warnings = set(dataset.warnings)
+    if dataset.quality_state is QualityState.PARTIAL or dataset.missing_interval_count:
+        warnings.add("incomplete_price_coverage")
+    return tuple(sorted(warnings))
+
+
 def analyze_instrument_prices(
     dataset: PriceSeriesDataset,
     *,
@@ -228,19 +253,9 @@ def analyze_instrument_prices(
             missing_fields=(requested_return,),
             warnings=("unadjusted_price_series",),
         )
-    if dataset.quality_state in {
-        QualityState.MISSING,
-        QualityState.INVALID,
-        QualityState.STALE,
-    }:
-        return _refusal(
-            analysis_kind="instrument_price_return",
-            reason_code="price_data_unusable",
-            reason="the bounded Saxo price dataset is missing, invalid, or stale",
-            datasets=(dataset.dataset_id,),
-            handles=(dataset.instrument_handle,),
-            warnings=dataset.warnings,
-        )
+    quality = assess_price_quality(dataset, analysis_kind="instrument_price_return")
+    if isinstance(quality, ResearchRefusal):
+        return quality
     if len(dataset.bars) < _MIN_PRICE_OBSERVATIONS:
         return _refusal(
             analysis_kind="instrument_price_return",
@@ -288,10 +303,8 @@ def analyze_instrument_prices(
         )
         for index in range(rolling_window, len(closes))
     )
-    warnings = set(dataset.warnings)
+    warnings = set(quality)
     warnings.add("unadjusted_price_series")
-    if dataset.quality_state is QualityState.PARTIAL or dataset.missing_interval_count:
-        warnings.add("incomplete_price_coverage")
     if annualized_volatility is None:
         warnings.add("risk_sample_insufficient")
     return InstrumentPriceResearch(
@@ -316,11 +329,22 @@ def analyze_instrument_prices(
     )
 
 
-def analyze_quote(
+def analyze_quote(  # noqa: C901
     dataset: QuoteResearchDataset,
 ) -> InstrumentQuoteResearch | ResearchRefusal:
     """Calculate quote quality only when Saxo supplied an entitled bid and ask."""
-    if dataset.entitlement_state != "available":
+    warnings = set(dataset.warnings) | set(dataset.quote.warnings)
+    normalized_price_type = (
+        None
+        if dataset.price_type is None
+        else dataset.price_type.replace(" ", "").casefold()
+    )
+    if (
+        dataset.entitlement_state != "available"
+        or normalized_price_type == "noaccess"
+        or "quote_entitlement_limited" in warnings
+    ):
+        warnings.add("quote_entitlement_limited")
         return _refusal(
             analysis_kind="instrument_quote",
             reason_code="quote_entitlement_insufficient",
@@ -328,7 +352,7 @@ def analyze_quote(
             datasets=(dataset.dataset_id,),
             handles=(dataset.instrument_handle,),
             missing_fields=("bid", "ask"),
-            warnings=dataset.warnings,
+            warnings=tuple(warnings),
         )
     if dataset.quality_state in {QualityState.MISSING, QualityState.INVALID}:
         return _refusal(
@@ -337,7 +361,7 @@ def analyze_quote(
             reason="the entitled Saxo quote dataset is marked missing or invalid",
             datasets=(dataset.dataset_id,),
             handles=(dataset.instrument_handle,),
-            warnings=dataset.warnings,
+            warnings=tuple(warnings),
         )
     bid = dataset.quote.bid_value
     ask = dataset.quote.ask_value
@@ -349,7 +373,7 @@ def analyze_quote(
             datasets=(dataset.dataset_id,),
             handles=(dataset.instrument_handle,),
             missing_fields=("bid" if bid is None else "", "ask" if ask is None else ""),
-            warnings=dataset.warnings,
+            warnings=tuple(warnings),
         )
     if bid <= 0.0 or ask <= 0.0 or ask < bid:
         return _refusal(
@@ -358,7 +382,7 @@ def analyze_quote(
             reason="the Saxo bid and ask do not form a valid quote",
             datasets=(dataset.dataset_id,),
             handles=(dataset.instrument_handle,),
-            warnings=dataset.warnings,
+            warnings=tuple(warnings),
         )
     midpoint = dataset.quote.mid_value
     if midpoint is None:
@@ -370,14 +394,19 @@ def analyze_quote(
             reason="the Saxo quote midpoint is invalid",
             datasets=(dataset.dataset_id,),
             handles=(dataset.instrument_handle,),
-            warnings=dataset.warnings,
+            warnings=tuple(warnings),
         )
     spread = ask - bid
-    warnings = set(dataset.warnings) | set(dataset.quote.warnings)
     if dataset.quote.freshness == "stale" or dataset.quality_state is QualityState.STALE:
         warnings.add("quote_stale")
-    if (dataset.delayed_by_minutes or 0) > 0:
+    if (dataset.delayed_by_minutes or 0) > 0 or normalized_price_type == "delayed":
         warnings.add("quote_delayed")
+    if normalized_price_type == "indicative":
+        warnings.add("quote_indicative")
+    if normalized_price_type is None:
+        warnings.add("quote_price_type_missing")
+    elif normalized_price_type not in {"delayed", "indicative", "realtime"}:
+        warnings.add("quote_price_type_unrecognized")
     if dataset.quality_state is QualityState.PARTIAL:
         warnings.add("quote_quality_partial")
     status = ResearchStatus.REDUCED if warnings else ResearchStatus.COMPLETE
@@ -464,5 +493,6 @@ __all__ = (
     "TimedValue",
     "analyze_instrument_prices",
     "analyze_quote",
+    "assess_price_quality",
     "build_instrument_dossier",
 )

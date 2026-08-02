@@ -61,7 +61,7 @@ def test_golden_par_bond_yield_duration_convexity_carry_and_roll_down() -> None:
     result = analyze_fixed_income(dataset)
 
     assert not isinstance(result, ResearchRefusal)
-    assert result.status is ResearchStatus.COMPLETE
+    assert result.status is ResearchStatus.REDUCED
     assert result.yield_to_maturity == pytest.approx(0.05, abs=1e-12)
     present_values = (5.0 / 1.05, 105.0 / 1.05**2)
     macaulay = (1.0 * present_values[0] + 2.0 * present_values[1]) / 100.0
@@ -71,7 +71,17 @@ def test_golden_par_bond_yield_duration_convexity_carry_and_roll_down() -> None:
     assert result.convexity == pytest.approx(expected_convexity)
     assert result.carry == pytest.approx(2.75)
     assert result.roll_down == pytest.approx(1.5)
-    assert result.source_scope == "saxo_openapi"
+    assert result.source_scope is None
+    assert "fixed_income_source_contract_unbound" in result.warnings
+
+
+def test_caller_availability_cannot_claim_unbound_fixed_income_saxo_provenance() -> None:
+    result = analyze_fixed_income(_bond(entitlement_state="available"))
+
+    assert not isinstance(result, ResearchRefusal)
+    assert result.status is ResearchStatus.REDUCED
+    assert result.source_scope is None
+    assert "fixed_income_source_contract_unbound" in result.warnings
 
 
 def test_individual_fixed_income_formulas_match_hand_calculation() -> None:
@@ -111,6 +121,8 @@ def test_fixed_income_refuses_insufficient_entitlement(
 
     assert isinstance(result, ResearchRefusal)
     assert result.reason_code == "fixed_income_entitlement_insufficient"
+    assert result.source_scope is None
+    assert "saxo" not in result.reason.casefold()
 
 
 def test_missing_carry_and_curve_fields_reduce_without_inventing_them() -> None:
@@ -126,6 +138,28 @@ def test_missing_carry_and_curve_fields_reduce_without_inventing_them() -> None:
         "horizon_coupon_cashflows",
         "same_curve_shorter_maturity_price",
     }
+
+
+def test_extreme_finite_inputs_return_measure_undefined_instead_of_dividing_by_zero() -> None:
+    dataset = FixedIncomeDataset(
+        dataset_id=_DATASET,
+        instrument_handle=_HANDLE,
+        as_of=_AS_OF,
+        entitlement_state="available",
+        dirty_price=1e308,
+        cash_flows=(
+            FixedIncomeCashFlow(years_from_settlement=1_000.0, amount=1e-20),
+        ),
+        compounding_frequency=1,
+        day_count_basis="ACT/365",
+        settlement_at=_AS_OF,
+    )
+
+    result = analyze_fixed_income(dataset)
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "fixed_income_measure_undefined"
+    assert result.source_scope is None
 
 
 @seed(2026080203)

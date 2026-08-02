@@ -14,6 +14,7 @@ from saxo_bank_mcp.analytics_instruments import (
     ResearchRefusal,
     ResearchStatus,
     analyze_instrument_prices,
+    analyze_quote,
     build_instrument_dossier,
 )
 from saxo_bank_mcp.analytics_market_data import ChartInterval
@@ -190,6 +191,21 @@ def test_dossier_refuses_a_quote_marked_missing_even_when_values_are_present() -
     assert not isinstance(result, ResearchRefusal)
     assert result.quote is None
     assert "quote_data_unusable" in result.warnings
+
+
+def test_noaccess_price_type_never_becomes_a_complete_quote() -> None:
+    dataset = _quote().model_copy(
+        update={
+            "entitlement_state": "available",
+            "price_type": "NoAccess",
+            "quality_state": QualityState.COMPLETE,
+        },
+    )
+
+    result = analyze_quote(dataset)
+
+    assert isinstance(result, ResearchRefusal)
+    assert result.reason_code == "quote_entitlement_insufficient"
 
 
 def test_raw_broker_identifier_cannot_replace_an_opaque_instrument_handle() -> None:

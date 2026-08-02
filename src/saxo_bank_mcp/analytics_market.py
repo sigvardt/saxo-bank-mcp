@@ -15,6 +15,7 @@ from saxo_bank_mcp.analytics_instruments import (
     ResearchStatus,
     analyze_instrument_prices,
     analyze_quote,
+    assess_price_quality,
 )
 from saxo_bank_mcp.analytics_metrics import FinancialMetricError, correlation
 from saxo_bank_mcp.analytics_models import (
@@ -37,6 +38,7 @@ _LOW_CORRELATION_BOUND: Final = 0.3
 _HIGH_CORRELATION_BOUND: Final = 0.7
 _LOW_VOLATILITY_BOUND: Final = 0.15
 _HIGH_VOLATILITY_BOUND: Final = 0.30
+_UNBOUND_DEPTH_SOURCE_WARNING: Final = "market_depth_source_contract_unbound"
 
 
 class _StrictModel(BaseModel):
@@ -116,8 +118,8 @@ class BoundedMarketResearch(_StrictModel):
         le=1,
         allow_inf_nan=False,
     )
-    correlation_regime: Literal["low", "mixed", "high"]
-    volatility_regime: Literal["low", "moderate", "high"]
+    correlation_regime: Literal["low", "mixed", "high"] | None
+    volatility_regime: Literal["low", "moderate", "high"] | None
     warnings: tuple[str, ...]
 
 
@@ -153,22 +155,22 @@ def _aligned_period_returns(
     left: PriceSeriesDataset,
     right: PriceSeriesDataset,
 ) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    left_by_time = {
-        bar.bar_time: bar.close_value / previous.close_value - 1.0
+    left_by_period = {
+        (previous.bar_time, bar.bar_time): bar.close_value / previous.close_value - 1.0
         for previous, bar in pairwise(left.bars)
     }
-    right_by_time = {
-        bar.bar_time: bar.close_value / previous.close_value - 1.0
+    right_by_period = {
+        (previous.bar_time, bar.bar_time): bar.close_value / previous.close_value - 1.0
         for previous, bar in pairwise(right.bars)
     }
-    common = tuple(sorted(set(left_by_time) & set(right_by_time)))
+    common = tuple(sorted(set(left_by_period) & set(right_by_period)))
     return (
-        tuple(left_by_time[timestamp] for timestamp in common),
-        tuple(right_by_time[timestamp] for timestamp in common),
+        tuple(left_by_period[period] for period in common),
+        tuple(right_by_period[period] for period in common),
     )
 
 
-def analyze_bounded_market(  # noqa: C901, PLR0912
+def analyze_bounded_market(  # noqa: C901, PLR0912, PLR0915
     universe: BoundedResearchUniverse,
     *,
     periods_per_year: float,
@@ -246,19 +248,22 @@ def analyze_bounded_market(  # noqa: C901, PLR0912
         if correlations
         else None
     )
-    if (
-        average_absolute_correlation is None
-        or average_absolute_correlation < _LOW_CORRELATION_BOUND
-    ):
+    if average_absolute_correlation is None:
+        correlation_regime = None
+        warnings.add("correlation_regime_unavailable")
+    elif average_absolute_correlation < _LOW_CORRELATION_BOUND:
         correlation_regime = "low"
     elif average_absolute_correlation < _HIGH_CORRELATION_BOUND:
         correlation_regime = "mixed"
     else:
         correlation_regime = "high"
     average_volatility = (
-        math.fsum(volatility_values) / len(volatility_values) if volatility_values else 0.0
+        math.fsum(volatility_values) / len(volatility_values) if volatility_values else None
     )
-    if average_volatility < _LOW_VOLATILITY_BOUND:
+    if average_volatility is None:
+        volatility_regime = None
+        warnings.add("volatility_regime_unavailable")
+    elif average_volatility < _LOW_VOLATILITY_BOUND:
         volatility_regime = "low"
     elif average_volatility < _HIGH_VOLATILITY_BOUND:
         volatility_regime = "moderate"
@@ -326,13 +331,13 @@ class MarketDepthResearch(_StrictModel):
     analysis_kind: Literal["entitled_market_depth"] = "entitled_market_depth"
     dataset_id: DatasetId
     instrument_handle: InstrumentHandle
-    source_scope: Literal["saxo_openapi"] = _SOURCE_SCOPE
+    source_scope: Literal["saxo_openapi"] | None = None
     captured_at: datetime
     spread: float = Field(ge=0, allow_inf_nan=False)
     spread_basis_points: float = Field(ge=0, allow_inf_nan=False)
     bid_depth: float = Field(gt=0, allow_inf_nan=False)
     ask_depth: float = Field(gt=0, allow_inf_nan=False)
-    depth_imbalance: float = Field(ge=-1, le=1, allow_inf_nan=False)
+    depth_imbalance: float = Field(ge=-100, le=100, allow_inf_nan=False)
     delayed_by_minutes: int | None = Field(default=None, ge=0)
     warnings: tuple[str, ...]
 
@@ -340,35 +345,38 @@ class MarketDepthResearch(_StrictModel):
 def analyze_entitled_depth(
     dataset: MarketDepthDataset,
 ) -> MarketDepthResearch | ResearchRefusal:
-    """Calculate spread and displayed depth only for fully entitled Saxo levels."""
+    """Calculate spread and displayed depth without asserting unbound provenance."""
     if dataset.entitlement_state != "available":
         return ResearchRefusal(
             analysis_kind="entitled_market_depth",
             reason_code="market_depth_entitlement_insufficient",
-            reason="Saxo depth entitlement is not complete",
+            reason="declared depth entitlement is not complete",
             dataset_ids=(dataset.dataset_id,),
             instrument_handles=(dataset.instrument_handle,),
             missing_fields=("bids", "asks"),
             warnings=dataset.warnings,
+            source_scope=None,
         )
     if dataset.quality_state in {QualityState.MISSING, QualityState.INVALID, QualityState.STALE}:
         return ResearchRefusal(
             analysis_kind="entitled_market_depth",
             reason_code="market_depth_unusable",
-            reason="the entitled Saxo depth dataset is missing, invalid, or stale",
+            reason="the supplied depth dataset is missing, invalid, or stale",
             dataset_ids=(dataset.dataset_id,),
             instrument_handles=(dataset.instrument_handle,),
             warnings=dataset.warnings,
+            source_scope=None,
         )
     if not dataset.bids or not dataset.asks:
         return ResearchRefusal(
             analysis_kind="entitled_market_depth",
             reason_code="market_depth_fields_missing",
-            reason="the entitled Saxo dataset has no complete bid and ask levels",
+            reason="the supplied depth dataset has no complete bid and ask levels",
             dataset_ids=(dataset.dataset_id,),
             instrument_handles=(dataset.instrument_handle,),
             missing_fields=("bids", "asks"),
             warnings=dataset.warnings,
+            source_scope=None,
         )
     best_bid = dataset.bids[0].price
     best_ask = dataset.asks[0].price
@@ -376,16 +384,18 @@ def analyze_entitled_depth(
         return ResearchRefusal(
             analysis_kind="entitled_market_depth",
             reason_code="market_depth_crossed",
-            reason="the entitled Saxo depth dataset contains a crossed book",
+            reason="the supplied depth dataset contains a crossed book",
             dataset_ids=(dataset.dataset_id,),
             instrument_handles=(dataset.instrument_handle,),
             warnings=dataset.warnings,
+            source_scope=None,
         )
     bid_depth = math.fsum(level.size for level in dataset.bids)
     ask_depth = math.fsum(level.size for level in dataset.asks)
     total_depth = bid_depth + ask_depth
     midpoint = (best_bid + best_ask) / 2.0
     warnings = set(dataset.warnings)
+    warnings.add(_UNBOUND_DEPTH_SOURCE_WARNING)
     if (dataset.delayed_by_minutes or 0) > 0:
         warnings.add("depth_delayed")
     if dataset.quality_state is QualityState.PARTIAL:
@@ -399,7 +409,7 @@ def analyze_entitled_depth(
         spread_basis_points=(best_ask - best_bid) / midpoint * 10_000.0,
         bid_depth=bid_depth,
         ask_depth=ask_depth,
-        depth_imbalance=(bid_depth - ask_depth) / total_depth,
+        depth_imbalance=100.0 * (bid_depth - ask_depth) / total_depth,
         delayed_by_minutes=dataset.delayed_by_minutes,
         warnings=tuple(sorted(warnings)),
     )
@@ -512,7 +522,7 @@ class SavedConditionResult(_StrictModel):
     warnings: tuple[str, ...]
 
 
-def check_saved_conditions(  # noqa: PLR0911
+def check_saved_conditions(  # noqa: C901, PLR0911
     conditions: Sequence[SavedCondition],
     universe: BoundedResearchUniverse,
     *,
@@ -569,6 +579,13 @@ def check_saved_conditions(  # noqa: PLR0911
                     instrument_handles=(condition.instrument_handle,),
                     missing_fields=("price_dataset",),
                 )
+            price_quality = assess_price_quality(
+                price_dataset,
+                analysis_kind="saved_condition_checks",
+            )
+            if isinstance(price_quality, ResearchRefusal):
+                return price_quality
+            warnings.update(price_quality)
             if not price_dataset.bars:
                 return ResearchRefusal(
                     analysis_kind="saved_condition_checks",
