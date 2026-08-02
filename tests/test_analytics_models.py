@@ -15,7 +15,9 @@ from pydantic import TypeAdapter, ValidationError
 from saxo_bank_mcp.analytics_errors import AnalyticsPrivacyError
 from saxo_bank_mcp.analytics_models import (
     ActiveProofReceipt,
+    AnalysisCalendar,
     AnalysisOutput,
+    AnalysisParameterBinding,
     AnalysisProvenance,
     AnalysisRequest,
     AnalysisResult,
@@ -26,12 +28,17 @@ from saxo_bank_mcp.analytics_models import (
     DataCoverage,
     DataQuality,
     DatasetSummary,
+    FxConversionMethod,
+    FxSource,
     HandleKind,
     InstrumentAnalysisRequest,
     JobSummary,
     MarketAnalysisRequest,
     MetricClass,
     MetricValue,
+    ModelScalarUnit,
+    NamedModelAssumption,
+    NamedModelParameter,
     PortfolioAnalysisRequest,
     ProofEngineBinding,
     ProofSourceBinding,
@@ -42,9 +49,7 @@ from saxo_bank_mcp.analytics_models import (
     validate_public_evidence,
 )
 
-_SCHEMA_PATH = (
-    Path(__file__).parents[1] / "data" / "analytics" / "output_schema_v1.json"
-)
+_SCHEMA_PATH = Path(__file__).parents[1] / "data" / "analytics" / "output_schema_v1.json"
 _AS_OF = datetime(2026, 7, 30, 8, 0, tzinfo=UTC)
 _PROOF_PROFILE_ID = "vp_fixture_v1"
 _SOURCE_REVISION = "revision_fixture_v1"
@@ -62,6 +67,32 @@ _HANDLES_PER_KIND = 2
 _EXPECTED_HANDLE_COUNT = len(HandleKind) * _HANDLES_PER_KIND
 _UUID_VERSION = 4
 _ACCOUNT_ALIAS = "aa_00000000000040008000000000000000"
+
+
+def _analysis_parameters(
+    *,
+    as_of: datetime = _AS_OF,
+) -> AnalysisParameterBinding:
+    return AnalysisParameterBinding(
+        start_at=_AS_OF - timedelta(days=2),
+        end_at=_AS_OF,
+        as_of=as_of,
+        benchmark_handle=None,
+        benchmark_fingerprint_sha256=None,
+        fx_method=FxConversionMethod.NOT_APPLICABLE,
+        fx_source=FxSource.NOT_APPLICABLE,
+        fx_timestamp=None,
+        calendar=AnalysisCalendar.CALENDAR_DAYS,
+        reporting_currency="DKK",
+        metric_currency_bindings=(),
+        model_parameters=(
+            NamedModelParameter(
+                name="risk_free_rate",
+                value=0.03,
+                unit=ModelScalarUnit.RATIO,
+            ),
+        ),
+    )
 
 
 def _coverage(state: QualityState = QualityState.COMPLETE) -> DataCoverage:
@@ -184,6 +215,7 @@ def _result(
             request_kind="market",
             analysis_kind="bounded_market_overview",
             dataset_id=dataset_id,
+            parameters=_analysis_parameters(),
         ),
         visibility=visibility,
         account_scope="selected SIM account",
@@ -304,9 +336,7 @@ def _degradation_payload() -> dict[str, Any]:
     ],
 )
 def test_enum_protocol_values_are_exact_and_round_trip(
-    enum_type: type[
-        AnalysisStatus | MetricClass | VisibilityMode | QualityState | HandleKind
-    ],
+    enum_type: type[AnalysisStatus | MetricClass | VisibilityMode | QualityState | HandleKind],
     expected: dict[str, str],
 ) -> None:
     adapter = TypeAdapter(enum_type)
@@ -326,11 +356,13 @@ def test_analysis_requests_are_discriminated_and_round_trip() -> None:
             request_kind="market",
             analysis_kind="bounded_market_overview",
             dataset_id=dataset_id,
+            parameters=_analysis_parameters(),
         ),
         InstrumentAnalysisRequest(
             request_kind="instrument",
             analysis_kind="price_return",
             dataset_id=dataset_id,
+            parameters=_analysis_parameters(),
             instrument_handles=(
                 new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
                 new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
@@ -340,6 +372,7 @@ def test_analysis_requests_are_discriminated_and_round_trip() -> None:
             request_kind="portfolio",
             analysis_kind="overview",
             dataset_id=dataset_id,
+            parameters=_analysis_parameters(),
             portfolio_snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
         ),
     )
@@ -354,6 +387,51 @@ def test_analysis_requests_are_discriminated_and_round_trip() -> None:
     )
     for request in requests:
         assert adapter.validate_json(adapter.dump_json(request)) == request
+
+
+def test_analysis_request_requires_typed_material_parameter_binding() -> None:
+    schema = MarketAnalysisRequest.model_json_schema()
+
+    assert "parameters" in schema["required"]
+    request = MarketAnalysisRequest.model_validate(
+        {
+            "request_kind": "market",
+            "analysis_kind": "bounded_market_overview",
+            "dataset_id": new_safe_handle(HandleKind.DATASET_ID),
+            "parameters": _analysis_parameters(),
+        },
+    )
+
+    assert request.parameters.reporting_currency == "DKK"
+    assert request.parameters.model_parameters[0].name == "risk_free_rate"
+
+
+def test_analysis_result_accepts_only_bounded_named_assumptions() -> None:
+    payload = _result().model_dump()
+    payload["request"]["parameters"] = _analysis_parameters().model_dump()
+    payload["assumptions"] = (
+        NamedModelAssumption(
+            name="inflation_rate",
+            value=0.02,
+            unit=ModelScalarUnit.RATIO,
+        ),
+    )
+
+    result = AnalysisResult.model_validate(payload)
+
+    assert result.assumptions[0].name == "inflation_rate"
+
+
+@pytest.mark.parametrize("model_type", [NamedModelParameter, NamedModelAssumption])
+def test_named_model_scalars_reject_raw_account_value_names(
+    model_type: type[NamedModelParameter | NamedModelAssumption],
+) -> None:
+    with pytest.raises(ValidationError, match="raw account value"):
+        model_type(
+            name="cash_balance",
+            value=123_456.0,
+            unit=ModelScalarUnit.DIMENSIONLESS,
+        )
 
 
 def test_analysis_request_rejects_an_unknown_discriminator() -> None:
@@ -378,14 +456,9 @@ def test_safe_handles_use_kind_prefixes_and_random_uuid4_payloads() -> None:
         HandleKind.JOB_ID: "jb",
         HandleKind.DELETION_PREVIEW_TOKEN: "dp",
     }
-    handles = {
-        kind: (new_safe_handle(kind), new_safe_handle(kind)) for kind in HandleKind
-    }
+    handles = {kind: (new_safe_handle(kind), new_safe_handle(kind)) for kind in HandleKind}
 
-    assert (
-        len({handle for pair in handles.values() for handle in pair})
-        == _EXPECTED_HANDLE_COUNT
-    )
+    assert len({handle for pair in handles.values() for handle in pair}) == _EXPECTED_HANDLE_COUNT
     for kind, pair in handles.items():
         for handle in pair:
             prefix, payload = handle.split("_", maxsplit=1)
@@ -405,12 +478,14 @@ def test_models_reject_predictable_or_wrong_kind_handles() -> None:
             request_kind="market",
             analysis_kind="overview",
             dataset_id=predictable,
+            parameters=_analysis_parameters(),
         )
     with pytest.raises(ValidationError):
         MarketAnalysisRequest(
             request_kind="market",
             analysis_kind="overview",
             dataset_id=wrong_kind,
+            parameters=_analysis_parameters(),
         )
 
 
@@ -422,6 +497,7 @@ def test_models_reject_encoded_identifier_handle_payloads() -> None:
             request_kind="market",
             analysis_kind="overview",
             dataset_id=encoded_identifier,
+            parameters=_analysis_parameters(),
         )
 
 
@@ -506,9 +582,7 @@ def test_money_claim_schema_publishes_closed_iso_currency_codes() -> None:
     schema = TypeAdapter(MetricValue).json_schema()
     currency_schema = schema["properties"]["currency"]
     currency_reference = next(
-        branch["$ref"]
-        for branch in currency_schema["anyOf"]
-        if "$ref" in branch
+        branch["$ref"] for branch in currency_schema["anyOf"] if "$ref" in branch
     )
     currency_definition = currency_reference.rsplit("/", maxsplit=1)[-1]
     published_codes = schema["$defs"][currency_definition]["enum"]
@@ -1000,10 +1074,7 @@ def test_public_evidence_validator_rejects_explicit_raw_account_identifier_assig
 @pytest.mark.parametrize(
     "safe_text",
     [
-        (
-            '"AccountId": "unavailable". '
-            "The raw account identifier remains unavailable."
-        ),
+        ('"AccountId": "unavailable". The raw account identifier remains unavailable.'),
         "The raw account identifier format is documented without values.",
     ],
 )
@@ -1019,10 +1090,7 @@ def test_public_evidence_model_allows_raw_account_identifier_prose_without_value
 @pytest.mark.parametrize(
     "safe_text",
     [
-        (
-            '"AccountId": "unavailable". '
-            "The raw account identifier remains unavailable."
-        ),
+        ('"AccountId": "unavailable". The raw account identifier remains unavailable.'),
         "The raw account identifier format is documented without values.",
     ],
 )
@@ -1147,11 +1215,7 @@ def test_public_refusals_and_degradations_reject_monetary_text(
     field_name: str,
     unsafe_text: str,
 ) -> None:
-    payload = (
-        _refusal_payload()
-        if model_type is AnalyticsRefusal
-        else _degradation_payload()
-    )
+    payload = _refusal_payload() if model_type is AnalyticsRefusal else _degradation_payload()
     if field_name == "warnings":
         payload[field_name] = (
             {
@@ -1175,11 +1239,7 @@ def test_public_refusals_and_degradations_reject_monetary_text(
 def test_public_refusals_and_degradations_reject_financial_percentages(
     model_type: type[AnalyticsRefusal | AnalyticsDegradation],
 ) -> None:
-    payload = (
-        _refusal_payload()
-        if model_type is AnalyticsRefusal
-        else _degradation_payload()
-    )
+    payload = _refusal_payload() if model_type is AnalyticsRefusal else _degradation_payload()
     payload["reason"] = "Portfolio return: 12.5%."
 
     with pytest.raises(ValidationError, match="forbidden value class"):
@@ -1226,8 +1286,7 @@ def test_public_evidence_allows_currency_word_collisions_without_financial_conte
     assert validate_public_evidence(output) is None
 
 
-def test_public_evidence_allows_financial_domain_prose_without_bound_money(
-) -> None:
+def test_public_evidence_allows_financial_domain_prose_without_bound_money() -> None:
     payload = _refusal_payload()
     payload["reason"] = "The cost model won 123 tests."
 
@@ -1269,11 +1328,7 @@ def test_public_evidence_allows_non_currency_uppercase_count_labels() -> None:
 def test_public_value_free_counts_and_times_remain_allowed(
     model_type: type[AnalyticsRefusal | AnalyticsDegradation],
 ) -> None:
-    payload = (
-        _refusal_payload()
-        if model_type is AnalyticsRefusal
-        else _degradation_payload()
-    )
+    payload = _refusal_payload() if model_type is AnalyticsRefusal else _degradation_payload()
     payload["reason"] = "Rows available: 123. Cutoff time: 12:30 UTC."
 
     output = model_type.model_validate(payload)

@@ -19,14 +19,22 @@ from saxo_bank_mcp.analytics_metric_definitions import (
 from saxo_bank_mcp.analytics_migrations import LATEST_SCHEMA_VERSION, migrate_store
 from saxo_bank_mcp.analytics_models import (
     ActiveProofReceipt,
+    AnalysisCalendar,
+    AnalysisParameterBinding,
     AnalysisProvenance,
     AnalysisResult,
     DataCoverage,
     DataQuality,
+    FxConversionMethod,
+    FxSource,
     HandleKind,
     MarketAnalysisRequest,
     MetricClass,
+    MetricCurrencyBinding,
     MetricValue,
+    ModelScalarUnit,
+    NamedModelAssumption,
+    NamedModelParameter,
     ProofEngineBinding,
     ProofSourceBinding,
     QualityState,
@@ -58,6 +66,7 @@ _ANALYSIS_PARAMETERS_DOMAIN = b"saxo-bank-mcp:analysis-parameters:v1\x00"
 _ANALYSIS_ID_LENGTH = 35
 _OPAQUE_UUID_VERSION = 4
 _DISTINCT_ID_COUNT = 6
+_MATERIAL_IDENTITY_VARIANT_COUNT = 4
 _OWNER_FILE_MODE = 0o600
 _SHA256_LENGTH = 64
 
@@ -157,6 +166,20 @@ def _analysis_result() -> AnalysisResult:
         request_kind="market",
         analysis_kind="replay_unit_test",
         dataset_id=dataset_id,
+        parameters=AnalysisParameterBinding(
+            start_at=_NOW - timedelta(days=2),
+            end_at=_NOW,
+            as_of=_NOW,
+            benchmark_handle=None,
+            benchmark_fingerprint_sha256=None,
+            fx_method=FxConversionMethod.NOT_APPLICABLE,
+            fx_source=FxSource.NOT_APPLICABLE,
+            fx_timestamp=None,
+            calendar=AnalysisCalendar.CALENDAR_DAYS,
+            reporting_currency="DKK",
+            metric_currency_bindings=(),
+            model_parameters=(),
+        ),
     )
     identity = provenance_module.build_analysis_identity(
         _identity_inputs(dataset_id),
@@ -267,13 +290,28 @@ def _analysis_parameters_sha256(
     *,
     account_scope: str = "aggregate",
 ) -> str:
-    material = {
+    material: dict[str, object] = {
         "account_scope": account_scope,
         "analysis_kind": "replay_unit_test",
+        "assumptions": [],
         "as_of": _NOW.isoformat(),
         "request": {
             "analysis_kind": "replay_unit_test",
             "dataset_id": dataset_id,
+            "parameters": {
+                "as_of": "2026-08-01T12:00:00Z",
+                "benchmark_fingerprint_sha256": None,
+                "benchmark_handle": None,
+                "calendar": "calendar_days",
+                "end_at": "2026-08-01T12:00:00Z",
+                "fx_method": "not_applicable",
+                "fx_source": "not_applicable",
+                "fx_timestamp": None,
+                "metric_currency_bindings": [],
+                "model_parameters": [],
+                "reporting_currency": "DKK",
+                "start_at": "2026-07-30T12:00:00Z",
+            },
             "request_kind": "market",
         },
         "schema_version": "1",
@@ -428,6 +466,66 @@ def test_analysis_id_is_deterministic_opaque_and_seed_bound() -> None:
         )
         == _DISTINCT_ID_COUNT
     )
+
+
+def test_analysis_identity_binds_risk_free_rate_and_result_assumptions() -> None:
+    result = _analysis_result()
+    risk_parameter = NamedModelParameter(
+        name="risk_free_rate",
+        value=0.03,
+        unit=ModelScalarUnit.RATIO,
+    )
+    risk_changed = risk_parameter.model_copy(update={"value": 0.04})
+    with_risk = result.model_copy(
+        update={
+            "request": result.request.model_copy(
+                update={
+                    "parameters": result.request.parameters.model_copy(
+                        update={"model_parameters": (risk_parameter,)},
+                    ),
+                },
+            ),
+        },
+    )
+    changed_risk = with_risk.model_copy(
+        update={
+            "request": with_risk.request.model_copy(
+                update={
+                    "parameters": with_risk.request.parameters.model_copy(
+                        update={"model_parameters": (risk_changed,)},
+                    ),
+                },
+            ),
+        },
+    )
+    with_assumption = result.model_copy(
+        update={
+            "assumptions": (
+                NamedModelAssumption(
+                    name="inflation_rate",
+                    value=0.02,
+                    unit=ModelScalarUnit.RATIO,
+                ),
+            ),
+        },
+    )
+
+    fingerprints = tuple(
+        provenance_module.analysis_parameters_sha256(candidate)
+        for candidate in (result, with_risk, changed_risk, with_assumption)
+    )
+    identities = tuple(
+        build_analysis_id(
+            _identity_inputs(result.provenance.dataset_id)
+            | {"analysis_parameters_sha256": fingerprint},
+            _engine_versions(),
+            None,
+        )
+        for fingerprint in fingerprints
+    )
+
+    assert len(set(fingerprints)) == _MATERIAL_IDENTITY_VARIANT_COUNT
+    assert len(set(identities)) == _MATERIAL_IDENTITY_VARIANT_COUNT
 
 
 @pytest.mark.parametrize("seed", [True, -1, 2**64])
@@ -723,6 +821,52 @@ def test_replay_refuses_metric_definition_currency_semantics(tmp_path: Path) -> 
     registry, _ = _registry(
         definition_updates={
             "output_unit": "usd",
+            "unit_class": ValueUnitClass.MONETARY,
+        },
+    )
+    _seed_store(config, changed_result)
+
+    with pytest.raises(AnalysisReplayRefused) as raised:
+        replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
+
+    assert raised.value.reason_code == "metric_currency_mismatch"
+
+
+@pytest.mark.parametrize("output_unit", ["reporting_currency", "price_currency"])
+def test_replay_binds_monetary_metric_to_exact_requested_currency(
+    tmp_path: Path,
+    output_unit: str,
+) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    currency_bindings = (
+        (MetricCurrencyBinding(metric_id="price_return", currency="USD"),)
+        if output_unit == "price_currency"
+        else ()
+    )
+    request = result.request.model_copy(
+        update={
+            "parameters": result.request.parameters.model_copy(
+                update={
+                    "reporting_currency": "USD",
+                    "metric_currency_bindings": currency_bindings,
+                },
+            ),
+        },
+    )
+    metric = result.metrics[0].model_copy(
+        update={
+            "unit": output_unit,
+            "unit_class": ValueUnitClass.MONETARY,
+            "currency": "DKK",
+        },
+    )
+    changed_result = result.model_copy(
+        update={"request": request, "metrics": (metric,)},
+    )
+    registry, _ = _registry(
+        definition_updates={
+            "output_unit": output_unit,
             "unit_class": ValueUnitClass.MONETARY,
         },
     )

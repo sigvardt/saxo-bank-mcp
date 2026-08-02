@@ -23,6 +23,7 @@ from saxo_bank_mcp.analytics_config import (
     prepare_owner_only_path,
 )
 from saxo_bank_mcp.analytics_metric_definitions import (
+    MetricDefinition,
     MetricDefinitionBinding,
     MetricDefinitionCatalog,
 )
@@ -243,6 +244,7 @@ class CoverageMatrix(_StrictModel):
     inactive_artifact_template_ids: tuple[str, ...] = ()
     inactive_source_fields: tuple[str, ...] = ()
     misassigned_artifact_template_ids: tuple[str, ...] = ()
+    overbroad_source_fields: tuple[str, ...] = ()
 
 
 class CoverageError(RuntimeError):
@@ -371,17 +373,11 @@ class ProofRegistry:
             binding.contract_id: frozenset(binding.field_paths)
             for binding in profile.source_contracts
         }
-        if any(
-            input_binding.source_contract_id is not None
-            and (
-                input_binding.source_contract_id not in profile_source_fields
-                or not set(input_binding.field_paths).issubset(
-                    profile_source_fields[input_binding.source_contract_id],
-                )
-            )
-            for metric_binding in profile.metric_definitions
-            for input_binding in current_definitions[metric_binding.metric_id].input_bindings
-        ):
+        expected_source_fields = _metric_source_fields(
+            profile.metric_definitions,
+            current_definitions,
+        )
+        if profile_source_fields != expected_source_fields:
             return _status(
                 ProofState.STALE,
                 "metric_source_binding_changed",
@@ -583,21 +579,27 @@ def _generate_coverage_matrix(
         }
         for profile in catalog.profiles
     }
-    profile_binding_gaps = {
-        f"{profile.analysis_kind}:{input_binding.source_contract_id}.{field_path}"
-        for profile in catalog.profiles
-        for metric_binding in profile.metric_definitions
-        for definition in (definitions_by_id.get(metric_binding.metric_id),)
-        if definition is not None
-        for input_binding in definition.input_bindings
-        if input_binding.source_contract_id is not None
-        for field_path in input_binding.field_paths
-        if field_path
-        not in profile_source_fields[profile.analysis_kind].get(
-            input_binding.source_contract_id,
-            frozenset(),
+    expected_profile_source_fields = {
+        profile.analysis_kind: _metric_source_fields(
+            profile.metric_definitions,
+            definitions_by_id,
         )
+        for profile in catalog.profiles
     }
+    profile_binding_gaps = {
+        f"{kind}:{contract_id}.{field_path}"
+        for kind, expected_contracts in expected_profile_source_fields.items()
+        for contract_id, expected_paths in expected_contracts.items()
+        for field_path in expected_paths
+        if field_path not in profile_source_fields[kind].get(contract_id, frozenset())
+    }
+    overbroad_fields = sorted(
+        f"{kind}:{contract_id}.{field_path}"
+        for kind, supplied_contracts in profile_source_fields.items()
+        for contract_id, supplied_paths in supplied_contracts.items()
+        for field_path in supplied_paths
+        if field_path not in expected_profile_source_fields[kind].get(contract_id, frozenset())
+    )
     missing_fields = sorted(
         (required_fields - supplied_fields)
         | (required_fields - current_fields)
@@ -658,6 +660,7 @@ def _generate_coverage_matrix(
         inactive_artifacts,
         inactive_fields,
         misassigned_artifacts,
+        overbroad_fields,
     )
     matrix = CoverageMatrix(
         complete=not any(incomplete_items),
@@ -670,6 +673,7 @@ def _generate_coverage_matrix(
         inactive_artifact_template_ids=tuple(inactive_artifacts),
         inactive_source_fields=tuple(inactive_fields),
         misassigned_artifact_template_ids=tuple(misassigned_artifacts),
+        overbroad_source_fields=tuple(overbroad_fields),
     )
     if not matrix.complete:
         raise CoverageError(matrix)
@@ -732,13 +736,11 @@ def load_proof_profile_catalog(
             for definition in definitions.definitions
             if kind in definition.analysis_kinds
         )
-        required_metric_contract_ids = {
-            input_binding.source_contract_id
-            for definition in definitions.definitions
-            if kind in definition.analysis_kinds
-            for input_binding in definition.input_bindings
-            if input_binding.source_contract_id is not None
-        }
+        required_metric_fields = _metric_source_fields(
+            metric_bindings,
+            definitions.by_id(),
+        )
+        required_metric_contract_ids = set(required_metric_fields)
         unknown_contract_ids = required_metric_contract_ids - set(contracts)
         if unknown_contract_ids:
             raise ProofProfileError("metric definitions bind unknown source contracts")
@@ -746,13 +748,10 @@ def load_proof_profile_catalog(
             SourceContractProofBinding(
                 contract_id=contract.contract_id,
                 contract_sha256=current_contract_shas[contract.contract_id],
-                field_paths=_source_field_paths(contract.fields),
+                field_paths=tuple(sorted(required_metric_fields[contract.contract_id])),
             )
             for contract in contracts.values()
-            if (
-                kind in contract.dependent_analysis_kinds
-                or contract.contract_id in required_metric_contract_ids
-            )
+            if contract.contract_id in required_metric_contract_ids
         )
         profiles.append(
             ProofProfile(
@@ -899,6 +898,24 @@ def _source_field_paths(fields: Sequence[SourceField]) -> tuple[str, ...]:
     for source_field in fields:
         visit(source_field, "")
     return tuple(paths)
+
+
+def _metric_source_fields(
+    metric_bindings: Sequence[MetricDefinitionBinding],
+    definitions_by_id: Mapping[str, MetricDefinition],
+) -> dict[str, frozenset[str]]:
+    fields: dict[str, set[str]] = {}
+    for metric_binding in metric_bindings:
+        definition = definitions_by_id.get(metric_binding.metric_id)
+        if definition is None:
+            continue
+        for input_binding in definition.input_bindings:
+            if input_binding.source_contract_id is None:
+                continue
+            fields.setdefault(input_binding.source_contract_id, set()).update(
+                input_binding.field_paths,
+            )
+    return {contract_id: frozenset(field_paths) for contract_id, field_paths in fields.items()}
 
 
 def _status(

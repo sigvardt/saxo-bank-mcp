@@ -535,10 +535,10 @@
         {"metric_id": "quarterly_return", "meaning": "Return between declared quarter-end cutoffs.", "formula": "P_quarter_end / P_previous_quarter_end - 1."},
         {"metric_id": "annual_return", "meaning": "Return between declared year-end cutoffs.", "formula": "P_year_end / P_previous_year_end - 1."},
         {"metric_id": "rolling_return", "meaning": "Return over one exact rolling observation window.", "formula": "P_t / P_(t-window) - 1 with no shorter fallback."},
-        {"metric_id": "best_period_return", "meaning": "Largest eligible subperiod return.", "formula": "max(r_i) over the complete declared subperiod set."},
-        {"metric_id": "worst_period_return", "meaning": "Smallest eligible subperiod return.", "formula": "min(r_i) over the complete declared subperiod set."},
+        {"metric_id": "best_period_return", "meaning": "Largest eligible subperiod return.", "formula": "I={the complete ordered eligible subperiods}; best_period_return=max_{i in I}(r_i)."},
+        {"metric_id": "worst_period_return", "meaning": "Smallest eligible subperiod return.", "formula": "I={the complete ordered eligible subperiods}; worst_period_return=min_{i in I}(r_i)."},
         {"metric_id": "benchmark_relative_return", "meaning": "Difference between portfolio or instrument return and the disclosed Saxo proxy return.", "formula": "R_subject - R_proxy over identical cutoffs, currency method, and return label."},
-        {"metric_id": "active_return", "meaning": "Arithmetic subject return minus benchmark-proxy return.", "formula": "R_subject - R_proxy for each aligned period or the declared aggregate."}
+        {"metric_id": "active_return", "meaning": "Arithmetic subject return minus benchmark-proxy return.", "formula": "aggregation_id=period computes R_subject-R_proxy for each member of the exact aligned-period set; aggregation_id=aggregate computes R_subject_total-R_proxy_total over the identical complete range; refuse every other aggregation_id."}
       ]
     },
     {
@@ -546,11 +546,11 @@
       "definition_version": "1",
       "analysis_kinds": ["portfolio_performance", "portfolio_attribution", "portfolio_overview", "portfolio_time_machine"],
       "metrics": [
-        {"metric_id": "time_weighted_return", "meaning": "Cash-flow-neutral compounded portfolio return.", "formula": "product_i(1 + r_i) - 1, where r_i = (V_i - CF_i) / V_(i-1) - 1 at defined external-flow boundaries."},
+        {"metric_id": "time_weighted_return", "meaning": "Cash-flow-neutral compounded portfolio return.", "formula": "I={the ordered valuation subperiods separated by exact external-flow boundaries}; time_weighted_return=product_{i in I}(1+r_i)-1, where r_i=(V_i-CF_i)/V_(i-1)-1."},
         {
           "metric_id": "money_weighted_return",
           "meaning": "Periodic internal rate that discounts starting value, external flows, and ending value to zero.",
-          "formula": "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / (1+r)^t_i) + V_end/(1+r)^t_end; deposits are negative investor cash flows, withdrawals and terminal value are positive.",
+          "formula": "I={the complete ordered external cash-flow ledger entries}; solve for r>-1: 0=-V_start+sum_{i in I}((withdrawal_i-deposit_i)/(1+r)^t_i)+V_end/(1+r)^t_end; deposits are negative investor cash flows, withdrawals and terminal value are positive.",
           "input_bindings": [
             {
               "input_id": "mwr_cashflow_equation",
@@ -564,7 +564,7 @@
         {
           "metric_id": "xirr",
           "meaning": "Annualized money-weighted return using exact UTC economic dates and ACT/365 exponents.",
-          "formula": "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / (1+r)^((date_i-date_0).days/365)) + V_end/(1+r)^((date_end-date_0).days/365); deposits are negative and withdrawals plus terminal value are positive.",
+          "formula": "I={the complete ordered external cash-flow ledger entries}; solve for r>-1: 0=-V_start+sum_{i in I}((withdrawal_i-deposit_i)/(1+r)^((date_i-date_0).days/365))+V_end/(1+r)^((date_end-date_0).days/365); deposits are negative and withdrawals plus terminal value are positive.",
           "input_bindings": [
             {
               "input_id": "xirr_cashflow_equation",
@@ -577,7 +577,7 @@
         },
         {"metric_id": "cagr", "meaning": "Compound annual growth rate over a positive elapsed year fraction.", "formula": "(V_end / V_start)^(1/years) - 1 after the named cash-flow method; refuse nonpositive ratio or years."},
         {"metric_id": "contribution_withdrawal_aware_growth", "meaning": "Portfolio growth after explicit external contributions and withdrawals.", "formula": "V_end - V_start - net_external_flows, with flows converted at their economic timestamps."},
-        {"metric_id": "tracking_error", "meaning": "Annualized sample standard deviation of aligned active returns.", "formula": "sample_std(R_subject_i - R_proxy_i) * sqrt(periods_per_year)."},
+        {"metric_id": "tracking_error", "meaning": "Annualized sample standard deviation of aligned active returns.", "formula": "I={the complete ordered periods with aligned subject and proxy returns}; tracking_error=sample_std_{i in I}(R_subject_i-R_proxy_i)*sqrt(periods_per_year)."},
         {"metric_id": "information_ratio", "meaning": "Annualized active return per unit of tracking error.", "formula": "annualized_mean(active_returns) / annualized_tracking_error; refuse zero denominator."},
         {"metric_id": "alpha", "meaning": "Intercept of subject excess returns regressed on proxy excess returns.", "formula": "mean(y) - beta*mean(x), annualized by the declared period count, where x and y are aligned excess returns."},
         {"metric_id": "beta", "meaning": "Sensitivity of subject returns to aligned proxy returns.", "formula": "covariance(subject, proxy) / variance(proxy); refuse zero proxy variance."},
@@ -591,21 +591,21 @@
       "definition_version": "1",
       "analysis_kinds": ["instrument_risk", "portfolio_risk", "market_correlation_regime", "market_volatility_dispersion", "portfolio_margin"],
       "metrics": [
-        {"metric_id": "volatility", "meaning": "Annualized sample standard deviation of periodic returns.", "formula": "sample_std(r_i) * sqrt(periods_per_year)."},
-        {"metric_id": "downside_deviation", "meaning": "Annualized root mean square of returns below the declared target.", "formula": "sqrt(mean(min(r_i-target,0)^2)) * sqrt(periods_per_year)."},
-        {"metric_id": "sharpe_ratio", "meaning": "Annualized excess return divided by annualized volatility.", "formula": "annualized_mean(r_i-rf_i) / annualized_sample_std(r_i); refuse zero volatility."},
-        {"metric_id": "sortino_ratio", "meaning": "Annualized excess return divided by downside deviation.", "formula": "annualized_mean(r_i-target_i) / downside_deviation; refuse zero downside deviation."},
+        {"metric_id": "volatility", "meaning": "Annualized sample standard deviation of periodic returns.", "formula": "I={the complete ordered eligible periodic returns}; volatility=sample_std_{i in I}(r_i)*sqrt(periods_per_year)."},
+        {"metric_id": "downside_deviation", "meaning": "Annualized root mean square of returns below the declared target.", "formula": "I={the complete ordered eligible periodic returns}; downside_deviation=sqrt(mean_{i in I}(min(r_i-target,0)^2))*sqrt(periods_per_year)."},
+        {"metric_id": "sharpe_ratio", "meaning": "Annualized excess return divided by annualized volatility.", "formula": "I={the complete ordered periods with aligned return r_i and risk-free rate rf_i}; sharpe_ratio=annualized_mean_{i in I}(r_i-rf_i)/annualized_sample_std_{i in I}(r_i); refuse zero volatility."},
+        {"metric_id": "sortino_ratio", "meaning": "Annualized excess return divided by downside deviation.", "formula": "I={the complete ordered periods with aligned return r_i and target_i}; sortino_ratio=annualized_mean_{i in I}(r_i-target_i)/downside_deviation; refuse zero downside deviation."},
         {"metric_id": "calmar_ratio", "meaning": "Annualized return divided by maximum drawdown magnitude.", "formula": "annualized_return / abs(maximum_drawdown); refuse zero drawdown."},
         {"metric_id": "maximum_drawdown", "meaning": "Largest peak-to-trough loss in a cumulative value series.", "formula": "min_t(V_t / max_(s<=t)(V_s) - 1); result is in [-1,0]."},
         {"metric_id": "underwater_duration", "meaning": "Longest elapsed time below the prior cumulative peak.", "formula": "max over drawdown episodes of recovery_or_cutoff_timestamp - peak_timestamp.", "output_unit": "days", "unit_class": "duration"},
         {"metric_id": "historical_var", "meaning": "Positive loss magnitude at the declared empirical confidence quantile.", "formula": "max(0, -quantile(return_series, 1-confidence, declared interpolation))."},
-        {"metric_id": "expected_shortfall", "meaning": "Positive mean loss at or beyond historical VaR.", "formula": "mean(-r_i for r_i <= -historical_var) under the declared tie rule."},
+        {"metric_id": "expected_shortfall", "meaning": "Positive mean loss at or beyond historical VaR.", "formula": "I={indices in the complete return series satisfying r_i<=-historical_var under tie_rule=inclusive}; expected_shortfall=mean_{i in I}(-r_i); refuse empty I."},
         {"metric_id": "parametric_var", "meaning": "Positive loss magnitude under the declared parametric distribution.", "formula": "max(0, -(mu + sigma*z_(1-confidence))) for the explicit normal assumption."},
-        {"metric_id": "marginal_risk_contribution", "meaning": "Derivative of portfolio volatility with respect to one weight.", "formula": "(Sigma*w)_i / sqrt(w^T Sigma w); refuse zero portfolio volatility."},
-        {"metric_id": "component_risk_contribution", "meaning": "Weight-scaled marginal contribution to portfolio volatility.", "formula": "w_i * (Sigma*w)_i / sqrt(w^T Sigma w)."},
-        {"metric_id": "concentration_index", "meaning": "Herfindahl concentration of normalized absolute exposures.", "formula": "sum_i(abs(exposure_i)/sum_j(abs(exposure_j)))^2; refuse zero gross exposure."},
+        {"metric_id": "marginal_risk_contribution", "meaning": "Derivative of portfolio volatility with respect to one weight.", "formula": "I={the exact persisted ordered asset vector}; for each i in I, marginal_risk_contribution_i=(Sigma*w)_i/sqrt(w^T Sigma w); refuse zero portfolio volatility."},
+        {"metric_id": "component_risk_contribution", "meaning": "Weight-scaled marginal contribution to portfolio volatility.", "formula": "I={the exact persisted ordered asset vector}; for each i in I, component_risk_contribution_i=w_i*(Sigma*w)_i/sqrt(w^T Sigma w)."},
+        {"metric_id": "concentration_index", "meaning": "Herfindahl concentration of normalized absolute exposures.", "formula": "I={the exact persisted ordered exposure vector}; gross_exposure=sum_{i in I}(abs(exposure_i)); concentration_index=sum_{i in I}(abs(exposure_i)/gross_exposure)^2; refuse zero gross_exposure."},
         {"metric_id": "correlation", "meaning": "Pearson correlation of two aligned return series.", "formula": "covariance(x,y)/(sample_std(x)*sample_std(y)); refuse zero variance."},
-        {"metric_id": "covariance", "meaning": "Sample covariance of two aligned return series.", "formula": "sum_i((x_i-mean(x))*(y_i-mean(y)))/(n-1)."},
+        {"metric_id": "covariance", "meaning": "Sample covariance of two aligned return series.", "formula": "I={the complete ordered aligned (x_i,y_i) observations}; n=|I|; covariance=sum_{i in I}((x_i-mean(x))*(y_i-mean(y)))/(n-1); refuse n<2."},
         {"metric_id": "rolling_beta", "meaning": "Beta calculated on each complete rolling window.", "formula": "rolling_covariance(subject,proxy)/rolling_variance(proxy) for the exact window."},
         {"metric_id": "rolling_correlation", "meaning": "Correlation calculated on each complete rolling window.", "formula": "rolling_covariance/(rolling_sample_std_subject*rolling_sample_std_proxy)."},
         {"metric_id": "margin_utilization", "meaning": "Used margin as a fraction of the compatible Saxo margin base.", "formula": "used_margin / margin_base; refuse absent or zero base."},
@@ -621,27 +621,27 @@
         {"metric_id": "asset_class_exposure", "meaning": "Exposure grouped by authoritative Saxo asset type.", "formula": "sum instrument_exposure by bound Saxo asset type."},
         {"metric_id": "currency_exposure", "meaning": "Exposure grouped by source or settlement currency.", "formula": "sum signed source-currency exposure converted once to reporting currency, grouped by original currency."},
         {"metric_id": "exchange_exposure", "meaning": "Exposure grouped by authoritative Saxo exchange identifier.", "formula": "sum instrument_exposure by bound exchange; unavailable for missing exchange."},
-        {"metric_id": "long_exposure", "meaning": "Sum of positive signed exposures.", "formula": "sum max(exposure_i,0)."},
-        {"metric_id": "short_exposure", "meaning": "Positive magnitude of negative signed exposures.", "formula": "sum abs(min(exposure_i,0))."},
-        {"metric_id": "gross_exposure", "meaning": "Total absolute exposure.", "formula": "sum abs(exposure_i)."},
-        {"metric_id": "net_exposure", "meaning": "Signed total exposure.", "formula": "sum exposure_i = long_exposure - short_exposure."},
-        {"metric_id": "leveraged_exposure", "meaning": "Gross exposure from instruments or positions proved leveraged.", "formula": "sum abs(exposure_i) for leveraged_i = true."},
-        {"metric_id": "unleveraged_exposure", "meaning": "Gross exposure from instruments proved unleveraged.", "formula": "sum abs(exposure_i) for leveraged_i = false."},
-        {"metric_id": "delta_equivalent_options_exposure", "meaning": "Underlying-equivalent options exposure using verified delta.", "formula": "sum quantity_i * contract_multiplier_i * underlying_price_i * delta_i."},
-        {"metric_id": "duration_exposure", "meaning": "Money duration for supported fixed-income positions.", "formula": "sum market_value_i * modified_duration_i."},
-        {"metric_id": "rate_exposure", "meaning": "First-order portfolio money change for a one-unit rate move.", "formula": "-sum market_value_i * modified_duration_i * rate_change_unit."},
+        {"metric_id": "long_exposure", "meaning": "Sum of positive signed exposures.", "formula": "I={the exact persisted ordered position vector}; long_exposure=sum_{i in I}(max(exposure_i,0))."},
+        {"metric_id": "short_exposure", "meaning": "Positive magnitude of negative signed exposures.", "formula": "I={the exact persisted ordered position vector}; short_exposure=sum_{i in I}(abs(min(exposure_i,0)))."},
+        {"metric_id": "gross_exposure", "meaning": "Total absolute exposure.", "formula": "I={the exact persisted ordered position vector}; gross_exposure=sum_{i in I}(abs(exposure_i))."},
+        {"metric_id": "net_exposure", "meaning": "Signed total exposure.", "formula": "I={the exact persisted ordered position vector}; net_exposure=sum_{i in I}(exposure_i)=long_exposure-short_exposure."},
+        {"metric_id": "leveraged_exposure", "meaning": "Gross exposure from instruments or positions proved leveraged.", "formula": "I={positions in the exact persisted ordered vector whose profile-bound leveraged flag is true}; leveraged_exposure=sum_{i in I}(abs(exposure_i))."},
+        {"metric_id": "unleveraged_exposure", "meaning": "Gross exposure from instruments proved unleveraged.", "formula": "I={positions in the exact persisted ordered vector whose profile-bound leveraged flag is false}; unleveraged_exposure=sum_{i in I}(abs(exposure_i))."},
+        {"metric_id": "delta_equivalent_options_exposure", "meaning": "Underlying-equivalent options exposure using verified delta.", "formula": "I={the exact persisted ordered supported option positions}; delta_equivalent_options_exposure=sum_{i in I}(quantity_i*contract_multiplier_i*underlying_price_i*delta_i)."},
+        {"metric_id": "duration_exposure", "meaning": "Money duration for supported fixed-income positions.", "formula": "I={the exact persisted ordered supported fixed-income positions}; duration_exposure=sum_{i in I}(market_value_i*modified_duration_i)."},
+        {"metric_id": "rate_exposure", "meaning": "First-order portfolio money change for a one-unit rate move.", "formula": "I={the exact persisted ordered supported fixed-income positions}; rate_exposure=-sum_{i in I}(market_value_i*modified_duration_i*rate_change_unit)."},
         {"metric_id": "settlement_currency_exposure", "meaning": "Upcoming cash requirement grouped by settlement currency.", "formula": "sum signed unsettled obligations by authoritative settlement currency."},
-        {"metric_id": "upcoming_cash_obligation", "meaning": "Positive reporting-currency magnitude of confirmed upcoming cash outflows.", "formula": "sum max(-signed_unsettled_cash_i,0) over the declared horizon."},
+        {"metric_id": "upcoming_cash_obligation", "meaning": "Positive reporting-currency magnitude of confirmed upcoming cash outflows.", "formula": "I={the complete ordered confirmed unsettled-cash rows whose economic timestamp is inside the exact request horizon}; upcoming_cash_obligation=sum_{i in I}(max(-signed_unsettled_cash_i,0))."},
         {"metric_id": "margin_stress_effect", "meaning": "Change in margin headroom under one explicit shock map.", "formula": "stressed_margin_headroom - current_margin_headroom."},
         {"metric_id": "account_value", "meaning": "Broker-reported or reconciled account value at cutoff.", "formula": "account_value = the unique balances_v1.TotalValue row whose account scope exactly equals the request account_scope at cutoff; refuse when zero or multiple exact-scope rows exist."},
-        {"metric_id": "cash_balance", "meaning": "Broker-reported cash balance at cutoff.", "formula": "Sum compatible Saxo cash balance components once by account and currency."},
+        {"metric_id": "cash_balance", "meaning": "Broker-reported cash balance at cutoff.", "formula": "C={the unique balances_v1.CashBalance value for each Currency row whose account scope exactly equals request account_scope at cutoff}; cash_balance=sum_{c in C} CashBalance_c*fx_c_to_reporting_at_request_fx_timestamp; exclude TotalValue, CashAvailableForTrading, MarginAvailableForTrading, FundsAvailableForSettlement, FundsReservedForSettlement, and every other balance field; refuse a missing or duplicate account/currency row."},
         {"metric_id": "settled_cash", "meaning": "Cash available after excluding unsettled obligations under the bound Saxo balance contract.", "formula": "cash_balance - positive unsettled obligations under the declared Saxo fields."},
-        {"metric_id": "unsettled_cash", "meaning": "Signed transactions and settlement amounts not yet booked.", "formula": "sum bound unbooked or settlement-reserved amounts without double counting."},
+        {"metric_id": "unsettled_cash", "meaning": "Signed transactions and settlement amounts not yet booked.", "formula": "U={deduplicated normalized_money_ledger rows whose event_class is unbooked_transaction plus the unique exact-scope balances_v1.FundsReservedForSettlement row per Currency}; unsettled_cash=sum_{u in U}(signed_amount_u*fx_u_to_reporting_at_economic_timestamp); refuse duplicate source keys or missing currency."},
         {"metric_id": "margin_headroom", "meaning": "Broker-compatible amount available before modeled margin exhaustion.", "formula": "margin_headroom = the unique balances_v1.MarginAvailableForTrading row whose account scope exactly equals the request account_scope at cutoff; refuse when zero or multiple exact-scope rows exist."},
         {"metric_id": "buying_power", "meaning": "Broker-reported spending power or compatible available amount at cutoff.", "formula": "buying_power = the unique balances_v1.CashAvailableForTrading row whose account scope exactly equals the request account_scope at cutoff; refuse when zero or multiple exact-scope rows exist."},
         {"metric_id": "income_amount", "meaning": "Recognized income in the declared interval.", "formula": "sum eligible income bookings and transactions once after corrections."},
-        {"metric_id": "dividend_amount", "meaning": "Recognized dividend income in the declared interval.", "formula": "sum eligible dividend-classified rows once after taxes and corrections according to requested gross or net basis."},
-        {"metric_id": "settlement_obligation", "meaning": "Positive amount due on one confirmed settlement date.", "formula": "sum max(-signed_settlement_cash_i,0) for the exact date and currency."}
+        {"metric_id": "dividend_amount", "meaning": "Recognized dividend income in the declared interval.", "formula": "D={deduplicated dividend-classified normalized_money_ledger rows inside the exact request interval}; basis_id=gross sums source gross_amount_d, basis_id=net sums gross_amount_d-tax_amount_d, each converted at economic timestamp; refuse every other basis_id or a missing amount component."},
+        {"metric_id": "settlement_obligation", "meaning": "Positive amount due on one confirmed settlement date.", "formula": "I={the complete ordered confirmed settlement rows for the exact requested date and source Currency}; settlement_obligation=sum_{i in I}(max(-signed_settlement_cash_i,0)*fx_i_to_reporting_at_economic_timestamp)."}
       ]
     },
     {
@@ -656,8 +656,8 @@
         {"metric_id": "income_contribution", "meaning": "Income contribution to portfolio return.", "formula": "100 * linked_income_amount / linked_capital_base under the declared method."},
         {"metric_id": "cost_drag", "meaning": "Reduction in return attributable to included costs.", "formula": "100 * (return_before_cost - return_after_cost)."},
         {"metric_id": "trading_contribution", "meaning": "Linked contribution from realized trading changes under the declared method.", "formula": "100 * linked_trading_profit_loss / linked_capital_base."},
-        {"metric_id": "allocation_attribution", "meaning": "Allocation effect against the disclosed Saxo proxy weights.", "formula": "100 * sum_i((w_subject_i-w_proxy_i)*(r_proxy_i-r_proxy_total))."},
-        {"metric_id": "selection_attribution", "meaning": "Selection effect against the disclosed Saxo proxy returns.", "formula": "100 * sum_i(w_subject_i*(r_subject_i-r_proxy_i))."},
+        {"metric_id": "allocation_attribution", "meaning": "Allocation effect against the disclosed Saxo proxy weights.", "formula": "I={the complete ordered aligned attribution buckets}; allocation_attribution=100*sum_{i in I}((w_subject_i-w_proxy_i)*(r_proxy_i-r_proxy_total))."},
+        {"metric_id": "selection_attribution", "meaning": "Selection effect against the disclosed Saxo proxy returns.", "formula": "I={the complete ordered aligned attribution buckets}; selection_attribution=100*sum_{i in I}(w_subject_i*(r_subject_i-r_proxy_i))."},
         {"metric_id": "snapshot_change", "meaning": "One component of change between two immutable portfolio snapshots.", "formula": "100 * linked_component_change / declared opening capital base; components reconcile to total change."},
         {"metric_id": "fx_drag", "meaning": "Difference between reporting-currency and local-asset return.", "formula": "100 * (reporting_currency_return - local_asset_return)."},
         {"metric_id": "win_rate", "meaning": "Percent of completed eligible trades with positive net result.", "formula": "100 * winning_trade_count / eligible_completed_trade_count."},
@@ -694,7 +694,7 @@
         {"metric_id": "stamp_duty_cost", "meaning": "Positive stamp-duty charge available from Saxo rows.", "formula": "sum abs(stamp-duty-classified charges) once."},
         {"metric_id": "turnover_cost", "meaning": "Eligible cost attributed to observed turnover.", "formula": "sum included cost components for trades inside the turnover scope."},
         {"metric_id": "cost_to_open", "meaning": "Estimated broker-specific cost to open the exact proposed position.", "formula": "sum eligible Saxo pre-trade opening cost components for the exact proposal."},
-        {"metric_id": "cost_to_hold", "meaning": "Estimated broker-specific holding cost over the explicit horizon.", "formula": "sum eligible daily or period carrying costs over the exact stated horizon."},
+        {"metric_id": "cost_to_hold", "meaning": "Estimated broker-specific holding cost over the explicit horizon.", "formula": "cadence_id=daily sums the deduplicated normalized_money_ledger carrying-cost rows for every UTC date in the exact horizon; cadence_id=period sums the single source period charge with identical endpoints; refuse every other cadence_id, mixed cadence, or overlapping source keys."},
         {"metric_id": "cost_to_close", "meaning": "Estimated broker-specific cost to close the exact proposed position.", "formula": "sum eligible Saxo pre-trade closing cost components for the exact quantity."},
         {"metric_id": "estimated_round_trip_cost", "meaning": "Estimated total open, hold, and close cost.", "formula": "cost_to_open + cost_to_hold + cost_to_close with component identity proof."},
         {"metric_id": "wrapper_cost_difference", "meaning": "Cost difference between two user-selected Saxo-tradable wrappers.", "formula": "total_cost_wrapper_a - total_cost_wrapper_b under identical exposure, horizon, and currency assumptions."},
@@ -720,12 +720,12 @@
       "analysis_kinds": ["trading_mirror", "execution_quality"],
       "metrics": [
         {"metric_id": "expectancy", "meaning": "Average net result per eligible completed trade in return units.", "formula": "win_rate_ratio*mean_winner_return + (1-win_rate_ratio)*mean_loser_return."},
-        {"metric_id": "average_winner", "meaning": "Mean net return of eligible winning trades.", "formula": "mean(net_trade_return_i for net_trade_return_i > 0)."},
-        {"metric_id": "average_loser", "meaning": "Mean net return of eligible losing trades.", "formula": "mean(net_trade_return_i for net_trade_return_i < 0)."},
+        {"metric_id": "average_winner", "meaning": "Mean net return of eligible winning trades.", "formula": "I={the complete ordered eligible closed trades satisfying net_trade_return_i>0}; average_winner=mean_{i in I}(net_trade_return_i); refuse empty I."},
+        {"metric_id": "average_loser", "meaning": "Mean net return of eligible losing trades.", "formula": "I={the complete ordered eligible closed trades satisfying net_trade_return_i<0}; average_loser=mean_{i in I}(net_trade_return_i); refuse empty I."},
         {"metric_id": "entry_timing_effect", "meaning": "Observed entry price effect against the exact decision quote or labeled bar rule.", "formula": "side_sign*(reference_price-entry_price)/reference_price."},
         {"metric_id": "exit_timing_effect", "meaning": "Observed exit price effect against the exact decision quote or labeled bar rule.", "formula": "side_sign*(exit_price-reference_price)/reference_price."},
         {"metric_id": "twr_mwr_behavior_gap", "meaning": "Difference between time-weighted and money-weighted return.", "formula": "time_weighted_return - money_weighted_return."},
-        {"metric_id": "turnover", "meaning": "Gross traded value relative to average capital.", "formula": "sum(abs(trade_value_i)) / average_declared_capital_base."}
+        {"metric_id": "turnover", "meaning": "Gross traded value relative to average capital.", "formula": "I={the complete ordered deduplicated eligible trades in the exact request interval}; turnover=sum_{i in I}(abs(trade_value_i))/average_declared_capital_base; refuse nonpositive capital base."}
       ]
     },
     {
@@ -741,12 +741,12 @@
       "definition_version": "1",
       "analysis_kinds": ["execution_quality", "instrument_quote", "session_cockpit"],
       "metrics": [
-        {"metric_id": "arrival_price", "meaning": "Exact MCP-captured market reference at decision time.", "formula": "Stored eligible quote price selected by the declared bid, ask, or midpoint rule; unavailable without capture."},
-        {"metric_id": "midpoint_price", "meaning": "Midpoint of one synchronized eligible bid and ask quote.", "formula": "(bid + ask) / 2."},
-        {"metric_id": "vwap", "meaning": "Volume-weighted average execution price.", "formula": "sum(price_i*volume_i)/sum(volume_i); refuse zero or missing eligible volume."},
-        {"metric_id": "bar_approximation_price", "meaning": "Explicit nearest Saxo chart-bar reference when no decision quote exists.", "formula": "Declared open, close, high, or low from the nearest eligible completed bar; never label as arrival or midpoint.", "default_metric_class": "approximation"},
-        {"metric_id": "slippage", "meaning": "Side-normalized execution price difference from the eligible reference.", "formula": "side_sign*(execution_price-reference_price), where positive is adverse cost."},
-        {"metric_id": "spread", "meaning": "Eligible ask minus bid.", "formula": "ask - bid; refuse missing or asynchronous sides."}
+        {"metric_id": "arrival_price", "meaning": "Exact MCP-captured market reference at decision time.", "formula": "reference_price_id=bid selects captured_quote.Quote.Bid, reference_price_id=ask selects captured_quote.Quote.Ask, and reference_price_id=midpoint requires synchronized Bid and Ask then computes (Bid+Ask)/2; refuse every other reference_price_id or an absent decision-time capture."},
+        {"metric_id": "midpoint_price", "meaning": "Midpoint of one synchronized eligible bid and ask quote.", "formula": "(bid + ask) / 2.", "default_metric_class": "calculated_verified"},
+        {"metric_id": "vwap", "meaning": "Volume-weighted average execution price.", "formula": "I={the complete ordered eligible executions in the exact request interval}; vwap=sum_{i in I}(price_i*volume_i)/sum_{i in I}(volume_i); refuse zero total volume.", "default_metric_class": "calculated_verified"},
+        {"metric_id": "bar_approximation_price", "meaning": "Explicit nearest Saxo chart-bar reference when no decision quote exists.", "formula": "bar_price_id=open_bid selects nearest_completed_bar.OpenBid, bar_price_id=close_bid selects CloseBid, bar_price_id=high_bid selects HighBid, and bar_price_id=low_bid selects LowBid; refuse every other bar_price_id and never label the result as arrival_price or midpoint_price.", "default_metric_class": "approximation"},
+        {"metric_id": "slippage", "meaning": "Side-normalized execution price difference from the eligible reference.", "formula": "side_sign*(execution_price-reference_price), where positive is adverse cost.", "default_metric_class": "calculated_verified"},
+        {"metric_id": "spread", "meaning": "Eligible ask minus bid.", "formula": "ask - bid; refuse missing or asynchronous sides.", "default_metric_class": "calculated_verified"}
       ]
     },
     {
@@ -794,7 +794,7 @@
         {
           "metric_id": "market_depth",
           "meaning": "Total eligible quoted bid and ask quantity from an authoritative depth source.",
-          "formula": "sum(q_i for q_i in eligible_bid_ask_depth_quantities where q_i >= 0); refuse when no authoritative depth quantity field is bound.",
+          "formula": "I={the complete ordered eligible_bid_ask_depth_quantities from the exact bound source fields}; market_depth=sum_{i in I}(q_i) after requiring q_i>=0; refuse empty I.",
           "input_bindings": [
             {
               "input_id": "eligible_bid_ask_depth_quantities",
@@ -820,13 +820,13 @@
       "definition_version": "1",
       "analysis_kinds": ["portfolio_scenario", "scenario_historical", "scenario_custom", "scenario_currency", "scenario_volatility", "scenario_rate", "scenario_margin", "scenario_combined", "margin_fire_drill"],
       "metrics": [
-        {"metric_id": "historical_scenario_effect", "meaning": "Portfolio money change under a dated historical shock replay.", "formula": "historical_scenario_effect = sum_i(shocked_value_i-base_value_i); branch_id=linear sets shocked_value_i=base_value_i*(1+historical_return_i), branch_id=option uses theoretical_option_value with shocked S or F, sigma, r, and q, and branch_id=fixed_income sets shocked_value_i=sum_j(CF_ij*shocked_discount_factor_ij); convert each difference once with the persisted shocked FX rate and refuse every other branch_id."},
-        {"metric_id": "custom_shock_effect", "meaning": "Portfolio money change under explicit user-confirmed shocks.", "formula": "sum component_effect_i under the exact stored shock map."},
+        {"metric_id": "historical_scenario_effect", "meaning": "Portfolio money change under a dated historical shock replay.", "formula": "I={the ordered components in the exact persisted portfolio snapshot}; J_i={the ordered authoritative cash flows for fixed-income component i}; historical_scenario_effect=sum_{i in I}(shocked_value_i-base_value_i); branch_id=linear sets shocked_value_i=base_value_i*(1+historical_return_i), branch_id=option evaluates theoretical_option_value with the complete persisted shocked parameter vector, and branch_id=fixed_income sets shocked_value_i=sum_{j in J_i}(CF_ij*shocked_discount_factor_ij); convert each difference once with the persisted shocked FX rate and refuse every other branch_id."},
+        {"metric_id": "custom_shock_effect", "meaning": "Portfolio money change under explicit user-confirmed shocks.", "formula": "I={the ordered components in the exact persisted portfolio snapshot}; require the stored shock_map keys to equal I; branch_id=linear sets shocked_value_i=base_value_i*(1+price_shock_i), branch_id=option evaluates theoretical_option_value with the complete shocked parameter vector, and branch_id=fixed_income sets shocked_value_i=sum_{j in J_i}(CF_ij*shocked_discount_factor_ij) where J_i={the ordered cash flows for component i}; component_effect_i=(shocked_value_i-base_value_i)*fx_i_to_reporting_at_request_fx_timestamp+cash_flow_shock_i; custom_shock_effect=sum_{i in I}(component_effect_i); refuse every other branch_id, missing component, or extra shock_map key."},
         {"metric_id": "currency_shock_effect", "meaning": "Portfolio money change caused by explicit currency shocks.", "formula": "sum currency_exposure_c * explicit_fx_shock_c."},
-        {"metric_id": "volatility_shock_effect", "meaning": "Supported derivative value change under an explicit volatility-point shock.", "formula": "volatility_shock_effect = sum_i(quantity_i*multiplier_i*(theoretical_option_value_i(sigma_i+volatility_shock_i)-theoretical_option_value_i(sigma_i))); both calls use the same persisted pricing_model branch and other inputs; require sigma_i+volatility_shock_i>0 and refuse a non-option branch."},
-        {"metric_id": "rate_shock_effect", "meaning": "Supported position money change under an explicit rate shock.", "formula": "rate_shock_effect = sum_i(shocked_value_i-base_value_i); branch_id=option evaluates theoretical_option_value at r_i+rate_shock_i and r_i with all other inputs fixed, while branch_id=fixed_income evaluates sum_j(CF_ij*discount_factor_ij_shocked) and sum_j(CF_ij*discount_factor_ij_base); refuse every other branch_id."},
-        {"metric_id": "combined_scenario_effect", "meaning": "Total money effect from one explicit combined shock map.", "formula": "combined_scenario_effect = sum_i(shocked_value_i-base_value_i); apply the complete persisted shock map simultaneously, then branch_id=linear sets shocked_value_i=base_value_i*(1+price_shock_i)+cash_flow_shock_i, branch_id=option evaluates theoretical_option_value with every shocked input, and branch_id=fixed_income evaluates sum_j(CF_ij*shocked_discount_factor_ij); refuse every other branch_id and require scenario_contribution_i=shocked_value_i-base_value_i for exact reconciliation."},
-        {"metric_id": "scenario_contribution", "meaning": "One position or risk-driver contribution to total scenario effect.", "formula": "shocked_value_i - current_value_i; all contributions must sum to combined_scenario_effect."},
+        {"metric_id": "volatility_shock_effect", "meaning": "Supported derivative value change under an explicit volatility-point shock.", "formula": "I={the exact persisted ordered supported option components}; volatility_shock_effect=sum_{i in I}(quantity_i*multiplier_i*(theoretical_option_value_i(sigma_i+volatility_shock_i)-theoretical_option_value_i(sigma_i))); both calls use the same persisted pricing_model branch and other inputs; require sigma_i+volatility_shock_i>0."},
+        {"metric_id": "rate_shock_effect", "meaning": "Supported position money change under an explicit rate shock.", "formula": "I={the exact persisted ordered supported option and fixed-income components}; J_i={the ordered authoritative cash flows for fixed-income component i}; rate_shock_effect=sum_{i in I}(shocked_value_i-base_value_i); branch_id=option evaluates theoretical_option_value at r_i+rate_shock_i and r_i with all other inputs fixed, and branch_id=fixed_income evaluates sum_{j in J_i}(CF_ij*discount_factor_ij_shocked) and sum_{j in J_i}(CF_ij*discount_factor_ij_base); refuse every other branch_id."},
+        {"metric_id": "combined_scenario_effect", "meaning": "Total money effect from one explicit combined shock map.", "formula": "I={the ordered components in the exact persisted portfolio snapshot}; J_i={the ordered authoritative cash flows for fixed-income component i}; combined_scenario_effect=sum_{i in I}(shocked_value_i-base_value_i); apply the complete persisted shock map simultaneously, branch_id=linear sets shocked_value_i=base_value_i*(1+price_shock_i)+cash_flow_shock_i, branch_id=option evaluates theoretical_option_value with every shocked input, and branch_id=fixed_income evaluates sum_{j in J_i}(CF_ij*shocked_discount_factor_ij); refuse every other branch_id and require scenario_contribution_i=shocked_value_i-base_value_i for exact reconciliation."},
+        {"metric_id": "scenario_contribution", "meaning": "One position or risk-driver contribution to total scenario effect.", "formula": "I={the ordered components in the exact persisted portfolio snapshot}; for reported component i in I, scenario_contribution_i=shocked_value_i-current_value_i; require sum_{i in I}(scenario_contribution_i)=combined_scenario_effect."},
         {"metric_id": "inflation_adjusted_outcome", "meaning": "Nominal modeled outcome converted by an explicit numeric inflation assumption.", "formula": "nominal_outcome / (1+inflation_assumption)^years; refuse absent assumption."},
         {"metric_id": "sensitivity_lower", "meaning": "Lower modeled outcome at the declared lower assumption bound.", "formula": "E(lower_parameter_set, random_seed), where E is the exact equation bound by engine_name, engine_version, code_commit, and branch_id; lower_parameter_set is a complete ordered vector persisted in the request; refuse a missing parameter, changed branch_id, or changed seed."},
         {"metric_id": "sensitivity_upper", "meaning": "Upper modeled outcome at the declared upper assumption bound.", "formula": "E(upper_parameter_set, random_seed), where E is the exact equation bound by engine_name, engine_version, code_commit, and branch_id; upper_parameter_set is a complete ordered vector persisted in the request; refuse a missing parameter, changed branch_id, or changed seed."}
@@ -856,7 +856,7 @@
         {"metric_id": "bollinger_upper", "meaning": "Upper Bollinger band.", "formula": "rolling_mean + k*population_std over the exact window.", "output_unit": "price_currency", "unit_class": "monetary"},
         {"metric_id": "realized_volatility", "meaning": "Annualized realized volatility from declared bar returns.", "formula": "sample_std(log(P_t/P_(t-1))) * sqrt(periods_per_year)."},
         {"metric_id": "volume", "meaning": "Broker-reported eligible bar volume.", "formula": "sum eligible source Volume fields over the declared interval.", "output_unit": "units", "unit_class": "quantity", "default_metric_class": "broker_reported"},
-        {"metric_id": "volume_weighted_price", "meaning": "Price weighted by eligible bar volume.", "formula": "sum(price_i*volume_i)/sum(volume_i); refuse zero or missing volume.", "output_unit": "price_currency", "unit_class": "monetary"},
+        {"metric_id": "volume_weighted_price", "meaning": "Price weighted by eligible bar volume.", "formula": "I={the complete ordered eligible bars in the exact request interval}; volume_weighted_price=sum_{i in I}(price_i*volume_i)/sum_{i in I}(volume_i); refuse zero total volume.", "output_unit": "price_currency", "unit_class": "monetary"},
         {"metric_id": "support_level", "meaning": "Deterministic support from the declared local-minimum rule.", "formula": "most recent price satisfying the exact left/right local-minimum window and touch-count parameters.", "output_unit": "price_currency", "unit_class": "monetary"},
         {"metric_id": "resistance_level", "meaning": "Deterministic resistance from the declared local-maximum rule.", "formula": "most recent price satisfying the exact left/right local-maximum window and touch-count parameters.", "output_unit": "price_currency", "unit_class": "monetary"},
         {"metric_id": "relative_strength", "meaning": "Subject cumulative price return divided by proxy cumulative price return.", "formula": "(1+subject_return)/(1+proxy_return)-1 over aligned cutoffs."},
@@ -871,20 +871,20 @@
       "analysis_kinds": ["option_chain", "derivatives_model", "option_payoff", "option_greeks", "iv_surface", "derivatives_scenario", "futures_curve", "fx_forward_carry"],
       "metrics": [
         {"metric_id": "option_breakeven", "meaning": "Underlying expiry price where one supported strategy payoff equals zero.", "formula": "Solve sum leg_quantity*intrinsic_value(S,K,side) - net_premium - eligible_costs = 0 on each piecewise-linear interval.", "output_unit": "price_currency", "unit_class": "monetary"},
-        {"metric_id": "payoff_at_expiry", "meaning": "Supported strategy money payoff at expiry for one underlying price.", "formula": "sum quantity_i*multiplier_i*intrinsic_i(S_T) - net_premium - eligible_costs.", "output_unit": "reporting_currency", "unit_class": "monetary"},
+        {"metric_id": "payoff_at_expiry", "meaning": "Supported strategy money payoff at expiry for one underlying price.", "formula": "I={the exact persisted ordered supported strategy legs}; payoff_at_expiry=sum_{i in I}(quantity_i*multiplier_i*intrinsic_i(S_T))-net_premium-eligible_costs.", "output_unit": "reporting_currency", "unit_class": "monetary"},
         {"metric_id": "theoretical_option_value", "meaning": "Supported European option model value.", "formula": "pricing_model=black_scholes: d1=(ln(S/K)+(r-q+sigma^2/2)*T)/(sigma*sqrt(T)), d2=d1-sigma*sqrt(T), call=S*exp(-q*T)*N(d1)-K*exp(-r*T)*N(d2), put=K*exp(-r*T)*N(-d2)-S*exp(-q*T)*N(-d1). pricing_model=black_76: d1=(ln(F/K)+sigma^2*T/2)/(sigma*sqrt(T)), d2=d1-sigma*sqrt(T), call=exp(-r*T)*(F*N(d1)-K*N(d2)), put=exp(-r*T)*(K*N(-d2)-F*N(-d1)). Use black_scholes only for a persisted spot branch with S and q, black_76 only for a persisted forward_or_futures branch with F; T=0 returns call=max(reference-K,0) or put=max(K-reference,0), with reference=S or F; refuse every other branch or nonpositive K, reference, or sigma when T>0.", "output_unit": "price_currency", "unit_class": "monetary"},
         {"metric_id": "delta", "meaning": "First derivative of option value with respect to underlying price.", "formula": "pricing_model=black_scholes: call_delta=exp(-q*T)*N(d1), put_delta=exp(-q*T)*(N(d1)-1). pricing_model=black_76 with derivative taken with respect to F: call_delta=exp(-r*T)*N(d1), put_delta=exp(-r*T)*(N(d1)-1). Use d1 and the persisted branch from theoretical_option_value; refuse T<=0 or sigma<=0."},
         {"metric_id": "gamma", "meaning": "Second derivative of option value with respect to underlying price.", "formula": "pricing_model=black_scholes: gamma=exp(-q*T)*phi(d1)/(S*sigma*sqrt(T)). pricing_model=black_76 with derivative taken with respect to F: gamma=exp(-r*T)*phi(d1)/(F*sigma*sqrt(T)). Use d1 and the persisted branch from theoretical_option_value; refuse T<=0 or sigma<=0."},
         {"metric_id": "theta", "meaning": "Change in option value per declared one-day passage of time.", "formula": "pricing_model=black_scholes: call_theta_year=(-S*exp(-q*T)*phi(d1)*sigma/(2*sqrt(T))-r*K*exp(-r*T)*N(d2)+q*S*exp(-q*T)*N(d1)); put_theta_year=(-S*exp(-q*T)*phi(d1)*sigma/(2*sqrt(T))+r*K*exp(-r*T)*N(-d2)-q*S*exp(-q*T)*N(-d1)). pricing_model=black_76: theta_year=r*V-exp(-r*T)*F*phi(d1)*sigma/(2*sqrt(T)). theta=theta_year/days_per_year; use the persisted branch and refuse T<=0, sigma<=0, or days_per_year<=0."},
         {"metric_id": "vega", "meaning": "Change in option value for one volatility-point change.", "formula": "pricing_model=black_scholes: vega=S*exp(-q*T)*phi(d1)*sqrt(T)/100. pricing_model=black_76: vega=exp(-r*T)*F*phi(d1)*sqrt(T)/100. Use d1 and the persisted branch from theoretical_option_value; refuse T<=0 or sigma<=0."},
         {"metric_id": "rho", "meaning": "Change in option value for one rate-point change.", "formula": "pricing_model=black_scholes: call_rho=K*T*exp(-r*T)*N(d2)/100, put_rho=-K*T*exp(-r*T)*N(-d2)/100. pricing_model=black_76 with F held fixed: rho=-T*V/100. Use the persisted branch from theoretical_option_value; refuse T<=0 or sigma<=0."},
-        {"metric_id": "aggregate_delta", "meaning": "Quantity and multiplier weighted strategy delta.", "formula": "sum quantity_i*multiplier_i*delta_i."},
-        {"metric_id": "aggregate_gamma", "meaning": "Quantity and multiplier weighted strategy gamma.", "formula": "sum quantity_i*multiplier_i*gamma_i."},
-        {"metric_id": "aggregate_theta", "meaning": "Quantity and multiplier weighted strategy theta.", "formula": "sum quantity_i*multiplier_i*theta_i."},
-        {"metric_id": "aggregate_vega", "meaning": "Quantity and multiplier weighted strategy vega.", "formula": "sum quantity_i*multiplier_i*vega_i."},
-        {"metric_id": "aggregate_rho", "meaning": "Quantity and multiplier weighted strategy rho.", "formula": "sum quantity_i*multiplier_i*rho_i."},
+        {"metric_id": "aggregate_delta", "meaning": "Quantity and multiplier weighted strategy delta.", "formula": "I={the exact persisted ordered supported strategy legs}; aggregate_delta=sum_{i in I}(quantity_i*multiplier_i*delta_i)."},
+        {"metric_id": "aggregate_gamma", "meaning": "Quantity and multiplier weighted strategy gamma.", "formula": "I={the exact persisted ordered supported strategy legs}; aggregate_gamma=sum_{i in I}(quantity_i*multiplier_i*gamma_i)."},
+        {"metric_id": "aggregate_theta", "meaning": "Quantity and multiplier weighted strategy theta.", "formula": "I={the exact persisted ordered supported strategy legs}; aggregate_theta=sum_{i in I}(quantity_i*multiplier_i*theta_i)."},
+        {"metric_id": "aggregate_vega", "meaning": "Quantity and multiplier weighted strategy vega.", "formula": "I={the exact persisted ordered supported strategy legs}; aggregate_vega=sum_{i in I}(quantity_i*multiplier_i*vega_i)."},
+        {"metric_id": "aggregate_rho", "meaning": "Quantity and multiplier weighted strategy rho.", "formula": "I={the exact persisted ordered supported strategy legs}; aggregate_rho=sum_{i in I}(quantity_i*multiplier_i*rho_i)."},
         {"metric_id": "implied_volatility", "meaning": "Volatility that reproduces an eligible option price under the supported model.", "formula": "Let f(sigma)=theoretical_option_value(sigma)-observed_price under the persisted pricing_model branch. Require 0<sigma_min<sigma_max and f(sigma_min)*f(sigma_max)<=0. Set lo=sigma_min and hi=sigma_max; at each iteration mid=(lo+hi)/2, return mid when abs(f(mid))<=price_tolerance or hi-lo<=sigma_tolerance, otherwise set hi=mid when f(lo)*f(mid)<=0 and lo=mid otherwise; refuse an unbracketed root or max_iterations without convergence."},
-        {"metric_id": "iv_smile", "meaning": "Implied volatility at one expiry indexed by strike or delta.", "formula": "independently invert each eligible option then preserve ordered strike or delta pairs."},
+        {"metric_id": "iv_smile", "meaning": "Implied volatility at one expiry indexed by one explicit axis.", "formula": "axis_id=strike orders independently inverted eligible options by strike ascending; axis_id=delta orders them by signed delta ascending; refuse every other axis_id, duplicate axis coordinate, or mixed expiry."},
         {"metric_id": "iv_skew", "meaning": "Declared difference or slope across two implied-volatility points.", "formula": "(IV_b-IV_a)/(x_b-x_a) for exact declared strikes or deltas."},
         {"metric_id": "iv_term_structure", "meaning": "Implied volatility indexed by time to expiry at a declared moneyness or delta.", "formula": "eligible IV at each expiry after exact interpolation rule; refuse unsupported interpolation."},
         {"metric_id": "probability_range", "meaning": "Stated-distribution probability that expiry price lies inside explicit bounds.", "formula": "pricing_model=black_scholes: z(x)=(ln(x/S)-(r-q-sigma^2/2)*T)/(sigma*sqrt(T)); pricing_model=black_76: z(x)=(ln(x/F)+sigma^2*T/2)/(sigma*sqrt(T)); probability_range=N(z(upper))-N(z(lower)) using the persisted pricing_model branch; require 0<lower<upper, T>0, and sigma>0, otherwise refuse."},
@@ -901,7 +901,7 @@
       "definition_version": "1",
       "analysis_kinds": ["option_payoff", "pretrade_impact"],
       "metrics": [
-        {"metric_id": "option_margin", "meaning": "Saxo-reported or compatible modeled margin for the exact option strategy.", "formula": "branch_id=saxo_strategy sets option_margin to the unique Saxo strategy MarginImpact for the exact persisted legs and quantities; branch_id=additive_legs sets option_margin=sum_i(leg_margin_i) only when every source leg carries additive_margin=true under one source revision; refuse missing, mixed-revision, nonadditive, or every other branch_id."},
+        {"metric_id": "option_margin", "meaning": "Saxo-reported or explicitly additive modeled margin for the exact option strategy.", "formula": "I={the exact persisted ordered strategy legs}; branch_id=saxo_strategy sets option_margin to the unique Saxo strategy MarginImpact for I and its quantities; branch_id=additive_legs sets option_margin=sum_{i in I}(leg_margin_i) only when every source leg carries additive_margin=true under one source revision; refuse missing, mixed-revision, nonadditive, or every other branch_id."},
         {"metric_id": "option_cost", "meaning": "Total eligible premium and broker cost for the exact option strategy.", "formula": "option_cost = net_premium + commission_cost + spread_cost + financing_cost; every component is the exact-strategy reporting-currency amount at the persisted cutoff and absent components are zero only when the bound source explicitly reports zero."}
       ]
     },
@@ -928,7 +928,7 @@
       "analysis_kinds": ["position_sizing", "pretrade_impact"],
       "metrics": [
         {"metric_id": "concentration_limit", "meaning": "Explicit money cap implied by the user-confirmed concentration constraint.", "formula": "portfolio_denominator * explicit_maximum_weight."},
-        {"metric_id": "margin_constraint", "meaning": "Maximum money exposure allowed by compatible margin headroom.", "formula": "compatible_margin_headroom / margin_requirement_per_money_unit."},
+        {"metric_id": "margin_constraint", "meaning": "Maximum money exposure allowed by exact requested margin headroom.", "formula": "margin_constraint=max(0,margin_headroom)/margin_requirement_per_money_unit; require margin_headroom from the exact request-bound account scope and require positive margin_requirement_per_money_unit."},
         {"metric_id": "buying_power_constraint", "meaning": "Maximum money exposure allowed by authoritative Saxo buying power.", "formula": "eligible Saxo buying power less explicit reserved buffer and eligible costs."}
       ]
     },
@@ -938,11 +938,11 @@
       "analysis_kinds": ["portfolio_minimum_variance", "portfolio_risk_parity", "portfolio_comparison"],
       "metrics": [
         {"metric_id": "minimum_variance_objective", "meaning": "Portfolio variance at the feasible target weights.", "formula": "w^T Sigma w."},
-        {"metric_id": "risk_parity_contribution", "meaning": "Normalized component risk contribution for one target asset.", "formula": "component_risk_i / sum_j(component_risk_j)."},
+        {"metric_id": "risk_parity_contribution", "meaning": "Normalized component risk contribution for one target asset.", "formula": "I={the exact persisted ordered target assets}; total_component_risk=sum_{i in I}(component_risk_i); for asset a in I, risk_parity_contribution_a=component_risk_a/total_component_risk; refuse zero total_component_risk."},
         {
           "metric_id": "target_weight",
           "meaning": "Proposed feasible portfolio weight from a fully bound deterministic optimization problem.",
-          "formula": "w_i from the feasible optimum of the exact profile-bound objective, equality constraints, inequality constraints, and bounds; select the lexicographically smallest asset-ordered weight vector among optima within objective tolerance, and refuse infeasibility or residual above tolerance.",
+          "formula": "I={the exact persisted ordered target assets}; for each i in I, w_i is the component of the feasible optimum of the exact profile-bound objective, equality constraints, inequality constraints, and bounds; select the lexicographically smallest I-ordered weight vector among optima within objective tolerance, and refuse infeasibility or residual above tolerance.",
           "input_bindings": [
             {
               "input_id": "target_weight_problem",
@@ -953,10 +953,10 @@
             }
           ]
         },
-        {"metric_id": "current_weight", "meaning": "Current position exposure divided by the declared current portfolio denominator.", "formula": "current_exposure_i/current_total_exposure."},
-        {"metric_id": "current_to_target_delta", "meaning": "Required change from current to target weight.", "formula": "target_weight_i-current_weight_i."},
-        {"metric_id": "optimizer_turnover", "meaning": "One-way portfolio turnover implied by target weights.", "formula": "0.5*sum_i(abs(target_weight_i-current_weight_i))."},
-        {"metric_id": "optimizer_stability", "meaning": "Maximum absolute weight change under the declared small input perturbations.", "formula": "max_i(abs(weight_i_perturbed-weight_i_base)) across the exact perturbation set."}
+        {"metric_id": "current_weight", "meaning": "Current position exposure divided by the declared current portfolio denominator.", "formula": "I={the exact persisted ordered target assets}; for each i in I, current_weight_i=current_exposure_i/current_total_exposure; refuse zero denominator."},
+        {"metric_id": "current_to_target_delta", "meaning": "Required change from current to target weight.", "formula": "I={the exact persisted ordered target assets}; for each i in I, current_to_target_delta_i=target_weight_i-current_weight_i."},
+        {"metric_id": "optimizer_turnover", "meaning": "One-way portfolio turnover implied by target weights.", "formula": "I={the exact persisted ordered target assets}; optimizer_turnover=0.5*sum_{i in I}(abs(target_weight_i-current_weight_i))."},
+        {"metric_id": "optimizer_stability", "meaning": "Maximum absolute weight change under the declared small input perturbations.", "formula": "I={the exact persisted ordered target assets}; P={the complete persisted ordered perturbation set}; optimizer_stability=max_{i in I,p in P}(abs(weight_i_perturbed_p-weight_i_base))."}
       ]
     },
     {
@@ -964,12 +964,12 @@
       "definition_version": "1",
       "analysis_kinds": ["fixed_income"],
       "metrics": [
-        {"metric_id": "yield_to_maturity", "meaning": "Rate that discounts authoritative future cash flows to the declared price basis.", "formula": "Solve sum cashflow_i/(1+y/frequency)^(frequency*time_i) - declared_price = 0."},
-        {"metric_id": "modified_duration", "meaning": "First-order price sensitivity to yield.", "formula": "MacaulayDuration/(1+yield/frequency), with MacaulayDuration=sum(time_i*PV_i)/price."},
+        {"metric_id": "yield_to_maturity", "meaning": "Rate that discounts authoritative future cash flows to the declared price basis.", "formula": "I={the complete ordered authoritative future cash flows}; solve sum_{i in I}(cashflow_i/(1+y/frequency)^(frequency*time_i))-declared_price=0 for the persisted root interval; refuse no root or multiple roots."},
+        {"metric_id": "modified_duration", "meaning": "First-order price sensitivity to yield.", "formula": "I={the complete ordered authoritative future cash flows}; MacaulayDuration=sum_{i in I}(time_i*PV_i)/price; modified_duration=MacaulayDuration/(1+yield/frequency); refuse nonpositive price or denominator."},
         {
           "metric_id": "convexity",
           "meaning": "Second-order dirty-price sensitivity to yield for periodic compounding.",
-          "formula": "sum_i(CF_i * t_i * (t_i + 1/m) / (1 + y/m)^(m*t_i + 2)) / dirty_price, where m is compounding periods per year and t_i is years from settlement.",
+          "formula": "I={the complete ordered authoritative future cash flows}; convexity=sum_{i in I}(CF_i*t_i*(t_i+1/m)/(1+y/m)^(m*t_i+2))/dirty_price, where m is compounding periods per year and t_i is years from settlement; refuse nonpositive m, dirty_price, or denominator.",
           "input_bindings": [
             {
               "input_id": "convexity_cashflows",
@@ -982,7 +982,7 @@
         },
         {"metric_id": "bond_carry", "meaning": "Expected supported coupon and accrual effect over the explicit horizon with unchanged yield.", "formula": "coupon_cashflows + accrued_interest_change - financing_cost over the horizon."},
         {"metric_id": "roll_down", "meaning": "Modeled price effect of moving down an unchanged supported curve.", "formula": "price_at_shorter_remaining_maturity_same_curve - current_price."},
-        {"metric_id": "curve_shock_effect", "meaning": "Modeled money price change under an explicit curve shock.", "formula": "curve_shock_effect = quantity*contract_multiplier*(sum_i(CF_i*shocked_discount_factor_i)-sum_i(CF_i*base_discount_factor_i)); both discount-factor vectors use the same authoritative cash flows, settlement date, day-count basis, and ordered maturities; refuse a missing factor or mismatched vector."}
+        {"metric_id": "curve_shock_effect", "meaning": "Modeled money price change under an explicit curve shock.", "formula": "I={the complete ordered authoritative future cash flows}; curve_shock_effect=quantity*contract_multiplier*(sum_{i in I}(CF_i*shocked_discount_factor_i)-sum_{i in I}(CF_i*base_discount_factor_i)); both factor vectors use the same settlement date, day-count basis, and I-ordered maturities; refuse a missing factor or mismatched vector."}
       ]
     },
     {

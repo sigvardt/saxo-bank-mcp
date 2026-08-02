@@ -22,6 +22,7 @@ from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinitionCatalog,
     load_metric_definition_catalog,
 )
+from saxo_bank_mcp.analytics_models import MetricClass
 from saxo_bank_mcp.analytics_proof_profiles import (
     CoverageError,
     EngineProofBinding,
@@ -66,7 +67,23 @@ _PLACEHOLDER_FORMULA_PATTERNS = (
     r"\bwhen required\b",
     r"\bother declared eligible components\b",
     r"\buse the eligible saxo margin value\b",
+    r"\bcompatible\b",
+    r"\bfor each aligned period or the declared aggregate\b",
+    r"\bbound unbooked or settlement-reserved\b",
+    r"\brequested gross or net basis\b",
+    r"\beligible daily or period carrying costs\b",
+    r"\bdeclared bid, ask, or midpoint rule\b",
+    r"\bdeclared open, close, high, or low\b",
+    r"\bordered strike or delta pairs\b",
 )
+_INDEXED_SYMBOL_PATTERN = re.compile(
+    r"\b(?:sum|product|max|min)_([ijk])\b|\b[A-Za-z][A-Za-z0-9]*_([ijk])\b",
+)
+_INDEX_SET_PATTERNS = {
+    "i": re.compile(r"\bI\s*=\s*\{"),
+    "j": re.compile(r"\bJ(?:_i)?\s*=\s*\{"),
+    "k": re.compile(r"\bK(?:_[ij])?\s*=\s*\{"),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -171,13 +188,15 @@ def test_metric_definitions_are_versioned_and_machine_readable() -> None:
 
     named = catalog.by_id()
     assert named["money_weighted_return"].formula == (
-        "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / "
-        "(1+r)^t_i) + V_end/(1+r)^t_end; deposits are negative investor cash flows, "
+        "I={the complete ordered external cash-flow ledger entries}; solve for r>-1: "
+        "0=-V_start+sum_{i in I}((withdrawal_i-deposit_i)/(1+r)^t_i)+"
+        "V_end/(1+r)^t_end; deposits are negative investor cash flows, "
         "withdrawals and terminal value are positive."
     )
     assert named["xirr"].formula == (
-        "Solve for r > -1: 0 = -V_start + sum_i((withdrawal_i - deposit_i) / "
-        "(1+r)^((date_i-date_0).days/365)) + V_end/(1+r)^"
+        "I={the complete ordered external cash-flow ledger entries}; solve for r>-1: "
+        "0=-V_start+sum_{i in I}((withdrawal_i-deposit_i)/(1+r)^"
+        "((date_i-date_0).days/365))+V_end/(1+r)^"
         "((date_end-date_0).days/365); deposits are negative and withdrawals plus "
         "terminal value are positive."
     )
@@ -215,6 +234,68 @@ def test_metric_formulas_reject_placeholder_models_and_bind_exact_branches() -> 
     assert "call=exp(-r*T)*(F*N(d1)-K*N(d2))" in option_formula
 
 
+def test_metric_formulas_define_every_index_set_and_exact_cash_shock_equations() -> None:
+    named = load_metric_definition_catalog().by_id()
+    undefined_indexes = {
+        definition.metric_id: tuple(
+            sorted(
+                {
+                    match.group(1) or match.group(2)
+                    for match in _INDEXED_SYMBOL_PATTERN.finditer(definition.formula)
+                    if not _INDEX_SET_PATTERNS[match.group(1) or match.group(2)].search(
+                        definition.formula,
+                    )
+                },
+            ),
+        )
+        for definition in named.values()
+        if any(
+            not _INDEX_SET_PATTERNS[match.group(1) or match.group(2)].search(
+                definition.formula,
+            )
+            for match in _INDEXED_SYMBOL_PATTERN.finditer(definition.formula)
+        )
+    }
+
+    assert undefined_indexes == {}
+    assert named["cash_balance"].formula == (
+        "C={the unique balances_v1.CashBalance value for each Currency row whose account "
+        "scope exactly equals request account_scope at cutoff}; cash_balance=sum_{c in C} "
+        "CashBalance_c*fx_c_to_reporting_at_request_fx_timestamp; exclude TotalValue, "
+        "CashAvailableForTrading, MarginAvailableForTrading, FundsAvailableForSettlement, "
+        "FundsReservedForSettlement, and every other balance field; refuse a missing or "
+        "duplicate account/currency row."
+    )
+    assert named["custom_shock_effect"].formula == (
+        "I={the ordered components in the exact persisted portfolio snapshot}; require the "
+        "stored shock_map keys to equal I; branch_id=linear sets shocked_value_i="
+        "base_value_i*(1+price_shock_i), branch_id=option evaluates theoretical_option_value "
+        "with the complete shocked parameter vector, and branch_id=fixed_income sets "
+        "shocked_value_i=sum_{j in J_i}(CF_ij*shocked_discount_factor_ij) where J_i={the "
+        "ordered cash flows for component i}; component_effect_i=(shocked_value_i-"
+        "base_value_i)*fx_i_to_reporting_at_request_fx_timestamp+cash_flow_shock_i; "
+        "custom_shock_effect=sum_{i in I}(component_effect_i); refuse every other branch_id, "
+        "missing component, or extra shock_map key."
+    )
+
+
+def test_price_and_execution_metric_classes_match_their_calculation_origin() -> None:
+    named = load_metric_definition_catalog().by_id()
+    expected = {
+        "arrival_price": MetricClass.BROKER_REPORTED,
+        "midpoint_price": MetricClass.CALCULATED_VERIFIED,
+        "vwap": MetricClass.CALCULATED_VERIFIED,
+        "bar_approximation_price": MetricClass.APPROXIMATION,
+        "slippage": MetricClass.CALCULATED_VERIFIED,
+        "spread": MetricClass.CALCULATED_VERIFIED,
+        "quote_delay": MetricClass.CALCULATED_VERIFIED,
+        "volume": MetricClass.BROKER_REPORTED,
+        "volume_weighted_price": MetricClass.CALCULATED_VERIFIED,
+    }
+
+    assert {metric_id: named[metric_id].default_metric_class for metric_id in expected} == expected
+
+
 def test_checked_in_profiles_cover_every_declared_surface_and_current_source() -> None:
     definitions = load_metric_definition_catalog()
     catalog = load_proof_profile_catalog(definitions=definitions)
@@ -249,15 +330,18 @@ def test_checked_in_profiles_cover_every_declared_surface_and_current_source() -
             binding.contract_id: frozenset(binding.field_paths)
             for binding in profile.source_contracts
         }
+        expected_sources: dict[str, set[str]] = {}
         for metric_binding in profile.metric_definitions:
             for input_binding in definitions_by_id[metric_binding.metric_id].input_bindings:
                 if input_binding.source_contract_id is None:
                     continue
-                assert input_binding.source_contract_id in profile_sources
-                assert (
-                    set(input_binding.field_paths)
-                    <= profile_sources[input_binding.source_contract_id]
+                expected_sources.setdefault(input_binding.source_contract_id, set()).update(
+                    input_binding.field_paths,
                 )
+        assert profile_sources == {
+            contract_id: frozenset(field_paths)
+            for contract_id, field_paths in expected_sources.items()
+        }
         assert len(profile_sources) < source_count
 
     with pytest.raises(CoverageError) as inactive:
@@ -301,6 +385,69 @@ def test_active_profile_must_cover_each_metric_source_field() -> None:
 
     assert status.state is ProofState.STALE
     assert status.reason_code == "metric_source_binding_changed"
+
+
+def test_active_profile_rejects_an_overbroad_metric_source_field() -> None:
+    registry, profile, source_contracts = _active_registry()
+    overbroad_profile = profile.model_copy(
+        update={
+            "source_contracts": (
+                profile.source_contracts[0].model_copy(
+                    update={"field_paths": ("CloseBid", "Time", "UnexpectedField")},
+                ),
+            ),
+        },
+    )
+    overbroad_registry = ProofRegistry(
+        definitions=registry.definitions,
+        catalog=registry.catalog.model_copy(update={"profiles": (overbroad_profile,)}),
+    )
+
+    status = overbroad_registry.status(
+        profile.analysis_kind,
+        "1",
+        source_contracts,
+        source_revision="revision-a",
+        engine_versions={"saxo_analytics": ("1", "abcdef0")},
+        at=_NOW,
+    )
+
+    assert status.state is ProofState.STALE
+    assert status.reason_code == "metric_source_binding_changed"
+
+
+def test_declared_coverage_rejects_an_overbroad_profile_source_field() -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    owner = next(profile for profile in catalog.profiles if profile.source_contracts)
+    source = owner.source_contracts[0]
+    overbroad_owner = owner.model_copy(
+        update={
+            "source_contracts": (
+                source.model_copy(
+                    update={"field_paths": (*source.field_paths, "UnexpectedField")},
+                ),
+                *owner.source_contracts[1:],
+            ),
+        },
+    )
+    overbroad_catalog = catalog.model_copy(
+        update={
+            "profiles": tuple(
+                overbroad_owner if profile is owner else profile for profile in catalog.profiles
+            ),
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=definitions,
+            catalog=overbroad_catalog,
+        )
+
+    assert raised.value.matrix.overbroad_source_fields == (
+        f"{owner.analysis_kind}:{source.contract_id}.UnexpectedField",
+    )
 
 
 def test_clean_wheel_loads_metric_and_proof_catalogs_outside_repository(

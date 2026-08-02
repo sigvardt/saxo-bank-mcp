@@ -54,9 +54,7 @@ _SENSITIVE_FIELD_NAMES: Final = frozenset(
         "rawaccountidentifier",
     },
 )
-_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT: Final = (
-    r"raw[\s_-]+account[\s_-]+identifier"
-)
+_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT: Final = r"raw[\s_-]+account[\s_-]+identifier"
 _SENSITIVE_FIELD_PATTERN_TEXT: Final = rf"""(?:
     {_RAW_ACCOUNT_IDENTIFIER_LABEL_PATTERN_TEXT}
     |account[\s_-]?(?:id|key|number)
@@ -181,9 +179,7 @@ _CURRENCY_NAMES: Final[frozenset[str]] = frozenset(
 )
 _CURRENCY_CODE_PATTERN_TEXT: Final = "|".join(sorted(_ISO_4217_CURRENCY_CODES))
 _CURRENCY_NAME_PATTERN_TEXT: Final = "|".join(sorted(_CURRENCY_NAMES))
-_MONEY_AMOUNT_PATTERN_TEXT: Final = (
-    r"[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?"
-)
+_MONEY_AMOUNT_PATTERN_TEXT: Final = r"[-+]?(?:\d{1,3}(?:[,\s]\d{3})+|\d+)(?:\.\d+)?"
 _DIRECT_MONETARY_VALUE_PATTERN: Final = re.compile(
     rf"""(?x)
     (?:
@@ -215,9 +211,7 @@ _FINANCIAL_CONTEXT_PATTERN_TEXT: Final = r"""(?:
     |proceeds
     |profit
 )"""
-_FINANCIAL_LABEL_BINDING_PATTERN_TEXT: Final = (
-    r"(?:\s*[:=]\s*|\s+(?:is|was)\s+|\s+)"
-)
+_FINANCIAL_LABEL_BINDING_PATTERN_TEXT: Final = r"(?:\s*[:=]\s*|\s+(?:is|was)\s+|\s+)"
 _CONTEXTUAL_CURRENCY_NAME_VALUE_PATTERN: Final = re.compile(
     rf"""(?ix)
     \b{_FINANCIAL_CONTEXT_PATTERN_TEXT}\b
@@ -239,9 +233,20 @@ _AGGREGATE_ACCOUNT_SCOPES: Final = frozenset(
         "selected SIM account",
     },
 )
-_ACCOUNT_ALIAS_PATTERN_TEXT: Final = (
-    r"^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
+_RAW_ACCOUNT_VALUE_PARAMETER_NAMES: Final = frozenset(
+    {
+        "account_balance",
+        "account_cash",
+        "account_value",
+        "cash_balance",
+        "market_value",
+        "order_value",
+        "portfolio_value",
+        "position_value",
+        "trade_value",
+    },
 )
+_ACCOUNT_ALIAS_PATTERN_TEXT: Final = r"^aa_[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$"
 _ACCOUNT_ALIAS_PATTERN: Final = re.compile(_ACCOUNT_ALIAS_PATTERN_TEXT)
 
 
@@ -286,6 +291,37 @@ class QualityState(StrEnum):
     INVALID = "invalid"
 
 
+class AnalysisCalendar(StrEnum):
+    CALENDAR_DAYS = "calendar_days"
+    TRADING_DAYS = "trading_days"
+    ACTUAL_365 = "actual_365"
+    ACTUAL_360 = "actual_360"
+
+
+class FxConversionMethod(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    SAXO_SPOT_AT_TIMESTAMP = "saxo_spot_at_timestamp"
+    SAXO_PERIOD_END_AT_TIMESTAMP = "saxo_period_end_at_timestamp"
+    SAXO_TRANSACTION_AT_TIMESTAMP = "saxo_transaction_at_timestamp"
+
+
+class FxSource(StrEnum):
+    NOT_APPLICABLE = "not_applicable"
+    SAXO_OPENAPI = "saxo_openapi"
+
+
+class ModelScalarUnit(StrEnum):
+    RATIO = "ratio"
+    PERCENTAGE = "percentage"
+    BASIS_POINTS = "basis_points"
+    DAYS = "days"
+    YEARS = "years"
+    COUNT = "count"
+    VOLATILITY = "volatility"
+    RATE = "rate"
+    DIMENSIONLESS = "dimensionless"
+
+
 class HandleKind(StrEnum):
     INSTRUMENT_HANDLE = "instrument_handle"
     UNIVERSE_ID = "universe_id"
@@ -300,13 +336,9 @@ class HandleKind(StrEnum):
 _NON_MONETARY_UNITS: Final = MappingProxyType(
     {
         ValueUnitClass.RATIO: frozenset({"ratio"}),
-        ValueUnitClass.PERCENTAGE: frozenset(
-            {"percent", "percentage_points", "basis_points"}
-        ),
+        ValueUnitClass.PERCENTAGE: frozenset({"percent", "percentage_points", "basis_points"}),
         ValueUnitClass.COUNT: frozenset({"count"}),
-        ValueUnitClass.DURATION: frozenset(
-            {"seconds", "minutes", "hours", "days", "years"}
-        ),
+        ValueUnitClass.DURATION: frozenset({"seconds", "minutes", "hours", "days", "years"}),
         ValueUnitClass.QUANTITY: frozenset({"shares", "contracts", "units"}),
     }
 )
@@ -356,10 +388,7 @@ def _require_safe_account_scope(value: str) -> str:
         return value
     if _ACCOUNT_ALIAS_PATTERN.fullmatch(value) is not None:
         opaque_uuid = UUID(hex=value.removeprefix("aa_"))
-        if (
-            opaque_uuid.version == _OPAQUE_HANDLE_UUID_VERSION
-            and opaque_uuid.variant == RFC_4122
-        ):
+        if opaque_uuid.version == _OPAQUE_HANDLE_UUID_VERSION and opaque_uuid.variant == RFC_4122:
             return value
     raise PydanticCustomError(
         "analytics_safe_account_alias",
@@ -477,10 +506,7 @@ def _require_handle(value: str, *, kind: HandleKind) -> str:
             "analytics handle must be an opaque handle",
         )
     opaque_uuid = UUID(hex=payload)
-    if (
-        opaque_uuid.version != _OPAQUE_HANDLE_UUID_VERSION
-        or opaque_uuid.variant != RFC_4122
-    ):
+    if opaque_uuid.version != _OPAQUE_HANDLE_UUID_VERSION or opaque_uuid.variant != RFC_4122:
         raise PydanticCustomError(
             "analytics_opaque_handle",
             "analytics handle must be an opaque handle",
@@ -606,10 +632,7 @@ class DataQuality(_StrictAnalyticsModel):
 
     @model_validator(mode="after")
     def _validate_complete_quality(self) -> Self:
-        if (
-            self.state is QualityState.COMPLETE
-            and self.coverage.state is not QualityState.COMPLETE
-        ):
+        if self.state is QualityState.COMPLETE and self.coverage.state is not QualityState.COMPLETE:
             raise PydanticCustomError(
                 "analytics_complete_quality",
                 "complete quality requires complete coverage",
@@ -726,9 +749,7 @@ class AnalysisProvenance(_StrictAnalyticsModel):
 
     @model_validator(mode="after")
     def _validate_proof_lists(self) -> Self:
-        proof_profile_ids = tuple(
-            receipt.proof_profile_id for receipt in self.proof_receipts
-        )
+        proof_profile_ids = tuple(receipt.proof_profile_id for receipt in self.proof_receipts)
         if len(set(proof_profile_ids)) != len(proof_profile_ids):
             raise PydanticCustomError(
                 "analytics_duplicate_proof_profile",
@@ -737,9 +758,105 @@ class AnalysisProvenance(_StrictAnalyticsModel):
         return self
 
 
+class MetricCurrencyBinding(_StrictAnalyticsModel):
+    metric_id: ContractName
+    currency: IsoCurrencyCode
+
+
+class NamedModelParameter(_StrictAnalyticsModel):
+    name: ContractName
+    value: float = Field(ge=-1_000_000, le=1_000_000, allow_inf_nan=False)
+    unit: ModelScalarUnit
+
+    @field_validator("name")
+    @classmethod
+    def _reject_raw_account_value(cls, value: str) -> str:
+        if value in _RAW_ACCOUNT_VALUE_PARAMETER_NAMES:
+            raise PydanticCustomError(
+                "analytics_raw_account_model_value",
+                "model scalar cannot encode a raw account value",
+            )
+        return value
+
+
+class NamedModelAssumption(_StrictAnalyticsModel):
+    name: ContractName
+    value: float = Field(ge=-1_000_000, le=1_000_000, allow_inf_nan=False)
+    unit: ModelScalarUnit
+
+    @field_validator("name")
+    @classmethod
+    def _reject_raw_account_value(cls, value: str) -> str:
+        if value in _RAW_ACCOUNT_VALUE_PARAMETER_NAMES:
+            raise PydanticCustomError(
+                "analytics_raw_account_model_value",
+                "model scalar cannot encode a raw account value",
+            )
+        return value
+
+
+class AnalysisParameterBinding(_StrictAnalyticsModel):
+    start_at: UtcDateTime
+    end_at: UtcDateTime
+    as_of: UtcDateTime
+    benchmark_handle: InstrumentHandle | None
+    benchmark_fingerprint_sha256: Sha256Fingerprint | None
+    fx_method: FxConversionMethod
+    fx_source: FxSource
+    fx_timestamp: UtcDateTime | None
+    calendar: AnalysisCalendar
+    reporting_currency: IsoCurrencyCode
+    metric_currency_bindings: tuple[MetricCurrencyBinding, ...] = Field(max_length=206)
+    model_parameters: tuple[NamedModelParameter, ...] = Field(max_length=64)
+
+    @model_validator(mode="after")
+    def _validate_material_parameters(self) -> Self:
+        if self.start_at > self.end_at or self.end_at > self.as_of:
+            raise PydanticCustomError(
+                "analytics_parameter_range",
+                "analysis parameter timestamps must satisfy start_at <= end_at <= as_of",
+            )
+        if (self.benchmark_handle is None) != (self.benchmark_fingerprint_sha256 is None):
+            raise PydanticCustomError(
+                "analytics_benchmark_binding",
+                "benchmark handle and fingerprint must be supplied together",
+            )
+        if self.fx_method is FxConversionMethod.NOT_APPLICABLE:
+            if self.fx_source is not FxSource.NOT_APPLICABLE or self.fx_timestamp is not None:
+                raise PydanticCustomError(
+                    "analytics_fx_binding",
+                    "an unused FX conversion must have no source timestamp",
+                )
+        elif (
+            self.fx_source is not FxSource.SAXO_OPENAPI
+            or self.fx_timestamp is None
+            or self.fx_timestamp > self.as_of
+        ):
+            raise PydanticCustomError(
+                "analytics_fx_binding",
+                "an FX conversion requires an eligible Saxo timestamp at or before as_of",
+            )
+        metric_ids = tuple(binding.metric_id for binding in self.metric_currency_bindings)
+        if len(set(metric_ids)) != len(metric_ids) or metric_ids != tuple(sorted(metric_ids)):
+            raise PydanticCustomError(
+                "analytics_metric_currency_order",
+                "metric currency bindings must be unique and sorted by metric identifier",
+            )
+        parameter_names = tuple(parameter.name for parameter in self.model_parameters)
+        if len(set(parameter_names)) != len(parameter_names) or parameter_names != tuple(
+            sorted(parameter_names),
+        ):
+            raise PydanticCustomError(
+                "analytics_model_parameter_order",
+                "model parameters must be unique and sorted by name",
+            )
+        return self
+
+
 class _AnalysisRequestBase(_StrictAnalyticsModel):
     analysis_kind: ContractName
     dataset_id: DatasetId
+    parameters: AnalysisParameterBinding
 
 
 class MarketAnalysisRequest(_AnalysisRequestBase):
@@ -785,7 +902,7 @@ class AnalysisResult(_EvidenceAwareModel):
     warnings: tuple[AnalysisWarning, ...]
     data_quality: DataQuality
     provenance: AnalysisProvenance
-    assumptions: tuple[NonEmptyText, ...]
+    assumptions: tuple[NamedModelAssumption, ...] = Field(max_length=64)
     is_not_advice: Literal[True]
     is_not_forecast: bool
     model_distribution_only: bool
@@ -804,6 +921,19 @@ class AnalysisResult(_EvidenceAwareModel):
             raise PydanticCustomError(
                 "analytics_dataset_mismatch",
                 "request and provenance dataset handles must match",
+            )
+        if self.request.parameters.as_of != self.as_of:
+            raise PydanticCustomError(
+                "analytics_parameter_as_of_mismatch",
+                "request parameter as_of must match the result",
+            )
+        assumption_names = tuple(assumption.name for assumption in self.assumptions)
+        if len(set(assumption_names)) != len(assumption_names) or assumption_names != tuple(
+            sorted(assumption_names),
+        ):
+            raise PydanticCustomError(
+                "analytics_model_assumption_order",
+                "model assumptions must be unique and sorted by name",
             )
 
     def _validate_timestamps(self) -> None:
@@ -873,12 +1003,8 @@ class AnalysisResult(_EvidenceAwareModel):
                     "analytics_proof_engine_binding",
                     "proof receipt engine binding must match provenance",
                 )
-        proof_profiles = {
-            receipt.proof_profile_id for receipt in self.provenance.proof_receipts
-        }
-        if any(
-            metric.proof_profile_id not in proof_profiles for metric in self.metrics
-        ):
+        proof_profiles = {receipt.proof_profile_id for receipt in self.provenance.proof_receipts}
+        if any(metric.proof_profile_id not in proof_profiles for metric in self.metrics):
             raise PydanticCustomError(
                 "analytics_metric_proof_profile",
                 "every verified metric requires a listed proof profile",
@@ -1004,13 +1130,7 @@ type AnalysisOutput = (
     | AnalyticsDegradation
 )
 type PublicEvidenceValue = (
-    str
-    | int
-    | float
-    | bool
-    | None
-    | list[PublicEvidenceValue]
-    | dict[str, PublicEvidenceValue]
+    str | int | float | bool | None | list[PublicEvidenceValue] | dict[str, PublicEvidenceValue]
 )
 
 
@@ -1051,9 +1171,7 @@ def _is_safe_sensitive_value(value: str) -> bool:
 def _contains_forbidden_raw_account_identifier_assignment(value: str) -> bool:
     if any(
         not _is_safe_sensitive_value(match.group("value"))
-        for match in _RAW_ACCOUNT_IDENTIFIER_TOKEN_ASSIGNMENT_PATTERN.finditer(
-            value
-        )
+        for match in _RAW_ACCOUNT_IDENTIFIER_TOKEN_ASSIGNMENT_PATTERN.finditer(value)
     ):
         return True
     return any(
@@ -1111,14 +1229,14 @@ def _contains_forbidden_public_value(value: PublicEvidenceValue) -> bool:
         return False
     if isinstance(value, list):
         return any(_contains_forbidden_public_value(child) for child in value)
-    return isinstance(value, str) and _string_contains_forbidden_public_value(
-        value
-    )
+    return isinstance(value, str) and _string_contains_forbidden_public_value(value)
 
 
 __all__ = (
     "ActiveProofReceipt",
+    "AnalysisCalendar",
     "AnalysisOutput",
+    "AnalysisParameterBinding",
     "AnalysisProvenance",
     "AnalysisRequest",
     "AnalysisResult",
@@ -1130,12 +1248,18 @@ __all__ = (
     "DataCoverage",
     "DataQuality",
     "DatasetSummary",
+    "FxConversionMethod",
+    "FxSource",
     "HandleKind",
     "InstrumentAnalysisRequest",
     "JobSummary",
     "MarketAnalysisRequest",
     "MetricClass",
+    "MetricCurrencyBinding",
     "MetricValue",
+    "ModelScalarUnit",
+    "NamedModelAssumption",
+    "NamedModelParameter",
     "PortfolioAnalysisRequest",
     "ProofEngineBinding",
     "ProofSourceBinding",

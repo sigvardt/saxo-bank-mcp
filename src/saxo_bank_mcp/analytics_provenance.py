@@ -177,6 +177,9 @@ def analysis_parameters_sha256(result: AnalysisResult) -> str:
         {
             "account_scope": result.account_scope,
             "analysis_kind": result.analysis_kind,
+            "assumptions": [
+                assumption.model_dump(mode="json") for assumption in result.assumptions
+            ],
             "as_of": result.as_of.isoformat(),
             "request": result.request.model_dump(mode="json"),
             "schema_version": result.schema_version,
@@ -489,9 +492,26 @@ def _verify_result_metric_bindings(
         raise AnalysisReplayRefused("metric_not_bound")
     if set(result_metric_ids) != required_metric_ids:
         raise AnalysisReplayRefused("required_metric_missing")
+    requested_price_currencies = {
+        binding.metric_id: binding.currency
+        for binding in result.request.parameters.metric_currency_bindings
+    }
+    expected_price_currency_metrics = {
+        metric_id
+        for metric_id in result_metric_ids
+        if definitions[metric_id].unit_class is ValueUnitClass.MONETARY
+        and definitions[metric_id].output_unit == "price_currency"
+    }
+    if set(requested_price_currencies) != expected_price_currency_metrics:
+        raise AnalysisReplayRefused("metric_currency_mismatch")
     for metric in result.metrics:
         definition = definitions[metric.metric_id]
-        _verify_metric_semantics(metric, definition)
+        _verify_metric_semantics(
+            metric,
+            definition,
+            reporting_currency=result.request.parameters.reporting_currency,
+            price_currency=requested_price_currencies.get(metric.metric_id),
+        )
         if metric.proof_profile_id != profile.proof_profile_id:
             raise AnalysisReplayRefused("proof_receipt_changed")
 
@@ -499,6 +519,9 @@ def _verify_result_metric_bindings(
 def _verify_metric_semantics(
     metric: MetricValue,
     definition: MetricDefinition,
+    *,
+    reporting_currency: str,
+    price_currency: str | None,
 ) -> None:
     if metric.metric_class is not definition.default_metric_class:
         raise AnalysisReplayRefused("metric_class_mismatch")
@@ -506,13 +529,16 @@ def _verify_metric_semantics(
         raise AnalysisReplayRefused("metric_unit_class_mismatch")
     if metric.unit != definition.output_unit:
         raise AnalysisReplayRefused("metric_unit_mismatch")
+    expected_currency = (
+        reporting_currency
+        if definition.output_unit == "reporting_currency"
+        else price_currency
+        if definition.output_unit == "price_currency"
+        else None
+    )
     monetary = definition.unit_class is ValueUnitClass.MONETARY
-    allowed_monetary_unit = definition.output_unit in {
-        "price_currency",
-        "reporting_currency",
-    }
-    if (monetary and (metric.currency is None or not allowed_monetary_unit)) or (
-        not monetary and metric.currency is not None
+    if (monetary and (expected_currency is None or metric.currency != expected_currency)) or (
+        not monetary and (metric.currency is not None or price_currency is not None)
     ):
         raise AnalysisReplayRefused("metric_currency_mismatch")
 

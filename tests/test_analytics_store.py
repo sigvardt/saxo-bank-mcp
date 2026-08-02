@@ -34,12 +34,16 @@ from saxo_bank_mcp.analytics_migrations import (
 )
 from saxo_bank_mcp.analytics_models import (
     ActiveProofReceipt,
+    AnalysisCalendar,
+    AnalysisParameterBinding,
     AnalysisProvenance,
     AnalysisResult,
     AnalysisStatus,
     ArtifactSummary,
     DataCoverage,
     DataQuality,
+    FxConversionMethod,
+    FxSource,
     HandleKind,
     InstrumentAnalysisRequest,
     MarketAnalysisRequest,
@@ -98,6 +102,23 @@ _REQUIRED_TABLES = {
     "transactions",
     "universes",
 }
+
+
+def _analysis_parameters(*, as_of: datetime) -> AnalysisParameterBinding:
+    return AnalysisParameterBinding(
+        start_at=_SOURCE_AT,
+        end_at=_SOURCE_AT,
+        as_of=as_of,
+        benchmark_handle=None,
+        benchmark_fingerprint_sha256=None,
+        fx_method=FxConversionMethod.NOT_APPLICABLE,
+        fx_source=FxSource.NOT_APPLICABLE,
+        fx_timestamp=None,
+        calendar=AnalysisCalendar.CALENDAR_DAYS,
+        reporting_currency="DKK",
+        metric_currency_bindings=(),
+        model_parameters=(),
+    )
 
 
 class _ProcessEvent(Protocol):
@@ -279,6 +300,7 @@ def _analysis_result(  # noqa: PLR0913
             request_kind="market",
             analysis_kind="row_count",
             dataset_id=dataset_id,
+            parameters=_analysis_parameters(as_of=_SOURCE_AT + timedelta(minutes=2)),
         ),
         account_scope=account_scope,
         as_of=_SOURCE_AT + timedelta(minutes=2),
@@ -1182,6 +1204,7 @@ def test_instrument_analysis_rejects_a_missing_instrument_reference(
             request_kind="instrument",
             analysis_kind="row_count",
             dataset_id=dataset.dataset_id,
+            parameters=_analysis_parameters(as_of=_SOURCE_AT + timedelta(minutes=2)),
             instrument_handles=(new_safe_handle(HandleKind.INSTRUMENT_HANDLE),),
         )
         result = _analysis_result(
@@ -1207,6 +1230,7 @@ def test_portfolio_analysis_rejects_a_missing_snapshot_reference(
             request_kind="portfolio",
             analysis_kind="row_count",
             dataset_id=dataset.dataset_id,
+            parameters=_analysis_parameters(as_of=_SOURCE_AT + timedelta(minutes=2)),
             portfolio_snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
         )
         result = _analysis_result(
@@ -1383,6 +1407,7 @@ def test_portfolio_analysis_rejects_a_snapshot_from_another_dataset(
             request_kind="portfolio",
             analysis_kind="row_count",
             dataset_id=second_dataset.dataset_id,
+            parameters=_analysis_parameters(as_of=_SOURCE_AT + timedelta(minutes=2)),
             portfolio_snapshot_id=snapshot_id,
         )
         result = _analysis_result(
