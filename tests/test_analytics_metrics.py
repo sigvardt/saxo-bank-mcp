@@ -847,6 +847,27 @@ def test_mwr_and_xirr_include_declared_rate_boundaries(
 
 
 @pytest.mark.parametrize(
+    ("terminal_flow", "expected_rate"),
+    [
+        (math.nextafter(1e-12, math.inf), -0.999999999999),
+        (math.nextafter(1_000_001.0, -math.inf), 999_999.9999999999),
+    ],
+)
+def test_mwr_and_xirr_include_roots_one_ulp_inside_declared_boundaries(
+    terminal_flow: float,
+    expected_rate: float,
+) -> None:
+    flows = (-1.0, terminal_flow)
+    periods = (0.0, 1.0)
+    economic_dates = (date(2021, 1, 1), date(2022, 1, 1))
+
+    _assert_close(money_weighted_return(flows, periods), expected_rate)
+    _assert_close(xirr(flows, economic_dates), expected_rate)
+    _assert_close(reference_money_weighted_return(flows, periods), expected_rate)
+    _assert_close(reference_xirr(flows, economic_dates), expected_rate)
+
+
+@pytest.mark.parametrize(
     "terminal_flow",
     [9.999999999995e-13, 1e-13, 1_000_001.0000005, 2_000_001.0],
 )
@@ -865,6 +886,25 @@ def test_mwr_and_xirr_refuse_roots_outside_declared_boundaries(
         reference_money_weighted_return(flows, periods)
     with pytest.raises(ValueError, match="no bounded real solution"):
         reference_xirr(flows, economic_dates)
+
+
+def test_mwr_and_xirr_group_same_timestamp_extremes_without_overflow() -> None:
+    flows = (-1e308, -1e308, 1e308, 1e308)
+    periods = (0.0, 0.0, 0.0, 1.0)
+    economic_dates = (
+        date(2021, 1, 1),
+        date(2021, 1, 1),
+        date(2021, 1, 1),
+        date(2022, 1, 1),
+    )
+
+    for actual in (
+        money_weighted_return(flows, periods),
+        xirr(flows, economic_dates),
+        reference_money_weighted_return(flows, periods),
+        reference_xirr(flows, economic_dates),
+    ):
+        assert abs(actual) < _ROOT_RESIDUAL_TOLERANCE
 
 
 def test_aligned_and_capture_edges_refuse_partial_or_undefined_results() -> None:

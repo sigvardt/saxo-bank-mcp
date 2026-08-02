@@ -635,6 +635,10 @@ def _validate_rate_inputs(flows: FloatVector, periods: FloatVector) -> None:
 def _solve_discount_rate(flows: FloatVector, periods: FloatVector) -> float:
     lower_y = math.log(_MIN_ONE_PLUS_RATE)
     upper_y = math.log1p(_MAX_RATE)
+    boundary_signs = (
+        _high_precision_boundary_sign(flows, periods, lower=True),
+        _high_precision_boundary_sign(flows, periods, lower=False),
+    )
     coefficients, normalized_periods = _normalized_discount_terms(flows, periods)
     if coefficients.size == 0:
         raise FinancialMetricError("money-weighted return has multiple bounded real solutions")
@@ -643,18 +647,8 @@ def _solve_discount_rate(flows: FloatVector, periods: FloatVector) -> float:
         normalized_periods,
         lower_y,
         upper_y,
+        boundary_signs=boundary_signs,
     )
-    roots = [
-        root
-        for root in roots
-        if _discount_root_is_inside_declared_boundaries(
-            flows,
-            periods,
-            root[0],
-            lower_y,
-            upper_y,
-        )
-    ]
     if not roots:
         raise FinancialMetricError("money-weighted return has no bounded real solution")
     if len(roots) != 1 or roots[0][1]:
@@ -662,26 +656,12 @@ def _solve_discount_rate(flows: FloatVector, periods: FloatVector) -> float:
     return _finite_output_scalar(math.expm1(roots[0][0]), "money-weighted return")
 
 
-def _discount_root_is_inside_declared_boundaries(
-    flows: FloatVector,
-    periods: FloatVector,
-    root: float,
-    lower: float,
-    upper: float,
-) -> bool:
-    if root == lower:
-        return _high_precision_boundary_root(flows, periods, lower=True)
-    if root == upper:
-        return _high_precision_boundary_root(flows, periods, lower=False)
-    return True
-
-
-def _high_precision_boundary_root(
+def _high_precision_boundary_sign(
     flows: FloatVector,
     periods: FloatVector,
     *,
     lower: bool,
-) -> bool:
+) -> int:
     with localcontext() as context:
         context.prec = _BOUNDARY_DECIMAL_PRECISION
         growth = Decimal("1e-12") if lower else Decimal(1_000_001)
@@ -700,7 +680,10 @@ def _high_precision_boundary_root(
         )
     boundary_is_root = abs(boundary_value) <= _BOUNDARY_ROOT_TOLERANCE * boundary_magnitude
     inside_is_distinct = abs(inside_value) > _BOUNDARY_ROOT_TOLERANCE * inside_magnitude
-    return boundary_is_root and inside_is_distinct
+    if boundary_is_root and inside_is_distinct:
+        return 0
+    signed_value = inside_value if boundary_is_root else boundary_value
+    return -1 if signed_value < 0 else 1
 
 
 def _decimal_discounted_value(
@@ -731,8 +714,9 @@ def _normalized_discount_terms(
     periods: FloatVector,
 ) -> tuple[FloatVector, FloatVector]:
     unique_periods, inverse = np.unique(periods, return_inverse=True)
+    flow_scale = float(np.max(np.abs(flows)))
     combined_flows = np.zeros(unique_periods.size, dtype=np.float64)
-    np.add.at(combined_flows, inverse, flows)
+    np.add.at(combined_flows, inverse, flows / flow_scale)
     nonzero = combined_flows != 0.0
     if not np.any(nonzero):
         return (
@@ -754,6 +738,8 @@ def _isolate_discount_roots(
     periods: FloatVector,
     lower: float,
     upper: float,
+    *,
+    boundary_signs: tuple[int, int] | None = None,
 ) -> list[tuple[float, bool]]:
     if coefficients.size < _MIN_SAMPLE_COUNT or _sign_changes(coefficients) == 0:
         return []
@@ -775,9 +761,14 @@ def _isolate_discount_roots(
     critical_points = [root for root, _ in critical_roots]
     points = [lower, *critical_points, upper]
     roots: list[tuple[float, bool]] = []
-    for boundary in (lower, upper):
+    for index, boundary in enumerate((lower, upper)):
         value, magnitude = _scaled_discounted_value(coefficients, periods, boundary)
-        if _is_discount_root(value, magnitude):
+        boundary_is_root = (
+            _is_discount_root(value, magnitude)
+            if boundary_signs is None
+            else boundary_signs[index] == 0
+        )
+        if boundary_is_root:
             _append_discount_root(roots, boundary, repeated=False)
     for critical_point in critical_points:
         value, magnitude = _scaled_discounted_value(
@@ -798,18 +789,26 @@ def _isolate_discount_roots(
             periods,
             right,
         )
-        if _is_discount_root(left_value, left_magnitude) or _is_discount_root(
-            right_value,
-            right_magnitude,
-        ):
+        left_sign = (
+            boundary_signs[0]
+            if boundary_signs is not None and left == lower
+            else _discount_sign(left_value, left_magnitude)
+        )
+        right_sign = (
+            boundary_signs[1]
+            if boundary_signs is not None and right == upper
+            else _discount_sign(right_value, right_magnitude)
+        )
+        if left_sign == 0 or right_sign == 0:
             continue
-        if math.copysign(1.0, left_value) == math.copysign(1.0, right_value):
+        if left_sign == right_sign:
             continue
         root = _bisect_discounted_value(
             coefficients,
             periods,
             left,
             right,
+            lower_sign=left_sign,
         )
         _append_discount_root(roots, root, repeated=False)
     return roots
@@ -840,6 +839,12 @@ def _is_discount_root(value: float, magnitude: float) -> bool:
     return abs(value) <= _ROOT_RELATIVE_TOLERANCE * magnitude
 
 
+def _discount_sign(value: float, magnitude: float) -> int:
+    if _is_discount_root(value, magnitude):
+        return 0
+    return -1 if value < 0.0 else 1
+
+
 def _append_discount_root(
     roots: list[tuple[float, bool]],
     candidate: float,
@@ -864,8 +869,13 @@ def _bisect_discounted_value(
     periods: FloatVector,
     lower: float,
     upper: float,
+    *,
+    lower_sign: int | None = None,
 ) -> float:
     lower_value, _ = _scaled_discounted_value(coefficients, periods, lower)
+    active_lower_sign = lower_sign
+    if active_lower_sign is None:
+        active_lower_sign = -1 if lower_value < 0.0 else 1
     for _ in range(_ROOT_ITERATIONS):
         middle = (lower + upper) / 2.0
         middle_value, middle_magnitude = _scaled_discounted_value(
@@ -877,9 +887,11 @@ def _bisect_discounted_value(
             _ROOT_INTERVAL_TOLERANCE * max(1.0, abs(middle))
         ):
             return middle
-        if math.copysign(1.0, lower_value) == math.copysign(1.0, middle_value):
+        middle_sign = -1 if middle_value < 0.0 else 1
+        if active_lower_sign == middle_sign:
             lower = middle
             lower_value = middle_value
+            active_lower_sign = middle_sign
         else:
             upper = middle
     return (lower + upper) / 2.0
