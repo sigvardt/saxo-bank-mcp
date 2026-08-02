@@ -907,6 +907,22 @@ def test_mwr_and_xirr_group_same_timestamp_extremes_without_overflow() -> None:
         assert abs(actual) < _ROOT_RESIDUAL_TOLERANCE
 
 
+def test_mwr_and_xirr_preserve_small_same_timestamp_residuals() -> None:
+    flows = (1e308, 1e250, -1e308, -2e250)
+    periods = (0.0, 0.0, 0.0, 1.0)
+    economic_dates = (
+        date(2021, 1, 1),
+        date(2021, 1, 1),
+        date(2021, 1, 1),
+        date(2022, 1, 1),
+    )
+
+    _assert_close(money_weighted_return(flows, periods), 1.0)
+    _assert_close(xirr(flows, economic_dates), 1.0)
+    _assert_close(reference_money_weighted_return(flows, periods), 1.0)
+    _assert_close(reference_xirr(flows, economic_dates), 1.0)
+
+
 def test_aligned_and_capture_edges_refuse_partial_or_undefined_results() -> None:
     with pytest.raises(FinancialMetricError):
         active_returns([0.1], [0.1, 0.2])

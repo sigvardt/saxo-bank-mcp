@@ -715,8 +715,14 @@ def _normalized_discount_terms(
 ) -> tuple[FloatVector, FloatVector]:
     unique_periods, inverse = np.unique(periods, return_inverse=True)
     flow_scale = float(np.max(np.abs(flows)))
-    combined_flows = np.zeros(unique_periods.size, dtype=np.float64)
-    np.add.at(combined_flows, inverse, flows / flow_scale)
+    scaled_flows = flows / flow_scale
+    combined_flows = np.asarray(
+        [
+            math.fsum(float(value) for value in scaled_flows[inverse == index])
+            for index in range(unique_periods.size)
+        ],
+        dtype=np.float64,
+    )
     nonzero = combined_flows != 0.0
     if not np.any(nonzero):
         return (
