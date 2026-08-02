@@ -16,7 +16,6 @@ from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinitionBinding,
     load_metric_definition_catalog,
 )
-from saxo_bank_mcp.analytics_migrations import LATEST_SCHEMA_VERSION, migrate_store
 from saxo_bank_mcp.analytics_models import (
     ActiveProofReceipt,
     AnalysisCalendar,
@@ -57,11 +56,18 @@ from saxo_bank_mcp.analytics_provenance import (
     replay_analysis,
 )
 from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha256
+from saxo_bank_mcp.analytics_store import AnalyticsStore
 
 _NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
-_SOURCE_SHA = "a" * 64
-_PAGE_ID = f"sp_{'b' * 64}"
-_DATASET_FINGERPRINT = "c" * 64
+_SOURCE_SHA = "29f480ba97c45faac440876272afd3c865afcb558c5a9ee9c089d26d1ed46d09"
+_PAGE_ID = "sp_679644729f339eae7292daa7c34077dd69d855b8e858a9506dd997f7eb013a3c"
+_DATASET_FINGERPRINT = "73c3374786b35a8265ae0e80611cf6a1e4b9997011621eede3301f5c661a2a2e"
+_SOURCE_PAYLOAD = {
+    "rows": [
+        {"CloseBid": 100.0, "Time": "2026-08-01T11:58:00Z"},
+        {"CloseBid": 101.0, "Time": "2026-08-01T11:59:00Z"},
+    ],
+}
 _ANALYSIS_PARAMETERS_DOMAIN = b"saxo-bank-mcp:analysis-parameters:v1\x00"
 _ANALYSIS_ID_LENGTH = 35
 _OPAQUE_UUID_VERSION = 4
@@ -331,7 +337,36 @@ def _engine_versions() -> dict[str, object]:
 
 
 def _seed_store(config: AnalyticsConfig, result: AnalysisResult) -> None:
-    migrate_store(config.paths.store_path, LATEST_SCHEMA_VERSION)
+    store = AnalyticsStore.open(config)
+    try:
+        page = store.put_source_page(
+            source_kind="chart",
+            page_key="fixture",
+            source_revision="revision-a",
+            source_native_revision="native-a",
+            contract_name="chart_v3",
+            contract_sha256=_SOURCE_SHA,
+            payload=_SOURCE_PAYLOAD,
+            row_count=2,
+            source_timestamp=_NOW - timedelta(minutes=1),
+            account_scope=None,
+            instrument_handle=None,
+        )
+        dataset = store.create_dataset(
+            dataset_id=result.provenance.dataset_id,
+            account_scope="aggregate",
+            source_scope="saxo_openapi",
+            source_revision="revision-a",
+            source_page_ids=(page.page_id,),
+            created_at=_NOW,
+            coverage_start=_NOW - timedelta(days=2),
+            coverage_end=_NOW - timedelta(minutes=1),
+            quality_state=QualityState.COMPLETE,
+        )
+        assert page.page_id == _PAGE_ID
+        assert dataset.fingerprint_sha256 == _DATASET_FINGERPRINT
+    finally:
+        store.close()
     result_json = json.dumps(
         result.model_dump(mode="json"),
         allow_nan=False,
@@ -339,56 +374,8 @@ def _seed_store(config: AnalyticsConfig, result: AnalysisResult) -> None:
         separators=(",", ":"),
         sort_keys=True,
     )
-    payload_json = "{}"
     connection = duckdb.connect(str(config.paths.store_path))
     try:
-        connection.execute(
-            """
-            INSERT INTO source_contracts
-            VALUES ('sc_fixture', 'saxo_openapi', 'chart_v3', ?, ?,)
-            """,
-            (_SOURCE_SHA, _NOW),
-        )
-        connection.execute(
-            """
-            INSERT INTO source_pages (
-                page_id, source_kind, page_key, source_revision,
-                source_native_revision, contract_id, account_scope,
-                instrument_handle, instrument_scope_sha256, source_timestamp,
-                ingested_at, row_count, byte_count, logical_key_sha256,
-                fingerprint_sha256, payload_sha256, payload_json
-            ) VALUES (?, 'chart', 'fixture', 'revision-a', 'native-a',
-                'sc_fixture', NULL, NULL, NULL, ?, ?, 0, 2, ?, ?, ?, ?)
-            """,
-            (
-                _PAGE_ID,
-                _NOW - timedelta(minutes=1),
-                _NOW,
-                "d" * 64,
-                "e" * 64,
-                _sha256(payload_json),
-                payload_json,
-            ),
-        )
-        connection.execute(
-            """
-            INSERT INTO datasets VALUES (
-                ?, 'aggregate', 'saxo_openapi', 'revision-a', ?, ?, ?,
-                'complete', 2, 2, ?
-            )
-            """,
-            (
-                result.provenance.dataset_id,
-                _NOW,
-                _NOW - timedelta(days=2),
-                _NOW - timedelta(minutes=1),
-                _DATASET_FINGERPRINT,
-            ),
-        )
-        connection.execute(
-            "INSERT INTO dataset_source_pages VALUES (?, ?)",
-            (result.provenance.dataset_id, _PAGE_ID),
-        )
         connection.execute(
             """
             INSERT INTO analyses VALUES (
@@ -594,6 +581,57 @@ def test_replay_reads_owner_store_and_returns_byte_equal_result(tmp_path: Path) 
     assert second == result
     assert first.model_dump_json() == second.model_dump_json()
     assert stat.S_IMODE(config.paths.store_path.stat().st_mode) == _OWNER_FILE_MODE
+
+
+@pytest.mark.parametrize("mutation", ["payload", "lineage"])
+def test_replay_refuses_changed_bound_source_material(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    config = _config(tmp_path)
+    result = _analysis_result()
+    registry, _ = _registry()
+    _seed_store(config, result)
+    replacement_page_id: str | None = None
+    if mutation == "lineage":
+        store = AnalyticsStore.open(config)
+        try:
+            replacement = store.put_source_page(
+                source_kind="chart",
+                page_key="replacement",
+                source_revision="revision-a",
+                source_native_revision="native-a",
+                contract_name="chart_v3",
+                contract_sha256=_SOURCE_SHA,
+                payload={"rows": [_SOURCE_PAYLOAD["rows"][0]]},
+                row_count=1,
+                source_timestamp=_NOW - timedelta(minutes=1),
+                account_scope=None,
+                instrument_handle=None,
+            )
+            replacement_page_id = replacement.page_id
+        finally:
+            store.close()
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        if mutation == "payload":
+            connection.execute(
+                "UPDATE source_pages SET payload_json = '{\"rows\":[]}' WHERE page_id = ?",
+                (_PAGE_ID,),
+            )
+        else:
+            assert replacement_page_id is not None
+            connection.execute(
+                "UPDATE dataset_source_pages SET page_id = ? WHERE dataset_id = ?",
+                (replacement_page_id, result.provenance.dataset_id),
+            )
+    finally:
+        connection.close()
+
+    with pytest.raises(AnalysisReplayRefused) as raised:
+        replay_analysis(result.analysis_id, config=config, registry=registry, at=_NOW)
+
+    assert raised.value.reason_code == "dataset_integrity_changed"
 
 
 def test_replay_refuses_invalidated_or_revised_source(tmp_path: Path) -> None:

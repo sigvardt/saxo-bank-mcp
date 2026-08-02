@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -23,6 +24,12 @@ from saxo_bank_mcp.analytics_models import (
     ValueUnitClass,
 )
 from saxo_bank_mcp.analytics_proof_profiles import ProofProfile, ProofRegistry, ProofState
+from saxo_bank_mcp.analytics_store import (
+    AnalyticsStore,
+    StoreConflictError,
+    StoreError,
+    StoreNotFoundError,
+)
 
 _ANALYSIS_ID_DOMAIN: Final = b"saxo-bank-mcp:analysis-id:v1\x00"
 _ANALYSIS_INPUT_DOMAIN: Final = b"saxo-bank-mcp:analysis-input:v1\x00"
@@ -262,7 +269,10 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
         )
     except duckdb.Error as error:
         raise AnalysisReplayRefused("store_unreadable") from error
+    transaction_open = False
     try:
+        connection.execute("BEGIN TRANSACTION")
+        transaction_open = True
         row = connection.execute(
             """
             SELECT dataset_id, analysis_kind, status, source_revision,
@@ -301,23 +311,26 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             raise AnalysisReplayRefused("analysis_not_replayable")
         if checked_at >= result.valid_until:
             raise AnalysisReplayRefused("analysis_result_expired")
-        dataset_row = connection.execute(
-            """
-            SELECT source_scope, source_revision, quality_state, fingerprint_sha256
-            FROM datasets
-            WHERE dataset_id = ?
-            """,
+        dataset_revision_row = connection.execute(
+            "SELECT source_revision FROM datasets WHERE dataset_id = ?",
             (dataset_id,),
         ).fetchone()
-        if dataset_row is None:
+        if dataset_revision_row is None:
             raise AnalysisReplayRefused("dataset_not_found")
-        dataset_scope = _stored_str(dataset_row[0])
-        dataset_revision = _stored_str(dataset_row[1])
-        dataset_quality = _stored_str(dataset_row[2])
-        dataset_fingerprint = _stored_str(dataset_row[3])
-        if dataset_scope != "saxo_openapi" or dataset_quality != "complete":
+        if _stored_str(dataset_revision_row[0]) != source_revision:
+            raise AnalysisReplayRefused("source_revision_changed")
+        try:
+            dataset = AnalyticsStore.authenticate_dataset(connection, dataset_id)
+        except StoreNotFoundError as error:
+            raise AnalysisReplayRefused("dataset_not_found") from error
+        except StoreConflictError as error:
+            raise AnalysisReplayRefused("analysis_identity_changed") from error
+        except StoreError as error:
+            raise AnalysisReplayRefused("dataset_integrity_changed") from error
+        dataset_revision = dataset.source_revision
+        dataset_fingerprint = dataset.fingerprint_sha256
+        if dataset.quality_state.value != "complete":
             raise AnalysisReplayRefused("dataset_not_verified")
-        _require_sha256(dataset_fingerprint, "dataset_fingerprint_invalid")
         if dataset_revision != source_revision:
             raise AnalysisReplayRefused("source_revision_changed")
         contract_rows = connection.execute(
@@ -395,10 +408,15 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             or identity.seed_sha256 != result.provenance.analysis_seed_sha256
         ):
             raise AnalysisReplayRefused("analysis_identity_changed")
+        connection.execute("COMMIT")
+        transaction_open = False
         return result  # noqa: TRY300
     except duckdb.Error as error:
         raise AnalysisReplayRefused("store_unreadable") from error
     finally:
+        if transaction_open:
+            with suppress(duckdb.Error):
+                connection.execute("ROLLBACK")
         connection.close()
 
 

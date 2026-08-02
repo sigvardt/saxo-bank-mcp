@@ -17,6 +17,7 @@ from pydantic import SecretStr
 import saxo_bank_mcp.analytics_sync as analytics_sync_module
 from saxo_bank_mcp.analytics_account_data import AccountScope, new_account_alias
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
+from saxo_bank_mcp.analytics_instrument_identity import instrument_handle_for_saxo_identity
 from saxo_bank_mcp.analytics_market_data import ChartInterval
 from saxo_bank_mcp.analytics_models import HandleKind, VisibilityMode, new_safe_handle
 from saxo_bank_mcp.analytics_portfolio_snapshots import capture_portfolio_snapshot
@@ -313,6 +314,61 @@ async def test_duplicate_noncanonical_rows_for_one_saxo_identity_fail_closed(
     finally:
         connection.close()
     executor = _PayloadExecutor((_reference_payload(1001, symbol="FIX"),))
+    resolver = InstrumentResolver(
+        SaxoAnalyticsProvider(request_executor=executor),
+        config,
+    )
+
+    with pytest.raises(ResolutionError, match="identity"):
+        await resolver.resolve_instruments("FIX", (), ())
+
+    assert executor.calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("corruption", ["handle", "fingerprint"])
+async def test_catalog_load_refuses_noncanonical_identity_before_unavailable_result(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    store.close()
+    metadata = {
+        "aliases": ["fix"],
+        "asset_type": "Stock",
+        "display_label": "FIX · Stock · XNAS",
+        "exchange": "XNAS",
+        "identifier": 1001,
+        "symbol": "FIX",
+    }
+    metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    canonical_handle = instrument_handle_for_saxo_identity("Stock", 1001)
+    canonical_fingerprint = hashlib.sha256(metadata_json.encode()).hexdigest()
+    connection = duckdb.connect(str(config.paths.store_path))
+    try:
+        connection.execute(
+            """
+            INSERT INTO safe_instruments (
+                instrument_handle, asset_type, safe_label, source_revision,
+                source_timestamp, fingerprint_sha256, metadata_json
+            )
+            VALUES (?, 'Stock', 'FIX · Stock · XNAS', 'fixture', ?, ?, ?)
+            """,
+            (
+                (
+                    new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+                    if corruption == "handle"
+                    else canonical_handle
+                ),
+                _FIRST_CAPTURE,
+                "f" * 64 if corruption == "fingerprint" else canonical_fingerprint,
+                metadata_json,
+            ),
+        )
+    finally:
+        connection.close()
+    executor = _PayloadExecutor(({"Data": []},))
     resolver = InstrumentResolver(
         SaxoAnalyticsProvider(request_executor=executor),
         config,

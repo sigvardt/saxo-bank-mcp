@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_instrument_identity import (
     InstrumentIdentityError,
+    instrument_handle_for_saxo_identity,
     put_saxo_instrument_identity,
 )
 from saxo_bank_mcp.analytics_migrations import store_writer_lock_path
@@ -33,6 +34,7 @@ from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
 _REFERENCE_CONTRACT: Final = "reference_instruments_v1"
 _REFERENCE_RECEIPT: Final = source_contracts_by_id()[_REFERENCE_CONTRACT]
 _REFERENCE_CONTRACT_SHA256: Final = source_contract_fingerprint(_REFERENCE_RECEIPT)
+_CATALOG_ROW_COLUMN_COUNT: Final = 3
 _MAX_QUERY_LENGTH: Final = 200
 _MAX_FILTERS: Final = 25
 _SAFE_FILTER_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+ -]{1,64}$")
@@ -141,6 +143,28 @@ def _unique_catalog_entries(
             raise ResolutionError("stored Saxo instrument identity is duplicated")
         identities.add(entry.identity)
     return tuple(entries)
+
+
+def _authenticated_catalog_entry(row: tuple[object, ...]) -> _CatalogEntry:
+    if (
+        len(row) != _CATALOG_ROW_COLUMN_COUNT
+        or not isinstance(row[0], str)
+        or not isinstance(row[1], str)
+        or not isinstance(row[2], str)
+        or hashlib.sha256(row[2].encode()).hexdigest() != row[1]
+    ):
+        raise ResolutionError("stored instrument identity is invalid")
+    try:
+        metadata = _StoredInstrumentMetadata.model_validate_json(row[2], strict=True)
+        canonical_handle = instrument_handle_for_saxo_identity(
+            metadata.asset_type,
+            metadata.identifier,
+        )
+    except (InstrumentIdentityError, ValidationError) as error:
+        raise ResolutionError("stored instrument identity is invalid") from error
+    if row[0] != canonical_handle:
+        raise ResolutionError("stored instrument identity is invalid")
+    return _CatalogEntry(instrument_handle=canonical_handle, metadata=metadata)
 
 
 def _unique_source_instruments(
@@ -271,7 +295,7 @@ class _InstrumentCatalog:
                 "list[tuple[object, ...]]",
                 connection.execute(
                     """
-                    SELECT instrument_handle, metadata_json
+                    SELECT instrument_handle, fingerprint_sha256, metadata_json
                     FROM safe_instruments
                     ORDER BY instrument_handle
                     """,
@@ -279,18 +303,7 @@ class _InstrumentCatalog:
             )
         finally:
             connection.close()
-        entries: list[_CatalogEntry] = []
-        for handle, metadata_json in rows:
-            if not isinstance(handle, str) or not isinstance(metadata_json, str):
-                raise ResolutionError("stored instrument metadata is invalid")
-            try:
-                metadata = _StoredInstrumentMetadata.model_validate_json(
-                    metadata_json,
-                    strict=True,
-                )
-            except ValidationError as error:
-                raise ResolutionError("stored instrument metadata is invalid") from error
-            entries.append(_CatalogEntry(instrument_handle=handle, metadata=metadata))
+        entries = [_authenticated_catalog_entry(row) for row in rows]
         return _unique_catalog_entries(entries)
 
     def upsert(
@@ -348,21 +361,10 @@ class _InstrumentCatalog:
         rows = cast(
             "list[tuple[object, ...]]",
             connection.execute(
-                "SELECT instrument_handle, metadata_json FROM safe_instruments",
+                "SELECT instrument_handle, fingerprint_sha256, metadata_json FROM safe_instruments",
             ).fetchall(),
         )
-        entries: list[_CatalogEntry] = []
-        for handle, metadata_json in rows:
-            if not isinstance(handle, str) or not isinstance(metadata_json, str):
-                raise ResolutionError("stored instrument metadata is invalid")
-            try:
-                metadata = _StoredInstrumentMetadata.model_validate_json(
-                    metadata_json,
-                    strict=True,
-                )
-            except ValidationError as error:
-                raise ResolutionError("stored instrument metadata is invalid") from error
-            entries.append(_CatalogEntry(instrument_handle=handle, metadata=metadata))
+        entries = [_authenticated_catalog_entry(row) for row in rows]
         return _unique_catalog_entries(entries)
 
     def _upsert_one(

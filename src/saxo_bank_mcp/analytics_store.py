@@ -1611,6 +1611,119 @@ class AnalyticsStore:
             return stored
 
     @staticmethod
+    def authenticate_dataset(
+        connection: duckdb.DuckDBPyConnection,
+        dataset_id: str,
+    ) -> StoredDataset:
+        """Recompute one stored dataset and every page bound to it."""
+        _validate_handle(dataset_id, "ds")
+        row = connection.execute(
+            """
+            SELECT dataset_id, account_scope, source_scope, source_revision,
+                   epoch_us(created_at), epoch_us(coverage_start),
+                   epoch_us(coverage_end), quality_state, row_count,
+                   byte_count, fingerprint_sha256
+            FROM datasets
+            WHERE dataset_id = ?
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if row is None:
+            raise StoreNotFoundError("dataset does not exist")
+        try:
+            stored_id = _require_str(row[0])
+            account_scope = _require_str(row[1])
+            source_scope = _require_str(row[2])
+            source_revision = _require_str(row[3])
+            created_at = _require_datetime(row[4])
+            coverage_start = _require_datetime(row[5])
+            coverage_end = _require_datetime(row[6])
+            quality_state = QualityState(_require_str(row[7]))
+            row_count = _require_int(row[8])
+            byte_count = _require_int(row[9])
+            fingerprint_sha256 = _require_str(row[10])
+        except (IndexError, StoreError, ValueError) as error:
+            raise StoreValidationError("dataset integrity check failed") from error
+        try:
+            _validate_account_scope(account_scope)
+            _validate_source_revision(source_revision)
+            _validate_utc(created_at)
+            _validate_utc(coverage_start)
+            _validate_utc(coverage_end)
+            _validate_sha256(fingerprint_sha256)
+        except StoreValidationError as error:
+            raise StoreValidationError("dataset integrity check failed") from error
+        if (
+            stored_id != dataset_id
+            or source_scope != "saxo_openapi"
+            or coverage_end < coverage_start
+            or row_count < 0
+            or byte_count < 0
+        ):
+            raise StoreValidationError("dataset integrity check failed")
+        raw_page_ids = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT page_id
+                FROM dataset_source_pages
+                WHERE dataset_id = ?
+                ORDER BY page_id
+                """,
+                (dataset_id,),
+            ).fetchall(),
+        )
+        page_ids = tuple(_require_str(page[0]) for page in raw_page_ids)
+        if not page_ids or page_ids != tuple(sorted(set(page_ids))):
+            raise StoreValidationError("dataset integrity check failed")
+        rows = AnalyticsStore._validated_dataset_source_rows(
+            connection,
+            page_ids,
+            account_scope,
+            None,
+        )
+        if not any(_require_str(page[5]) == source_revision for page in rows):
+            raise StoreValidationError("dataset integrity check failed")
+        bound_quality = AnalyticsStore._bound_dataset_quality_state(rows, quality_state)
+        recomputed_row_count = sum(_require_int(page[2]) for page in rows)
+        recomputed_byte_count = sum(_require_int(page[3]) for page in rows)
+        material_json = _canonical_json(
+            {
+                "account_scope": account_scope,
+                "coverage_end": coverage_end.isoformat(),
+                "coverage_start": coverage_start.isoformat(),
+                "pages": [
+                    {
+                        "page_id": _require_str(page[0]),
+                        "page_fingerprint_sha256": _require_str(page[1]),
+                        "source_contract_sha256": _require_str(page[6]),
+                    }
+                    for page in rows
+                ],
+                "quality_state": bound_quality.value,
+                "source_revision": source_revision,
+                "source_scope": source_scope,
+            },
+        )
+        if (
+            bound_quality is not quality_state
+            or row_count != recomputed_row_count
+            or byte_count != recomputed_byte_count
+        ):
+            raise StoreValidationError("dataset integrity check failed")
+        if fingerprint_sha256 != _fingerprint(material_json):
+            raise StoreConflictError("dataset fingerprint does not match bound pages")
+        return StoredDataset(
+            dataset_id=stored_id,
+            source_revision=source_revision,
+            fingerprint_sha256=fingerprint_sha256,
+            row_count=row_count,
+            byte_count=byte_count,
+            created_at=created_at,
+            quality_state=quality_state,
+        )
+
+    @staticmethod
     def _dataset_by_id(
         connection: duckdb.DuckDBPyConnection,
         dataset_id: str,
