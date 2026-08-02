@@ -373,9 +373,13 @@ class AnalyticsJobManager:
         if handler is None:
             raise JobStateError("analytics job kind has no registered in-process handler")
         fingerprint, request_json = _request_identity(validated)
+        persisted_request = JobRequest.model_validate_json(request_json)
         launch = False
         async with self._lock:
+            self._require_open()
             row = self._find_by_fingerprint(fingerprint)
+            previous_row = row
+            workspace: Path | None = None
             if row is not None:
                 if row.request_json != request_json:
                     raise JobStateError("analytics job fingerprint binding is invalid")
@@ -383,22 +387,42 @@ class AnalyticsJobManager:
                     validated.restart_interrupted
                     and row.persisted.status_code == "job_interrupted_restart_required"
                 ):
-                    row = self._restart_row(row)
+                    workspace = self._prepare_workspace(row.job_id)
+                    try:
+                        row = self._restart_row(row)
+                    except BaseException:
+                        _cleanup_workspace(self._workspace_root, row.job_id)
+                        raise
                     launch = True
             else:
-                row = self._insert_row(fingerprint, request_json, validated.total_work_units)
+                job_id = new_safe_handle(HandleKind.JOB_ID)
+                workspace = self._prepare_workspace(job_id)
+                try:
+                    row = self._insert_row(
+                        job_id,
+                        fingerprint,
+                        request_json,
+                        validated.total_work_units,
+                    )
+                except BaseException:
+                    _cleanup_workspace(self._workspace_root, job_id)
+                    raise
                 launch = True
 
             if launch:
-                persisted_request = JobRequest.model_validate_json(row.request_json)
-                workspace = self._prepare_workspace(row.job_id)
-                task = asyncio.create_task(
-                    self._run_job(row.job_id, persisted_request, workspace, handler),
-                    name=f"analytics-{row.job_id}",
-                )
+                if workspace is None:
+                    raise JobStateError("analytics job workspace was not prepared")
+                try:
+                    task = asyncio.create_task(
+                        self._run_job(row.job_id, persisted_request, workspace, handler),
+                        name=f"analytics-{row.job_id}",
+                    )
+                except BaseException:
+                    self._rollback_failed_launch(row, previous_row=previous_row)
+                    _cleanup_workspace(self._workspace_root, row.job_id)
+                    raise
                 self._tasks[row.job_id] = task
-        await asyncio.sleep(0)
-        return await self.get_job(row.job_id)
+            return _status_from_row(row)
 
     async def get_job(self, job_id: str) -> JobStatus:
         """Return safe state and expire active work without exposing partial conclusions."""
@@ -509,8 +533,10 @@ class AnalyticsJobManager:
                 if row is not None and row.state in {"queued", "running"}:
                     self._set_terminal(row, state="failed", status_code="job_failed")
         finally:
-            _cleanup_workspace(self._workspace_root, job_id)
-            self._tasks.pop(job_id, None)
+            try:
+                _cleanup_workspace(self._workspace_root, job_id)
+            finally:
+                self._tasks.pop(job_id, None)
 
     async def _record_progress(self, job_id: str, completed_units: int) -> None:
         if type(completed_units) is not int:
@@ -528,6 +554,7 @@ class AnalyticsJobManager:
 
     def _insert_row(
         self,
+        job_id: str,
         fingerprint: str,
         request_json: str,
         total_units: int,
@@ -540,7 +567,6 @@ class AnalyticsJobManager:
             status_code="job_queued",
             artifact_ids=(),
         )
-        job_id = new_safe_handle(HandleKind.JOB_ID)
         with self._store._write_connection() as connection:
             active_row = connection.execute(
                 "SELECT count(*) FROM jobs WHERE state IN ('queued', 'running')",
@@ -567,6 +593,33 @@ class AnalyticsJobManager:
             )
             self._store._bump_revision(connection)
         return self._require_row(job_id)
+
+    def _rollback_failed_launch(
+        self,
+        row: _JobRow,
+        *,
+        previous_row: _JobRow | None,
+    ) -> None:
+        with self._store._write_connection() as connection:
+            if previous_row is None:
+                connection.execute(
+                    "DELETE FROM jobs WHERE job_id = ? AND state = 'queued'",
+                    (row.job_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'failed', updated_at = ?, analysis_id = NULL, message = ?
+                    WHERE job_id = ? AND state = 'queued'
+                    """,
+                    (
+                        _utc_now(),
+                        previous_row.persisted.model_dump_json(),
+                        row.job_id,
+                    ),
+                )
+            self._store._bump_revision(connection)
 
     def _restart_row(self, row: _JobRow) -> _JobRow:
         now = _utc_now()

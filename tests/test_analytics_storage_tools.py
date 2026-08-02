@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ from saxo_bank_mcp.analytics_store import (
     StorageDataType,
     StorageScope,
     StoreBusyError,
+    StoreQuotaError,
     StoreValidationError,
     TableCount,
 )
@@ -171,6 +173,89 @@ def test_deletion_token_is_single_use_and_receipt_is_value_free(tmp_path: Path) 
         assert "money" not in dumped
         with pytest.raises(DeletionTokenError, match="used"):
             delete_analytics_data(preview.preview.token, store=store)
+    finally:
+        store.close()
+
+
+def test_resource_artifacts_use_random_registered_handles_and_exact_file_deletion(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, legacy_artifact_id, _ = _seed_dependency_chain(store)
+        content = b"synthetic owner artifact"
+        first = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=content,
+            description="Synthetic owner artifact",
+        )
+        second = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=content,
+            description="Synthetic owner artifact",
+        )
+
+        assert first.artifact_id != second.artifact_id
+        entries = store.list_storage(
+            StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+        )
+        assert {first.artifact_id, second.artifact_id} <= {entry.object_id for entry in entries}
+        files_before = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files_before) == 2
+        assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files_before)
+
+        preview = preview_deletion(
+            StorageScope(artifact_ids=(first.artifact_id,)),
+            store=store,
+        )
+        delete_analytics_data(preview.preview.token, store=store)
+
+        files_after = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files_after) == 1
+        assert second.artifact_id in files_after[0].name
+        remaining = store.list_storage(
+            StorageScope(data_types=(StorageDataType.ARTIFACTS,)),
+        )
+        assert {entry.object_id for entry in remaining} == {
+            legacy_artifact_id,
+            second.artifact_id,
+        }
+    finally:
+        store.close()
+
+
+def test_resource_artifact_refuses_when_store_quota_refuses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        content = b"bounded synthetic artifact"
+
+        def refuse_capacity(
+            _store: AnalyticsStore,
+            _config: AnalyticsConfig,
+            _incoming_bytes: int,
+        ) -> None:
+            raise StoreQuotaError("synthetic quota refusal")
+
+        monkeypatch.setattr(AnalyticsStore, "ensure_owner_capacity", refuse_capacity)
+        with pytest.raises(StoreQuotaError, match="quota refusal"):
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=content,
+                description="Synthetic bounded artifact",
+            )
+        assert tuple(config.paths.artifacts_dir.iterdir()) == ()
     finally:
         store.close()
 

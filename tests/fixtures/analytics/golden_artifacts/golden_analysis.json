@@ -7,7 +7,8 @@
     "title": "Synthetic portfolio path",
     "subtitle": "Deterministic fixture",
     "x_axis_title": "Period",
-    "y_axis_title": "Percent",
+    "y_axis_title": "Index",
+    "secondary_y_axis_title": "Percent",
     "labels": ["2026-01", "2026-02", "2026-03", "2026-04"],
     "series": [
       {

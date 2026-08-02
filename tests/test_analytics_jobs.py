@@ -21,6 +21,7 @@ from saxo_bank_mcp.analytics_jobs import (
     JobExecutionContext,
     JobParameter,
     JobRequest,
+    JobStateError,
 )
 from saxo_bank_mcp.analytics_models import (
     HandleKind,
@@ -28,7 +29,13 @@ from saxo_bank_mcp.analytics_models import (
     VisibilityMode,
     new_safe_handle,
 )
-from saxo_bank_mcp.analytics_store import AnalyticsStore
+from saxo_bank_mcp.analytics_storage_tools import preview_deletion
+from saxo_bank_mcp.analytics_store import (
+    AnalyticsStore,
+    StorageDataType,
+    StorageScope,
+    StoreValidationError,
+)
 
 _NOW = datetime(2026, 8, 2, 10, tzinfo=UTC)
 
@@ -135,6 +142,42 @@ async def test_four_jobs_run_in_process_and_fifth_is_refused(tmp_path: Path) -> 
 
         assert len({status.job_id for status in statuses}) == 4
         assert all(handler.thread_id == get_ident() for handler in handlers)
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_active_jobs_cannot_be_deleted_or_free_false_capacity(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handlers = [_ControlledHandler() for _ in range(5)]
+    selected = iter(handlers)
+
+    async def dispatch(
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        return await next(selected)(request, context)
+
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": dispatch},
+    )
+    try:
+        await asyncio.gather(*(manager.start_job(_request(index)) for index in range(1, 5)))
+        await asyncio.gather(*(handler.started.wait() for handler in handlers[:4]))
+
+        with pytest.raises(StoreValidationError, match="active jobs"):
+            preview_deletion(
+                StorageScope(data_types=(StorageDataType.JOBS,)),
+                store=store,
+            )
+
+        with pytest.raises(JobCapacityError, match="four"):
+            await manager.start_job(_request(5))
+        assert len(manager._tasks) == 4
     finally:
         await manager.shutdown()
         store.close()
@@ -299,6 +342,115 @@ async def test_explicit_restart_cannot_exceed_four_active_jobs(tmp_path: Path) -
             )
     finally:
         await second_manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_start_rechecks_shutdown_state_inside_the_lifecycle_lock(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": _ControlledHandler()},
+    )
+    await manager._lock.acquire()
+    start = asyncio.create_task(manager.start_job(_request()))
+    await asyncio.sleep(0)
+    manager._closed = True
+    manager._lock.release()
+    try:
+        with pytest.raises(JobStateError, match="closed"):
+            await start
+        assert (
+            store.list_storage(
+                StorageScope(data_types=(StorageDataType.JOBS,)),
+            )
+            == ()
+        )
+        assert manager._tasks == {}
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_failed_workspace_launch_leaves_no_queued_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": _ControlledHandler()},
+    )
+
+    def fail_workspace(_job_id: str) -> Path:
+        raise JobStateError("synthetic workspace refusal")
+
+    monkeypatch.setattr(manager, "_prepare_workspace", fail_workspace)
+    try:
+        with pytest.raises(JobStateError, match="workspace refusal"):
+            await manager.start_job(_request())
+        assert (
+            store.list_storage(
+                StorageScope(data_types=(StorageDataType.JOBS,)),
+            )
+            == ()
+        )
+        assert manager._tasks == {}
+    finally:
+        await manager.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_cleanup_failure_cannot_retain_a_finished_task(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+
+    async def complete(
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        await context.report_progress(request.total_work_units)
+        return JobConclusion(
+            analysis_id=new_safe_handle(HandleKind.ANALYSIS_ID),
+            artifact_ids=(),
+        )
+
+    cleanup_calls = 0
+    original_cleanup = jobs_module._cleanup_workspace
+
+    def fail_final_cleanup(root: Path, job_id: str) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        if cleanup_calls > 1:
+            raise JobStateError("synthetic cleanup refusal")
+        original_cleanup(root, job_id)
+
+    monkeypatch.setattr(jobs_module, "_cleanup_workspace", fail_final_cleanup)
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": complete},
+    )
+    try:
+        status = await manager.start_job(_request(total_work_units=1))
+        task = manager._tasks.get(status.job_id)
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        assert status.job_id not in manager._tasks
+        assert (await manager.get_job(status.job_id)).state == "completed"
+    finally:
+        await manager.shutdown()
         store.close()
 
 

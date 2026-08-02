@@ -1,4 +1,4 @@
-# pyright: reportUnknownMemberType=false
+# pyright: reportPrivateUsage=false, reportUnknownMemberType=false
 # ruff: noqa: E501
 from __future__ import annotations
 
@@ -27,13 +27,15 @@ from saxo_bank_mcp.analytics_chart_semantics import (
     ChartSemantics,
     chart_semantics_sha256,
     validate_artifact_text,
-    visible_stamp_lines,
+)
+from saxo_bank_mcp.analytics_chart_semantics import (
+    _bound_visible_stamp_lines as visible_stamp_lines,
 )
 from saxo_bank_mcp.analytics_render import (
     ArtifactPayload,
     ArtifactRefusal,
+    _render_png_payload,
     build_artifact_payload,
-    render_png,
 )
 
 type ReportFormat = Literal["html", "pdf"]
@@ -64,16 +66,8 @@ class AnalysisReport(_StrictModel):
     @model_validator(mode="after")
     def validate_source_linkage(self) -> Self:
         first = self.charts[0].stamps
-        if any(
-            chart.stamps.analysis_id != first.analysis_id
-            or chart.stamps.environment != first.environment
-            or chart.stamps.data_cutoff != first.data_cutoff
-            or chart.stamps.source_scope != first.source_scope
-            or chart.stamps.source_revision != first.source_revision
-            or chart.stamps.visibility != first.visibility
-            for chart in self.charts[1:]
-        ):
-            raise ValueError("report charts must share one source-linked analysis and visibility")
+        if any(chart.stamps != first for chart in self.charts[1:]):
+            raise ValueError("report charts must share one complete artifact stamp envelope")
         return self
 
 
@@ -90,6 +84,16 @@ def report_semantics_sha256(report: AnalysisReport) -> str:
 
 
 def render_report_html(
+    report: AnalysisReport,
+    *,
+    viewport_width: int = 1280,
+) -> ArtifactRefusal:
+    """Refuse caller-composed multi-chart evidence at the public boundary."""
+    del report, viewport_width
+    return _unbound_report_refusal()
+
+
+def _render_report_html_payload(  # pyright: ignore[reportUnusedFunction]
     report: AnalysisReport,
     *,
     viewport_width: int = 1280,
@@ -128,12 +132,20 @@ table{{width:100%;max-width:100%;border-collapse:collapse;table-layout:fixed;fon
     )
 
 
-def render_report_pdf(report: AnalysisReport) -> ArtifactPayload | ArtifactRefusal:
+def render_report_pdf(report: AnalysisReport) -> ArtifactRefusal:
+    """Refuse caller-composed report evidence at the public boundary."""
+    del report
+    return _unbound_report_refusal()
+
+
+def _render_report_pdf_payload(  # pyright: ignore[reportUnusedFunction]
+    report: AnalysisReport,
+) -> ArtifactPayload | ArtifactRefusal:
     """Render deterministic PDF pages from the same exact PNG semantics."""
     report_sha256 = report_semantics_sha256(report)
     rendered: list[ArtifactPayload] = []
     for chart in report.charts:
-        payload = render_png(chart, width=1200, height=675)
+        payload = _render_png_payload(chart, width=1200, height=675)
         if isinstance(payload, ArtifactRefusal):
             return payload
         rendered.append(payload)
@@ -194,4 +206,12 @@ def _report_dimension_refusal() -> ArtifactRefusal:
         reason_code="artifact_dimensions_unsupported",
         reason="report width is outside the bounded renderer range",
         next_action="request a report width from 320 to 2560",
+    )
+
+
+def _unbound_report_refusal() -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code="artifact_analysis_unbound",
+        reason="caller-composed report values cannot establish stored Saxo provenance",
+        next_action="render from a server-issued stored analysis binding",
     )

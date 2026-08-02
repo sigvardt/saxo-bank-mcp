@@ -408,7 +408,7 @@ def _seed_normalized_scope(
                     message,
                     request_json
                 )
-                VALUES (?, 'queued', ?, ?, ?, NULL, NULL, '{}')
+                VALUES (?, 'cancelled', ?, ?, ?, NULL, NULL, '{}')
                 """,
                 (job_id, "f" * 64, _SOURCE_AT, _SOURCE_AT),
             )

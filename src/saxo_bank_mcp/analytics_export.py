@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 # ruff: noqa: E501
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ from saxo_bank_mcp.analytics_chart_semantics import (
     ArtifactStamps,
     ChartSemantics,
     validate_artifact_text,
-    visible_stamp_lines,
+)
+from saxo_bank_mcp.analytics_chart_semantics import (
+    _bound_visible_stamp_lines as visible_stamp_lines,
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_models import ContractName
@@ -38,15 +41,8 @@ from saxo_bank_mcp.analytics_render import (
     ArtifactPayload,
     ArtifactRefusal,
     build_artifact_payload,
-    deliver_artifact,
-    render_plotly_html,
-    render_png,
 )
-from saxo_bank_mcp.analytics_reports import (
-    AnalysisReport,
-    render_report_html,
-    render_report_pdf,
-)
+from saxo_bank_mcp.analytics_reports import AnalysisReport
 
 type ExportValue = str | int | float | bool | None
 type ExportValueType = Literal["string", "number", "integer", "boolean", "decimal"]
@@ -74,10 +70,20 @@ _FORBIDDEN_RAW_KEYS: Final = frozenset(
     {
         "accountid",
         "accountkey",
+        "accountnumber",
+        "accountgroupid",
+        "accountgroupkey",
+        "accountgroupname",
+        "appid",
+        "appkey",
         "clientid",
         "clientkey",
+        "displayname",
+        "instrumentid",
         "orderid",
         "positionid",
+        "tradeid",
+        "transactionid",
         "userid",
         "userkey",
         "accesstoken",
@@ -179,37 +185,13 @@ def export_analysis(
     request: ExportRequest,
     *,
     config: AnalyticsConfig,
-    trusted_local_host: bool,
 ) -> ArtifactDelivery:
-    """Export one typed table, chart, or report without accepting paths or code."""
-    if isinstance(request, TableExportRequest):
-        payload = _export_table_payload(request.table, request.output_format, config=config)
-    elif isinstance(request, ChartExportRequest):
-        if request.output_format == "png":
-            payload = render_png(
-                request.semantics,
-                width=request.width,
-                height=request.height,
-            )
-        else:
-            payload = render_plotly_html(
-                request.semantics,
-                viewport_width=request.width,
-                height=request.height,
-            )
-    elif request.output_format == "html":
-        payload = render_report_html(
-            request.report,
-            viewport_width=request.viewport_width,
-        )
-    else:
-        payload = render_report_pdf(request.report)
-    if isinstance(payload, ArtifactRefusal):
-        return payload
-    return deliver_artifact(
-        payload,
-        config=config,
-        trusted_local_host=trusted_local_host,
+    """Refuse caller-composed exports until stored analysis values are bound internally."""
+    del request, config
+    return ArtifactRefusal(
+        reason_code="artifact_analysis_unbound",
+        reason="caller-composed export values cannot establish stored Saxo provenance",
+        next_action="export from a server-issued stored analysis binding",
     )
 
 
@@ -225,7 +207,7 @@ def table_semantics_sha256(table: ExportTable) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _export_table_payload(
+def _export_table_payload(  # pyright: ignore[reportUnusedFunction]
     table: ExportTable,
     output_format: TableExportFormat,
     *,

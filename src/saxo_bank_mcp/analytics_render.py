@@ -1,4 +1,4 @@
-# pyright: reportUnknownMemberType=false
+# pyright: reportPrivateUsage=false, reportUnknownMemberType=false
 # ruff: noqa: E501
 from __future__ import annotations
 
@@ -8,17 +8,13 @@ import hashlib
 import html
 import json
 import math
-import os
 import re
-import stat
 import textwrap
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from functools import cache
 from importlib.resources import files
 from io import BytesIO
-from pathlib import Path
 from typing import Final, Literal, Self
-from uuid import UUID
 
 import matplotlib as mpl
 import numpy as np
@@ -36,10 +32,13 @@ from saxo_bank_mcp.analytics_chart_semantics import (
     ChartSeries,
     chart_kind_for,
     chart_semantics_sha256,
-    visible_stamp_lines,
+)
+from saxo_bank_mcp.analytics_chart_semantics import (
+    _bound_visible_stamp_lines as visible_stamp_lines,
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
-from saxo_bank_mcp.analytics_models import ArtifactId, Sha256Fingerprint, VisibilityMode
+from saxo_bank_mcp.analytics_models import ArtifactId, Sha256Fingerprint
+from saxo_bank_mcp.analytics_store import AnalyticsStore
 
 mpl.use("Agg", force=True)
 
@@ -57,11 +56,9 @@ _MIN_HEIGHT: Final = 240
 _MAX_HEIGHT: Final = 1600
 _SCATTER_SERIES_COUNT: Final = 2
 _MAX_DISPLAY_TICKS: Final = 8
+_MIN_READABLE_FONT_PX: Final = 12
 _INK_THRESHOLD: Final = 248
 _CANVAS_TOLERANCE: Final = 0.5
-_OWNER_FILE_MODE: Final = 0o600
-_OWNER_DIRECTORY_MODE: Final = 0o700
-_OPAQUE_UUID_VERSION: Final = 4
 _PLOTLY_RESOURCE: Final = "package_data/plotly.min.js"
 _NETWORK_RUNTIME_PATTERNS: Final = (
     re.compile(rb"https?://", re.IGNORECASE),
@@ -119,6 +116,7 @@ class HtmlVisualQa(_StrictModel):
     horizontal_overflow: bool
     minimum_font_size_px: int = Field(ge=0)
     external_url_count: int = Field(ge=0)
+    layout_issue_count: int = Field(default=0, ge=0)
 
 
 class ArtifactPayload(_StrictModel):
@@ -197,10 +195,20 @@ class RenderRequest(_StrictModel):
     output_format: RenderFormat
     width: int = Field(ge=_MIN_WIDTH, le=_MAX_WIDTH)
     height: int = Field(ge=_MIN_HEIGHT, le=_MAX_HEIGHT)
-    trusted_local_host: bool
 
 
 def render_png(
+    semantics: ChartSemantics,
+    *,
+    width: int = 1200,
+    height: int = 675,
+) -> ArtifactRefusal:
+    """Refuse caller-composed chart evidence at the public rendering boundary."""
+    del semantics, width, height
+    return _unbound_analysis_refusal()
+
+
+def _render_png_payload(  # pyright: ignore[reportUnusedFunction]
     semantics: ChartSemantics,
     *,
     width: int = 1200,
@@ -225,6 +233,8 @@ def render_png(
             bounded_texts=bounded_texts,
             label_texts=label_texts,
         )
+        if visual_qa.clipped_text_count or visual_qa.overlapping_label_count:
+            return _visual_qa_refusal()
         buffer = BytesIO()
         canvas.print_png(
             buffer,
@@ -251,6 +261,17 @@ def render_png(
 
 
 def render_plotly_html(
+    semantics: ChartSemantics,
+    *,
+    viewport_width: int = 1280,
+    height: int = 720,
+) -> ArtifactRefusal:
+    """Refuse caller-composed HTML evidence at the public rendering boundary."""
+    del semantics, viewport_width, height
+    return _unbound_analysis_refusal()
+
+
+def _render_plotly_html_payload(  # pyright: ignore[reportUnusedFunction]
     semantics: ChartSemantics,
     *,
     viewport_width: int = 1280,
@@ -283,7 +304,10 @@ h1{{font-size:22px;line-height:1.25;margin:0 0 4px;overflow-wrap:anywhere}}p{{fo
 .stamps span{{overflow-wrap:anywhere}}.privacy{{font-size:12px;font-weight:700;margin-top:8px;color:#27364d}}
 .semantic-fallback{{margin-top:12px;max-width:100%;overflow:hidden}}table{{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}}
 th,td{{padding:5px;border:1px solid var(--line);text-align:right;overflow-wrap:anywhere}}th:first-child,td:first-child{{text-align:left}}
-@media(max-width:600px){{main{{padding:8px}}h1{{font-size:18px}}#chart{{height:{max(320, min(height, 480))}px}}.stamps{{font-size:12px}}table{{font-size:12px}}}}
+@media(max-width:600px){{main{{padding:8px}}h1{{font-size:18px}}#chart{{height:{max(320, min(height, 480))}px}}.stamps{{font-size:12px}}
+.semantic-fallback table,.semantic-fallback tbody,.semantic-fallback tr,.semantic-fallback td{{display:block;width:100%}}.semantic-fallback thead{{position:absolute;clip:rect(0 0 0 0);width:1px;height:1px;overflow:hidden}}
+.semantic-fallback tr{{margin-bottom:8px;border:1px solid var(--line)}}.semantic-fallback td{{display:grid;grid-template-columns:minmax(88px,40%) 1fr;border:0;border-bottom:1px solid var(--line);font-size:12px;text-align:right;overflow-wrap:anywhere}}
+.semantic-fallback td::before{{content:attr(data-field-label);font-weight:700;text-align:left}}}}
 </style></head>
 <body data-viewport-width="{viewport_width}" data-semantics-sha256="{semantics_sha256}"><main>
 <h1>{html.escape(semantics.title)}</h1><p>{html.escape(semantics.subtitle)}</p>
@@ -313,6 +337,15 @@ th,td{{padding:5px;border:1px solid var(--line);text-align:right;overflow-wrap:a
                 next_action="request a deterministic PNG artifact",
             )
     content = document.encode()
+    qa = inspect_html_artifact(content, viewport_width=viewport_width)
+    if (
+        not qa.readable
+        or qa.horizontal_overflow
+        or qa.minimum_font_size_px < _MIN_READABLE_FONT_PX
+        or qa.external_url_count
+        or qa.layout_issue_count
+    ):
+        return _visual_qa_refusal()
     return build_artifact_payload(
         media_type="text/html",
         extension="html",
@@ -335,29 +368,42 @@ def inspect_html_artifact(content: bytes, *, viewport_width: int) -> HtmlVisualQ
             horizontal_overflow=True,
             minimum_font_size_px=0,
             external_url_count=0,
+            layout_issue_count=1,
         )
     external_count = sum(len(pattern.findall(document)) for pattern in _EXTERNAL_HTML_PATTERNS)
     font_sizes = tuple(int(value) for value in re.findall(r"font-size:(\d+)px", document))
     declared_width = re.search(r'data-viewport-width="(\d+)"', document)
+    required_markers = (
+        "data-semantics-sha256=",
+        'id="chart"',
+        "semantic-fallback",
+        PRIVACY_FOOTER,
+    )
+    layout_markers = (
+        'data-mobile-layout="stacked"',
+        "data-field-label=",
+        ".semantic-fallback td::before",
+        "overflow-wrap:anywhere",
+    )
+    layout_issues = sum(marker not in document for marker in layout_markers)
+    horizontal_overflow = (
+        "overflow-x:hidden" not in document or "max-width:100%" not in document or layout_issues > 0
+    )
     readable = (
-        all(
-            marker in document
-            for marker in (
-                "data-semantics-sha256=",
-                'id="chart"',
-                "semantic-fallback",
-                PRIVACY_FOOTER,
-            )
-        )
+        all(marker in document for marker in required_markers)
         and declared_width is not None
         and int(declared_width.group(1)) == viewport_width
+        and min(font_sizes, default=0) >= _MIN_READABLE_FONT_PX
+        and external_count == 0
+        and not horizontal_overflow
     )
     return HtmlVisualQa(
         viewport_width=viewport_width,
         readable=readable,
-        horizontal_overflow="overflow-x:hidden" not in document or "max-width:100%" not in document,
+        horizontal_overflow=horizontal_overflow,
         minimum_font_size_px=min(font_sizes, default=0),
         external_url_count=external_count,
+        layout_issue_count=layout_issues,
     )
 
 
@@ -391,71 +437,17 @@ def deliver_artifact(
     payload: ArtifactPayload,
     *,
     config: AnalyticsConfig,
-    trusted_local_host: bool,
-) -> ArtifactDelivery:
-    """Enforce visibility and 25 MiB delivery before returning bytes or a safe link."""
-    artifact_id = _artifact_id(payload.sha256)
-    visible_stamps = visible_stamp_lines(payload.stamps)
-    reason: DeliveryReason | None = None
-    if payload.stamps.visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
-        reason = "local_resource_link_requested"
-    elif payload.stamps.visibility is VisibilityMode.INLINE_PRIVATE:
-        if payload.stamps.environment == "LIVE" and not trusted_local_host:
-            reason = "inline_private_not_enabled"
-        elif payload.byte_count > config.limits.artifact_bytes:
-            reason = "artifact_return_limit"
-    else:
-        return ArtifactRefusal(
-            reason_code="artifact_visibility_unsupported",
-            reason="numeric artifacts require inline_private or local_resource_link visibility",
-            next_action="request one of the supported owner-only artifact delivery modes",
-        )
-    if reason is None:
-        return InlineArtifact(
-            artifact_id=artifact_id,
-            media_type=payload.media_type,
-            content=payload.content,
-            byte_count=payload.byte_count,
-            sha256=payload.sha256,
-            semantics_sha256=payload.semantics_sha256,
-            visible_stamps=visible_stamps,
-        )
-    persisted = _persist_owner_artifact(payload, artifact_id=artifact_id, config=config)
-    if isinstance(persisted, ArtifactRefusal):
-        return persisted
-    return ArtifactResourceLink(
-        artifact_id=artifact_id,
-        resource_uri=f"saxo-analytics://artifacts/{artifact_id}",
-        media_type=payload.media_type,
-        byte_count=payload.byte_count,
-        sha256=payload.sha256,
-        semantics_sha256=payload.semantics_sha256,
-        reason_code=reason,
-        visible_stamps=visible_stamps,
-    )
+    store: AnalyticsStore,
+) -> ArtifactRefusal:
+    """Refuse caller-created payloads at the public persistence boundary."""
+    del payload, config, store
+    return _unbound_analysis_refusal()
 
 
 def render_analysis(request: RenderRequest, *, config: AnalyticsConfig) -> ArtifactDelivery:
-    """Render one exact semantic chart and apply the artifact delivery boundary."""
-    if request.output_format == "png":
-        payload = render_png(
-            request.semantics,
-            width=request.width,
-            height=request.height,
-        )
-    else:
-        payload = render_plotly_html(
-            request.semantics,
-            viewport_width=request.width,
-            height=request.height,
-        )
-    if isinstance(payload, ArtifactRefusal):
-        return payload
-    return deliver_artifact(
-        payload,
-        config=config,
-        trusted_local_host=request.trusted_local_host,
-    )
+    """Refuse caller-composed semantics until a stored-analysis adapter binds values."""
+    del request, config
+    return _unbound_analysis_refusal()
 
 
 def _build_figure(
@@ -472,12 +464,31 @@ def _build_figure(
     canvas = FigureCanvasAgg(figure)
     axis = figure.add_axes((0.09, 0.27, 0.84, 0.58))
     bounded_texts: list[Text] = [
-        figure.text(0.04, 0.955, semantics.title, fontsize=16, fontweight="bold", va="top"),
-        figure.text(0.04, 0.91, semantics.subtitle, fontsize=9, color="#4a5568", va="top"),
+        figure.text(
+            0.04,
+            0.955,
+            _wrap_display_text(semantics.title, max(24, width // 11)),
+            fontsize=16,
+            fontweight="bold",
+            va="top",
+        ),
+        figure.text(
+            0.04,
+            0.89,
+            _wrap_display_text(semantics.subtitle, max(30, width // 8)),
+            fontsize=9,
+            color="#4a5568",
+            va="top",
+        ),
     ]
-    _draw_chart(axis, semantics)
+    secondary_axis = _draw_chart(axis, semantics)
     axis.set_xlabel(semantics.x_axis_title, fontsize=9, labelpad=7)
     axis.set_ylabel(semantics.y_axis_title, fontsize=9, labelpad=7)
+    if secondary_axis is not None:
+        secondary_title = semantics.secondary_y_axis_title
+        if secondary_title is None:
+            raise ValueError("secondary chart axis is missing its title")
+        secondary_axis.set_ylabel(secondary_title, fontsize=9, labelpad=7)
     axis.grid(visible=True, axis="y", linewidth=0.5, color="#d9e2ef", alpha=0.8)
     axis.tick_params(labelsize=8)
     kind = chart_kind_for(semantics.template_id)
@@ -486,9 +497,15 @@ def _build_figure(
     else:
         axis.xaxis.set_major_locator(MaxNLocator(nbins=6, prune="both"))
     label_texts = tuple(axis.get_xticklabels())
-    legend = axis.get_legend_handles_labels()
-    if legend[0]:
+    handles, legend_labels = axis.get_legend_handles_labels()
+    if secondary_axis is not None:
+        secondary_handles, secondary_labels = secondary_axis.get_legend_handles_labels()
+        handles.extend(secondary_handles)
+        legend_labels.extend(secondary_labels)
+    if handles:
         drawn = axis.legend(
+            handles,
+            legend_labels,
             loc="upper left",
             frameon=False,
             fontsize=8,
@@ -510,7 +527,7 @@ def _build_figure(
     return figure, canvas, tuple(bounded_texts), label_texts
 
 
-def _draw_chart(axis: Axes, semantics: ChartSemantics) -> None:
+def _draw_chart(axis: Axes, semantics: ChartSemantics) -> Axes | None:
     kind = chart_kind_for(semantics.template_id)
     positions = np.arange(len(semantics.labels), dtype=np.float64)
     if kind in {"heatmap", "surface"}:
@@ -520,11 +537,12 @@ def _draw_chart(axis: Axes, semantics: ChartSemantics) -> None:
     elif kind == "bar":
         _draw_bars(axis, semantics.series, positions)
     elif kind == "scatter":
-        _draw_scatter(axis, semantics.series, positions)
+        _draw_scatter(axis, semantics.series)
     elif kind in {"dashboard", "card"}:
         _draw_dashboard(axis, semantics.series)
     else:
-        _draw_lines(axis, semantics.series, positions, composite=kind == "composite")
+        return _draw_lines(axis, semantics.series, positions, composite=kind == "composite")
+    return None
 
 
 def _draw_lines(
@@ -533,7 +551,7 @@ def _draw_lines(
     positions: np.ndarray[tuple[int], np.dtype[np.float64]],
     *,
     composite: bool,
-) -> None:
+) -> Axes | None:
     secondary: Axes | None = None
     for index, series in enumerate(series_values):
         values = _numeric_values(series.values)
@@ -559,6 +577,7 @@ def _draw_lines(
                 color=color,
                 label=label,
             )
+    return secondary
 
 
 def _draw_bars(
@@ -583,7 +602,7 @@ def _draw_waterfall(
     series: ChartSeries,
     positions: np.ndarray[tuple[int], np.dtype[np.float64]],
 ) -> None:
-    values = np.nan_to_num(_numeric_values(series.values), nan=0.0)
+    values = _numeric_values(series.values)
     starts = np.concatenate((np.array([0.0]), np.cumsum(values[:-1])))
     colors = tuple("#38a169" if value >= 0 else "#c53030" for value in values)
     axis.bar(
@@ -613,27 +632,19 @@ def _draw_heatmap(axis: Axes, semantics: ChartSemantics) -> None:
 def _draw_scatter(
     axis: Axes,
     series_values: Sequence[ChartSeries],
-    positions: np.ndarray[tuple[int], np.dtype[np.float64]],
 ) -> None:
-    if len(series_values) >= _SCATTER_SERIES_COUNT:
-        x_values = _numeric_values(series_values[0].values)
-        y_values = _numeric_values(series_values[1].values)
-        axis.scatter(
-            x_values,
-            y_values,
-            color=_COLORS[0],
-            s=28,
-            label=" / ".join(
-                (_short_label(series_values[0].name, 18), _short_label(series_values[1].name, 18)),
-            ),
-        )
-        return
+    if len(series_values) != _SCATTER_SERIES_COUNT:
+        raise ValueError("scatter chart cardinality was not validated")
+    x_values = _numeric_values(series_values[0].values)
+    y_values = _numeric_values(series_values[1].values)
     axis.scatter(
-        positions,
-        _numeric_values(series_values[0].values),
+        x_values,
+        y_values,
         color=_COLORS[0],
         s=28,
-        label=_short_label(series_values[0].name, 34),
+        label=" / ".join(
+            (_short_label(series_values[0].name, 18), _short_label(series_values[1].name, 18)),
+        ),
     )
 
 
@@ -642,7 +653,7 @@ def _draw_dashboard(
     series_values: Sequence[ChartSeries],
 ) -> None:
     latest = np.array(
-        [_last_finite(series.values) for series in series_values],
+        [_required_latest(series.values) for series in series_values],
         dtype=np.float64,
     )
     dashboard_positions = np.arange(len(series_values), dtype=np.float64)
@@ -776,7 +787,7 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
             }
             for series in semantics.series
         ]
-    elif kind == "scatter" and len(semantics.series) >= _SCATTER_SERIES_COUNT:
+    elif kind == "scatter":
         data = [
             {
                 "type": "scatter",
@@ -792,7 +803,7 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
             {
                 "type": "bar",
                 "orientation": "h",
-                "x": [_last_finite(series.values)],
+                "x": [_required_latest(series.values)],
                 "y": [series.name],
                 "name": series.name,
             }
@@ -826,7 +837,7 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
         "xaxis": {"title": semantics.x_axis_title, "automargin": True},
         "yaxis": {"title": semantics.y_axis_title, "automargin": True, "zeroline": True},
         "yaxis2": {
-            "title": semantics.y_axis_title,
+            "title": semantics.secondary_y_axis_title or "",
             "overlaying": "y",
             "side": "right",
             "automargin": True,
@@ -861,12 +872,14 @@ def _semantic_fallback_table(semantics: ChartSemantics) -> str:
     rows: list[str] = []
     for index, label in enumerate(semantics.labels):
         cells = "".join(
-            f'<td data-canonical-value="{html.escape(_canonical_value(series.values[index]))}">{html.escape(_canonical_value(series.values[index]))}</td>'
+            f'<td data-field-label="{html.escape(series.name)}" data-canonical-value="{html.escape(_canonical_value(series.values[index]))}">{html.escape(_canonical_value(series.values[index]))}</td>'
             for series in semantics.series
         )
-        rows.append(f"<tr><td>{html.escape(label)}</td>{cells}</tr>")
+        rows.append(
+            f'<tr><td data-field-label="{html.escape(semantics.x_axis_title)}">{html.escape(label)}</td>{cells}</tr>',
+        )
     return (
-        '<section class="semantic-fallback" aria-label="Exact chart values">'
+        '<section class="semantic-fallback" data-mobile-layout="stacked" aria-label="Exact chart values">'
         f"<table><thead><tr><th>{html.escape(semantics.x_axis_title)}</th>{header}</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></section>"
     )
@@ -915,75 +928,6 @@ def _compressed_sanitized_plotly_runtime() -> str:
     return base64.b64encode(compressed).decode("ascii")
 
 
-def _persist_owner_artifact(  # noqa: PLR0911
-    payload: ArtifactPayload,
-    *,
-    artifact_id: ArtifactId,
-    config: AnalyticsConfig,
-) -> Path | ArtifactRefusal:
-    artifacts_dir = config.paths.artifacts_dir
-    try:
-        resolved_root = config.paths.state_root.resolve(strict=True)
-        resolved_dir = artifacts_dir.resolve(strict=True)
-        mode = stat.S_IMODE(resolved_dir.stat().st_mode)
-    except OSError:
-        return _storage_refusal()
-    if (
-        artifacts_dir.is_symlink()
-        or not resolved_dir.is_relative_to(resolved_root)
-        or mode != _OWNER_DIRECTORY_MODE
-    ):
-        return _storage_refusal()
-    destination = resolved_dir / f"{artifact_id}.{payload.extension}"
-    if destination.exists() or destination.is_symlink():
-        try:
-            if (
-                destination.is_symlink()
-                or not destination.is_file()
-                or hashlib.sha256(destination.read_bytes()).hexdigest() != payload.sha256
-            ):
-                return _storage_refusal()
-            destination.chmod(_OWNER_FILE_MODE)
-            return destination  # noqa: TRY300
-        except OSError:
-            return _storage_refusal()
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(destination, flags, _OWNER_FILE_MODE)
-        _write_all(descriptor, payload.content)
-        os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
-        destination.chmod(_OWNER_FILE_MODE)
-        if (
-            stat.S_IMODE(destination.stat().st_mode) != _OWNER_FILE_MODE
-            or hashlib.sha256(destination.read_bytes()).hexdigest() != payload.sha256
-        ):
-            return _storage_refusal()
-        return destination  # noqa: TRY300
-    except OSError:
-        if descriptor is not None:
-            os.close(descriptor)
-        return _storage_refusal()
-
-
-def _artifact_id(sha256: str) -> str:
-    raw = bytearray(bytes.fromhex(sha256)[:16])
-    raw[6] = (raw[6] & 0x0F) | (_OPAQUE_UUID_VERSION << 4)
-    raw[8] = (raw[8] & 0x3F) | 0x80
-    return f"ar_{UUID(bytes=bytes(raw)).hex}"
-
-
-def _write_all(descriptor: int, content: bytes) -> None:
-    view = memoryview(content)
-    while view:
-        written = os.write(descriptor, view)
-        if written <= 0:
-            raise OSError("artifact write made no progress")
-        view = view[written:]
-
-
 def _numeric_values(values: Sequence[float | None]) -> np.ndarray[tuple[int], np.dtype[np.float64]]:
     return np.array(
         [np.nan if value is None else value for value in values],
@@ -991,9 +935,11 @@ def _numeric_values(values: Sequence[float | None]) -> np.ndarray[tuple[int], np
     )
 
 
-def _last_finite(values: Iterable[float | None]) -> float:
-    finite = tuple(value for value in values if value is not None and math.isfinite(value))
-    return 0.0 if not finite else finite[-1]
+def _required_latest(values: Sequence[float | None]) -> float:
+    latest = values[-1]
+    if latest is None or not math.isfinite(latest):
+        raise ValueError("latest chart value was not validated")
+    return latest
 
 
 def _canonical_value(value: float | None) -> str:
@@ -1002,6 +948,17 @@ def _canonical_value(value: float | None) -> str:
 
 def _short_label(value: str, width: int) -> str:
     return textwrap.shorten(value, width=width, placeholder="…")
+
+
+def _wrap_display_text(value: str, width: int) -> str:
+    return "\n".join(
+        textwrap.wrap(
+            value,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=True,
+        ),
+    )
 
 
 def _has_renderable_values(semantics: ChartSemantics) -> bool:
@@ -1024,9 +981,17 @@ def _dimension_refusal() -> ArtifactRefusal:
     )
 
 
-def _storage_refusal() -> ArtifactRefusal:
+def _visual_qa_refusal() -> ArtifactRefusal:
     return ArtifactRefusal(
-        reason_code="artifact_owner_storage_unavailable",
-        reason="the owner-only artifact directory could not be proven or written safely",
-        next_action="restore the configured owner-only analytics artifact directory",
+        reason_code="artifact_visual_qa_failed",
+        reason="artifact QA detected clipping, overlap, overflow, or unreadable layout",
+        next_action="shorten valid labels or request a larger bounded artifact",
+    )
+
+
+def _unbound_analysis_refusal() -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code="artifact_analysis_unbound",
+        reason="caller-composed values cannot establish stored Saxo analysis provenance",
+        next_action="render from a server-issued stored analysis binding",
     )

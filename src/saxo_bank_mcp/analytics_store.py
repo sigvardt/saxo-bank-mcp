@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from saxo_bank_mcp.analytics_models import (
     InstrumentAnalysisRequest,
     PortfolioAnalysisRequest,
     QualityState,
+    VisibilityMode,
     new_safe_handle,
 )
 from saxo_bank_mcp.analytics_source_contracts import (
@@ -49,6 +51,7 @@ from saxo_bank_mcp.analytics_source_contracts import (
 )
 
 _OWNER_FILE_MODE: Final = 0o600
+_OWNER_DIRECTORY_MODE: Final = 0o700
 _OPAQUE_UUID_VERSION: Final = 4
 _CONNECTION_CONFIG: Final = MappingProxyType(
     {
@@ -59,6 +62,18 @@ _CONNECTION_CONFIG: Final = MappingProxyType(
     },
 )
 _DELETION_TOKEN_TTL: Final = timedelta(minutes=5)
+_ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "application/json": "json",
+        "application/octet-stream": "bin",
+        "application/pdf": "pdf",
+        "application/vnd.apache.parquet": "parquet",
+        "image/png": "png",
+        "text/csv": "csv",
+        "text/html": "html",
+        "text/plain": "txt",
+    },
+)
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SOURCE_REVISION_PATTERN: Final = re.compile(
@@ -499,6 +514,14 @@ class _DeletionPlan:
     targets: dict[str, tuple[str, ...]]
     table_counts: tuple[TableCount, ...]
     estimated_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DeletionAuthorization:
+    plan: _DeletionPlan
+    scope_fingerprint: str
+    now: datetime
+    store_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -2214,6 +2237,82 @@ class AnalyticsStore:
                 raise StoreError("stored artifact cannot be read back")
             return stored
 
+    def put_owned_artifact(
+        self,
+        *,
+        analysis_id: str,
+        media_type: str,
+        extension: str,
+        content: bytes,
+        description: str,
+    ) -> StoredArtifact:
+        """Persist an owner-only artifact file and metadata without accepting a path."""
+        expected_extension = _ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE.get(media_type)
+        if expected_extension is None or extension != expected_extension:
+            raise StoreValidationError("artifact media type and extension are not supported")
+        if type(content) is not bytes:
+            raise StoreValidationError("artifact content must be exact bytes")
+        artifact = ArtifactSummary(
+            schema_version="1",
+            visibility=VisibilityMode.LOCAL_RESOURCE_LINK,
+            artifact_id=new_safe_handle(HandleKind.ARTIFACT_ID),
+            analysis_id=analysis_id,
+            media_type=media_type,
+            byte_count=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+            created_at=_utc_now(),
+            description=description,
+        )
+        destination = _owned_artifact_path(
+            self._config,
+            artifact.artifact_id,
+            artifact.media_type,
+        )
+        temporary = destination.with_name(f".{artifact.artifact_id}.{uuid4().hex}.tmp")
+        destination_created = False
+        try:
+            with self._write_connection() as connection:
+                _require_stored_analysis(connection, artifact.analysis_id)
+                self._ensure_capacity(artifact.byte_count)
+                _write_owner_artifact_file(temporary, content)
+                _require_new_artifact_destination(destination)
+                os.link(temporary, destination, follow_symlinks=False)
+                destination_created = True
+                temporary.unlink()
+                destination.chmod(_OWNER_FILE_MODE)
+                _require_owner_artifact_file(destination, artifact.sha256)
+                connection.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id, analysis_id, media_type, byte_count,
+                        sha256, created_at, description, visibility
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact.artifact_id,
+                        artifact.analysis_id,
+                        artifact.media_type,
+                        artifact.byte_count,
+                        artifact.sha256,
+                        artifact.created_at,
+                        artifact.description,
+                        artifact.visibility.value,
+                    ),
+                )
+                self._bump_revision(connection)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+            if destination_created:
+                with suppress(FileNotFoundError):
+                    destination.unlink()
+            raise
+        with self._read_connection() as connection:
+            stored = self._artifact_by_id(connection, artifact.artifact_id)
+        if stored is None:
+            raise StoreError("stored artifact cannot be read back")
+        return stored
+
     @staticmethod
     def _artifact_by_id(
         connection: duckdb.DuckDBPyConnection,
@@ -2708,6 +2807,10 @@ class AnalyticsStore:
                 analysis_ids,
             ),
         )
+        if job_ids and _count_active_jobs(connection, tuple(sorted(job_ids))) > 0:
+            raise StoreValidationError(
+                "active jobs must be cancelled before deletion preview",
+            )
 
         raw_targets: dict[str, set[str]] = {
             "account_snapshots": snapshot_ids,
@@ -2772,87 +2875,74 @@ class AnalyticsStore:
         except StoreValidationError as error:
             raise DeletionTokenError("deletion token is invalid") from error
         token_sha256 = _fingerprint(token)
-        with self._write_connection() as connection:
-            row = connection.execute(
-                """
-                SELECT
-                    scope_fingerprint,
-                    normalized_scope_json,
-                    deletion_plan_json,
-                    store_revision,
-                    epoch_us(expires_at),
-                    epoch_us(used_at)
-                FROM deletion_tokens
-                WHERE token_sha256 = ?
-                """,
-                (token_sha256,),
-            ).fetchone()
-            if row is None:
-                raise DeletionTokenError("deletion token is invalid")
-            used_at = _optional_datetime(row[5])
-            if used_at is not None:
-                raise DeletionTokenError("deletion token was already used")
-            now = _utc_now()
-            expires_at = _require_datetime(row[4])
-            if now >= expires_at:
-                raise DeletionTokenError("deletion token expired")
-            expected_revision = _require_int(row[3])
-            current_revision = self._revision(connection)
-            if expected_revision != current_revision:
-                raise DeletionTokenError("store revision changed after deletion preview")
-            normalized_scope_json = _require_str(row[1])
-            scope_fingerprint = _require_str(row[0])
-            if _fingerprint(normalized_scope_json) != scope_fingerprint:
-                raise DeletionTokenError("deletion token scope is invalid")
-            plan = _plan_from_json(_require_str(row[2]))
-            for table in _DELETION_ORDER:
-                ids = plan.targets.get(table, ())
-                if ids:
-                    _delete_targets(
-                        connection,
-                        table,
-                        _DELETION_COLUMNS[table],
-                        ids,
-                    )
-            connection.execute(
-                "UPDATE deletion_tokens SET used_at = ? WHERE token_sha256 = ?",
-                (now, token_sha256),
-            )
-            next_revision = self._bump_revision(connection)
-            receipt_id = f"dr_{uuid4().hex}"
-            counts_json = _table_counts_json(plan.table_counts)
-            connection.execute(
-                """
-                INSERT INTO deletion_receipts (
-                    receipt_id,
-                    scope_fingerprint,
-                    deleted_at,
-                    table_counts_json,
-                    estimated_bytes,
-                    store_revision_before,
-                    store_revision_after
+        staged_files: tuple[tuple[Path, Path], ...] = ()
+        receipt: DeletionReceipt
+        try:
+            with self._write_connection() as connection:
+                authorization = _authorize_deletion_token(
+                    connection,
+                    token_sha256,
+                    current_revision=self._revision(connection),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    receipt_id,
-                    scope_fingerprint,
-                    now,
-                    counts_json,
-                    plan.estimated_bytes,
-                    current_revision,
-                    next_revision,
-                ),
-            )
-            return DeletionReceipt(
-                receipt_id=receipt_id,
-                scope_fingerprint=scope_fingerprint,
-                deleted_at=now,
-                table_counts=plan.table_counts,
-                estimated_bytes=plan.estimated_bytes,
-                store_revision_before=current_revision,
-                store_revision_after=next_revision,
-            )
+                plan = authorization.plan
+                staged_files = _stage_owned_artifact_deletions(
+                    self._config,
+                    connection,
+                    plan.targets.get("artifacts", ()),
+                )
+                for table in _DELETION_ORDER:
+                    ids = plan.targets.get(table, ())
+                    if ids:
+                        _delete_targets(
+                            connection,
+                            table,
+                            _DELETION_COLUMNS[table],
+                            ids,
+                        )
+                connection.execute(
+                    "UPDATE deletion_tokens SET used_at = ? WHERE token_sha256 = ?",
+                    (authorization.now, token_sha256),
+                )
+                next_revision = self._bump_revision(connection)
+                receipt_id = f"dr_{uuid4().hex}"
+                counts_json = _table_counts_json(plan.table_counts)
+                connection.execute(
+                    """
+                    INSERT INTO deletion_receipts (
+                        receipt_id,
+                        scope_fingerprint,
+                        deleted_at,
+                        table_counts_json,
+                        estimated_bytes,
+                        store_revision_before,
+                        store_revision_after
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        authorization.scope_fingerprint,
+                        authorization.now,
+                        counts_json,
+                        plan.estimated_bytes,
+                        authorization.store_revision,
+                        next_revision,
+                    ),
+                )
+                receipt = DeletionReceipt(
+                    receipt_id=receipt_id,
+                    scope_fingerprint=authorization.scope_fingerprint,
+                    deleted_at=authorization.now,
+                    table_counts=plan.table_counts,
+                    estimated_bytes=plan.estimated_bytes,
+                    store_revision_before=authorization.store_revision,
+                    store_revision_after=next_revision,
+                )
+        except BaseException:
+            _restore_staged_artifact_files(staged_files)
+            raise
+        _remove_staged_artifact_files(staged_files)
+        return receipt
 
 
 def _scope_has_selector(scope: StorageScope) -> bool:
@@ -2902,6 +2992,177 @@ def _select_strings(
     return {_require_str(row[0]) for row in rows}
 
 
+def _require_stored_analysis(
+    connection: duckdb.DuckDBPyConnection,
+    analysis_id: str,
+) -> None:
+    row = connection.execute(
+        "SELECT 1 FROM analyses WHERE analysis_id = ?",
+        (analysis_id,),
+    ).fetchone()
+    if row is None:
+        raise StoreNotFoundError("artifact analysis does not exist")
+
+
+def _require_new_artifact_destination(destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise StoreConflictError("artifact handle already has a physical file")
+
+
+def _authorize_deletion_token(
+    connection: duckdb.DuckDBPyConnection,
+    token_sha256: str,
+    *,
+    current_revision: int,
+) -> _DeletionAuthorization:
+    row = connection.execute(
+        """
+        SELECT
+            scope_fingerprint,
+            normalized_scope_json,
+            deletion_plan_json,
+            store_revision,
+            epoch_us(expires_at),
+            epoch_us(used_at)
+        FROM deletion_tokens
+        WHERE token_sha256 = ?
+        """,
+        (token_sha256,),
+    ).fetchone()
+    if row is None:
+        raise DeletionTokenError("deletion token is invalid")
+    if _optional_datetime(row[5]) is not None:
+        raise DeletionTokenError("deletion token was already used")
+    now = _utc_now()
+    if now >= _require_datetime(row[4]):
+        raise DeletionTokenError("deletion token expired")
+    expected_revision = _require_int(row[3])
+    if expected_revision != current_revision:
+        raise DeletionTokenError("store revision changed after deletion preview")
+    normalized_scope_json = _require_str(row[1])
+    scope_fingerprint = _require_str(row[0])
+    if _fingerprint(normalized_scope_json) != scope_fingerprint:
+        raise DeletionTokenError("deletion token scope is invalid")
+    return _DeletionAuthorization(
+        plan=_plan_from_json(_require_str(row[2])),
+        scope_fingerprint=scope_fingerprint,
+        now=now,
+        store_revision=current_revision,
+    )
+
+
+def _owned_artifact_path(
+    config: AnalyticsConfig,
+    artifact_id: str,
+    media_type: str,
+) -> Path:
+    _validate_handle(artifact_id, "ar")
+    extension = _ARTIFACT_EXTENSIONS_BY_MEDIA_TYPE.get(media_type)
+    if extension is None:
+        raise StoreValidationError("artifact media type is not supported")
+    artifacts_dir = config.paths.artifacts_dir
+    if artifacts_dir.is_symlink():
+        raise StoreValidationError("artifact directory cannot be a symlink")
+    try:
+        resolved_dir = artifacts_dir.resolve(strict=True)
+        resolved_root = config.paths.analytics_root.resolve(strict=True)
+    except OSError as error:
+        raise StoreValidationError("artifact directory is unavailable") from error
+    if (
+        not resolved_dir.is_relative_to(resolved_root)
+        or stat.S_IMODE(resolved_dir.stat().st_mode) != _OWNER_DIRECTORY_MODE
+    ):
+        raise StoreValidationError("artifact directory is not owner-only")
+    return resolved_dir / f"{artifact_id}.{extension}"
+
+
+def _write_owner_artifact_file(path: Path, content: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags, _OWNER_FILE_MODE)
+        view = memoryview(content)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("artifact write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _require_owner_artifact_file(path: Path, expected_sha256: str) -> None:
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or stat.S_IMODE(path.stat().st_mode) != _OWNER_FILE_MODE
+        or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
+    ):
+        raise StoreError("owner artifact file integrity check failed")
+
+
+def _stage_owned_artifact_deletions(
+    config: AnalyticsConfig,
+    connection: duckdb.DuckDBPyConnection,
+    artifact_ids: Sequence[str],
+) -> tuple[tuple[Path, Path], ...]:
+    if not artifact_ids:
+        return ()
+    rows = cast(
+        "list[tuple[object, ...]]",
+        connection.execute(
+            """
+            SELECT artifact_id, media_type, sha256, visibility
+            FROM artifacts WHERE artifact_id = ANY(?)
+            ORDER BY artifact_id
+            """,
+            (list(artifact_ids),),
+        ).fetchall(),
+    )
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for raw_artifact_id, raw_media_type, raw_sha256, raw_visibility in rows:
+            if _require_str(raw_visibility) != VisibilityMode.LOCAL_RESOURCE_LINK.value:
+                continue
+            artifact_id = _require_str(raw_artifact_id)
+            destination = _owned_artifact_path(
+                config,
+                artifact_id,
+                _require_str(raw_media_type),
+            )
+            _require_owner_artifact_file(destination, _require_str(raw_sha256))
+            temporary = destination.with_name(
+                f".deleting-{artifact_id}-{uuid4().hex}.tmp",
+            )
+            destination.replace(temporary)
+            temporary.chmod(_OWNER_FILE_MODE)
+            staged.append((destination, temporary))
+    except BaseException:
+        _restore_staged_artifact_files(tuple(staged))
+        raise
+    return tuple(staged)
+
+
+def _restore_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
+    for destination, temporary in reversed(staged):
+        if not temporary.exists():
+            continue
+        if destination.exists() or destination.is_symlink():
+            raise StoreError("artifact deletion rollback target is occupied")
+        temporary.replace(destination)
+        destination.chmod(_OWNER_FILE_MODE)
+
+
+def _remove_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
+    try:
+        for _destination, temporary in staged:
+            temporary.unlink()
+    except OSError as error:
+        raise StoreError("artifact physical deletion cleanup failed") from error
+
+
 def _count_targets(
     connection: duckdb.DuckDBPyConnection,
     table: str,
@@ -2916,6 +3177,22 @@ def _count_targets(
     ).fetchone()
     if row is None:
         raise StoreError("analytics deletion count is missing")
+    return _require_int(row[0])
+
+
+def _count_active_jobs(
+    connection: duckdb.DuckDBPyConnection,
+    job_ids: Sequence[str],
+) -> int:
+    row = connection.execute(
+        """
+        SELECT count(*) FROM jobs
+        WHERE job_id = ANY(?) AND state IN ('queued', 'running')
+        """,
+        (list(job_ids),),
+    ).fetchone()
+    if row is None:
+        raise StoreError("analytics active job count is missing")
     return _require_int(row[0])
 
 

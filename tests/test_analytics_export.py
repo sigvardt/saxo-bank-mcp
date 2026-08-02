@@ -1,9 +1,10 @@
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import csv
 import json
 import re
-import stat
 from io import StringIO
 from pathlib import Path
 from typing import cast
@@ -21,11 +22,23 @@ from saxo_bank_mcp.analytics_export import (
     ReportExportRequest,
     TableExportFormat,
     TableExportRequest,
+    _export_table_payload,
     export_analysis,
 )
 from saxo_bank_mcp.analytics_models import VisibilityMode
-from saxo_bank_mcp.analytics_render import ArtifactResourceLink, InlineArtifact
-from saxo_bank_mcp.analytics_reports import AnalysisReport
+from saxo_bank_mcp.analytics_render import (
+    ArtifactPayload,
+    ArtifactRefusal,
+    _render_plotly_html_payload,
+    _render_png_payload,
+)
+from saxo_bank_mcp.analytics_reports import (
+    AnalysisReport,
+    _render_report_html_payload,
+    _render_report_pdf_payload,
+    render_report_html,
+    render_report_pdf,
+)
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "analytics" / "golden_artifacts"
 _GOLDEN_PATH = _FIXTURE_ROOT / "golden_analysis.json"
@@ -36,7 +49,6 @@ _FORBIDDEN_HTML = (
     re.compile(r"\bfetch\s*\(", re.IGNORECASE),
     re.compile(r"/Users/|/Volumes/|/private/|[A-Za-z]:\\", re.IGNORECASE),
 )
-_OWNER_FILE_MODE = 0o600
 
 
 def _fixture_document() -> dict[str, object]:
@@ -61,13 +73,13 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     return load_analytics_config({"XDG_STATE_HOME": str(tmp_path / "state")})
 
 
-def _export_table(tmp_path: Path, output_format: TableExportFormat) -> InlineArtifact:
-    result = export_analysis(
-        TableExportRequest(table=_table(), output_format=output_format),
+def _export_table(tmp_path: Path, output_format: TableExportFormat) -> ArtifactPayload:
+    result = _export_table_payload(
+        _table(),
+        output_format,
         config=_config(tmp_path),
-        trusted_local_host=True,
     )
-    assert isinstance(result, InlineArtifact)
+    assert isinstance(result, ArtifactPayload)
     return result
 
 
@@ -232,19 +244,45 @@ def test_png_html_and_pdf_export_dispatch_is_deterministic(
     media_type: str,
     magic: bytes,
 ) -> None:
-    first = export_analysis(
-        export_request,
-        config=_config(tmp_path),
-        trusted_local_host=True,
-    )
-    second = export_analysis(
-        export_request,
-        config=_config(tmp_path),
-        trusted_local_host=True,
-    )
+    del tmp_path
+    if isinstance(export_request, ChartExportRequest):
+        if export_request.output_format == "png":
+            first = _render_png_payload(
+                export_request.semantics,
+                width=export_request.width,
+                height=export_request.height,
+            )
+            second = _render_png_payload(
+                export_request.semantics,
+                width=export_request.width,
+                height=export_request.height,
+            )
+        else:
+            first = _render_plotly_html_payload(
+                export_request.semantics,
+                viewport_width=export_request.width,
+                height=export_request.height,
+            )
+            second = _render_plotly_html_payload(
+                export_request.semantics,
+                viewport_width=export_request.width,
+                height=export_request.height,
+            )
+    elif export_request.output_format == "html":
+        first = _render_report_html_payload(
+            export_request.report,
+            viewport_width=export_request.viewport_width,
+        )
+        second = _render_report_html_payload(
+            export_request.report,
+            viewport_width=export_request.viewport_width,
+        )
+    else:
+        first = _render_report_pdf_payload(export_request.report)
+        second = _render_report_pdf_payload(export_request.report)
 
-    assert isinstance(first, InlineArtifact)
-    assert isinstance(second, InlineArtifact)
+    assert isinstance(first, ArtifactPayload)
+    assert isinstance(second, ArtifactPayload)
     assert first.media_type == media_type
     assert first.content.startswith(magic)
     assert first.content == second.content
@@ -257,6 +295,38 @@ def test_report_requires_one_source_linked_analysis_and_visibility() -> None:
     second = ChartSemantics.model_validate_json(json.dumps(second_payload))
 
     with pytest.raises(ValidationError):
+        AnalysisReport(title="Mismatched report", charts=(first, second))
+
+
+def test_public_report_renderers_refuse_unbound_caller_charts() -> None:
+    report = AnalysisReport(title="Synthetic report", charts=(_chart(),))
+
+    assert render_report_html(report).reason_code == "artifact_analysis_unbound"
+    assert render_report_pdf(report).reason_code == "artifact_analysis_unbound"
+
+
+@pytest.mark.parametrize(
+    ("stamp_field", "replacement"),
+    [
+        ("quote_delay", "real_time"),
+        ("price_type", "midpoint"),
+        ("currency", "EUR"),
+        ("adjustment_status", "unadjusted"),
+        ("warnings", ("different_warning",)),
+    ],
+)
+def test_report_requires_complete_stamp_equality(
+    stamp_field: str,
+    replacement: object,
+) -> None:
+    first = _chart()
+    second = first.model_copy(
+        update={
+            "stamps": first.stamps.model_copy(update={stamp_field: replacement}),
+        },
+    )
+
+    with pytest.raises(ValidationError, match="stamp"):
         AnalysisReport(title="Mismatched report", charts=(first, second))
 
 
@@ -291,6 +361,53 @@ def test_export_string_values_reject_private_paths_and_secret_material() -> None
         ExportColumn.model_validate_json(json.dumps(payload))
 
 
+def test_export_fields_reject_linux_paths_identifier_variants_and_token_shapes() -> None:
+    column = _table().columns[0]
+    unsafe_key = column.model_dump(mode="json")
+    unsafe_key["key"] = "account_number"
+    with pytest.raises(ValidationError):
+        ExportColumn.model_validate_json(json.dumps(unsafe_key))
+
+    unsafe_values = column.model_dump(mode="json")
+    unsafe_values["values"] = [
+        str(
+            Path("/")
+            / "Volumes"
+            / "ssd_1"
+            / "codex"
+            / "tmp"
+            / "saxo-bank-mcp-analytics"
+            / "agent-implementation"
+            / "synthetic"
+            / "export.txt"
+        ),
+        "eyJ" + "d" * 24 + "." + "e" * 24 + "." + "f" * 24,
+    ]
+    with pytest.raises(ValidationError):
+        ExportColumn.model_validate_json(json.dumps(unsafe_values))
+
+
+def test_unbound_caller_export_refuses_instead_of_claiming_saxo_provenance(
+    tmp_path: Path,
+) -> None:
+    table = _table()
+    unbound = table.model_copy(
+        update={
+            "stamps": table.stamps.model_copy(
+                update={"source_revision": "caller:unbound"},
+            ),
+        },
+    )
+
+    result = export_analysis(
+        TableExportRequest(table=unbound, output_format="json"),
+        config=_config(tmp_path),
+    )
+
+    assert isinstance(result, ArtifactRefusal)
+    assert result.reason_code == "artifact_analysis_unbound"
+
+
 def test_export_columns_require_equal_rows_and_unique_keys() -> None:
     table = _table()
     short = table.columns[0].model_copy(update={"values": ("2026-01",)})
@@ -311,7 +428,7 @@ def test_export_columns_require_equal_rows_and_unique_keys() -> None:
         )
 
 
-def test_local_resource_link_export_persists_owner_only_without_exposing_path(
+def test_local_resource_link_export_still_refuses_unbound_caller_values(
     tmp_path: Path,
 ) -> None:
     table = _table()
@@ -324,12 +441,8 @@ def test_local_resource_link_export_persists_owner_only_without_exposing_path(
     result = export_analysis(
         TableExportRequest(table=local_table, output_format="json"),
         config=config,
-        trusted_local_host=False,
     )
 
-    assert isinstance(result, ArtifactResourceLink)
-    assert result.reason_code == "local_resource_link_requested"
-    assert "path" not in result.model_dump(mode="json")
-    files = tuple(config.paths.artifacts_dir.iterdir())
-    assert len(files) == 1
-    assert stat.S_IMODE(files[0].stat().st_mode) == _OWNER_FILE_MODE
+    assert isinstance(result, ArtifactRefusal)
+    assert result.reason_code == "artifact_analysis_unbound"
+    assert tuple(config.paths.artifacts_dir.iterdir()) == ()

@@ -24,6 +24,7 @@ from saxo_bank_mcp.analytics_models import (
     UtcDateTime,
     VisibilityMode,
 )
+from saxo_bank_mcp.secret_scan import scan_secret_text
 
 type ChartTemplateId = Literal[
     "price_volume_indicator",
@@ -66,21 +67,35 @@ PRIVACY_FOOTER: Final = "Owner-only analytics; public evidence remains redacted"
 _SOURCE_SCOPE: Final = "saxo_openapi"
 _MAX_LABELS: Final = 500
 _MAX_SERIES: Final = 25
+_SCATTER_SERIES_COUNT: Final = 2
 _FORBIDDEN_DISPLAY_TEXT: Final = re.compile(
     r"(?:https?://|ftp://|file://|<\s*script\b|\bfetch\s*\(|"
     r"XMLHttpRequest|WebSocket|EventSource|(?:/Users/|/Volumes/|/private/)|"
     r"(?:^|[\s=])~/|(?:^|[\s=])[A-Za-z]:\\|\\\\[^\\]+\\|"
     r"\b(?:access[_ -]?token|refresh[_ -]?token|client[_ -]?secret|"
     r"client[_ -]?key|account[_ -]?key|account[_ -]?id|order[_ -]?id|"
-    r"position[_ -]?id|preview[_ -]?token)\b)",
+    r"position[_ -]?id|preview[_ -]?token|"
+    r"(?:account|client|order|position|user|trade|transaction|application|app)"
+    r"[_ -]?(?:id|key|number|name|ref))\b)",
     re.IGNORECASE,
+)
+_ABSOLUTE_PATH_TEXT: Final = re.compile(
+    r"(?:^|[\s=(])/(?!/)[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+",
 )
 _CONTROL_TEXT: Final = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _safe_display_text(value: str) -> str:
     material = value.strip()
-    if not material or _CONTROL_TEXT.search(material) or _FORBIDDEN_DISPLAY_TEXT.search(material):
+    findings, scan_errors = scan_secret_text("artifact-field.txt", material)
+    if (
+        not material
+        or _CONTROL_TEXT.search(material)
+        or _FORBIDDEN_DISPLAY_TEXT.search(material)
+        or _ABSOLUTE_PATH_TEXT.search(material)
+        or findings
+        or scan_errors
+    ):
         raise ValueError("artifact display text contains forbidden material")
     return material
 
@@ -262,6 +277,7 @@ class ChartSemantics(_StrictModel):
     subtitle: DisplayText
     x_axis_title: DisplayText
     y_axis_title: DisplayText
+    secondary_y_axis_title: DisplayText | None = None
     labels: tuple[DisplayText, ...] = Field(min_length=1, max_length=_MAX_LABELS)
     series: tuple[ChartSeries, ...] = Field(min_length=1, max_length=_MAX_SERIES)
     stamps: ArtifactStamps
@@ -278,7 +294,43 @@ class ChartSemantics(_StrictModel):
             raise ValueError("chart series names must be unique")
         if any(len(series.values) != len(self.labels) for series in self.series):
             raise ValueError("every chart series must align exactly to the chart labels")
+        kind = binding.chart_kind
+        _validate_template_values(kind, self.series)
+        self._validate_axis_contract(kind)
         return self
+
+    def _validate_axis_contract(self, kind: ChartKind) -> None:  # noqa: C901
+        if kind in {"dashboard", "card"}:
+            return
+        primary = tuple(series for series in self.series if series.axis == "primary")
+        secondary = tuple(series for series in self.series if series.axis == "secondary")
+        if kind == "scatter":
+            if self.secondary_y_axis_title is not None:
+                raise ValueError("scatter charts use explicit x and y titles only")
+            _require_axis_unit_title(self.x_axis_title, self.series[0].unit, "scatter x")
+            _require_axis_unit_title(self.y_axis_title, self.series[1].unit, "scatter y")
+            return
+        if kind != "composite" and secondary:
+            raise ValueError("only composite charts may use a secondary axis")
+        if not primary:
+            raise ValueError("charts require a primary-axis series")
+        primary_units = {series.unit for series in primary}
+        if len(primary_units) != 1:
+            raise ValueError("primary-axis series must share one unit")
+        _require_axis_unit_title(self.y_axis_title, next(iter(primary_units)), "primary")
+        if secondary:
+            secondary_units = {series.unit for series in secondary}
+            if len(secondary_units) != 1:
+                raise ValueError("secondary-axis series must share one unit")
+            if self.secondary_y_axis_title is None:
+                raise ValueError("secondary-axis series require a separate axis title")
+            _require_axis_unit_title(
+                self.secondary_y_axis_title,
+                next(iter(secondary_units)),
+                "secondary",
+            )
+        elif self.secondary_y_axis_title is not None:
+            raise ValueError("secondary axis title requires secondary-axis series")
 
 
 class StructuredChartSemantics(_StrictModel):
@@ -290,6 +342,7 @@ class StructuredChartSemantics(_StrictModel):
     subtitle: DisplayText
     x_axis_title: DisplayText
     y_axis_title: DisplayText
+    secondary_y_axis_title: DisplayText | None
     labels: tuple[DisplayText, ...]
     series: tuple[ChartSeries, ...]
     series_sha256s: tuple[str, ...]
@@ -322,6 +375,7 @@ def structured_chart_semantics(semantics: ChartSemantics) -> StructuredChartSema
         subtitle=semantics.subtitle,
         x_axis_title=semantics.x_axis_title,
         y_axis_title=semantics.y_axis_title,
+        secondary_y_axis_title=semantics.secondary_y_axis_title,
         labels=semantics.labels,
         series=semantics.series,
         series_sha256s=tuple(_model_sha256(series) for series in semantics.series),
@@ -331,7 +385,19 @@ def structured_chart_semantics(semantics: ChartSemantics) -> StructuredChartSema
 
 
 def visible_stamp_lines(stamps: ArtifactStamps) -> tuple[str, ...]:
-    """Build the exact visible provenance and privacy stamp text."""
+    """Label caller-composed semantics without asserting source provenance."""
+    del stamps
+    return (
+        "Provenance: unverified caller-composed chart semantics",
+        "Artifact delivery: refused until stored analysis binding",
+        PRIVACY_FOOTER,
+    )
+
+
+def _bound_visible_stamp_lines(  # pyright: ignore[reportUnusedFunction]
+    stamps: ArtifactStamps,
+) -> tuple[str, ...]:
+    """Build stamps only for an internal adapter that already proved binding."""
     warning_text = ", ".join(stamps.warnings) if stamps.warnings else "none"
     return (
         f"Environment: {stamps.environment}",
@@ -366,3 +432,26 @@ def _model_sha256(model: BaseModel) -> str:
 
 def _is_finite(value: float) -> bool:
     return math.isfinite(value)
+
+
+def _require_axis_unit_title(title: str, unit: str, axis: str) -> None:
+    normalized_unit = unit.casefold().replace("_", " ")
+    if normalized_unit in {"index", "percent", "percentage"} and normalized_unit not in (
+        title.casefold().replace("_", " ")
+    ):
+        raise ValueError(f"{axis} axis title must identify its series unit")
+
+
+def _validate_template_values(kind: ChartKind, series: tuple[ChartSeries, ...]) -> None:
+    if kind == "waterfall":
+        if len(series) != 1:
+            raise ValueError("waterfall charts require exactly one series")
+        if any(value is None for value in series[0].values):
+            raise ValueError("waterfall charts cannot replace missing values")
+    if kind == "scatter":
+        if len(series) != _SCATTER_SERIES_COUNT:
+            raise ValueError("scatter charts require exactly two series")
+        if any(value is None for item in series for value in item.values):
+            raise ValueError("scatter charts require complete paired values")
+    if kind in {"dashboard", "card"} and any(item.values[-1] is None for item in series):
+        raise ValueError("dashboard and card latest values cannot be missing")
