@@ -1,0 +1,99 @@
+{
+  "schema_version": "1",
+  "chart": {
+    "schema_version": "1",
+    "template_id": "equity_curve_drawdown",
+    "analysis_kind": "portfolio_performance",
+    "title": "Synthetic portfolio path",
+    "subtitle": "Deterministic fixture",
+    "x_axis_title": "Period",
+    "y_axis_title": "Percent",
+    "labels": ["2026-01", "2026-02", "2026-03", "2026-04"],
+    "series": [
+      {
+        "name": "Equity",
+        "values": [100.0, 102.5, 101.0, 104.0],
+        "unit": "index",
+        "style": "line",
+        "axis": "primary"
+      },
+      {
+        "name": "Drawdown",
+        "values": [0.0, 0.0, -1.4634146341, 0.0],
+        "unit": "percent",
+        "style": "area",
+        "axis": "secondary"
+      },
+      {
+        "name": "Reference",
+        "values": [100.0, 101.0, 102.0, 103.0],
+        "unit": "index",
+        "style": "line",
+        "axis": "primary"
+      }
+    ],
+    "stamps": {
+      "environment": "SIM",
+      "data_cutoff": "2026-08-01T12:00:00Z",
+      "quote_delay": "delayed_15_minutes",
+      "price_type": "bar_close",
+      "currency": "DKK",
+      "adjustment_status": "adjusted",
+      "warnings": ["synthetic_delayed_fixture"],
+      "analysis_id": "an_00000000000040008000000000000091",
+      "source_scope": "saxo_openapi",
+      "source_revision": "fixture:t19",
+      "visibility": "inline_private"
+    }
+  },
+  "table": {
+    "schema_version": "1",
+    "title": "Synthetic monthly values",
+    "analysis_kind": "portfolio_performance",
+    "columns": [
+      {
+        "key": "period",
+        "label": "Period",
+        "value_type": "string",
+        "values": ["2026-01", "2026-02"]
+      },
+      {
+        "key": "return_ratio",
+        "label": "Return ratio",
+        "value_type": "number",
+        "values": [0.025, -0.014634146341]
+      },
+      {
+        "key": "observation_count",
+        "label": "Observation count",
+        "value_type": "integer",
+        "values": [21, 20]
+      },
+      {
+        "key": "complete",
+        "label": "Complete",
+        "value_type": "boolean",
+        "values": [true, false]
+      },
+      {
+        "key": "exact_fee",
+        "label": "Exact fee",
+        "value_type": "decimal",
+        "values": ["1.25", "0.00"]
+      }
+    ],
+    "stamps": {
+      "environment": "SIM",
+      "data_cutoff": "2026-08-01T12:00:00Z",
+      "quote_delay": "delayed_15_minutes",
+      "price_type": "bar_close",
+      "currency": "DKK",
+      "adjustment_status": "adjusted",
+      "warnings": ["synthetic_delayed_fixture"],
+      "analysis_id": "an_00000000000040008000000000000091",
+      "source_scope": "saxo_openapi",
+      "source_revision": "fixture:t19",
+      "visibility": "inline_private"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": "1",
+  "templates": [
+    {"analysis_kind": "instrument_price_volume", "chart_kind": "composite", "template_id": "price_volume_indicator"},
+    {"analysis_kind": "market_comparison", "chart_kind": "line", "template_id": "relative_performance"},
+    {"analysis_kind": "portfolio_performance", "chart_kind": "composite", "template_id": "equity_curve_drawdown"},
+    {"analysis_kind": "portfolio_performance", "chart_kind": "heatmap", "template_id": "monthly_return_heatmap"},
+    {"analysis_kind": "portfolio_performance", "chart_kind": "dashboard", "template_id": "portfolio_tearsheet"},
+    {"analysis_kind": "portfolio_performance", "chart_kind": "dashboard", "template_id": "portfolio_briefing"},
+    {"analysis_kind": "portfolio_exposure", "chart_kind": "bar", "template_id": "allocation_exposure"},
+    {"analysis_kind": "portfolio_attribution", "chart_kind": "waterfall", "template_id": "contribution_waterfall"},
+    {"analysis_kind": "portfolio_risk", "chart_kind": "bar", "template_id": "risk_contribution"},
+    {"analysis_kind": "portfolio_risk", "chart_kind": "heatmap", "template_id": "correlation_heatmap_cluster_map"},
+    {"analysis_kind": "portfolio_scenario", "chart_kind": "waterfall", "template_id": "scenario_waterfall"},
+    {"analysis_kind": "portfolio_minimum_variance", "chart_kind": "scatter", "template_id": "efficient_frontier"},
+    {"analysis_kind": "option_payoff", "chart_kind": "line", "template_id": "options_payoff_greeks"},
+    {"analysis_kind": "iv_surface", "chart_kind": "surface", "template_id": "iv_smile_surface"},
+    {"analysis_kind": "cost_xray", "chart_kind": "waterfall", "template_id": "cost_waterfall"},
+    {"analysis_kind": "trading_mirror", "chart_kind": "scatter", "template_id": "trade_distribution_behavior_dashboard"},
+    {"analysis_kind": "trading_mirror", "chart_kind": "dashboard", "template_id": "trading_mirror"},
+    {"analysis_kind": "pretrade_impact", "chart_kind": "card", "template_id": "pretrade_impact_card"},
+    {"analysis_kind": "execution_quality", "chart_kind": "card", "template_id": "execution_report_card"},
+    {"analysis_kind": "session_cockpit", "chart_kind": "dashboard", "template_id": "session_cockpit"}
+  ]
+}

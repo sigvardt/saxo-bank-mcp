@@ -1,0 +1,3 @@
+period,return_ratio,observation_count,complete,exact_fee,environment,data_cutoff,quote_delay,price_type,currency,adjustment_status,warnings,analysis_id,source_scope,source_revision,visibility,privacy_footer
+2026-01,0.025,21,true,1.25,SIM,2026-08-01T12:00:00Z,delayed_15_minutes,bar_close,DKK,adjusted,synthetic_delayed_fixture,an_00000000000040008000000000000091,saxo_openapi,fixture:t19,inline_private,Owner-only analytics; public evidence remains redacted
+2026-02,-0.014634146341,20,false,0.00,SIM,2026-08-01T12:00:00Z,delayed_15_minutes,bar_close,DKK,adjusted,synthetic_delayed_fixture,an_00000000000040008000000000000091,saxo_openapi,fixture:t19,inline_private,Owner-only analytics; public evidence remains redacted
