@@ -35,7 +35,7 @@ _FORMULA_INDEX_REDUCER_PATTERN: Final = re.compile(
 _FORMULA_STANDALONE_INDEX_PATTERN: Final = re.compile(
     r"(?<![A-Za-z0-9_])([a-z])(?![A-Za-z0-9_])",
 )
-_FORMULA_ORDINARY_SUFFIXES: Final = frozenset({"id"})
+_FORMULA_INDEX_ALPHABET: Final = frozenset({"i", "j", "k", "s", "t"})
 
 type ToleranceMode = Literal[
     "exact",
@@ -177,6 +177,11 @@ class MetricDefinition(_StrictModel):
             raise ValueError("metric analysis kinds must be unique")
         for kind in self.analysis_kinds:
             _require_safe_name(kind, "analysis kind")
+        unsupported_indices = _unsupported_formula_indices(self.formula)
+        if unsupported_indices:
+            raise ValueError(
+                "metric formula has unsupported formula indices: " + ", ".join(unsupported_indices),
+            )
         undefined_indices = _undefined_formula_indices(self.formula)
         if undefined_indices:
             raise ValueError(
@@ -417,7 +422,7 @@ def _catalog_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _undefined_formula_indices(formula: str) -> tuple[str, ...]:
+def _formula_indices(formula: str) -> frozenset[str]:
     indexes = {match.group(1) for match in _FORMULA_INDEX_SUFFIX_PATTERN.finditer(formula)}
     for pattern in (
         _FORMULA_INDEX_EXPRESSION_PATTERN,
@@ -425,15 +430,22 @@ def _undefined_formula_indices(formula: str) -> tuple[str, ...]:
     ):
         for match in pattern.finditer(formula):
             indexes.update(_FORMULA_STANDALONE_INDEX_PATTERN.findall(match.group(1)))
-    directly_indexed = frozenset(indexes)
     for match in _FORMULA_COMPOUND_INDEX_SUFFIX_PATTERN.finditer(formula):
         suffix = match.group(1)
-        if suffix not in _FORMULA_ORDINARY_SUFFIXES and not directly_indexed.isdisjoint(suffix):
+        if set(suffix) <= _FORMULA_INDEX_ALPHABET:
             indexes.update(suffix)
+    return frozenset(indexes)
+
+
+def _unsupported_formula_indices(formula: str) -> tuple[str, ...]:
+    return tuple(sorted(_formula_indices(formula) - _FORMULA_INDEX_ALPHABET))
+
+
+def _undefined_formula_indices(formula: str) -> tuple[str, ...]:
     return tuple(
         sorted(
             index
-            for index in indexes
+            for index in _formula_indices(formula) & _FORMULA_INDEX_ALPHABET
             if not re.search(
                 rf"\b{index.upper()}(?:_[a-z])?\s*=\s*\{{",
                 formula,

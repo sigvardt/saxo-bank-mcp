@@ -51,6 +51,7 @@ _EXACT_ANALYSIS_KIND_COUNT = 54
 _SHA256_LENGTH = 64
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
+_RESERVED_FORMULA_INDEXES = frozenset({"i", "j", "k", "s", "t"})
 _PLACEHOLDER_FORMULA_PATTERNS = (
     r"\bmodel\(",
     r"\bsupported-model\b",
@@ -305,8 +306,8 @@ def test_metric_formulas_define_every_index_set_and_exact_cash_shock_equations()
     assert undefined_indexes == {}
     assert named["cash_balance"].formula == (
         "C={the unique balances_v1.CashBalance value for each Currency row whose account "
-        "scope exactly equals request account_scope at cutoff}; cash_balance=sum_{c in C} "
-        "CashBalance_c*fx_c_to_reporting_at_request_fx_timestamp; exclude TotalValue, "
+        "scope exactly equals request account_scope at cutoff}; cash_balance=sum_{j in C} "
+        "CashBalance_j*fx_j_to_reporting_at_request_fx_timestamp; exclude TotalValue, "
         "CashAvailableForTrading, MarginAvailableForTrading, FundsAvailableForSettlement, "
         "FundsReservedForSettlement, and every other balance field; refuse a missing or "
         "duplicate account/currency row."
@@ -322,6 +323,18 @@ def test_metric_formulas_define_every_index_set_and_exact_cash_shock_equations()
         "custom_shock_effect=sum_{i in I}(component_effect_i); refuse every other branch_id, "
         "missing component, or extra shock_map key."
     )
+
+
+def test_metric_formulas_use_only_the_reserved_index_alphabet() -> None:
+    unsupported_indexes = {
+        definition.metric_id: tuple(
+            sorted(_formula_indexes(definition.formula) - _RESERVED_FORMULA_INDEXES)
+        )
+        for definition in load_metric_definition_catalog().definitions
+        if _formula_indexes(definition.formula) - _RESERVED_FORMULA_INDEXES
+    }
+
+    assert unsupported_indexes == {}
 
 
 def test_metric_definition_rejects_undefined_formula_indexes() -> None:
@@ -366,6 +379,44 @@ def test_metric_definition_rejects_undefined_lowercase_compound_formula_index(
 def test_metric_definition_accepts_ordinary_identifier_suffix() -> None:
     definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
     formula = "J={the complete ordered values}; sum_{j in J}(value_j)+subject_up; branch_id=linear."
+
+    validated = MetricDefinition.model_validate(
+        definition.model_dump(mode="python") | {"formula": formula},
+    )
+
+    assert validated.formula == formula
+
+
+def test_metric_definition_rejects_unsupported_bound_index_without_parsing_subject_up() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+    formula = (
+        "I={the complete ordered values}; P={the complete ordered periods}; "
+        "sum_{i in I,p in P}(value_i+subject_up); branch_id=linear."
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        MetricDefinition.model_validate(
+            definition.model_dump(mode="python") | {"formula": formula},
+        )
+
+    error_context = raised.value.errors()[0].get("ctx")
+    assert error_context is not None
+    assert str(error_context["error"]) == ("metric formula has unsupported formula indices: p")
+
+
+def test_metric_definition_rejects_bound_index_outside_reserved_alphabet() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+
+    with pytest.raises(ValidationError, match=r"unsupported formula indices: q"):
+        MetricDefinition.model_validate(
+            definition.model_dump(mode="python")
+            | {"formula": "Q={the complete ordered values}; sum_{q in Q}(value_q)."},
+        )
+
+
+def test_metric_definition_accepts_reserved_k_index() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+    formula = "K={the complete ordered values}; sum_{k in K}(value_k)."
 
     validated = MetricDefinition.model_validate(
         definition.model_dump(mode="python") | {"formula": formula},
