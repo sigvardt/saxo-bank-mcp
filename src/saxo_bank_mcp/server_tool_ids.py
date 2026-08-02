@@ -2,8 +2,31 @@ from __future__ import annotations
 
 from typing import Final
 
-# Canonical logical tool IDs registered by the MCP server (39 total).
+# Canonical logical tool IDs registered by the MCP server (60 total).
 # Keep in sync with server_tool_registration FUNCTION tools + health/auth/precheck.
+ANALYTICS_TOOL_IDS: Final[tuple[str, ...]] = (
+    "saxo_analytics_capabilities",
+    "saxo_resolve_research_universe",
+    "saxo_manage_research_universe",
+    "saxo_sync_research_data",
+    "saxo_get_research_dataset",
+    "saxo_analyze_market",
+    "saxo_analyze_instruments",
+    "saxo_analyze_portfolio",
+    "saxo_size_position",
+    "saxo_run_scenario",
+    "saxo_optimize_portfolio",
+    "saxo_model_derivatives",
+    "saxo_backtest_strategy",
+    "saxo_propose_trade_from_analysis",
+    "saxo_render_analysis",
+    "saxo_export_analysis",
+    "saxo_explain_analysis",
+    "saxo_manage_analysis_job",
+    "saxo_list_analytics_storage",
+    "saxo_preview_analytics_deletion",
+    "saxo_delete_analytics_data",
+)
 FUNCTION_TOOL_IDS: Final[tuple[str, ...]] = (
     "saxo_start_pkce_login",
     "saxo_exchange_pkce_code",
@@ -41,6 +64,7 @@ FUNCTION_TOOL_IDS: Final[tuple[str, ...]] = (
     "saxo_cancel_multileg_sim_order",
     "saxo_create_streaming_price_subscription",
     "saxo_cleanup_streaming_subscriptions",
+    *ANALYTICS_TOOL_IDS,
 )
 CORE_TOOL_IDS: Final[tuple[str, ...]] = (
     "saxo_health",
@@ -48,7 +72,7 @@ CORE_TOOL_IDS: Final[tuple[str, ...]] = (
     "saxo_precheck_live_order",
 )
 ALL_LOGICAL_TOOL_IDS: Final[frozenset[str]] = frozenset((*CORE_TOOL_IDS, *FUNCTION_TOOL_IDS))
-EXPECTED_TOOL_COUNT: Final = 39
+EXPECTED_TOOL_COUNT: Final = 60
 
 if len(ALL_LOGICAL_TOOL_IDS) != EXPECTED_TOOL_COUNT:  # pragma: no cover - import invariant
     message = f"tool catalog size {len(ALL_LOGICAL_TOOL_IDS)} != {EXPECTED_TOOL_COUNT}"

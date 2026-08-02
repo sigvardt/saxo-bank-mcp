@@ -9,9 +9,9 @@ from fastmcp import Client
 from mcp.types import Tool as McpTool
 from mcp.types import ToolAnnotations
 
+from saxo_bank_mcp.server_tool_ids import EXPECTED_TOOL_COUNT
 from saxo_bank_mcp.tool_metadata import metadata_for_tool
 
-EXPECTED_TOOL_COUNT: Final = 39
 STANDARD_HINT_FIELDS: Final = (
     "readOnlyHint",
     "destructiveHint",
@@ -32,6 +32,19 @@ PURE_READ_TOOLS: Final[frozenset[str]] = frozenset(
         "saxo_get_required_disclaimers",
         "saxo_list_trading_write_operations",
         "saxo_precheck_live_order",
+        "saxo_analytics_capabilities",
+        "saxo_get_research_dataset",
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+        "saxo_explain_analysis",
+        "saxo_list_analytics_storage",
     },
 )
 NON_DESTRUCTIVE_TOOLS: Final[frozenset[str]] = frozenset(
@@ -40,6 +53,11 @@ NON_DESTRUCTIVE_TOOLS: Final[frozenset[str]] = frozenset(
         "saxo_create_write_preview",
         "saxo_create_order_preview",
         "saxo_prepare_trading_write",
+        "saxo_resolve_research_universe",
+        "saxo_sync_research_data",
+        "saxo_render_analysis",
+        "saxo_export_analysis",
+        "saxo_preview_analytics_deletion",
     },
 )
 PURE_IDEMPOTENT_TOOLS: Final[frozenset[str]] = PURE_READ_TOOLS - frozenset(
@@ -58,6 +76,25 @@ LOCAL_CLOSED_WORLD_TOOLS: Final[frozenset[str]] = frozenset(
         "saxo_commit_write_preview",
         "saxo_list_trading_write_operations",
         "saxo_prepare_trading_write",
+        "saxo_analytics_capabilities",
+        "saxo_manage_research_universe",
+        "saxo_get_research_dataset",
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+        "saxo_render_analysis",
+        "saxo_export_analysis",
+        "saxo_explain_analysis",
+        "saxo_manage_analysis_job",
+        "saxo_list_analytics_storage",
+        "saxo_preview_analytics_deletion",
+        "saxo_delete_analytics_data",
     },
 )
 
@@ -94,7 +131,7 @@ async def test_annotation_map_matches_runtime_registration() -> None:
     # When: the map is validated against the runtime list.
     annotations_module.assert_tool_annotations_cover(runtime_ids)
 
-    # Then: the test uses the runtime list as truth, not a copied 39-name mirror.
+    # Then: the test uses the runtime list as truth, not a copied 60-name mirror.
     assert len(runtime_ids) == EXPECTED_TOOL_COUNT
 
 

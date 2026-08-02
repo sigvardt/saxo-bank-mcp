@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, cast
 
 from mcp.types import AnyFunction
 
+from saxo_bank_mcp.analytics_tool_descriptions import analytics_tool_description
 from saxo_bank_mcp.fastmcp_logging_safety import SafeFastMCP
 from saxo_bank_mcp.live_precheck_tool import create_live_precheck_tool
+from saxo_bank_mcp.mcp_analytics_tools import ANALYTICS_TOOL_FUNCTIONS
 from saxo_bank_mcp.mcp_auth_tools import (
     saxo_exchange_pkce_code,
     saxo_get_session_capabilities,
@@ -100,7 +102,7 @@ from saxo_bank_mcp.server_core_tools import (
     saxo_auth_status,
     saxo_health,
 )
-from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
+from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS, ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.tool_annotations import annotation_for_tool
 
 
@@ -252,6 +254,18 @@ FUNCTION_TOOL_REGISTRATIONS: Final[tuple[ToolRegistration, ...]] = (
         STREAMING_CLEANUP_TOOL_DESCRIPTION,
         saxo_cleanup_streaming_subscriptions,
     ),
+    *(
+        ToolRegistration(
+            tool_id,
+            analytics_tool_description(tool_id),
+            cast("AnyFunction", function),
+        )
+        for tool_id, function in zip(
+            ANALYTICS_TOOL_IDS,
+            ANALYTICS_TOOL_FUNCTIONS,
+            strict=True,
+        )
+    ),
 )
 
 
@@ -262,7 +276,7 @@ def register_saxo_tools(
 ) -> None:
     """Register health/auth/function/live-precheck tools, optionally filtered.
 
-    When allowed_tools is None every catalog tool is registered (production: 39).
+    When allowed_tools is None every catalog tool is registered (production: 60).
     When set, only the exact logical subset is registered via public FastMCP APIs.
     """
     allowed = ALL_LOGICAL_TOOL_IDS if allowed_tools is None else allowed_tools
@@ -289,5 +303,3 @@ def _register_core_tools(mcp: SafeFastMCP, allowed: frozenset[str]) -> None:
             description=AUTH_STATUS_TOOL_DESCRIPTION,
             annotations=annotation_for_tool("saxo_auth_status"),
         )(saxo_auth_status)
-
-

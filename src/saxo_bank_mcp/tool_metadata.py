@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import cast
+from typing import Final, cast
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.tool_metadata_live import LIVE_TOOL_METADATA
@@ -40,6 +40,160 @@ _PRODUCTION_ORDER_TOOL_METADATA: dict[str, ToolMetadata] = {
         ),
     }
     for name in _PRODUCTION_ORDER_TOOL_NAMES
+}
+
+_ANALYTICS_SAFETY_HINT: Final = (
+    " No broker write or disclaimer response is available from this analytics tool."
+)
+
+
+def _analytics_metadata(
+    tool_class: str,
+    *,
+    environments: list[ToolEnvironment],
+    local_state: bool,
+    hint: str,
+) -> ToolMetadata:
+    return {
+        "tool_class": tool_class,
+        "environment_support": environments,
+        "write_effect": "local_state" if local_state else "none",
+        "state_changing": local_state,
+        "safe_in_live_read_mode": True,
+        "agent_hint": hint + _ANALYTICS_SAFETY_HINT,
+    }
+
+
+_ANALYTICS_TOOL_METADATA: dict[str, ToolMetadata] = {
+    "saxo_analytics_capabilities": _analytics_metadata(
+        "analytics_local_read",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Use first to inspect fixed limits, formats, and proof quarantine state.",
+    ),
+    "saxo_resolve_research_universe": _analytics_metadata(
+        "analytics_saxo_read_local_index",
+        environments=["SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Resolve ambiguity explicitly before saving or synchronizing a universe.",
+    ),
+    "saxo_manage_research_universe": _analytics_metadata(
+        "analytics_local_universe_state",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Revision-bound local universe operation using only safe instrument handles.",
+    ),
+    "saxo_sync_research_data": _analytics_metadata(
+        "analytics_saxo_read_local_ingestion",
+        environments=["SIM", "LIVE_READ"],
+        local_state=True,
+        hint="One bounded on-demand source read and owner-only dataset write.",
+    ),
+    "saxo_get_research_dataset": _analytics_metadata(
+        "analytics_local_read",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Read one bounded normalized dataset page by opaque handle.",
+    ),
+    "saxo_analyze_market": _analytics_metadata(
+        "analytics_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Run only a typed bounded-market domain calculation.",
+    ),
+    "saxo_analyze_instruments": _analytics_metadata(
+        "analytics_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Run only typed source-bound instrument research.",
+    ),
+    "saxo_analyze_portfolio": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Use safe aliases and select an explicit owner-result visibility.",
+    ),
+    "saxo_size_position": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Requires a caller-supplied confirmed risk budget and returns a proposal only.",
+    ),
+    "saxo_run_scenario": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Run only explicit accepted numeric shocks; narrative proposals are not executed.",
+    ),
+    "saxo_optimize_portfolio": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Returns mathematical deltas only and does not choose objectives or risk tolerance.",
+    ),
+    "saxo_model_derivatives": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Use only supported bounded derivative models and retain stated refusals.",
+    ),
+    "saxo_backtest_strategy": _analytics_metadata(
+        "analytics_private_local_compute",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Declarative research only; no arbitrary code, execution, forecast, or advice.",
+    ),
+    "saxo_propose_trade_from_analysis": _analytics_metadata(
+        "analytics_trade_precheck",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint=(
+            "Returns typed preview input only and never approves or executes a trade; use the "
+            "separate existing order precheck for any later explicit request."
+        ),
+    ),
+    "saxo_render_analysis": _analytics_metadata(
+        "analytics_local_artifact_state",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Proof-replays stored analysis and may register one owner-only artifact.",
+    ),
+    "saxo_export_analysis": _analytics_metadata(
+        "analytics_local_artifact_state",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Exports only proof-bound stored values and may register one owner-only artifact.",
+    ),
+    "saxo_explain_analysis": _analytics_metadata(
+        "analytics_local_read",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Explain only a current proof-replayed stored analysis.",
+    ),
+    "saxo_manage_analysis_job": _analytics_metadata(
+        "analytics_local_job_state",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Starts, checks, or cancels one allowlisted in-process bounded job.",
+    ),
+    "saxo_list_analytics_storage": _analytics_metadata(
+        "analytics_local_read",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=False,
+        hint="Lists value-free owner storage metadata without filesystem locations.",
+    ),
+    "saxo_preview_analytics_deletion": _analytics_metadata(
+        "analytics_local_deletion_preview",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Issues a revision-bound expiring token but deletes no retained data.",
+    ),
+    "saxo_delete_analytics_data": _analytics_metadata(
+        "analytics_local_deletion",
+        environments=["LOCAL", "SIM", "LIVE_READ"],
+        local_state=True,
+        hint="Consumes one exact preview token and deletes only its local dependency closure.",
+    ),
 }
 
 
@@ -307,6 +461,7 @@ _TOOLS: Mapping[str, ToolMetadata] = MappingProxyType(
             ),
         },
         **LIVE_TOOL_METADATA,
+        **_ANALYTICS_TOOL_METADATA,
     },
 )
 
