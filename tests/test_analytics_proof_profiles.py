@@ -343,18 +343,41 @@ def test_metric_definition_rejects_undefined_compound_formula_index() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "indexed_value",
+    ["cash_flow_ij", "shocked_discount_factor_ij"],
+)
+def test_metric_definition_rejects_undefined_lowercase_compound_formula_index(
+    indexed_value: str,
+) -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+
+    with pytest.raises(ValidationError, match=r"undefined formula indices.*i"):
+        MetricDefinition.model_validate(
+            definition.model_dump(mode="python")
+            | {
+                "formula": (
+                    f"J={{the complete ordered cash flows}}; sum_{{j in J}}({indexed_value})."
+                ),
+            },
+        )
+
+
 def test_metric_definition_accepts_ordinary_identifier_suffix() -> None:
     definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
-    formula = (
-        "I={the complete ordered values}; P={the complete ordered periods}; "
-        "sum_{i in I,p in P}(value_i+subject_up); branch_id=linear."
-    )
+    formula = "J={the complete ordered values}; sum_{j in J}(value_j)+subject_up; branch_id=linear."
 
     validated = MetricDefinition.model_validate(
         definition.model_dump(mode="python") | {"formula": formula},
     )
 
     assert validated.formula == formula
+
+
+def test_metric_definition_accepts_current_catalog_compound_formula() -> None:
+    definition = load_metric_definition_catalog().by_id()["custom_shock_effect"]
+
+    assert MetricDefinition.model_validate(definition.model_dump(mode="python")) == definition
 
 
 def test_price_and_execution_metric_classes_match_their_calculation_origin() -> None:

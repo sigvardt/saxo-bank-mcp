@@ -24,7 +24,7 @@ _FORMULA_INDEX_SUFFIX_PATTERN: Final = re.compile(
     r"\b[A-Za-z][A-Za-z0-9_]*_([a-z])\b",
 )
 _FORMULA_COMPOUND_INDEX_SUFFIX_PATTERN: Final = re.compile(
-    r"\b(?=[A-Za-z0-9]*[A-Z])[A-Za-z][A-Za-z0-9]*_([a-z]{2,3})\b",
+    r"\b[A-Za-z][A-Za-z0-9_]*_([a-z]{2,3})\b",
 )
 _FORMULA_INDEX_EXPRESSION_PATTERN: Final = re.compile(
     r"\b[A-Za-z][A-Za-z0-9_]*_\(([^)]*)\)",
