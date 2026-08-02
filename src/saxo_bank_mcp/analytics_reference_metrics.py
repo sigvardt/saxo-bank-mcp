@@ -3,16 +3,20 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, DecimalException, localcontext
+from itertools import pairwise
 from statistics import NormalDist
 from typing import Literal, Protocol
 
 type QuantileMethod = Literal["linear", "lower", "higher", "midpoint", "nearest"]
 
-_REFERENCE_ROOT_GRID_SIZE = 4_097
-_REFERENCE_ROOT_ITERATIONS = 200
-_REFERENCE_ROOT_TOLERANCE = 1e-12
-_REFERENCE_ROOT_INTERVAL_TOLERANCE = 1e-14
+_REFERENCE_ROOT_ITERATIONS = 256
+_REFERENCE_DECIMAL_PRECISION = 60
+_REFERENCE_ROOT_TOLERANCE = Decimal("1e-40")
+_REFERENCE_ROOT_INTERVAL_TOLERANCE = Decimal("1e-45")
+_REFERENCE_ROOT_DUPLICATE_TOLERANCE = Decimal("1e-30")
+_REFERENCE_MIN_GROWTH = Decimal("1e-12")
+_REFERENCE_MAX_GROWTH = Decimal(1_000_001)
 _REFERENCE_MIN_SAMPLE_COUNT = 2
 
 
@@ -49,7 +53,14 @@ def reference_simple_returns(prices: Iterable[float]) -> tuple[float, ...]:
     values = _reference_vector(prices, "prices", minimum_count=2)
     if any(value <= 0.0 for value in values):
         raise ValueError("prices must be positive")
-    return tuple(values[index] / values[index - 1] - 1.0 for index in range(1, len(values)))
+    result: list[float] = []
+    for index in range(1, len(values)):
+        relative = values[index] / values[index - 1]
+        simple_return = relative - 1.0
+        if relative <= 0.0 or not math.isfinite(simple_return):
+            raise ValueError("simple returns are not finite")
+        result.append(simple_return)
+    return tuple(result)
 
 
 def reference_log_returns(prices: Iterable[float]) -> tuple[float, ...]:
@@ -57,7 +68,9 @@ def reference_log_returns(prices: Iterable[float]) -> tuple[float, ...]:
     values = _reference_vector(prices, "prices", minimum_count=2)
     if any(value <= 0.0 for value in values):
         raise ValueError("prices must be positive")
-    return tuple(math.log(values[index] / values[index - 1]) for index in range(1, len(values)))
+    return tuple(
+        math.log(values[index]) - math.log(values[index - 1]) for index in range(1, len(values))
+    )
 
 
 def reference_cumulative_returns(returns: Iterable[float]) -> tuple[float, ...]:
@@ -114,15 +127,22 @@ def reference_time_weighted_return(
     )
     if len(flows) != len(values) - 1:
         raise ValueError("TWR inputs are not aligned")
-    if any(value <= 0.0 for value in values):
-        raise ValueError("valuations must be positive")
+    if any(value <= 0.0 for value in values[:-1]):
+        raise ValueError("TWR opening valuations must be positive")
+    if values[-1] < 0.0:
+        raise ValueError("TWR final valuation cannot be negative")
     growth = 1.0
     for index, flow in enumerate(flows):
         adjusted_end = values[index + 1] - flow
+        if not math.isfinite(adjusted_end):
+            raise ValueError("TWR adjusted value is not finite")
         if adjusted_end < 0.0:
             raise ValueError("adjusted value cannot be negative")
         growth *= adjusted_end / values[index]
-    return growth - 1.0
+    result = growth - 1.0
+    if not math.isfinite(result):
+        raise ValueError("time-weighted return is not finite")
+    return result
 
 
 def reference_money_weighted_return(
@@ -236,13 +256,17 @@ def reference_downside_deviation(
     """Compute annualized target-relative downside root mean square."""
     values = _reference_vector(returns, "returns", minimum_count=1)
     targets = _reference_rates(target_returns, len(values), "target returns")
-    squared_sum = 0.0
-    for value, target in zip(values, targets, strict=True):
-        difference = value - target
-        downside = min(0.0, difference)
-        squared_sum += downside * downside
+    scale = max(*(abs(value) for value in values), *(abs(target) for target in targets))
+    if scale == 0.0:
+        return 0.0
+    normalized_downside = [
+        min(0.0, value / scale - target / scale)
+        for value, target in zip(values, targets, strict=True)
+    ]
+    squared_sum = math.fsum(value * value for value in normalized_downside)
     annualization = _reference_positive(periods_per_year, "periods per year")
-    return math.sqrt(squared_sum / len(values)) * math.sqrt(annualization)
+    normalized_result = math.sqrt(squared_sum / len(values)) * math.sqrt(annualization)
+    return _reference_decimal_rescale(normalized_result, (scale,), "downside deviation")
 
 
 def reference_drawdown_series(values: Iterable[float]) -> tuple[float, ...]:
@@ -357,21 +381,35 @@ def reference_parametric_var(
 def reference_covariance(x: Iterable[float], y: Iterable[float]) -> float:
     """Compute sample covariance by paired scalar deviations."""
     left, right = _reference_aligned(x, y, minimum_count=2)
-    left_mean = sum(left) / len(left)
-    right_mean = sum(right) / len(right)
-    total = 0.0
-    for left_value, right_value in zip(left, right, strict=True):
-        total += (left_value - left_mean) * (right_value - right_mean)
-    return total / (len(left) - 1)
+    centered_left, left_scale = _reference_scaled_centered(left)
+    centered_right, right_scale = _reference_scaled_centered(right)
+    normalized = math.fsum(
+        left_value * right_value
+        for left_value, right_value in zip(centered_left, centered_right, strict=True)
+    ) / (len(left) - 1)
+    return _reference_decimal_rescale(
+        normalized,
+        (left_scale, right_scale),
+        "covariance",
+    )
 
 
 def reference_correlation(x: Iterable[float], y: Iterable[float]) -> float:
     """Compute Pearson correlation from independent scalar moments."""
     left, right = _reference_aligned(x, y, minimum_count=2)
-    denominator = _reference_sample_deviation(left) * _reference_sample_deviation(right)
-    if denominator == 0.0:
+    centered_left, _ = _reference_scaled_centered(left)
+    centered_right, _ = _reference_scaled_centered(right)
+    left_squared = math.fsum(value * value for value in centered_left)
+    right_squared = math.fsum(value * value for value in centered_right)
+    if left_squared == 0.0 or right_squared == 0.0:
         raise ValueError("correlation denominator is zero")
-    result = reference_covariance(left, right) / denominator
+    cross_product = math.fsum(
+        left_value * right_value
+        for left_value, right_value in zip(centered_left, centered_right, strict=True)
+    )
+    result = cross_product / (math.sqrt(left_squared) * math.sqrt(right_squared))
+    if not math.isfinite(result):
+        raise ValueError("correlation is not finite")
     return min(1.0, max(-1.0, result))
 
 
@@ -385,10 +423,23 @@ def reference_beta(
         benchmark_returns,
         minimum_count=2,
     )
-    denominator = reference_covariance(benchmark, benchmark)
-    if denominator == 0.0:
+    centered_subject, subject_scale = _reference_scaled_centered(subject)
+    centered_benchmark, benchmark_scale = _reference_scaled_centered(benchmark)
+    denominator = math.fsum(value * value for value in centered_benchmark)
+    if denominator == 0.0 or benchmark_scale == 0.0:
         raise ValueError("benchmark variance is zero")
-    return reference_covariance(subject, benchmark) / denominator
+    numerator = math.fsum(
+        subject_value * benchmark_value
+        for subject_value, benchmark_value in zip(
+            centered_subject,
+            centered_benchmark,
+            strict=True,
+        )
+    )
+    result = numerator / denominator * (subject_scale / benchmark_scale)
+    if not math.isfinite(result):
+        raise ValueError("beta is not finite")
+    return result
 
 
 def reference_alpha(
@@ -552,11 +603,46 @@ def _reference_rates(
 
 
 def _reference_sample_deviation(values: tuple[float, ...]) -> float:
-    mean = sum(values) / len(values)
-    squared_sum = 0.0
-    for value in values:
-        squared_sum += (value - mean) ** 2
-    return math.sqrt(squared_sum / (len(values) - 1))
+    centered, scale = _reference_scaled_centered(values)
+    normalized = math.sqrt(
+        math.fsum(value * value for value in centered) / (len(values) - 1),
+    )
+    return _reference_decimal_rescale(normalized, (scale,), "sample deviation")
+
+
+def _reference_scaled_centered(
+    values: tuple[float, ...],
+) -> tuple[tuple[float, ...], float]:
+    scale = max(abs(value) for value in values)
+    if scale == 0.0:
+        return tuple(0.0 for _ in values), 0.0
+    normalized = tuple(value / scale for value in values)
+    mean = math.fsum(normalized) / len(normalized)
+    centered = tuple(value - mean for value in normalized)
+    if any(not math.isfinite(value) for value in centered):
+        raise ValueError("centered observations are not finite")
+    return centered, scale
+
+
+def _reference_decimal_rescale(
+    value: float,
+    scales: tuple[float, ...],
+    label: str,
+) -> float:
+    if value == 0.0 or any(scale == 0.0 for scale in scales):
+        return 0.0
+    with localcontext() as context:
+        context.prec = _REFERENCE_DECIMAL_PRECISION
+        result_decimal = Decimal(str(value))
+        for scale in scales:
+            result_decimal *= Decimal(str(scale))
+    try:
+        result = float(result_decimal)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{label} is not finite") from error
+    if not math.isfinite(result) or result == 0.0:
+        raise ValueError(f"{label} is not finite")
+    return result
 
 
 def _reference_capture(
@@ -611,73 +697,198 @@ def _reference_solve_discount_rate(
     flows: tuple[float, ...],
     periods: tuple[float, ...],
 ) -> float:
-    lower_log_growth = math.log(1e-12)
-    upper_log_growth = math.log1p(1_000_000.0)
-    step = (upper_log_growth - lower_log_growth) / (_REFERENCE_ROOT_GRID_SIZE - 1)
-    scale = max(1.0, sum(abs(value) for value in flows))
-    tolerance = _REFERENCE_ROOT_TOLERANCE * scale
-    roots: list[float] = []
-    previous_log_growth = lower_log_growth
-    previous_value = _reference_discounted_value(flows, periods, previous_log_growth)
-    for index in range(_REFERENCE_ROOT_GRID_SIZE):
-        current_log_growth = lower_log_growth + index * step
-        if index == _REFERENCE_ROOT_GRID_SIZE - 1:
-            current_log_growth = upper_log_growth
-        current_value = _reference_discounted_value(flows, periods, current_log_growth)
-        if abs(current_value) <= tolerance:
-            roots.append(current_log_growth)
-        if index > 0 and previous_value * current_value < 0.0:
-            roots.append(
-                _reference_bisect(
-                    flows,
-                    periods,
-                    previous_log_growth,
-                    current_log_growth,
-                    tolerance,
-                ),
-            )
-        previous_log_growth = current_log_growth
-        previous_value = current_value
-    unique_roots: list[float] = []
-    for root in sorted(roots):
-        if not unique_roots or not math.isclose(root, unique_roots[-1], abs_tol=1e-10):
-            unique_roots.append(root)
-    if len(unique_roots) != 1:
-        raise ValueError("discounted cash flows do not have one bounded solution")
-    return math.expm1(unique_roots[0])
+    with localcontext() as context:
+        context.prec = _REFERENCE_DECIMAL_PRECISION
+        coefficients, powers = _reference_normalized_discount_terms(flows, periods)
+        if not coefficients:
+            raise ValueError("discounted cash flows do not have one simple bounded solution")
+        lower_q = Decimal(1) / _REFERENCE_MAX_GROWTH
+        upper_q = Decimal(1) / _REFERENCE_MIN_GROWTH
+        roots = _reference_isolate_discount_roots(
+            coefficients,
+            powers,
+            lower_q,
+            upper_q,
+        )
+        if not roots:
+            raise ValueError("discounted cash flows have no bounded real solution")
+        if len(roots) != 1 or roots[0][1]:
+            raise ValueError("discounted cash flows do not have one simple bounded solution")
+        rate = Decimal(1) / roots[0][0] - Decimal(1)
+    result = float(rate)
+    if not math.isfinite(result):
+        raise ValueError("discounted cash-flow solution is not finite")
+    return result
+
+
+def _reference_normalized_discount_terms(
+    flows: tuple[float, ...],
+    periods: tuple[float, ...],
+) -> tuple[tuple[Decimal, ...], tuple[Decimal, ...]]:
+    combined: dict[Decimal, Decimal] = {}
+    for flow, period in zip(flows, periods, strict=True):
+        decimal_period = Decimal(str(period))
+        combined[decimal_period] = combined.get(decimal_period, Decimal(0)) + Decimal(
+            str(flow),
+        )
+    nonzero = sorted(
+        ((period, coefficient) for period, coefficient in combined.items() if coefficient),
+        key=lambda item: item[0],
+    )
+    if not nonzero:
+        return (), ()
+    first_period = nonzero[0][0]
+    scale = max(abs(coefficient) for _, coefficient in nonzero)
+    coefficients = tuple(coefficient / scale for _, coefficient in nonzero)
+    powers = tuple(period - first_period for period, _ in nonzero)
+    return coefficients, powers
+
+
+def _reference_isolate_discount_roots(
+    coefficients: tuple[Decimal, ...],
+    powers: tuple[Decimal, ...],
+    lower: Decimal,
+    upper: Decimal,
+) -> list[tuple[Decimal, bool]]:
+    sign_changes = _reference_sign_changes(coefficients)
+    if len(coefficients) < _REFERENCE_MIN_SAMPLE_COUNT or sign_changes == 0:
+        return []
+
+    critical_roots: list[tuple[Decimal, bool]] = []
+    if sign_changes > 1:
+        derivative_terms = [
+            (coefficient * power, power - Decimal(1))
+            for coefficient, power in zip(coefficients, powers, strict=True)
+            if power != 0
+        ]
+        first_power = derivative_terms[0][1]
+        derivative_scale = max(abs(coefficient) for coefficient, _ in derivative_terms)
+        derivative_coefficients = tuple(
+            coefficient / derivative_scale for coefficient, _ in derivative_terms
+        )
+        derivative_powers = tuple(power - first_power for _, power in derivative_terms)
+        critical_roots = _reference_isolate_discount_roots(
+            derivative_coefficients,
+            derivative_powers,
+            lower,
+            upper,
+        )
+
+    critical_points = [root for root, _ in critical_roots]
+    points = [lower, *critical_points, upper]
+    roots: list[tuple[Decimal, bool]] = []
+    for boundary in (lower, upper):
+        value, magnitude = _reference_discounted_value(coefficients, powers, boundary)
+        if _reference_is_discount_root(value, magnitude):
+            _reference_append_discount_root(roots, boundary, repeated=False)
+    for critical_point in critical_points:
+        value, magnitude = _reference_discounted_value(
+            coefficients,
+            powers,
+            critical_point,
+        )
+        if _reference_is_discount_root(value, magnitude):
+            _reference_append_discount_root(roots, critical_point, repeated=True)
+    for left, right in pairwise(points):
+        left_value, left_magnitude = _reference_discounted_value(
+            coefficients,
+            powers,
+            left,
+        )
+        right_value, right_magnitude = _reference_discounted_value(
+            coefficients,
+            powers,
+            right,
+        )
+        if _reference_is_discount_root(
+            left_value,
+            left_magnitude,
+        ) or _reference_is_discount_root(right_value, right_magnitude):
+            continue
+        if left_value.is_signed() == right_value.is_signed():
+            continue
+        root = _reference_bisect(coefficients, powers, left, right)
+        _reference_append_discount_root(roots, root, repeated=False)
+    return roots
+
+
+def _reference_sign_changes(coefficients: tuple[Decimal, ...]) -> int:
+    return sum(left.is_signed() != right.is_signed() for left, right in pairwise(coefficients))
 
 
 def _reference_discounted_value(
-    flows: tuple[float, ...],
-    periods: tuple[float, ...],
-    log_growth: float,
-) -> float:
-    total = 0.0
-    for flow, period in zip(flows, periods, strict=True):
-        exponent = min(700.0, max(-700.0, -period * log_growth))
-        total += flow * math.exp(exponent)
-    return total
+    coefficients: tuple[Decimal, ...],
+    powers: tuple[Decimal, ...],
+    discount_factor: Decimal,
+) -> tuple[Decimal, Decimal]:
+    try:
+        terms = tuple(
+            coefficient * _reference_decimal_power(discount_factor, power)
+            for coefficient, power in zip(coefficients, powers, strict=True)
+        )
+    except DecimalException as error:
+        raise ValueError("cash-flow periods are too large to evaluate") from error
+    return sum(terms, Decimal(0)), sum((abs(term) for term in terms), Decimal(0))
+
+
+def _reference_decimal_power(base: Decimal, exponent: Decimal) -> Decimal:
+    integral_exponent = exponent.to_integral_value()
+    if exponent == integral_exponent:
+        return base ** int(integral_exponent)
+    return (exponent * base.ln()).exp()
+
+
+def _reference_is_discount_root(value: Decimal, magnitude: Decimal) -> bool:
+    return abs(value) <= _REFERENCE_ROOT_TOLERANCE * magnitude
+
+
+def _reference_append_discount_root(
+    roots: list[tuple[Decimal, bool]],
+    candidate: Decimal,
+    *,
+    repeated: bool,
+) -> None:
+    for index, (existing, existing_repeated) in enumerate(roots):
+        tolerance = _REFERENCE_ROOT_DUPLICATE_TOLERANCE * max(
+            Decimal(1),
+            abs(candidate),
+            abs(existing),
+        )
+        if abs(candidate - existing) <= tolerance:
+            roots[index] = (existing, existing_repeated or repeated)
+            return
+    roots.append((candidate, repeated))
+    roots.sort(key=lambda item: item[0])
 
 
 def _reference_bisect(
-    flows: tuple[float, ...],
-    periods: tuple[float, ...],
-    lower: float,
-    upper: float,
-    tolerance: float,
-) -> float:
-    lower_value = _reference_discounted_value(flows, periods, lower)
+    coefficients: tuple[Decimal, ...],
+    powers: tuple[Decimal, ...],
+    lower: Decimal,
+    upper: Decimal,
+) -> Decimal:
+    lower_value, _ = _reference_discounted_value(coefficients, powers, lower)
     for _ in range(_REFERENCE_ROOT_ITERATIONS):
-        middle = (lower + upper) / 2.0
-        middle_value = _reference_discounted_value(flows, periods, middle)
-        if abs(middle_value) <= tolerance or upper - lower <= _REFERENCE_ROOT_INTERVAL_TOLERANCE:
+        middle = (lower + upper) / Decimal(2)
+        middle_value, middle_magnitude = _reference_discounted_value(
+            coefficients,
+            powers,
+            middle,
+        )
+        if _reference_is_discount_root(
+            middle_value,
+            middle_magnitude,
+        ) or upper - lower <= _REFERENCE_ROOT_INTERVAL_TOLERANCE * max(
+            Decimal(1),
+            abs(middle),
+        ):
             return middle
-        if lower_value * middle_value > 0.0:
+        if lower_value.is_signed() == middle_value.is_signed():
             lower = middle
             lower_value = middle_value
         else:
             upper = middle
-    return (lower + upper) / 2.0
+    return (lower + upper) / Decimal(2)
 
 
 def _reference_dates(values: Sequence[date], expected_count: int) -> tuple[date, ...]:

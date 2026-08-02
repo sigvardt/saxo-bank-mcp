@@ -13,10 +13,10 @@ from numpy.typing import ArrayLike, NDArray
 type FloatVector = NDArray[np.float64]
 type QuantileMethod = Literal["linear", "lower", "higher", "midpoint", "nearest"]
 
-_ROOT_GRID_SIZE = 4_097
 _ROOT_ITERATIONS = 200
 _ROOT_RELATIVE_TOLERANCE = 1e-12
-_ROOT_INTERVAL_TOLERANCE = 1e-14
+_ROOT_INTERVAL_TOLERANCE = 1e-13
+_ROOT_DUPLICATE_TOLERANCE = 1e-11
 _MIN_ONE_PLUS_RATE = 1e-12
 _MAX_RATE = 1_000_000.0
 _MIN_SAMPLE_COUNT = 2
@@ -31,14 +31,20 @@ def simple_returns(prices: ArrayLike) -> FloatVector:
     """Return ``P_t / P_(t-1) - 1`` for a complete positive price series."""
     values = _as_vector(prices, "prices", minimum_count=2)
     _require_strictly_positive(values, "prices")
-    return np.asarray(values[1:] / values[:-1] - 1.0, dtype=np.float64)
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        relatives = values[1:] / values[:-1]
+        result = np.asarray(relatives - 1.0, dtype=np.float64)
+    if np.any(relatives <= 0.0) or not np.all(np.isfinite(result)):
+        raise FinancialMetricError("simple returns are not finite")
+    return result
 
 
 def log_returns(prices: ArrayLike) -> FloatVector:
     """Return natural-log price relatives for a complete positive price series."""
     values = _as_vector(prices, "prices", minimum_count=2)
     _require_strictly_positive(values, "prices")
-    return np.asarray(np.log(values[1:] / values[:-1]), dtype=np.float64)
+    result = np.asarray(np.log(values[1:]) - np.log(values[:-1]), dtype=np.float64)
+    return _finite_output_vector(result, "log returns")
 
 
 def cumulative_returns(returns: ArrayLike) -> FloatVector:
@@ -90,12 +96,19 @@ def time_weighted_return(
     )
     if flows.size != values.size - 1:
         raise FinancialMetricError("TWR requires exactly one end-boundary flow per subperiod")
-    _require_strictly_positive(values, "valuations")
-    adjusted_end_values = values[1:] - flows
+    if np.any(values[:-1] <= 0.0):
+        raise FinancialMetricError("TWR requires strictly positive opening valuations")
+    if values[-1] < 0.0:
+        raise FinancialMetricError("TWR final valuation cannot be negative")
+    with np.errstate(over="ignore", invalid="ignore"):
+        adjusted_end_values = values[1:] - flows
+    _finite_output_vector(adjusted_end_values, "TWR adjusted values")
     if np.any(adjusted_end_values < 0.0):
         raise FinancialMetricError("TWR adjusted subperiod value cannot be negative")
-    subperiod_growth = adjusted_end_values / values[:-1]
-    return float(np.prod(subperiod_growth, dtype=np.float64) - 1.0)
+    with np.errstate(over="ignore", invalid="ignore"):
+        subperiod_growth = adjusted_end_values / values[:-1]
+        result = float(np.prod(subperiod_growth, dtype=np.float64) - 1.0)
+    return _finite_output_scalar(result, "time-weighted return")
 
 
 def money_weighted_return(
@@ -188,7 +201,8 @@ def volatility(returns: ArrayLike, periods_per_year: float) -> float:
     """Return annualized sample standard deviation of complete periodic returns."""
     values = _as_vector(returns, "returns", minimum_count=2)
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    return float(np.std(values, ddof=1) * math.sqrt(annualization))
+    result = _scaled_sample_deviation(values) * math.sqrt(annualization)
+    return _finite_output_scalar(result, "volatility")
 
 
 def downside_deviation(
@@ -200,8 +214,16 @@ def downside_deviation(
     values = _as_vector(returns, "returns", minimum_count=1)
     targets = _aligned_rate_vector(target_returns, values.size, "target returns")
     annualization = _positive_scalar(periods_per_year, "periods per year")
-    downside = np.minimum(values - targets, 0.0)
-    return float(math.sqrt(float(np.mean(np.square(downside)))) * math.sqrt(annualization))
+    scale = max(float(np.max(np.abs(values))), float(np.max(np.abs(targets))))
+    if scale == 0.0:
+        return 0.0
+    normalized_downside = np.minimum(values / scale - targets / scale, 0.0)
+    normalized_rms = math.sqrt(float(np.mean(np.square(normalized_downside))))
+    return _rescale_product(
+        normalized_rms * math.sqrt(annualization),
+        (scale,),
+        "downside deviation",
+    )
 
 
 def drawdown_series(values: ArrayLike) -> FloatVector:
@@ -312,20 +334,24 @@ def parametric_var(mean_return: float, standard_deviation: float, confidence: fl
 def covariance(x: ArrayLike, y: ArrayLike) -> float:
     """Return sample covariance for complete aligned observations."""
     left, right = _aligned_vectors(x, y, minimum_count=2)
-    centered_left = left - np.mean(left)
-    centered_right = right - np.mean(right)
-    return float(np.dot(centered_left, centered_right) / (left.size - 1))
+    centered_left, left_scale = _scaled_centered(left)
+    centered_right, right_scale = _scaled_centered(right)
+    normalized = float(np.dot(centered_left, centered_right) / (left.size - 1))
+    return _rescale_product(normalized, (left_scale, right_scale), "covariance")
 
 
 def correlation(x: ArrayLike, y: ArrayLike) -> float:
     """Return Pearson correlation for complete aligned observations."""
     left, right = _aligned_vectors(x, y, minimum_count=2)
-    left_deviation = float(np.std(left, ddof=1))
-    right_deviation = float(np.std(right, ddof=1))
-    denominator = left_deviation * right_deviation
-    if denominator == 0.0:
+    centered_left, _ = _scaled_centered(left)
+    centered_right, _ = _scaled_centered(right)
+    left_sum_of_squares = float(np.dot(centered_left, centered_left))
+    right_sum_of_squares = float(np.dot(centered_right, centered_right))
+    if left_sum_of_squares == 0.0 or right_sum_of_squares == 0.0:
         raise FinancialMetricError("correlation is undefined for zero variance")
-    result = covariance(left, right) / denominator
+    denominator = math.sqrt(left_sum_of_squares) * math.sqrt(right_sum_of_squares)
+    result = float(np.dot(centered_left, centered_right)) / denominator
+    result = _finite_output_scalar(result, "correlation")
     return min(1.0, max(-1.0, result))
 
 
@@ -336,10 +362,15 @@ def beta(subject_returns: ArrayLike, benchmark_returns: ArrayLike) -> float:
         benchmark_returns,
         minimum_count=2,
     )
-    benchmark_variance = covariance(benchmark, benchmark)
-    if benchmark_variance == 0.0:
+    centered_subject, subject_scale = _scaled_centered(subject)
+    centered_benchmark, benchmark_scale = _scaled_centered(benchmark)
+    normalized_variance = float(np.dot(centered_benchmark, centered_benchmark))
+    if normalized_variance == 0.0 or benchmark_scale == 0.0:
         raise FinancialMetricError("beta is undefined for zero benchmark variance")
-    return covariance(subject, benchmark) / benchmark_variance
+    normalized_covariance = float(np.dot(centered_subject, centered_benchmark))
+    scale_ratio = subject_scale / benchmark_scale
+    result = normalized_covariance / normalized_variance * scale_ratio
+    return _finite_output_scalar(result, "beta")
 
 
 def alpha(
@@ -465,6 +496,52 @@ def _require_strictly_positive(values: FloatVector, label: str) -> None:
         raise FinancialMetricError(f"{label} must be strictly positive")
 
 
+def _finite_output_vector(values: FloatVector, label: str) -> FloatVector:
+    if not np.all(np.isfinite(values)):
+        raise FinancialMetricError(f"{label} are not finite")
+    return values
+
+
+def _finite_output_scalar(value: float, label: str) -> float:
+    if not math.isfinite(value):
+        raise FinancialMetricError(f"{label} is not finite")
+    return value
+
+
+def _scaled_centered(values: FloatVector) -> tuple[FloatVector, float]:
+    scale = float(np.max(np.abs(values)))
+    if scale == 0.0:
+        return np.zeros_like(values), 0.0
+    normalized = values / scale
+    centered = np.asarray(normalized - np.mean(normalized), dtype=np.float64)
+    return _finite_output_vector(centered, "centered observations"), scale
+
+
+def _scaled_sample_deviation(values: FloatVector) -> float:
+    centered, scale = _scaled_centered(values)
+    normalized_deviation = math.sqrt(float(np.dot(centered, centered)) / (values.size - 1))
+    return _rescale_product(normalized_deviation, (scale,), "sample deviation")
+
+
+def _rescale_product(value: float, scales: tuple[float, ...], label: str) -> float:
+    if value == 0.0 or any(scale == 0.0 for scale in scales):
+        return 0.0
+    mantissa, exponent = math.frexp(value)
+    for scale in scales:
+        scale_mantissa, scale_exponent = math.frexp(scale)
+        mantissa *= scale_mantissa
+        exponent += scale_exponent
+        mantissa, adjustment = math.frexp(mantissa)
+        exponent += adjustment
+    try:
+        result = math.ldexp(mantissa, exponent)
+    except OverflowError as error:
+        raise FinancialMetricError(f"{label} is not finite") from error
+    if not math.isfinite(result) or result == 0.0:
+        raise FinancialMetricError(f"{label} is not finite")
+    return result
+
+
 def _validate_rate_inputs(flows: FloatVector, periods: FloatVector) -> None:
     if flows.size != periods.size:
         raise FinancialMetricError("cash flows and periods must have equal lengths")
@@ -479,70 +556,172 @@ def _validate_rate_inputs(flows: FloatVector, periods: FloatVector) -> None:
 def _solve_discount_rate(flows: FloatVector, periods: FloatVector) -> float:
     lower_y = math.log(_MIN_ONE_PLUS_RATE)
     upper_y = math.log1p(_MAX_RATE)
-    grid = np.unique(
-        np.concatenate(
-            (
-                np.linspace(lower_y, upper_y, _ROOT_GRID_SIZE, dtype=np.float64),
-                np.asarray([0.0], dtype=np.float64),
-            ),
-        ),
-    )
-    scale = max(1.0, float(np.sum(np.abs(flows))))
-    tolerance = _ROOT_RELATIVE_TOLERANCE * scale
-    values = np.asarray([_discounted_value(flows, periods, y) for y in grid])
-    roots: list[float] = []
-    for index, value in enumerate(values):
-        if math.isfinite(float(value)) and abs(float(value)) <= tolerance:
-            roots.append(float(grid[index]))
-    for index in range(grid.size - 1):
-        left_value = float(values[index])
-        right_value = float(values[index + 1])
-        if math.isnan(left_value) or math.isnan(right_value):
-            continue
-        same_sign = math.copysign(1.0, left_value) == math.copysign(
-            1.0,
-            right_value,
-        )
-        if left_value == 0.0 or right_value == 0.0 or same_sign:
-            continue
-        roots.append(
-            _bisect_discounted_value(
-                flows,
-                periods,
-                float(grid[index]),
-                float(grid[index + 1]),
-                tolerance,
-            ),
-        )
-    unique_roots: list[float] = []
-    for root in sorted(roots):
-        if not unique_roots or not math.isclose(root, unique_roots[-1], abs_tol=1e-10):
-            unique_roots.append(root)
-    if not unique_roots:
-        raise FinancialMetricError("money-weighted return has no bounded real solution")
-    if len(unique_roots) != 1:
+    coefficients, normalized_periods = _normalized_discount_terms(flows, periods)
+    if coefficients.size == 0:
         raise FinancialMetricError("money-weighted return has multiple bounded real solutions")
-    return math.expm1(unique_roots[0])
+    roots = _isolate_discount_roots(
+        coefficients,
+        normalized_periods,
+        lower_y,
+        upper_y,
+    )
+    if not roots:
+        raise FinancialMetricError("money-weighted return has no bounded real solution")
+    if len(roots) != 1 or roots[0][1]:
+        raise FinancialMetricError("money-weighted return has multiple bounded real solutions")
+    return math.expm1(roots[0][0])
 
 
-def _discounted_value(flows: FloatVector, periods: FloatVector, log_growth: float) -> float:
-    with np.errstate(over="ignore", invalid="ignore"):
-        discount_factors = np.exp(np.clip(-periods * log_growth, -700.0, 700.0))
-        return float(np.dot(flows, discount_factors))
-
-
-def _bisect_discounted_value(
+def _normalized_discount_terms(
     flows: FloatVector,
+    periods: FloatVector,
+) -> tuple[FloatVector, FloatVector]:
+    unique_periods, inverse = np.unique(periods, return_inverse=True)
+    combined_flows = np.zeros(unique_periods.size, dtype=np.float64)
+    np.add.at(combined_flows, inverse, flows)
+    nonzero = combined_flows != 0.0
+    if not np.any(nonzero):
+        return (
+            np.asarray([], dtype=np.float64),
+            np.asarray([], dtype=np.float64),
+        )
+    coefficients = combined_flows[nonzero]
+    normalized_periods = unique_periods[nonzero]
+    normalized_periods = normalized_periods - normalized_periods[0]
+    coefficients = coefficients / float(np.max(np.abs(coefficients)))
+    return (
+        np.asarray(coefficients, dtype=np.float64),
+        np.asarray(normalized_periods, dtype=np.float64),
+    )
+
+
+def _isolate_discount_roots(
+    coefficients: FloatVector,
     periods: FloatVector,
     lower: float,
     upper: float,
-    tolerance: float,
+) -> list[tuple[float, bool]]:
+    if coefficients.size < _MIN_SAMPLE_COUNT or _sign_changes(coefficients) == 0:
+        return []
+
+    critical_roots: list[tuple[float, bool]] = []
+    if _sign_changes(coefficients) > 1:
+        derivative_coefficients = -periods[1:] * coefficients[1:]
+        derivative_periods = periods[1:] - periods[1]
+        derivative_coefficients = derivative_coefficients / float(
+            np.max(np.abs(derivative_coefficients)),
+        )
+        critical_roots = _isolate_discount_roots(
+            np.asarray(derivative_coefficients, dtype=np.float64),
+            np.asarray(derivative_periods, dtype=np.float64),
+            lower,
+            upper,
+        )
+
+    critical_points = [root for root, _ in critical_roots]
+    points = [lower, *critical_points, upper]
+    roots: list[tuple[float, bool]] = []
+    for boundary in (lower, upper):
+        value, magnitude = _scaled_discounted_value(coefficients, periods, boundary)
+        if _is_discount_root(value, magnitude):
+            _append_discount_root(roots, boundary, repeated=False)
+    for critical_point in critical_points:
+        value, magnitude = _scaled_discounted_value(
+            coefficients,
+            periods,
+            critical_point,
+        )
+        if _is_discount_root(value, magnitude):
+            _append_discount_root(roots, critical_point, repeated=True)
+    for left, right in pairwise(points):
+        left_value, left_magnitude = _scaled_discounted_value(
+            coefficients,
+            periods,
+            left,
+        )
+        right_value, right_magnitude = _scaled_discounted_value(
+            coefficients,
+            periods,
+            right,
+        )
+        if _is_discount_root(left_value, left_magnitude) or _is_discount_root(
+            right_value,
+            right_magnitude,
+        ):
+            continue
+        if math.copysign(1.0, left_value) == math.copysign(1.0, right_value):
+            continue
+        root = _bisect_discounted_value(
+            coefficients,
+            periods,
+            left,
+            right,
+        )
+        _append_discount_root(roots, root, repeated=False)
+    return roots
+
+
+def _sign_changes(coefficients: FloatVector) -> int:
+    signs = np.signbit(coefficients)
+    return int(np.count_nonzero(signs[1:] != signs[:-1]))
+
+
+def _scaled_discounted_value(
+    coefficients: FloatVector,
+    periods: FloatVector,
+    log_growth: float,
+) -> tuple[float, float]:
+    with np.errstate(over="ignore", invalid="ignore"):
+        exponents = -periods * log_growth
+    if not np.all(np.isfinite(exponents)):
+        raise FinancialMetricError("cash-flow periods are too large to evaluate")
+    shifted_weights = np.exp(exponents - float(np.max(exponents)))
+    terms = coefficients * shifted_weights
+    value = math.fsum(float(term) for term in terms)
+    magnitude = math.fsum(abs(float(term)) for term in terms)
+    return value, magnitude
+
+
+def _is_discount_root(value: float, magnitude: float) -> bool:
+    return abs(value) <= _ROOT_RELATIVE_TOLERANCE * magnitude
+
+
+def _append_discount_root(
+    roots: list[tuple[float, bool]],
+    candidate: float,
+    *,
+    repeated: bool,
+) -> None:
+    for index, (existing, existing_repeated) in enumerate(roots):
+        if math.isclose(
+            candidate,
+            existing,
+            rel_tol=_ROOT_DUPLICATE_TOLERANCE,
+            abs_tol=_ROOT_DUPLICATE_TOLERANCE,
+        ):
+            roots[index] = (existing, existing_repeated or repeated)
+            return
+    roots.append((candidate, repeated))
+    roots.sort(key=lambda item: item[0])
+
+
+def _bisect_discounted_value(
+    coefficients: FloatVector,
+    periods: FloatVector,
+    lower: float,
+    upper: float,
 ) -> float:
-    lower_value = _discounted_value(flows, periods, lower)
+    lower_value, _ = _scaled_discounted_value(coefficients, periods, lower)
     for _ in range(_ROOT_ITERATIONS):
         middle = (lower + upper) / 2.0
-        middle_value = _discounted_value(flows, periods, middle)
-        if abs(middle_value) <= tolerance or upper - lower <= _ROOT_INTERVAL_TOLERANCE:
+        middle_value, middle_magnitude = _scaled_discounted_value(
+            coefficients,
+            periods,
+            middle,
+        )
+        if _is_discount_root(middle_value, middle_magnitude) or upper - lower <= (
+            _ROOT_INTERVAL_TOLERANCE * max(1.0, abs(middle))
+        ):
             return middle
         if math.copysign(1.0, lower_value) == math.copysign(1.0, middle_value):
             lower = middle

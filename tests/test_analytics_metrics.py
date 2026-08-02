@@ -90,6 +90,7 @@ from saxo_bank_mcp.analytics_reference_metrics import (
 _FIXTURE_PATH = Path(__file__).parent / "fixtures/analytics/golden_metrics.json"
 _ABS_TOLERANCE = 1e-12
 _REL_TOLERANCE = 1e-10
+_ROOT_RESIDUAL_TOLERANCE = 1e-9
 
 
 class _StrictFixtureModel(BaseModel):
@@ -760,6 +761,109 @@ def test_performance_edges_refuse_ambiguous_timing_and_denominators() -> None:
         cagr(0.0, 100.0, 1.0)
 
 
+def test_twr_allows_a_total_loss_only_at_the_final_valuation() -> None:
+    _assert_close(time_weighted_return([100.0, 0.0], [0.0]), -1.0)
+    _assert_close(reference_time_weighted_return([100.0, 0.0], [0.0]), -1.0)
+
+    with pytest.raises(FinancialMetricError, match="strictly positive opening valuations"):
+        time_weighted_return([100.0, 0.0, 0.0], [0.0, 0.0])
+    with pytest.raises(ValueError, match="opening valuations must be positive"):
+        reference_time_weighted_return([100.0, 0.0, 0.0], [0.0, 0.0])
+
+
+def test_mwr_and_xirr_refuse_three_roots_even_when_two_are_close() -> None:
+    flows = (-0.405045, 1.71014, -2.3001, 1.0)
+    periods = (0.0, 1.0, 2.0, 3.0)
+    economic_dates = (
+        date(2021, 1, 1),
+        date(2022, 1, 1),
+        date(2023, 1, 1),
+        date(2024, 1, 1),
+    )
+
+    for expected_rate in (0.110987668, 0.111111111, 1.0):
+        residual = sum(
+            flow / (1.0 + expected_rate) ** period
+            for flow, period in zip(flows, periods, strict=True)
+        )
+        assert abs(residual) < _ROOT_RESIDUAL_TOLERANCE
+
+    with pytest.raises(FinancialMetricError, match="multiple bounded real solutions"):
+        money_weighted_return(flows, periods)
+    with pytest.raises(FinancialMetricError, match="multiple bounded real solutions"):
+        xirr(flows, economic_dates)
+    with pytest.raises(ValueError, match="one simple bounded solution"):
+        reference_money_weighted_return(flows, periods)
+    with pytest.raises(ValueError, match="one simple bounded solution"):
+        reference_xirr(flows, economic_dates)
+
+
+def test_mwr_and_xirr_refuse_a_repeated_root_as_nonsimple() -> None:
+    flows = (0.25, -1.0, 1.0)
+    periods = (0.0, 1.0, 2.0)
+    economic_dates = (date(2021, 1, 1), date(2022, 1, 1), date(2023, 1, 1))
+
+    with pytest.raises(FinancialMetricError, match="multiple bounded real solutions"):
+        money_weighted_return(flows, periods)
+    with pytest.raises(FinancialMetricError, match="multiple bounded real solutions"):
+        xirr(flows, economic_dates)
+    with pytest.raises(ValueError, match="one simple bounded solution"):
+        reference_money_weighted_return(flows, periods)
+    with pytest.raises(ValueError, match="one simple bounded solution"):
+        reference_xirr(flows, economic_dates)
+
+
+def test_mwr_and_xirr_refuse_cash_flows_with_no_real_root() -> None:
+    flows = (-1.0, 2.0, -2.0)
+    periods = (0.0, 1.0, 2.0)
+    economic_dates = (date(2021, 1, 1), date(2022, 1, 1), date(2023, 1, 1))
+
+    with pytest.raises(FinancialMetricError, match="no bounded real solution"):
+        money_weighted_return(flows, periods)
+    with pytest.raises(FinancialMetricError, match="no bounded real solution"):
+        xirr(flows, economic_dates)
+    with pytest.raises(ValueError, match="no bounded real solution"):
+        reference_money_weighted_return(flows, periods)
+    with pytest.raises(ValueError, match="no bounded real solution"):
+        reference_xirr(flows, economic_dates)
+
+
+@pytest.mark.parametrize(
+    ("terminal_flow", "expected_rate"),
+    [(1e-12, -0.999999999999), (1_000_001.0, 1_000_000.0)],
+)
+def test_mwr_and_xirr_include_declared_rate_boundaries(
+    terminal_flow: float,
+    expected_rate: float,
+) -> None:
+    flows = (-1.0, terminal_flow)
+    periods = (0.0, 1.0)
+    economic_dates = (date(2021, 1, 1), date(2022, 1, 1))
+
+    _assert_close(money_weighted_return(flows, periods), expected_rate)
+    _assert_close(xirr(flows, economic_dates), expected_rate)
+    _assert_close(reference_money_weighted_return(flows, periods), expected_rate)
+    _assert_close(reference_xirr(flows, economic_dates), expected_rate)
+
+
+@pytest.mark.parametrize("terminal_flow", [1e-13, 2_000_001.0])
+def test_mwr_and_xirr_refuse_roots_outside_declared_boundaries(
+    terminal_flow: float,
+) -> None:
+    flows = (-1.0, terminal_flow)
+    periods = (0.0, 1.0)
+    economic_dates = (date(2021, 1, 1), date(2022, 1, 1))
+
+    with pytest.raises(FinancialMetricError, match="no bounded real solution"):
+        money_weighted_return(flows, periods)
+    with pytest.raises(FinancialMetricError, match="no bounded real solution"):
+        xirr(flows, economic_dates)
+    with pytest.raises(ValueError, match="no bounded real solution"):
+        reference_money_weighted_return(flows, periods)
+    with pytest.raises(ValueError, match="no bounded real solution"):
+        reference_xirr(flows, economic_dates)
+
+
 def test_aligned_and_capture_edges_refuse_partial_or_undefined_results() -> None:
     with pytest.raises(FinancialMetricError):
         active_returns([0.1], [0.1, 0.2])
@@ -807,6 +911,47 @@ def test_tail_and_dependence_edges_refuse_undefined_statistics() -> None:
         beta([0.1, 0.2], [0.1, 0.1])
     with pytest.raises(FinancialMetricError):
         alpha([0.1], [0.2, 0.3], 0.0, 252.0)
+
+
+def test_extreme_finite_inputs_never_emit_nonfinite_or_false_metrics() -> None:
+    with pytest.raises(FinancialMetricError, match="simple returns are not finite"):
+        simple_returns([5e-324, 1e308])
+    with pytest.raises(ValueError, match="simple returns are not finite"):
+        reference_simple_returns([5e-324, 1e308])
+
+    expected_log_return = math.log(1e308) - math.log(5e-324)
+    _assert_close(log_returns([5e-324, 1e308])[0], expected_log_return)
+    _assert_close(reference_log_returns([5e-324, 1e308])[0], expected_log_return)
+
+    expected_downside = 1e308 / math.sqrt(2.0)
+    _assert_close(downside_deviation([-1e308, 0.0], 0.0, 1.0), expected_downside)
+    _assert_close(
+        reference_downside_deviation([-1e308, 0.0], 0.0, 1.0),
+        expected_downside,
+    )
+
+    expected_volatility = math.sqrt(2.0) * 1e308
+    _assert_close(volatility([-1e308, 1e308], 1.0), expected_volatility)
+    _assert_close(
+        reference_volatility([-1e308, 1e308], 1.0),
+        expected_volatility,
+    )
+
+    _assert_close(correlation([-1e308, 1e308], [-1e308, 1e308]), 1.0)
+    _assert_close(reference_correlation([-1e308, 1e308], [-1e308, 1e308]), 1.0)
+
+    repeated_extremes = [-1e154, 1e154] * 50
+    expected_covariance = 100.0 / 99.0 * 1e308
+    _assert_close(covariance(repeated_extremes, repeated_extremes), expected_covariance)
+    _assert_close(
+        reference_covariance(repeated_extremes, repeated_extremes),
+        expected_covariance,
+    )
+
+    with pytest.raises(FinancialMetricError, match="covariance is not finite"):
+        covariance([-1e308, 1e308], [-1e308, 1e308])
+    with pytest.raises(ValueError, match="covariance is not finite"):
+        reference_covariance([-1e308, 1e308], [-1e308, 1e308])
 
 
 def test_cash_flow_and_fx_edges_refuse_missing_or_ambiguous_values(
