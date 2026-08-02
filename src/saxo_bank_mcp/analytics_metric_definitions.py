@@ -20,6 +20,18 @@ _CATALOG_SOURCE_PATH: Final = (
 _SAFE_NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _VERSION_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
+_FORMULA_INDEX_SUFFIX_PATTERN: Final = re.compile(
+    r"\b[A-Za-z][A-Za-z0-9_]*_([a-z])\b",
+)
+_FORMULA_INDEX_EXPRESSION_PATTERN: Final = re.compile(
+    r"\b[A-Za-z][A-Za-z0-9_]*_\(([^)]*)\)",
+)
+_FORMULA_INDEX_REDUCER_PATTERN: Final = re.compile(
+    r"\b(?:sum|product|max|min)_\{([^}]*)\}",
+)
+_FORMULA_STANDALONE_INDEX_PATTERN: Final = re.compile(
+    r"(?<![A-Za-z0-9_])([a-z])(?![A-Za-z0-9_])",
+)
 
 type ToleranceMode = Literal[
     "exact",
@@ -161,6 +173,11 @@ class MetricDefinition(_StrictModel):
             raise ValueError("metric analysis kinds must be unique")
         for kind in self.analysis_kinds:
             _require_safe_name(kind, "analysis kind")
+        undefined_indices = _undefined_formula_indices(self.formula)
+        if undefined_indices:
+            raise ValueError(
+                "metric formula has undefined formula indices: " + ", ".join(undefined_indices),
+            )
         return self
 
 
@@ -394,6 +411,30 @@ def _catalog_fingerprint(
         sort_keys=True,
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _undefined_formula_indices(formula: str) -> tuple[str, ...]:
+    indexes = {match.group(1) for match in _FORMULA_INDEX_SUFFIX_PATTERN.finditer(formula)}
+    for pattern in (
+        _FORMULA_INDEX_EXPRESSION_PATTERN,
+        _FORMULA_INDEX_REDUCER_PATTERN,
+    ):
+        for match in pattern.finditer(formula):
+            indexes.update(_FORMULA_STANDALONE_INDEX_PATTERN.findall(match.group(1)))
+    return tuple(
+        sorted(
+            index
+            for index in indexes
+            if not re.search(
+                rf"\b{index.upper()}(?:_[a-z])?\s*=\s*\{{",
+                formula,
+            )
+            and not re.search(
+                rf"\b{index}\s+in\s+[A-Z](?:_[a-z])?\b",
+                formula,
+            )
+        ),
+    )
 
 
 def _require_safe_name(value: str, label: str) -> None:

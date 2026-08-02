@@ -392,6 +392,17 @@ class ProofRegistry:
         }
         if dict(source_contracts) != expected_sources:
             return _status(ProofState.STALE, "source_contract_changed", profile)
+        frozen_source_fields = _source_field_paths_by_contract()
+        if any(
+            field_path not in frozen_source_fields.get(contract_id, frozenset())
+            for contract_id, field_paths in expected_source_fields.items()
+            for field_path in field_paths
+        ):
+            return _status(
+                ProofState.REFUSED,
+                "metric_source_field_missing",
+                profile,
+            )
         if profile.source_revision != source_revision:
             return _status(ProofState.STALE, "source_revision_changed", profile)
         supplied_engines = dict(engine_versions or {})
@@ -567,10 +578,11 @@ def _generate_coverage_matrix(
         for binding in requirements.required_source_contracts
         for path in binding.field_paths
     }
+    current_fields_by_contract = _source_field_paths_by_contract()
     current_fields = {
-        f"{contract.contract_id}.{path}"
-        for contract in source_contracts_by_id().values()
-        for path in _source_field_paths(contract.fields)
+        f"{contract_id}.{path}"
+        for contract_id, paths in current_fields_by_contract.items()
+        for path in paths
     }
     profile_source_fields = {
         profile.analysis_kind: {
@@ -600,10 +612,27 @@ def _generate_coverage_matrix(
         for field_path in supplied_paths
         if field_path not in expected_profile_source_fields[kind].get(contract_id, frozenset())
     )
+    invalid_definition_fields = {
+        f"{definition.metric_id}:{binding.source_contract_id}.{field_path}"
+        for definition in definitions.definitions
+        for binding in definition.input_bindings
+        if binding.source_contract_id is not None
+        for field_path in binding.field_paths
+        if field_path not in current_fields_by_contract.get(binding.source_contract_id, frozenset())
+    }
+    invalid_profile_fields = {
+        f"{kind}:{contract_id}.{field_path}"
+        for kind, supplied_contracts in profile_source_fields.items()
+        for contract_id, supplied_paths in supplied_contracts.items()
+        for field_path in supplied_paths
+        if field_path not in current_fields_by_contract.get(contract_id, frozenset())
+    }
     missing_fields = sorted(
         (required_fields - supplied_fields)
         | (required_fields - current_fields)
-        | profile_binding_gaps,
+        | profile_binding_gaps
+        | invalid_definition_fields
+        | invalid_profile_fields,
     )
     inactive_metrics: list[str] = []
     inactive_kinds: list[str] = []
@@ -898,6 +927,13 @@ def _source_field_paths(fields: Sequence[SourceField]) -> tuple[str, ...]:
     for source_field in fields:
         visit(source_field, "")
     return tuple(paths)
+
+
+def _source_field_paths_by_contract() -> dict[str, frozenset[str]]:
+    return {
+        contract_id: frozenset(_source_field_paths(contract.fields))
+        for contract_id, contract in source_contracts_by_id().items()
+    }
 
 
 def _metric_source_fields(

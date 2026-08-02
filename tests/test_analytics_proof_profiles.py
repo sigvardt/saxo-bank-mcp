@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from saxo_bank_mcp import analytics_proof_profiles as proof_profiles_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_metric_definitions import (
+    MetricDefinition,
     MetricDefinitionBinding,
     MetricDefinitionCatalog,
     load_metric_definition_catalog,
@@ -76,14 +77,14 @@ _PLACEHOLDER_FORMULA_PATTERNS = (
     r"\bdeclared open, close, high, or low\b",
     r"\bordered strike or delta pairs\b",
 )
-_INDEXED_SYMBOL_PATTERN = re.compile(
-    r"\b(?:sum|product|max|min)_([ijk])\b|\b[A-Za-z][A-Za-z0-9]*_([ijk])\b",
+_INDEXED_SUFFIX_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_]*_([a-z])\b")
+_INDEXED_EXPRESSION_PATTERN = re.compile(
+    r"\b[A-Za-z][A-Za-z0-9_]*_\(([^)]*)\)",
 )
-_INDEX_SET_PATTERNS = {
-    "i": re.compile(r"\bI\s*=\s*\{"),
-    "j": re.compile(r"\bJ(?:_i)?\s*=\s*\{"),
-    "k": re.compile(r"\bK(?:_[ij])?\s*=\s*\{"),
-}
+_INDEXED_REDUCER_PATTERN = re.compile(r"\b(?:sum|product|max|min)_\{([^}]*)\}")
+_STANDALONE_INDEX_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])([a-z])(?![A-Za-z0-9_])",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +157,50 @@ def _active_registry(
     )
 
 
+def _formula_indexes(formula: str) -> frozenset[str]:
+    indexes = {match.group(1) for match in _INDEXED_SUFFIX_PATTERN.finditer(formula)}
+    for pattern in (_INDEXED_EXPRESSION_PATTERN, _INDEXED_REDUCER_PATTERN):
+        for match in pattern.finditer(formula):
+            indexes.update(_STANDALONE_INDEX_PATTERN.findall(match.group(1)))
+    return frozenset(indexes)
+
+
+def _formula_defines_index(formula: str, index: str) -> bool:
+    return bool(
+        re.search(rf"\b{index.upper()}(?:_[a-z])?\s*=\s*\{{", formula)
+        or re.search(rf"\b{index}\s+in\s+[A-Z](?:_[a-z])?\b", formula)
+    )
+
+
+def _with_added_metric_source_field(
+    definitions: MetricDefinitionCatalog,
+    *,
+    metric_id: str,
+    contract_id: str,
+    field_path: str,
+) -> MetricDefinitionCatalog:
+    definition = definitions.by_id()[metric_id]
+    changed_bindings = tuple(
+        binding.model_copy(
+            update={"field_paths": (*binding.field_paths, field_path)},
+        )
+        if binding.source_contract_id == contract_id
+        else binding
+        for binding in definition.input_bindings
+    )
+    changed_definition = definition.model_copy(
+        update={"input_bindings": changed_bindings},
+    )
+    return MetricDefinitionCatalog.from_definitions(
+        catalog_version=definitions.catalog_version,
+        production_metric_ids=definitions.production_metric_ids,
+        definitions=tuple(
+            changed_definition if item.metric_id == metric_id else item
+            for item in definitions.definitions
+        ),
+    )
+
+
 def test_metric_definitions_are_versioned_and_machine_readable() -> None:
     catalog = load_metric_definition_catalog()
 
@@ -204,6 +249,12 @@ def test_metric_definitions_are_versioned_and_machine_readable() -> None:
     assert "declared" not in named["market_depth"].formula
     assert "solver decision variable" not in named["target_weight"].formula
     assert "declared compounding" not in named["convexity"].formula
+    assert named["maximum_drawdown"].formula == (
+        "T={the complete strictly UTC-ascending eligible valuation timestamps after applying "
+        "the exact profile-bound missing-data policy}; maximum_drawdown=min_{t in T}(V_t/"
+        "max_{s in T,s<=t}(V_s)-1); refuse empty T or any nonpositive running peak; result "
+        "is in [-1,0]."
+    )
 
 
 def test_metric_formulas_reject_placeholder_models_and_bind_exact_branches() -> None:
@@ -239,21 +290,15 @@ def test_metric_formulas_define_every_index_set_and_exact_cash_shock_equations()
     undefined_indexes = {
         definition.metric_id: tuple(
             sorted(
-                {
-                    match.group(1) or match.group(2)
-                    for match in _INDEXED_SYMBOL_PATTERN.finditer(definition.formula)
-                    if not _INDEX_SET_PATTERNS[match.group(1) or match.group(2)].search(
-                        definition.formula,
-                    )
-                },
+                index
+                for index in _formula_indexes(definition.formula)
+                if not _formula_defines_index(definition.formula, index)
             ),
         )
         for definition in named.values()
         if any(
-            not _INDEX_SET_PATTERNS[match.group(1) or match.group(2)].search(
-                definition.formula,
-            )
-            for match in _INDEXED_SYMBOL_PATTERN.finditer(definition.formula)
+            not _formula_defines_index(definition.formula, index)
+            for index in _formula_indexes(definition.formula)
         )
     }
 
@@ -277,6 +322,15 @@ def test_metric_formulas_define_every_index_set_and_exact_cash_shock_equations()
         "custom_shock_effect=sum_{i in I}(component_effect_i); refuse every other branch_id, "
         "missing component, or extra shock_map key."
     )
+
+
+def test_metric_definition_rejects_undefined_formula_indexes() -> None:
+    definition = load_metric_definition_catalog().by_id()["maximum_drawdown"]
+
+    with pytest.raises(ValidationError, match=r"undefined formula indices.*s.*t"):
+        MetricDefinition.model_validate(
+            definition.model_dump(mode="python") | {"formula": "min_t(V_t / max_(s<=t)(V_s) - 1)"},
+        )
 
 
 def test_price_and_execution_metric_classes_match_their_calculation_origin() -> None:
@@ -416,6 +470,47 @@ def test_active_profile_rejects_an_overbroad_metric_source_field() -> None:
     assert status.reason_code == "metric_source_binding_changed"
 
 
+def test_active_profile_refuses_a_consistently_bound_nonexistent_source_field() -> None:
+    registry, profile, source_contracts = _active_registry()
+    changed_definitions = _with_added_metric_source_field(
+        registry.definitions,
+        metric_id="price_return",
+        contract_id="chart_v3",
+        field_path="UnexpectedField",
+    )
+    changed_source = profile.source_contracts[0].model_copy(
+        update={"field_paths": (*profile.source_contracts[0].field_paths, "UnexpectedField")},
+    )
+    changed_profile = profile.model_copy(
+        update={
+            "definition_catalog_sha256": changed_definitions.fingerprint_sha256,
+            "source_contracts": (changed_source,),
+        },
+    )
+    changed_registry = ProofRegistry(
+        definitions=changed_definitions,
+        catalog=registry.catalog.model_copy(
+            update={
+                "definition_catalog_sha256": changed_definitions.fingerprint_sha256,
+                "source_field_coverage": (changed_source,),
+                "profiles": (changed_profile,),
+            },
+        ),
+    )
+
+    status = changed_registry.status(
+        profile.analysis_kind,
+        "1",
+        source_contracts,
+        source_revision="revision-a",
+        engine_versions={"saxo_analytics": ("1", "abcdef0")},
+        at=_NOW,
+    )
+
+    assert status.state is ProofState.REFUSED
+    assert status.reason_code == "metric_source_field_missing"
+
+
 def test_declared_coverage_rejects_an_overbroad_profile_source_field() -> None:
     definitions = load_metric_definition_catalog()
     catalog = load_proof_profile_catalog(definitions=definitions)
@@ -447,6 +542,58 @@ def test_declared_coverage_rejects_an_overbroad_profile_source_field() -> None:
 
     assert raised.value.matrix.overbroad_source_fields == (
         f"{owner.analysis_kind}:{source.contract_id}.UnexpectedField",
+    )
+
+
+def test_declared_coverage_rejects_a_consistently_bound_nonexistent_source_field() -> None:
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    changed_definitions = _with_added_metric_source_field(
+        definitions,
+        metric_id="price_return",
+        contract_id="chart_v3",
+        field_path="UnexpectedField",
+    )
+    owner_kinds = frozenset(definitions.by_id()["price_return"].analysis_kinds)
+    changed_profiles = tuple(
+        profile.model_copy(
+            update={
+                "definition_catalog_sha256": changed_definitions.fingerprint_sha256,
+                "source_contracts": tuple(
+                    source.model_copy(
+                        update={"field_paths": (*source.field_paths, "UnexpectedField")},
+                    )
+                    if profile.analysis_kind in owner_kinds and source.contract_id == "chart_v3"
+                    else source
+                    for source in profile.source_contracts
+                ),
+            },
+        )
+        for profile in catalog.profiles
+    )
+    changed_catalog = catalog.model_copy(
+        update={
+            "definition_catalog_sha256": changed_definitions.fingerprint_sha256,
+            "source_field_coverage": tuple(
+                source.model_copy(
+                    update={"field_paths": (*source.field_paths, "UnexpectedField")},
+                )
+                if source.contract_id == "chart_v3"
+                else source
+                for source in catalog.source_field_coverage
+            ),
+            "profiles": changed_profiles,
+        },
+    )
+
+    with pytest.raises(CoverageError) as raised:
+        proof_profiles_module.generate_declared_coverage_matrix(
+            definitions=changed_definitions,
+            catalog=changed_catalog,
+        )
+
+    assert {f"{kind}:chart_v3.UnexpectedField" for kind in owner_kinds}.issubset(
+        raised.value.matrix.missing_source_fields
     )
 
 
