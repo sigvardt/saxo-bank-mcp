@@ -17,7 +17,7 @@ from typing import cast
 
 import httpx2
 import pytest
-from analytics_source_matrix_support import ScriptedMatrixSession
+from analytics_source_matrix_support import REPOSITORY_COPY_IGNORE, ScriptedMatrixSession
 
 import saxo_bank_mcp.analytics_provider as provider_module
 import saxo_bank_mcp.analytics_source_contracts as contracts_module
@@ -115,16 +115,7 @@ def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
     shutil.copytree(
         repository_root,
         build_root,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            ".venv",
-            ".ruff_cache",
-            ".pytest_cache",
-            ".basedpyright",
-            "__pycache__",
-            "*.pyc",
-            "*.pyo",
-        ),
+        ignore=REPOSITORY_COPY_IGNORE,
     )
     wheel_dir = tmp_path / "wheel"
     uv = shutil.which("uv")

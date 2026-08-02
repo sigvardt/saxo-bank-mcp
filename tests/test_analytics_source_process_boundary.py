@@ -26,6 +26,7 @@ import anyio
 import pytest
 from analytics_source_matrix_support import (
     BOUNDARY_FORBIDDEN_SCALARS,
+    REPOSITORY_COPY_IGNORE,
     BoundaryEventFixture,
     ScriptedMatrixSession,
     build_fixture_candidate,
@@ -391,16 +392,7 @@ def two_prepared_runtimes(
     shutil.copytree(
         _ROOT,
         source_root,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            ".venv",
-            ".ruff_cache",
-            ".pytest_cache",
-            ".basedpyright",
-            "__pycache__",
-            "*.pyc",
-            "*.pyo",
-        ),
+        ignore=REPOSITORY_COPY_IGNORE,
     )
     uv = shutil.which("uv")
     assert uv is not None

@@ -64,6 +64,65 @@ BOUNDARY_FORBIDDEN_SCALARS: Final[frozenset[str | int]] = frozenset(
     },
 )
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
+REPOSITORY_COPY_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = (
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    ".superpowers",
+    ".pytest_cache",
+    ".hypothesis",
+    ".tox",
+    ".nox",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".basedpyright",
+    ".pyright",
+    ".pytype",
+    ".pyre",
+    ".cache",
+    "cache",
+    "caches",
+    "*-cache",
+    "cache-*",
+    "*-cache-*",
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".coverage",
+    ".coverage.*",
+    "coverage.xml",
+    "htmlcov",
+    "build",
+    "dist",
+    "*.egg",
+    "*.egg-info",
+    "*.whl",
+    "wheels",
+    "wheelhouse",
+    "*-wheel*",
+    "wheel-*",
+    "runtime",
+    "runtimes",
+    ".runtime",
+    ".runtimes",
+    "*-runtime*",
+    "runtime-*",
+    ".omo",
+    "evidence",
+    ".evidence",
+    "artifacts",
+    ".artifacts",
+    "*-artifacts",
+    "node_modules",
+    ".eslintcache",
+    ".local",
+    ".state",
+    "state",
+    "logs",
+    "audit",
+)
+REPOSITORY_COPY_IGNORE: Final = shutil.ignore_patterns(*REPOSITORY_COPY_EXCLUDE_PATTERNS)
 
 
 _SOURCE_CONTRACT_ORDER: Final[tuple[str, ...]] = (
@@ -119,15 +178,7 @@ def build_fixture_candidate(root: Path, uv_path: Path) -> SealedFixtureCandidate
         REPOSITORY_ROOT,
         source,
         symlinks=False,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            ".venv",
-            ".superpowers",
-            "dist",
-            "__pycache__",
-            "*.pyc",
-            "*.pyo",
-        ),
+        ignore=REPOSITORY_COPY_IGNORE,
     )
     shutil.copy2(
         REPOSITORY_ROOT / "tests/fixtures/analytics/source_matrix_fixture_server.py",
@@ -238,10 +289,16 @@ def _run_checked(
     *,
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    subprocess_environment = None
+    if env is not None:
+        subprocess_environment = dict(env)
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            if value := os.environ.get(name):
+                subprocess_environment[name] = value
     return subprocess.run(
         tuple(os.fspath(argument) for argument in command),
         cwd=cwd,
-        env=env,
+        env=subprocess_environment,
         shell=False,
         check=True,
         capture_output=True,

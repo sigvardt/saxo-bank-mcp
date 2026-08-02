@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Final
 
 import pytest
+from analytics_source_matrix_support import REPOSITORY_COPY_IGNORE
 from fastmcp import Client
 from mcp.types import Tool as McpTool
 from pydantic import TypeAdapter
@@ -280,16 +281,7 @@ def _run_generator_in(root: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _copy_worktree(target: Path) -> Path:
-    ignored = shutil.ignore_patterns(
-        ".git",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".superpowers",
-        ".venv",
-        "__pycache__",
-    )
-    shutil.copytree(ROOT, target, ignore=ignored)
+    shutil.copytree(ROOT, target, ignore=REPOSITORY_COPY_IGNORE)
     return target
 
 

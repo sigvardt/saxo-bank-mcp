@@ -8,7 +8,7 @@ default.
 
 ```bash
 uv sync --locked --all-extras --dev
-uv run pytest
+scripts/run-pytest
 uv run ruff check src tests
 uv run basedpyright src tests
 uv run python -c "import saxo_bank_mcp"
