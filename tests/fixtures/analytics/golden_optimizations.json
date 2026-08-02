@@ -1,0 +1,29 @@
+{
+  "schema_version": "1",
+  "diagonal_two_asset": {
+    "covariance": [
+      ["0.04", "0"],
+      ["0", "0.01"]
+    ],
+    "current_weights": ["0.5", "0.5"],
+    "minimum_variance_weights": ["0.2", "0.8"],
+    "minimum_variance_objective": "0.008",
+    "minimum_variance_turnover": "0.3",
+    "risk_parity_weights": [
+      "0.33333333333333333333333333333333333333333333333333",
+      "0.66666666666666666666666666666666666666666666666667"
+    ],
+    "risk_parity_contributions": ["0.5", "0.5"]
+  },
+  "correlated_two_asset": {
+    "covariance": [
+      ["0.04", "0.006"],
+      ["0.006", "0.01"]
+    ],
+    "minimum_variance_weights": [
+      "0.10526315789473684210526315789473684210526315789474",
+      "0.89473684210526315789473684210526315789473684210526"
+    ],
+    "minimum_variance_objective": "0.0095789473684210526315789473684210526315789473684211"
+  }
+}
