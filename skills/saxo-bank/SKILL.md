@@ -17,6 +17,14 @@ Use this skill first for broad Saxo Bank MCP requests. Classify the task, select
 - [saxo-safety-recovery](../saxo-safety-recovery/SKILL.md): recovery, incident, privacy, evidence, validation wording, request ledger, unknown state, partial success, timeout, duplicate, conflict, or no-purchase proof.
 - [saxo-qa-operations](../saxo-qa-operations/SKILL.md): QA, eval, dual harness, install proof, tool matrix, release evidence, static gate, SIM matrix, or LIVE read/precheck proof.
 
+## Analytics route
+
+Use [saxo-analytics](../saxo-analytics/SKILL.md) first for portfolio briefing, Cost X-ray,
+instrument or market comparison, scenario, sizing, optimization, derivatives, backtest, analytics
+artifact, bounded analytics job, analytics storage, or local analytics deletion. If research leads
+to `saxo_propose_trade_from_analysis`, stop before broker write. A trade is a separate explicit
+follow-on to `saxo-trading` only after a new user request.
+
 Read [router-contract.md](references/router-contract.md) when the first route is not obvious, when more than one intent appears, when the environment is unclear, or when approval, advice, unsupported operation, evidence, or mutation risk matters.
 
 Use [tool-catalog.md](references/tool-catalog.md) only to resolve logical tool IDs and owning skills. It is generated. Never edit it by hand.

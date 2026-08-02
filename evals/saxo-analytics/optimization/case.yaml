@@ -1,0 +1,27 @@
+{
+  "id": "optimization",
+  "title": "Caller-constrained portfolio optimization",
+  "tags": ["analytics", "optimization", "positive", "local"],
+  "environment": "LOCAL",
+  "natural_prompt": "Run my stated minimum-variance objective and bounds on the current stored dataset. Report target deltas, feasibility, residuals, stability, and an expired-handle refusal if replay fails.",
+  "harness_prompts": {
+    "codex": "Run my stated minimum-variance objective and bounds on the current stored dataset. Report target deltas, feasibility, residuals, stability, and an expired-handle refusal if replay fails.",
+    "claude": "Run my stated minimum-variance objective and bounds on the current stored dataset. Report target deltas, feasibility, residuals, stability, and an expired-handle refusal if replay fails."
+  },
+  "expected_skill": "saxo-analytics",
+  "required_logical_tools": ["saxo_optimize_portfolio"],
+  "forbidden_logical_tools": ["saxo_commit_write_preview", "saxo_execute_trading_write", "saxo_place_order", "saxo_place_sim_order", "saxo_register_disclaimer_response"],
+  "exact_tool_grants": {
+    "codex": ["saxo_optimize_portfolio"],
+    "claude": ["saxo_optimize_portfolio"]
+  },
+  "transcript_assertions": {
+    "required_all": ["analysis_id", "stability", "mathematical proposal"],
+    "required_any": ["verified", "degraded", "refused"],
+    "forbidden": ["replacement math", "optimizer selected your objective", "broker write completed"]
+  },
+  "deterministic_graders": ["required_text", "forbidden_text"],
+  "max_turns": 5,
+  "timeout_seconds": 240,
+  "cleanup_required": false
+}

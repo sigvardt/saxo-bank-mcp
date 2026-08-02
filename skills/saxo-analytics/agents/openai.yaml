@@ -1,0 +1,4 @@
+interface:
+  display_name: "Saxo analytics"
+  short_description: "Guide verified Saxo analytics"
+  default_prompt: "Use $saxo-bank-mcp:saxo-analytics to run bounded Saxo analytics, cite analysis_id and verified/degraded/refused state, preserve privacy and quality warnings, and stop before any broker write."

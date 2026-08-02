@@ -8,14 +8,30 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Final, cast
 
 from saxo_bank_mcp._evidence import write_json
+from saxo_bank_mcp.agent_skill_eval_models import Harness, SkillEvalCase
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
+
+ANALYTICS_LOCAL_FIXTURE: Final = "analytics-research-to-precheck"
+ANALYTICS_CASE_PATH: Final = Path("evals/saxo-analytics/research-to-precheck/case.yaml")
+ANALYTICS_FIXTURE_PATH: Final = Path("evals/saxo-analytics/research-to-precheck/local-fixture.json")
+BROKER_WRITE_TOOLS: Final = frozenset(
+    {
+        "saxo_commit_write_preview",
+        "saxo_execute_trading_write",
+        "saxo_place_order",
+        "saxo_place_sim_order",
+        "saxo_register_disclaimer_response",
+    }
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,7 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--fixture",
-        choices=("after-send-timeout", "incomplete-evicted-ledger", "state-fingerprint-mismatch"),
+        choices=(
+            "after-send-timeout",
+            "incomplete-evicted-ledger",
+            "state-fingerprint-mismatch",
+            ANALYTICS_LOCAL_FIXTURE,
+        ),
         default=None,
     )
     parser.add_argument("--out", type=Path, required=True)
@@ -60,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-repo", type=Path, default=Path())
     args = parser.parse_args(argv)
     if args.fixture is not None:
+        if args.fixture == ANALYTICS_LOCAL_FIXTURE:
+            return _run_analytics_local_fixture(
+                harness=cast("str", args.harness),
+                out=args.out,
+            )
         return _write_failure_fixture(args.fixture, args.out)
     bound = _bind_install_report(args)
     if isinstance(bound, int):
@@ -166,6 +192,105 @@ def _write_failure_fixture(fixture: str, out: Path) -> int:
     }
     write_json(out, payload)
     return 1
+
+
+def _run_analytics_local_fixture(*, harness: str, out: Path) -> int:
+    root = Path(__file__).resolve().parents[1]
+    try:
+        case = SkillEvalCase.model_validate_json(
+            (root / ANALYTICS_CASE_PATH).read_text(encoding="utf-8")
+        )
+        raw = json.loads((root / ANALYTICS_FIXTURE_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        write_json(out, _analytics_fixture_failure("fixture_invalid"))
+        return 1
+    if not isinstance(raw, dict) or raw.get("case_id") != case.id:
+        write_json(out, _analytics_fixture_failure("fixture_binding_invalid"))
+        return 1
+    responses = raw.get("responses")
+    if not isinstance(responses, dict):
+        write_json(out, _analytics_fixture_failure("fixture_responses_invalid"))
+        return 1
+
+    selected: tuple[Harness, ...] = (
+        ("codex", "claude") if harness == "both" else (cast("Harness", harness),)
+    )
+    records: list[dict[str, object]] = []
+    for client in selected:
+        response = responses.get(client)
+        passed, invoked = _analytics_fixture_response_passes(case, client, response)
+        records.append(
+            {
+                "case_id": case.id,
+                "harness": client,
+                "status": "passed" if passed else "failed",
+                "expected_skill": case.expected_skill,
+                "invoked_logical_tools": list(invoked),
+                "assertions_passed": passed,
+            }
+        )
+    passed = bool(records) and all(record["status"] == "passed" for record in records)
+    write_json(
+        out,
+        {
+            "status": "passed" if passed else "failed",
+            "fixture": ANALYTICS_LOCAL_FIXTURE,
+            "execution_mode": "local_fixture_validation",
+            "case_count": len(records),
+            "records": records,
+            "external_calls": 0,
+            "broker_writes": 0,
+            "disclaimer_responses": 0,
+            "raw_transcripts_persisted": 0,
+        },
+    )
+    return 0 if passed else 1
+
+
+def _analytics_fixture_response_passes(
+    case: SkillEvalCase,
+    harness: Harness,
+    response: object,
+) -> tuple[bool, tuple[str, ...]]:
+    if not isinstance(response, dict):
+        return False, ()
+    text = response.get("text")
+    invoked_value = response.get("invoked_logical_tools")
+    if not isinstance(text, str) or not isinstance(invoked_value, list):
+        return False, ()
+    if not all(isinstance(item, str) for item in invoked_value):
+        return False, ()
+    invoked = tuple(cast("list[str]", invoked_value))
+    lowered = text.lower()
+    assertions = case.transcript_assertions
+    required_all = all(phrase.lower() in lowered for phrase in assertions.required_all)
+    required_any = not assertions.required_any or any(
+        phrase.lower() in lowered for phrase in assertions.required_any
+    )
+    forbidden_clear = all(phrase.lower() not in lowered for phrase in assertions.forbidden)
+    grants = frozenset(case.exact_tool_grants[harness])
+    invoked_set = frozenset(invoked)
+    tools_valid = (
+        frozenset(case.required_logical_tools) <= invoked_set <= grants
+        and invoked_set.isdisjoint(case.forbidden_logical_tools)
+        and invoked_set.isdisjoint(BROKER_WRITE_TOOLS)
+    )
+    return required_all and required_any and forbidden_clear and tools_valid, invoked
+
+
+def _analytics_fixture_failure(reason: str) -> dict[str, object]:
+    return {
+        "status": "failed",
+        "fixture": ANALYTICS_LOCAL_FIXTURE,
+        "execution_mode": "local_fixture_validation",
+        "reason": reason,
+        "case_count": 0,
+        "records": [],
+        "external_calls": 0,
+        "broker_writes": 0,
+        "disclaimer_responses": 0,
+        "raw_transcripts_persisted": 0,
+    }
 
 
 if __name__ == "__main__":

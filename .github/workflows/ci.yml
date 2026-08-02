@@ -35,7 +35,7 @@ jobs:
         run: uv run python -c "import saxo_bank_mcp"
 
       - name: Test
-        run: uv run pytest --junitxml=/tmp/saxo-ci-pytest-junit.xml
+        run: scripts/run-pytest --junitxml=/tmp/saxo-ci-pytest-junit.xml
 
       - name: Lint
         run: uv run ruff check .
@@ -51,6 +51,9 @@ jobs:
 
       - name: Skill quick validate saxo-auth-session
         run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-auth-session
+
+      - name: Skill quick validate saxo-analytics
+        run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-analytics
 
       - name: Skill quick validate saxo-bank
         run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-bank
@@ -78,6 +81,15 @@ jobs:
 
       - name: Generated catalog check
         run: uv run python scripts/generate_agent_skill_catalogs.py --check
+
+      - name: Analytics dual packaging and version parity
+        run: scripts/run-pytest tests/test_saxo_analytics_skill.py --junitxml=/tmp/saxo-ci-analytics-skill.xml
+
+      - name: Analytics local dual fixture
+        run: >-
+          uv run python scripts/run_dual_harness_skill_evals.py
+          --harness both --fixture analytics-research-to-precheck
+          --out /tmp/saxo-ci-analytics-local-fixture.json
 
       - name: Eval manifest validation
         run: uv run python scripts/validate_agent_skill_evals.py --all

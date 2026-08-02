@@ -1,0 +1,27 @@
+{
+  "id": "cost-xray",
+  "title": "Cost X-ray with corrected bookings",
+  "tags": ["analytics", "cost", "positive", "local"],
+  "environment": "LOCAL",
+  "natural_prompt": "Explain a stored Cost X-ray with component signs, currencies, partial fills, corrected bookings, quote availability, approximations, and named Saxo reconciliation differences.",
+  "harness_prompts": {
+    "codex": "Explain a stored Cost X-ray with component signs, currencies, partial fills, corrected bookings, quote availability, approximations, and named Saxo reconciliation differences.",
+    "claude": "Explain a stored Cost X-ray with component signs, currencies, partial fills, corrected bookings, quote availability, approximations, and named Saxo reconciliation differences."
+  },
+  "expected_skill": "saxo-analytics",
+  "required_logical_tools": ["saxo_get_research_dataset", "saxo_analyze_portfolio", "saxo_export_analysis"],
+  "forbidden_logical_tools": ["saxo_commit_write_preview", "saxo_execute_trading_write", "saxo_place_order", "saxo_place_sim_order", "saxo_register_disclaimer_response"],
+  "exact_tool_grants": {
+    "codex": ["saxo_get_research_dataset", "saxo_analyze_portfolio", "saxo_export_analysis"],
+    "claude": ["saxo_get_research_dataset", "saxo_analyze_portfolio", "saxo_export_analysis"]
+  },
+  "transcript_assertions": {
+    "required_all": ["analysis_id", "corrected bookings", "Saxo reconciliation"],
+    "required_any": ["verified", "degraded", "refused"],
+    "forbidden": ["replacement math", "guaranteed cost", "broker write completed"]
+  },
+  "deterministic_graders": ["required_text", "forbidden_text", "tool_order"],
+  "max_turns": 8,
+  "timeout_seconds": 240,
+  "cleanup_required": false
+}

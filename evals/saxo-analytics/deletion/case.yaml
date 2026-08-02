@@ -1,0 +1,27 @@
+{
+  "id": "deletion",
+  "title": "Preview-bound local analytics deletion",
+  "tags": ["analytics", "deletion", "positive", "local"],
+  "environment": "LOCAL",
+  "natural_prompt": "List value-free local analytics storage, preview the exact dependency closure, and delete only with the current revision-bound single-use token. On deletion-preview expiry, obtain a new preview.",
+  "harness_prompts": {
+    "codex": "List value-free local analytics storage, preview the exact dependency closure, and delete only with the current revision-bound single-use token. On deletion-preview expiry, obtain a new preview.",
+    "claude": "List value-free local analytics storage, preview the exact dependency closure, and delete only with the current revision-bound single-use token. On deletion-preview expiry, obtain a new preview."
+  },
+  "expected_skill": "saxo-analytics",
+  "required_logical_tools": ["saxo_list_analytics_storage", "saxo_preview_analytics_deletion", "saxo_delete_analytics_data"],
+  "forbidden_logical_tools": ["saxo_commit_write_preview", "saxo_execute_trading_write", "saxo_place_order", "saxo_place_sim_order", "saxo_register_disclaimer_response"],
+  "exact_tool_grants": {
+    "codex": ["saxo_list_analytics_storage", "saxo_preview_analytics_deletion", "saxo_delete_analytics_data"],
+    "claude": ["saxo_list_analytics_storage", "saxo_preview_analytics_deletion", "saxo_delete_analytics_data"]
+  },
+  "transcript_assertions": {
+    "required_all": ["analysis_id", "local-only", "deletion-preview expiry"],
+    "required_any": ["verified", "degraded", "refused"],
+    "forbidden": ["replacement math", "deleted Saxo records", "broker write completed"]
+  },
+  "deterministic_graders": ["required_text", "forbidden_text", "tool_order"],
+  "max_turns": 7,
+  "timeout_seconds": 240,
+  "cleanup_required": false
+}

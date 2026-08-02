@@ -1,0 +1,27 @@
+{
+  "id": "market-comparison",
+  "title": "Bounded market and instrument comparison",
+  "tags": ["analytics", "market", "positive", "sim"],
+  "environment": "SIM",
+  "natural_prompt": "Compare an explicit saved Saxo universe without calling it the whole market. Preserve stale-data warnings, entitlement gaps, source cutoff, and schema quarantine.",
+  "harness_prompts": {
+    "codex": "Compare an explicit saved Saxo universe without calling it the whole market. Preserve stale-data warnings, entitlement gaps, source cutoff, and schema quarantine.",
+    "claude": "Compare an explicit saved Saxo universe without calling it the whole market. Preserve stale-data warnings, entitlement gaps, source cutoff, and schema quarantine."
+  },
+  "expected_skill": "saxo-analytics",
+  "required_logical_tools": ["saxo_manage_research_universe", "saxo_analyze_market", "saxo_analyze_instruments"],
+  "forbidden_logical_tools": ["saxo_commit_write_preview", "saxo_execute_trading_write", "saxo_place_order", "saxo_place_sim_order", "saxo_register_disclaimer_response"],
+  "exact_tool_grants": {
+    "codex": ["saxo_manage_research_universe", "saxo_analyze_market", "saxo_analyze_instruments"],
+    "claude": ["saxo_manage_research_universe", "saxo_analyze_market", "saxo_analyze_instruments"]
+  },
+  "transcript_assertions": {
+    "required_all": ["analysis_id", "bounded universe", "quality warnings"],
+    "required_any": ["verified", "degraded", "refused"],
+    "forbidden": ["replacement math", "complete global market", "broker write completed"]
+  },
+  "deterministic_graders": ["required_text", "forbidden_text", "tool_order"],
+  "max_turns": 8,
+  "timeout_seconds": 240,
+  "cleanup_required": false
+}

@@ -1,0 +1,13 @@
+{
+  "case_id": "research-to-precheck",
+  "responses": {
+    "codex": {
+      "text": "analysis_id is cited; state verified; typed preview input only; stop before broker write.",
+      "invoked_logical_tools": ["saxo_propose_trade_from_analysis"]
+    },
+    "claude": {
+      "text": "analysis_id is cited; state verified; typed preview input only; stop before broker write.",
+      "invoked_logical_tools": ["saxo_propose_trade_from_analysis"]
+    }
+  }
+}

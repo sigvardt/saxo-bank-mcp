@@ -1,0 +1,27 @@
+{
+  "id": "artifact-delivery",
+  "title": "Verified artifact delivery and bounded job",
+  "tags": ["analytics", "artifact", "positive", "local"],
+  "environment": "LOCAL",
+  "natural_prompt": "Render and export the exact stored analysis. Use a bounded job if needed, preserve every stamp and warning, deliver directly within the limit, and use owner-only fallback only above it.",
+  "harness_prompts": {
+    "codex": "Render and export the exact stored analysis. Use a bounded job if needed, preserve every stamp and warning, deliver directly within the limit, and use owner-only fallback only above it.",
+    "claude": "Render and export the exact stored analysis. Use a bounded job if needed, preserve every stamp and warning, deliver directly within the limit, and use owner-only fallback only above it."
+  },
+  "expected_skill": "saxo-analytics",
+  "required_logical_tools": ["saxo_render_analysis", "saxo_export_analysis", "saxo_manage_analysis_job"],
+  "forbidden_logical_tools": ["saxo_commit_write_preview", "saxo_execute_trading_write", "saxo_place_order", "saxo_place_sim_order", "saxo_register_disclaimer_response"],
+  "exact_tool_grants": {
+    "codex": ["saxo_render_analysis", "saxo_export_analysis", "saxo_manage_analysis_job"],
+    "claude": ["saxo_render_analysis", "saxo_export_analysis", "saxo_manage_analysis_job"]
+  },
+  "transcript_assertions": {
+    "required_all": ["analysis_id", "owner-only", "quality warnings"],
+    "required_any": ["verified", "degraded", "refused"],
+    "forbidden": ["replacement math", "caller-provided trust accepted", "broker write completed"]
+  },
+  "deterministic_graders": ["required_text", "forbidden_text", "tool_order"],
+  "max_turns": 8,
+  "timeout_seconds": 300,
+  "cleanup_required": false
+}
