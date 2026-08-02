@@ -781,7 +781,11 @@ def _deliver_bound_payload(
                 reason_code=(
                     "artifact_return_limit"
                     if payload.byte_count > config.limits.artifact_bytes
-                    else "local_resource_link_requested"
+                    else (
+                        "local_resource_link_requested"
+                        if result.visibility is VisibilityMode.LOCAL_RESOURCE_LINK
+                        else "inline_private_not_enabled"
+                    )
                 ),
                 visible_stamps=visible_stamp_lines(payload.stamps),
             )

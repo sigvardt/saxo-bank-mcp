@@ -6,9 +6,11 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import get_ident
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -142,6 +144,44 @@ class _CancellationSuppressingHandler(_ControlledHandler):
             )
 
 
+class _RepeatedCancellationSuppressingHandler:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancellation_count = 0
+
+    async def __call__(
+        self,
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        del request
+        await context.report_progress(1)
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancellation_count += 1
+                self.cancelled.set()
+        return JobConclusion(
+            analysis_id=new_safe_handle(HandleKind.ANALYSIS_ID),
+            artifact_ids=(),
+        )
+
+
+class _ExplodingHandlerMapping(Mapping[object, object]):
+    def __getitem__(self, key: object) -> object:
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[object]:
+        raise RuntimeError("synthetic handler mapping conversion failure")
+
+    def __len__(self) -> int:
+        return 1
+
+
 async def _wait_for_state(
     manager: AnalyticsJobManager,
     job_id: str,
@@ -153,6 +193,19 @@ async def _wait_for_state(
             return status
         await asyncio.sleep(0)
     raise AssertionError(f"job did not reach {expected}")
+
+
+async def _wait_for_persisted_state(
+    manager: AnalyticsJobManager,
+    job_id: str,
+    expected: str,
+) -> jobs_module._JobRow:
+    for _ in range(200):
+        row = manager._require_row(job_id)
+        if row.state == expected:
+            return row
+        await asyncio.sleep(0)
+    raise AssertionError(f"job row did not reach {expected}")
 
 
 @pytest.mark.anyio
@@ -527,34 +580,31 @@ async def test_failed_workspace_launch_leaves_no_queued_job(
 
 
 @pytest.mark.anyio
-async def test_workspace_cleanup_failure_cannot_retain_a_finished_task(
+async def test_workspace_cleanup_refusal_fails_without_publishing_a_conclusion(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
+    external = config.paths.analytics_root / "synthetic-external-completion-file"
+    content = b"synthetic external completion content"
+    external.write_bytes(content)
+    external.chmod(0o400)
+    original_mode = stat.S_IMODE(external.stat().st_mode)
+    workspace: Path | None = None
 
     async def complete(
         request: JobRequest,
         context: JobExecutionContext,
     ) -> JobConclusion:
+        nonlocal workspace
+        workspace = context.workspace
+        os.link(external, context.workspace / "linked.bin")
         await context.report_progress(request.total_work_units)
         return JobConclusion(
             analysis_id=new_safe_handle(HandleKind.ANALYSIS_ID),
             artifact_ids=(),
         )
 
-    cleanup_calls = 0
-    original_cleanup = jobs_module._cleanup_workspace
-
-    def fail_final_cleanup(root: Path, job_id: str) -> None:
-        nonlocal cleanup_calls
-        cleanup_calls += 1
-        if cleanup_calls > 1:
-            raise JobStateError("synthetic cleanup refusal")
-        original_cleanup(root, job_id)
-
-    monkeypatch.setattr(jobs_module, "_cleanup_workspace", fail_final_cleanup)
     manager = AnalyticsJobManager(
         store=store,
         config=config,
@@ -565,8 +615,15 @@ async def test_workspace_cleanup_failure_cannot_retain_a_finished_task(
         task = manager._tasks.get(status.job_id)
         if task is not None:
             await asyncio.gather(task, return_exceptions=True)
-        assert status.job_id not in manager._tasks
-        assert (await manager.get_job(status.job_id)).state == "completed"
+        failed = await _wait_for_persisted_state(manager, status.job_id, "failed")
+
+        assert failed.persisted.status_code == "job_failed"
+        assert failed.analysis_id is None
+        assert workspace is not None
+        assert workspace.exists()  # noqa: ASYNC240
+        assert external.read_bytes() == content
+        assert stat.S_IMODE(external.stat().st_mode) == original_mode
+        assert external.stat().st_nlink == 2
     finally:
         await manager.shutdown()
         store.close()
@@ -673,6 +730,154 @@ async def test_second_manager_cannot_interrupt_live_rows_and_releases_lease_on_s
         await first.shutdown()
         if replacement is not None:
             await replacement.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_manager_refuses_config_not_exactly_bound_to_the_store(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    alias = config.paths.analytics_root / "synthetic-store-alias.duckdb"
+    alias.hardlink_to(config.paths.store_path)
+    mismatched = config.model_copy(
+        update={"paths": config.paths.model_copy(update={"store_path": alias})},
+    )
+    first = AnalyticsJobManager(store=store, config=config, handlers={})
+    second: AnalyticsJobManager | None = None
+    try:
+        with pytest.raises(JobStateError, match=r"config.*store"):
+            second = AnalyticsJobManager(store=store, config=mismatched, handlers={})
+    finally:
+        if second is not None:
+            await second.shutdown()
+        await first.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_handler_mapping_conversion_failure_does_not_leak_manager_lease(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    lease_key = config.paths.store_path.resolve(strict=True)
+    manager: AnalyticsJobManager | None = None
+    try:
+        with pytest.raises(RuntimeError, match="mapping conversion"):
+            AnalyticsJobManager(
+                store=store,
+                config=config,
+                handlers=cast("jobs_module.HandlerMap", _ExplodingHandlerMapping()),
+            )
+
+        assert lease_key not in jobs_module._MANAGER_LEASES
+        manager = AnalyticsJobManager(store=store, config=config, handlers={})
+    finally:
+        if manager is not None:
+            await manager.shutdown()
+        jobs_module._MANAGER_LEASES.discard(lease_key)
+        store.close()
+
+
+@pytest.mark.anyio
+async def test_cancelled_shutdown_keeps_lease_until_suppressing_handler_stops(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _RepeatedCancellationSuppressingHandler()
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+    )
+    shutdown_transport: asyncio.Task[None] | None = None
+    replacement: AnalyticsJobManager | None = None
+    try:
+        started = await manager.start_job(_request())
+        await handler.started.wait()
+        shutdown_transport = asyncio.create_task(manager.shutdown())
+        await handler.cancelled.wait()
+
+        shutdown_transport.cancel()
+        done, _pending = await asyncio.wait({shutdown_transport}, timeout=0.1)
+        caller_cancelled_promptly = shutdown_transport in done
+        if caller_cancelled_promptly:
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown_transport
+
+        with pytest.raises(JobStateError, match=r"manager.*lease"):
+            replacement = AnalyticsJobManager(store=store, config=config, handlers={})
+
+        handler.release.set()
+        await manager.shutdown()
+        assert caller_cancelled_promptly is True
+        replacement = AnalyticsJobManager(store=store, config=config, handlers={})
+        row = replacement._require_row(started.job_id)
+        assert row.state == "failed"
+        assert row.persisted.status_code == "job_interrupted_restart_required"
+    finally:
+        handler.release.set()
+        if shutdown_transport is not None and not shutdown_transport.done():
+            await asyncio.gather(shutdown_transport, return_exceptions=True)
+        await manager.shutdown()
+        if replacement is not None:
+            await replacement.shutdown()
+        store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stop_kind", ["cancel", "expire"])
+async def test_transport_cancellation_cannot_strand_a_stop_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_kind: str,
+) -> None:
+    now = _NOW
+    monkeypatch.setattr(jobs_module, "_utc_now", lambda: now)
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    handler = _RepeatedCancellationSuppressingHandler()
+    manager = AnalyticsJobManager(
+        store=store,
+        config=config,
+        handlers={"monte_carlo": handler},
+        job_ttl=timedelta(seconds=30),
+    )
+    transport: asyncio.Task[jobs_module.JobStatus] | None = None
+    try:
+        started = await manager.start_job(_request())
+        await handler.started.wait()
+        if stop_kind == "expire":
+            now += timedelta(seconds=31)
+            transport = asyncio.create_task(manager.get_job(started.job_id))
+            expected_status = "job_expired"
+        else:
+            transport = asyncio.create_task(manager.cancel_job(started.job_id))
+            expected_status = "job_cancelled"
+        await handler.cancelled.wait()
+
+        transport.cancel()
+        done, _pending = await asyncio.wait({transport}, timeout=0.1)
+        caller_cancelled_promptly = transport in done
+        if caller_cancelled_promptly:
+            with pytest.raises(asyncio.CancelledError):
+                await transport
+        handler.release.set()
+        if not caller_cancelled_promptly:
+            await asyncio.gather(transport, return_exceptions=True)
+
+        row = await _wait_for_persisted_state(manager, started.job_id, "cancelled")
+        assert caller_cancelled_promptly is True
+        assert row.persisted.status_code == expected_status
+        assert row.analysis_id is None
+    finally:
+        handler.release.set()
+        if transport is not None and not transport.done():
+            await asyncio.gather(transport, return_exceptions=True)
+        await manager.shutdown()
         store.close()
 
 

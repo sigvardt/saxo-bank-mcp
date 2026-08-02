@@ -7,7 +7,9 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Self, cast
 
+import duckdb
 import httpx2
 import pytest
 
@@ -34,6 +36,54 @@ from saxo_bank_mcp.analytics_store import (
 from saxo_bank_mcp.request_ledger import capture_request_ledger, record_request_attempt
 
 _NOW = datetime(2026, 8, 2, 11, tzinfo=UTC)
+
+
+class _CommitThenRaiseConnection:
+    def __init__(self, connection: duckdb.DuckDBPyConnection) -> None:
+        self._connection = connection
+
+    def execute(self, query: str, parameters: object | None = None) -> Self:
+        if parameters is None:
+            self._connection.execute(query)
+        else:
+            self._connection.execute(query, parameters)
+        if query.strip().upper() == "COMMIT":
+            raise OSError("synthetic indeterminate commit")
+        return self
+
+    def close(self) -> None:
+        self._connection.close()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._connection, name)
+
+
+def _raise_after_next_real_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connect = store_module._connect_store_database
+    armed = True
+
+    def connect_with_indeterminate_commit(
+        path: Path,
+        *,
+        read_only: bool,
+    ) -> duckdb.DuckDBPyConnection:
+        nonlocal armed
+        connection = connect(path, read_only=read_only)
+        if armed and not read_only:
+            armed = False
+            return cast(
+                "duckdb.DuckDBPyConnection",
+                _CommitThenRaiseConnection(connection),
+            )
+        return connection
+
+    monkeypatch.setattr(
+        store_module,
+        "_connect_store_database",
+        connect_with_indeterminate_commit,
+    )
 
 
 def _config(tmp_path: Path) -> AnalyticsConfig:
@@ -522,11 +572,12 @@ def test_postcommit_publish_actions_drain_then_require_safe_reopen(
         destination: Path,
         staged: Path,
         expected_sha256: str,
+        expected_identity: store_module._ArtifactFileIdentity | None = None,
     ) -> None:
         attempted.append(destination.name)
         if len(attempted) == 1:
             raise OSError("synthetic postcommit publish interruption")
-        publish(destination, staged, expected_sha256)
+        publish(destination, staged, expected_sha256, expected_identity)
 
     monkeypatch.setattr(store_module, "_publish_staged_artifact", fail_first_publish)
     owned_ids: list[str] = []
@@ -571,7 +622,7 @@ def test_postcommit_delete_actions_drain_then_require_safe_reopen(
 ) -> None:
     config = _config(tmp_path)
     store = AnalyticsStore.open(config)
-    original_unlink = Path.unlink
+    unlink = store_module._unlink_owner_artifact
     attempted: list[str] = []
     try:
         analysis_id, _, _ = _seed_dependency_chain(store)
@@ -590,14 +641,25 @@ def test_postcommit_delete_actions_drain_then_require_safe_reopen(
             store=store,
         )
 
-        def fail_first_pending_unlink(path: Path, *, missing_ok: bool = False) -> None:
-            if path.name.startswith(".artifact-delete-"):
-                attempted.append(path.name)
+        def fail_first_pending_unlink(
+            directory: store_module._ArtifactDirectoryHandle,
+            *,
+            name: str,
+            expected_identity: store_module._ArtifactFileIdentity,
+            expected_sha256: str | None = None,
+        ) -> None:
+            if name.startswith(".artifact-delete-"):
+                attempted.append(name)
                 if len(attempted) == 1:
                     raise OSError("synthetic postcommit deletion interruption")
-            original_unlink(path, missing_ok=missing_ok)
+            unlink(
+                directory,
+                name=name,
+                expected_identity=expected_identity,
+                expected_sha256=expected_sha256,
+            )
 
-        monkeypatch.setattr(Path, "unlink", fail_first_pending_unlink)
+        monkeypatch.setattr(store_module, "_unlink_owner_artifact", fail_first_pending_unlink)
         with (
             pytest.raises(StoreError, match="physical deletion cleanup failed"),
             store.transaction(),
@@ -608,7 +670,7 @@ def test_postcommit_delete_actions_drain_then_require_safe_reopen(
         with pytest.raises(StoreError, match="reopen"):
             store.list_storage(StorageScope())
     finally:
-        monkeypatch.setattr(Path, "unlink", original_unlink)
+        monkeypatch.setattr(store_module, "_unlink_owner_artifact", unlink)
         store.close()
 
     recovered = AnalyticsStore.open(config)
@@ -616,6 +678,256 @@ def test_postcommit_delete_actions_drain_then_require_safe_reopen(
         assert tuple(config.paths.artifacts_dir.iterdir()) == ()
     finally:
         recovered.close()
+
+
+def test_real_commit_then_raise_preserves_owned_publish_marker_for_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        _raise_after_next_real_commit(monkeypatch)
+
+        with pytest.raises(OSError, match="indeterminate commit"):
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=b"synthetic indeterminate publish",
+                description="Synthetic indeterminate publish",
+            )
+
+        pending = tuple(config.paths.artifacts_dir.glob(".artifact-write-*.pending"))
+        assert len(pending) == 1
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        store.close()
+
+    monkeypatch.undo()
+    recovered = AnalyticsStore.open(config)
+    try:
+        files = tuple(config.paths.artifacts_dir.iterdir())
+        assert len(files) == 1
+        assert not files[0].name.startswith(".")
+        assert files[0].read_bytes() == b"synthetic indeterminate publish"
+    finally:
+        recovered.close()
+
+
+def test_real_commit_then_raise_preserves_owned_delete_marker_for_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=b"synthetic indeterminate delete",
+            description="Synthetic indeterminate delete",
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=(owned.artifact_id,)),
+            store=store,
+        )
+        _raise_after_next_real_commit(monkeypatch)
+
+        with pytest.raises(OSError, match="indeterminate commit"):
+            delete_analytics_data(preview.preview.token, store=store)
+
+        pending = tuple(config.paths.artifacts_dir.glob(".artifact-delete-*.pending"))
+        assert len(pending) == 1
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        store.close()
+
+    monkeypatch.undo()
+    recovered = AnalyticsStore.open(config)
+    try:
+        assert recovered.list_storage(StorageScope(artifact_ids=(owned.artifact_id,))) == ()
+        assert tuple(config.paths.artifacts_dir.iterdir()) == ()
+    finally:
+        recovered.close()
+
+
+def test_outer_transaction_real_commit_then_raise_poisoned_until_reopen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    owned_id = ""
+
+    def commit_owned() -> None:
+        nonlocal owned_id
+        with store.transaction():
+            owned = store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=b"synthetic outer indeterminate publish",
+                description="Synthetic outer indeterminate publish",
+            )
+            owned_id = owned.artifact_id
+
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        _raise_after_next_real_commit(monkeypatch)
+
+        with pytest.raises(OSError, match="indeterminate commit"):
+            commit_owned()
+
+        assert len(tuple(config.paths.artifacts_dir.glob(".artifact-write-*.pending"))) == 1
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        store.close()
+
+    monkeypatch.undo()
+    recovered = AnalyticsStore.open(config)
+    try:
+        assert tuple(
+            item.object_id
+            for item in recovered.list_storage(StorageScope(artifact_ids=(owned_id,)))
+        ) == (owned_id,)
+    finally:
+        recovered.close()
+
+
+def test_rollback_missing_delete_marker_without_canonical_poisoned_store(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        owned = store.put_owned_artifact(
+            analysis_id=analysis_id,
+            media_type="text/plain",
+            extension="txt",
+            content=b"synthetic rollback marker",
+            description="Synthetic rollback marker",
+        )
+        preview = preview_deletion(
+            StorageScope(artifact_ids=(owned.artifact_id,)),
+            store=store,
+        )
+
+        def rollback_without_marker() -> None:
+            with store.transaction():
+                delete_analytics_data(preview.preview.token, store=store)
+                marker = next(config.paths.artifacts_dir.glob(".artifact-delete-*.pending"))
+                marker.unlink()
+                raise RuntimeError("synthetic transaction rollback")
+
+        with pytest.raises(StoreError, match=r"rollback.*missing"):
+            rollback_without_marker()
+
+        with pytest.raises(StoreError, match="reopen"):
+            store.list_storage(StorageScope())
+    finally:
+        store.close()
+
+
+def test_artifact_directory_swap_after_validation_never_writes_to_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    original_validation = store_module._require_owner_artifact_directory
+    retained = config.paths.analytics_root / "synthetic-retained-artifacts"
+    sibling = config.paths.analytics_root / "synthetic-sibling-artifacts"
+    sibling.mkdir(mode=0o700)
+    sentinel = sibling / "sentinel.txt"
+    content = b"synthetic sibling sentinel"
+    sentinel.write_bytes(content)
+    sentinel.chmod(0o600)
+    swapped = False
+
+    def validate_then_swap(candidate: AnalyticsConfig) -> Path:
+        nonlocal swapped
+        result = original_validation(candidate)
+        if not swapped:
+            swapped = True
+            config.paths.artifacts_dir.rename(retained)
+            config.paths.artifacts_dir.symlink_to(sibling, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(
+        store_module,
+        "_require_owner_artifact_directory",
+        validate_then_swap,
+    )
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        with pytest.raises(StoreError):
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=b"synthetic refused swapped-directory artifact",
+                description="Synthetic refused swapped-directory artifact",
+            )
+
+        assert tuple(sibling.iterdir()) == (sentinel,)
+        assert sentinel.read_bytes() == content
+        assert stat.S_IMODE(sentinel.stat().st_mode) == 0o600
+    finally:
+        store.close()
+
+
+def test_staged_file_replacement_before_publish_never_chmods_external_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    external = config.paths.analytics_root / "synthetic-external-publish-file"
+    content = b"synthetic external publish content"
+    external.write_bytes(content)
+    external.chmod(0o640)
+    original_mode = stat.S_IMODE(external.stat().st_mode)
+    require_file = store_module._require_owner_artifact_file
+    swapped = False
+
+    def validate_then_replace(path: Path, expected_sha256: str) -> object:
+        nonlocal swapped
+        result = require_file(path, expected_sha256)
+        if not swapped and path.name.startswith(".artifact-write-"):
+            swapped = True
+            path.rename(path.with_name(f".retained-{path.name}"))
+            path.symlink_to(external)
+        return result
+
+    monkeypatch.setattr(
+        store_module,
+        "_require_owner_artifact_file",
+        validate_then_replace,
+    )
+    try:
+        analysis_id, _, _ = _seed_dependency_chain(store)
+        with pytest.raises(StoreError):
+            store.put_owned_artifact(
+                analysis_id=analysis_id,
+                media_type="text/plain",
+                extension="txt",
+                content=b"synthetic replaced publish artifact",
+                description="Synthetic replaced publish artifact",
+            )
+
+        assert external.read_bytes() == content
+        assert stat.S_IMODE(external.stat().st_mode) == original_mode
+        assert external.stat().st_nlink == 1
+    finally:
+        store.close()
 
 
 def test_startup_refuses_swapped_artifact_directory_without_touching_sibling(

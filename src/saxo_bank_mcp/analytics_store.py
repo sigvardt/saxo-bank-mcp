@@ -558,6 +558,29 @@ class _OwnedArtifactMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class _ArtifactFileIdentity:
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ArtifactDirectoryHandle:
+    path: Path
+    root_descriptor: int
+    descriptor: int
+    root_identity: _ArtifactFileIdentity
+    identity: _ArtifactFileIdentity
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedArtifactDeletion:
+    destination: Path
+    temporary: Path
+    expected_sha256: str
+    identity: _ArtifactFileIdentity
+
+
+@dataclass(frozen=True, slots=True)
 class _ArtifactAnalysisBinding:
     analysis_id: str
     analysis_kind: str
@@ -747,7 +770,7 @@ class AnalyticsStore:
             self._closed = True
 
     @contextmanager
-    def transaction(self) -> Generator[AnalyticsStore]:
+    def transaction(self) -> Generator[AnalyticsStore]:  # noqa: PLR0915
         """Group typed store writes into one atomic writer transaction."""
         self._require_open()
         owner = get_ident()
@@ -784,7 +807,11 @@ class AnalyticsStore:
                         raise cleanup_error from transaction_error
                     raise
                 else:
-                    writer.execute("COMMIT")
+                    try:
+                        writer.execute("COMMIT")
+                    except BaseException:
+                        self._file_state_poisoned = True
+                        raise
                     try:
                         _run_file_actions(self._transaction_commit_actions)
                     except BaseException:
@@ -854,7 +881,11 @@ class AnalyticsStore:
                         writer.execute("ROLLBACK")
                     raise
                 else:
-                    writer.execute("COMMIT")
+                    try:
+                        writer.execute("COMMIT")
+                    except BaseException:
+                        self._file_state_poisoned = True
+                        raise
             finally:
                 writer.close()
 
@@ -2357,7 +2388,7 @@ class AnalyticsStore:
                 raise StoreError("stored artifact cannot be read back")
             return stored
 
-    def put_owned_artifact(  # noqa: PLR0913
+    def put_owned_artifact(  # noqa: C901, PLR0913
         self,
         *,
         analysis_id: str,
@@ -2390,6 +2421,7 @@ class AnalyticsStore:
             artifact.media_type,
         )
         staged = _staged_artifact_write_path(destination, artifact.artifact_id)
+        staged_identity: _ArtifactFileIdentity | None = None
         outer_transaction = self._transaction_owner == get_ident()
         effect_registered = False
         stored: StoredArtifact | None = None
@@ -2404,7 +2436,7 @@ class AnalyticsStore:
                         analysis_binding,
                     )
                 self._ensure_capacity(artifact.byte_count)
-                _write_owner_artifact_file(staged, content)
+                staged_identity = _write_owner_artifact_file(staged, content)
                 _fsync_artifact_directory(staged.parent)
                 connection.execute(
                     """
@@ -2434,17 +2466,30 @@ class AnalyticsStore:
                             destination,
                             staged,
                             artifact.sha256,
+                            staged_identity,
                         ),
-                        after_rollback=lambda: _discard_staged_artifact(staged),
+                        after_rollback=lambda: _discard_staged_artifact(
+                            staged,
+                            staged_identity,
+                        ),
                     )
                     effect_registered = True
-        except BaseException:
-            if not effect_registered:
-                _discard_staged_artifact(staged)
+        except BaseException as operation_error:
+            if not effect_registered and not self._file_state_poisoned:
+                try:
+                    _discard_staged_artifact(staged, staged_identity)
+                except BaseException as cleanup_error:
+                    self._file_state_poisoned = True
+                    raise cleanup_error from operation_error
             raise
         if not outer_transaction:
             try:
-                _publish_staged_artifact(destination, staged, artifact.sha256)
+                _publish_staged_artifact(
+                    destination,
+                    staged,
+                    artifact.sha256,
+                    staged_identity,
+                )
             except BaseException:
                 self._file_state_poisoned = True
                 raise
@@ -3012,7 +3057,7 @@ class AnalyticsStore:
         except StoreValidationError as error:
             raise DeletionTokenError("deletion token is invalid") from error
         token_sha256 = _fingerprint(token)
-        staged_files: tuple[tuple[Path, Path], ...] = ()
+        staged_files: tuple[_StagedArtifactDeletion, ...] = ()
         outer_transaction = self._transaction_owner == get_ident()
         effect_registered = False
         receipt: DeletionReceipt
@@ -3083,9 +3128,13 @@ class AnalyticsStore:
                     store_revision_before=authorization.store_revision,
                     store_revision_after=next_revision,
                 )
-        except BaseException:
-            if not effect_registered:
-                _restore_staged_artifact_files(staged_files)
+        except BaseException as operation_error:
+            if not effect_registered and not self._file_state_poisoned:
+                try:
+                    _restore_staged_artifact_files(staged_files)
+                except BaseException as cleanup_error:
+                    self._file_state_poisoned = True
+                    raise cleanup_error from operation_error
             raise
         if not outer_transaction:
             try:
@@ -3203,11 +3252,6 @@ def _require_artifact_analysis_binding(
         raise StoreValidationError("artifact dataset binding is no longer current")
 
 
-def _require_new_artifact_destination(destination: Path) -> None:
-    if destination.exists() or destination.is_symlink():
-        raise StoreConflictError("artifact handle already has a physical file")
-
-
 def _authorize_deletion_token(
     connection: duckdb.DuckDBPyConnection,
     token_sha256: str,
@@ -3263,21 +3307,36 @@ def _owned_artifact_path(
     return resolved_dir / f"{artifact_id}.{extension}"
 
 
-def _write_owner_artifact_file(path: Path, content: bytes) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(path, flags, _OWNER_FILE_MODE)
-        view = memoryview(content)
-        while view:
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError("artifact write made no progress")
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
+def _write_owner_artifact_file(path: Path, content: bytes) -> _ArtifactFileIdentity:
+    with _open_owner_artifact_directory(path.parent) as directory:
+        name = _artifact_relative_name(directory, path)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                name,
+                flags,
+                _OWNER_FILE_MODE,
+                dir_fd=directory.descriptor,
+            )
+            node = os.fstat(descriptor)
+            identity = _require_owner_artifact_stat(node)
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("artifact write made no progress")  # noqa: TRY301
+                view = view[written:]
+            os.fsync(descriptor)
+            _require_named_artifact_identity(directory, name, identity)
+            _require_current_artifact_directory(directory)
+            os.fsync(directory.descriptor)
+            return identity  # noqa: TRY300
+        except OSError as error:
+            raise StoreError("owner artifact file write failed") from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
 
 def _staged_artifact_write_path(destination: Path, artifact_id: str) -> Path:
@@ -3290,28 +3349,48 @@ def _publish_staged_artifact(
     destination: Path,
     staged: Path,
     expected_sha256: str,
+    expected_identity: _ArtifactFileIdentity | None = None,
 ) -> None:
-    _require_new_artifact_destination(destination)
-    _require_owner_artifact_file(staged, expected_sha256)
-    staged.replace(destination)
-    destination.chmod(_OWNER_FILE_MODE)
-    _require_owner_artifact_file(destination, expected_sha256)
+    actual_identity = _require_owner_artifact_file(staged, expected_sha256)
+    if expected_identity is not None and actual_identity != expected_identity:
+        raise StoreError("owner artifact file identity changed")
+    with _open_owner_artifact_directory(destination.parent) as directory:
+        source_name = _artifact_relative_name(directory, staged)
+        destination_name = _artifact_relative_name(directory, destination)
+        _rename_owner_artifact(
+            directory,
+            source_name=source_name,
+            destination_name=destination_name,
+            expected_identity=actual_identity,
+            expected_sha256=expected_sha256,
+        )
     _fsync_artifact_directory(destination.parent)
 
 
-def _discard_staged_artifact(staged: Path) -> None:
-    if not _require_owner_artifact_node(staged, missing_ok=True):
-        return
-    staged.unlink()
+def _discard_staged_artifact(
+    staged: Path,
+    expected_identity: _ArtifactFileIdentity | None = None,
+) -> None:
+    with _open_owner_artifact_directory(staged.parent) as directory:
+        name = _artifact_relative_name(directory, staged)
+        actual_identity = _owner_artifact_identity_at(directory, name, missing_ok=True)
+        if actual_identity is None:
+            if expected_identity is not None:
+                raise StoreError("artifact rollback marker is missing")
+            return
+        if expected_identity is not None and actual_identity != expected_identity:
+            raise StoreError("owner artifact file identity changed")
+        _unlink_owner_artifact(
+            directory,
+            name=name,
+            expected_identity=actual_identity,
+        )
     _fsync_artifact_directory(staged.parent)
 
 
 def _fsync_artifact_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    with _open_owner_artifact_directory(directory) as opened:
+        os.fsync(opened.descriptor)
 
 
 def _run_file_actions(actions: Iterable[Callable[[], None]]) -> None:
@@ -3326,21 +3405,109 @@ def _run_file_actions(actions: Iterable[Callable[[], None]]) -> None:
         raise first_error
 
 
-def _require_owner_artifact_file(path: Path, expected_sha256: str) -> None:
-    _require_owner_artifact_node(path)
-    if hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256:
-        raise StoreError("owner artifact file integrity check failed")
+def _require_owner_artifact_file(
+    path: Path,
+    expected_sha256: str,
+) -> _ArtifactFileIdentity:
+    with _open_owner_artifact_directory(path.parent) as directory:
+        return _require_owner_artifact_file_at(
+            directory,
+            _artifact_relative_name(directory, path),
+            expected_sha256=expected_sha256,
+        )
 
 
-def _require_owner_artifact_node(path: Path, *, missing_ok: bool = False) -> bool:
+def _require_owner_artifact_node(
+    path: Path,
+    *,
+    missing_ok: bool = False,
+) -> _ArtifactFileIdentity | None:
+    with _open_owner_artifact_directory(path.parent) as directory:
+        return _owner_artifact_identity_at(
+            directory,
+            _artifact_relative_name(directory, path),
+            missing_ok=missing_ok,
+        )
+
+
+@contextmanager
+def _open_owner_artifact_directory(
+    directory: Path,
+) -> Generator[_ArtifactDirectoryHandle]:
+    root = directory.parent
+    root_descriptor: int | None = None
+    descriptor: int | None = None
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        node = path.lstat()
-    except FileNotFoundError:
-        if missing_ok:
-            return False
-        raise StoreError("owner artifact file integrity check failed") from None
+        root_named = root.lstat()
+        root_identity = _require_owner_artifact_directory_stat(root_named)
+        root_descriptor = os.open(root, flags)
+        root_opened = os.fstat(root_descriptor)
+        if _require_owner_artifact_directory_stat(root_opened) != root_identity:
+            raise StoreValidationError("artifact root identity changed")
+        directory_named = os.stat(
+            directory.name,
+            dir_fd=root_descriptor,
+            follow_symlinks=False,
+        )
+        directory_identity = _require_owner_artifact_directory_stat(directory_named)
+        descriptor = os.open(
+            directory.name,
+            flags,
+            dir_fd=root_descriptor,
+        )
+        directory_opened = os.fstat(descriptor)
+        if _require_owner_artifact_directory_stat(directory_opened) != directory_identity:
+            raise StoreValidationError("artifact directory identity changed")
+        resolved_root = root.resolve(strict=True)
+        resolved_directory = directory.resolve(strict=True)
+        if resolved_directory.parent != resolved_root:
+            raise StoreValidationError("artifact directory is not owner-contained")
+        handle = _ArtifactDirectoryHandle(
+            path=resolved_directory,
+            root_descriptor=root_descriptor,
+            descriptor=descriptor,
+            root_identity=root_identity,
+            identity=directory_identity,
+        )
+        _require_current_artifact_directory(handle)
+        yield handle
     except OSError as error:
-        raise StoreError("owner artifact file integrity check failed") from error
+        raise StoreValidationError("artifact directory is unavailable") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if root_descriptor is not None:
+            os.close(root_descriptor)
+
+
+def _require_current_artifact_directory(directory: _ArtifactDirectoryHandle) -> None:
+    root_opened = os.fstat(directory.root_descriptor)
+    if _require_owner_artifact_directory_stat(root_opened) != directory.root_identity:
+        raise StoreValidationError("artifact root identity changed")
+    opened = os.fstat(directory.descriptor)
+    if _require_owner_artifact_directory_stat(opened) != directory.identity:
+        raise StoreValidationError("artifact directory identity changed")
+    named = os.stat(
+        directory.path.name,
+        dir_fd=directory.root_descriptor,
+        follow_symlinks=False,
+    )
+    if _require_owner_artifact_directory_stat(named) != directory.identity:
+        raise StoreValidationError("artifact directory identity changed")
+
+
+def _require_owner_artifact_directory_stat(node: os.stat_result) -> _ArtifactFileIdentity:
+    if (
+        not stat.S_ISDIR(node.st_mode)
+        or node.st_uid != os.getuid()
+        or stat.S_IMODE(node.st_mode) != _OWNER_DIRECTORY_MODE
+    ):
+        raise StoreValidationError("artifact directory is not owner-contained")
+    return _ArtifactFileIdentity(device=node.st_dev, inode=node.st_ino)
+
+
+def _require_owner_artifact_stat(node: os.stat_result) -> _ArtifactFileIdentity:
     if (
         not stat.S_ISREG(node.st_mode)
         or node.st_uid != os.getuid()
@@ -3348,14 +3515,184 @@ def _require_owner_artifact_node(path: Path, *, missing_ok: bool = False) -> boo
         or stat.S_IMODE(node.st_mode) != _OWNER_FILE_MODE
     ):
         raise StoreError("owner artifact file integrity check failed")
-    return True
+    return _ArtifactFileIdentity(device=node.st_dev, inode=node.st_ino)
+
+
+def _artifact_relative_name(directory: _ArtifactDirectoryHandle, path: Path) -> str:
+    if path.parent != directory.path or path.name in {"", ".", ".."} or "/" in path.name:
+        raise StoreValidationError("artifact path is not owner-contained")
+    return path.name
+
+
+def _owner_artifact_identity_at(
+    directory: _ArtifactDirectoryHandle,
+    name: str,
+    *,
+    missing_ok: bool,
+) -> _ArtifactFileIdentity | None:
+    _require_current_artifact_directory(directory)
+    try:
+        node = os.stat(
+            name,
+            dir_fd=directory.descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise StoreError("owner artifact file integrity check failed") from None
+    except OSError as error:
+        raise StoreError("owner artifact file integrity check failed") from error
+    return _require_owner_artifact_stat(node)
+
+
+def _open_owner_artifact_file_at(
+    directory: _ArtifactDirectoryHandle,
+    name: str,
+    *,
+    expected_identity: _ArtifactFileIdentity | None = None,
+) -> tuple[int, _ArtifactFileIdentity]:
+    _require_current_artifact_directory(directory)
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory.descriptor,
+        )
+    except OSError as error:
+        raise StoreError("owner artifact file integrity check failed") from error
+    try:
+        identity = _require_owner_artifact_stat(os.fstat(descriptor))
+        if expected_identity is not None:
+            _require_matching_artifact_identity(identity, expected_identity)
+        _require_named_artifact_identity(directory, name, identity)
+        return descriptor, identity  # noqa: TRY300
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _require_named_artifact_identity(
+    directory: _ArtifactDirectoryHandle,
+    name: str,
+    expected_identity: _ArtifactFileIdentity,
+) -> None:
+    actual = _owner_artifact_identity_at(directory, name, missing_ok=False)
+    _require_matching_artifact_identity(actual, expected_identity)
+
+
+def _require_matching_artifact_identity(
+    actual: _ArtifactFileIdentity | None,
+    expected: _ArtifactFileIdentity,
+) -> None:
+    if actual != expected:
+        raise StoreError("owner artifact file identity changed")
+
+
+def _raise_artifact_rollback_target_occupied() -> None:
+    raise StoreError("artifact deletion rollback target is occupied")
+
+
+def _require_owner_artifact_file_at(
+    directory: _ArtifactDirectoryHandle,
+    name: str,
+    *,
+    expected_sha256: str,
+    expected_identity: _ArtifactFileIdentity | None = None,
+) -> _ArtifactFileIdentity:
+    descriptor, identity = _open_owner_artifact_file_at(
+        directory,
+        name,
+        expected_identity=expected_identity,
+    )
+    try:
+        digest = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        if digest.hexdigest() != expected_sha256:
+            raise StoreError("owner artifact file integrity check failed")
+        _require_named_artifact_identity(directory, name, identity)
+        return identity
+    finally:
+        os.close(descriptor)
+
+
+def _rename_owner_artifact(
+    directory: _ArtifactDirectoryHandle,
+    *,
+    source_name: str,
+    destination_name: str,
+    expected_identity: _ArtifactFileIdentity,
+    expected_sha256: str | None,
+) -> None:
+    descriptor, identity = _open_owner_artifact_file_at(
+        directory,
+        source_name,
+        expected_identity=expected_identity,
+    )
+    try:
+        if expected_sha256 is not None:
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise StoreError("owner artifact file integrity check failed")
+        if _owner_artifact_identity_at(directory, destination_name, missing_ok=True) is not None:
+            raise StoreError("artifact destination is occupied")
+        _require_named_artifact_identity(directory, source_name, identity)
+        os.rename(
+            source_name,
+            destination_name,
+            src_dir_fd=directory.descriptor,
+            dst_dir_fd=directory.descriptor,
+        )
+        _require_named_artifact_identity(directory, destination_name, identity)
+        if _owner_artifact_identity_at(directory, source_name, missing_ok=True) is not None:
+            raise StoreError("artifact source remained after rename")
+        _require_current_artifact_directory(directory)
+        os.fsync(directory.descriptor)
+    except OSError as error:
+        raise StoreError("owner artifact rename failed") from error
+    finally:
+        os.close(descriptor)
+
+
+def _unlink_owner_artifact(
+    directory: _ArtifactDirectoryHandle,
+    *,
+    name: str,
+    expected_identity: _ArtifactFileIdentity,
+    expected_sha256: str | None = None,
+) -> None:
+    descriptor, identity = _open_owner_artifact_file_at(
+        directory,
+        name,
+        expected_identity=expected_identity,
+    )
+    try:
+        if expected_sha256 is not None:
+            digest = hashlib.sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != expected_sha256:
+                raise StoreError("owner artifact file integrity check failed")
+        _require_named_artifact_identity(directory, name, identity)
+        os.unlink(name, dir_fd=directory.descriptor)
+        if _owner_artifact_identity_at(directory, name, missing_ok=True) is not None:
+            raise StoreError("artifact file remained after deletion")
+        _require_current_artifact_directory(directory)
+        os.fsync(directory.descriptor)
+    except OSError as error:
+        raise StoreError("owner artifact deletion failed") from error
+    finally:
+        os.close(descriptor)
 
 
 def _stage_owned_artifact_deletions(
     config: AnalyticsConfig,
     connection: duckdb.DuckDBPyConnection,
     artifact_ids: Sequence[str],
-) -> tuple[tuple[Path, Path], ...]:
+) -> tuple[_StagedArtifactDeletion, ...]:
     if not artifact_ids:
         return ()
     rows = cast(
@@ -3369,7 +3706,7 @@ def _stage_owned_artifact_deletions(
             (list(artifact_ids),),
         ).fetchall(),
     )
-    staged: list[tuple[Path, Path]] = []
+    staged: list[_StagedArtifactDeletion] = []
     try:
         for raw_artifact_id, raw_media_type, raw_sha256, raw_visibility in rows:
             if _require_str(raw_visibility) != VisibilityMode.LOCAL_RESOURCE_LINK.value:
@@ -3380,31 +3717,78 @@ def _stage_owned_artifact_deletions(
                 artifact_id,
                 _require_str(raw_media_type),
             )
-            _require_owner_artifact_file(destination, _require_str(raw_sha256))
+            expected_sha256 = _require_str(raw_sha256)
+            identity = _require_owner_artifact_file(destination, expected_sha256)
             temporary = destination.with_name(
                 f".artifact-delete-{artifact_id}-{uuid4().hex}{destination.suffix}.pending",
             )
-            destination.replace(temporary)
-            temporary.chmod(_OWNER_FILE_MODE)
+            with _open_owner_artifact_directory(destination.parent) as directory:
+                _rename_owner_artifact(
+                    directory,
+                    source_name=_artifact_relative_name(directory, destination),
+                    destination_name=_artifact_relative_name(directory, temporary),
+                    expected_identity=identity,
+                    expected_sha256=expected_sha256,
+                )
             _fsync_artifact_directory(destination.parent)
-            staged.append((destination, temporary))
+            staged.append(
+                _StagedArtifactDeletion(
+                    destination=destination,
+                    temporary=temporary,
+                    expected_sha256=expected_sha256,
+                    identity=identity,
+                ),
+            )
     except BaseException:
         _restore_staged_artifact_files(tuple(staged))
         raise
     return tuple(staged)
 
 
-def _restore_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
+def _restore_staged_artifact_files(staged: Sequence[_StagedArtifactDeletion]) -> None:
     first_error: BaseException | None = None
-    for destination, temporary in reversed(staged):
+    for item in reversed(staged):
         try:
-            if not temporary.exists():
-                continue
-            _require_owner_artifact_node(temporary)
-            _require_available_artifact_restore_destination(destination)
-            temporary.replace(destination)
-            destination.chmod(_OWNER_FILE_MODE)
-            _fsync_artifact_directory(destination.parent)
+            with _open_owner_artifact_directory(item.destination.parent) as directory:
+                temporary_name = _artifact_relative_name(directory, item.temporary)
+                destination_name = _artifact_relative_name(directory, item.destination)
+                temporary_identity = _owner_artifact_identity_at(
+                    directory,
+                    temporary_name,
+                    missing_ok=True,
+                )
+                if temporary_identity is None:
+                    try:
+                        canonical_identity = _require_owner_artifact_file_at(
+                            directory,
+                            destination_name,
+                            expected_sha256=item.expected_sha256,
+                            expected_identity=item.identity,
+                        )
+                    except StoreError as error:
+                        raise StoreError(
+                            "artifact deletion rollback marker is missing and canonical is invalid",
+                        ) from error
+                    _require_matching_artifact_identity(canonical_identity, item.identity)
+                    continue
+                _require_matching_artifact_identity(temporary_identity, item.identity)
+                if (
+                    _owner_artifact_identity_at(
+                        directory,
+                        destination_name,
+                        missing_ok=True,
+                    )
+                    is not None
+                ):
+                    _raise_artifact_rollback_target_occupied()
+                _rename_owner_artifact(
+                    directory,
+                    source_name=temporary_name,
+                    destination_name=destination_name,
+                    expected_identity=item.identity,
+                    expected_sha256=item.expected_sha256,
+                )
+            _fsync_artifact_directory(item.destination.parent)
         except BaseException as error:  # noqa: BLE001
             if first_error is None:
                 first_error = error
@@ -3412,13 +3796,18 @@ def _restore_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
         raise first_error
 
 
-def _remove_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
+def _remove_staged_artifact_files(staged: Sequence[_StagedArtifactDeletion]) -> None:
     first_error: BaseException | None = None
-    for _destination, temporary in staged:
+    for item in staged:
         try:
-            _require_owner_artifact_node(temporary)
-            temporary.unlink()
-            _fsync_artifact_directory(temporary.parent)
+            with _open_owner_artifact_directory(item.temporary.parent) as directory:
+                _unlink_owner_artifact(
+                    directory,
+                    name=_artifact_relative_name(directory, item.temporary),
+                    expected_identity=item.identity,
+                    expected_sha256=item.expected_sha256,
+                )
+            _fsync_artifact_directory(item.temporary.parent)
         except BaseException as error:  # noqa: BLE001
             if first_error is None:
                 first_error = error
@@ -3426,11 +3815,6 @@ def _remove_staged_artifact_files(staged: Sequence[tuple[Path, Path]]) -> None:
         if isinstance(first_error, Exception):
             raise StoreError("artifact physical deletion cleanup failed") from first_error
         raise first_error
-
-
-def _require_available_artifact_restore_destination(destination: Path) -> None:
-    if destination.exists() or destination.is_symlink():
-        raise StoreError("artifact deletion rollback target is occupied")
 
 
 def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
@@ -3441,7 +3825,12 @@ def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
     canonical: dict[str, Path] = {}
     staged_writes: dict[str, list[Path]] = {}
     staged_deletes: dict[str, list[Path]] = {}
-    for path in tuple(directory.iterdir()):
+    with _open_owner_artifact_directory(directory) as opened:
+        paths = tuple(
+            directory / name
+            for name in os.listdir(opened.descriptor)  # noqa: PTH208
+        )
+    for path in paths:
         name = path.name
         if _QUARANTINED_ARTIFACT_PATTERN.fullmatch(name) is not None:
             continue
@@ -3481,22 +3870,32 @@ def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
                 raise StoreError("owned artifact recovery state is ambiguous")
             _require_owner_artifact_file(current, item.sha256)
             for staged in writes:
-                _require_owner_artifact_file(staged, item.sha256)
-                _discard_staged_artifact(staged)
+                identity = _require_owner_artifact_file(staged, item.sha256)
+                _discard_staged_artifact(staged, identity)
             continue
         candidates = [*writes, *deletes]
         if len(candidates) != 1:
             raise StoreError("owned artifact metadata has no deterministic physical state")
         staged = candidates[0]
-        _require_owner_artifact_file(staged, item.sha256)
+        identity = _require_owner_artifact_file(staged, item.sha256)
         if writes:
-            _publish_staged_artifact(destination, staged, item.sha256)
+            _publish_staged_artifact(destination, staged, item.sha256, identity)
         else:
-            _restore_staged_artifact_files(((destination, staged),))
+            _restore_staged_artifact_files(
+                (
+                    _StagedArtifactDeletion(
+                        destination=destination,
+                        temporary=staged,
+                        expected_sha256=item.sha256,
+                        identity=identity,
+                    ),
+                ),
+            )
 
     for paths in (*staged_writes.values(), *staged_deletes.values()):
         for staged in paths:
-            _discard_staged_artifact(staged)
+            identity = _require_owner_artifact_node(staged)
+            _discard_staged_artifact(staged, identity)
     for artifact_id, path in canonical.items():
         item = metadata.get(artifact_id)
         if item is not None and item.visibility == VisibilityMode.LOCAL_RESOURCE_LINK.value:
@@ -3505,39 +3904,31 @@ def _reconcile_owned_artifact_directory(  # noqa: C901, PLR0912, PLR0915
 
 
 def _quarantine_unreferenced_artifact(path: Path, artifact_id: str) -> None:
-    _require_owner_artifact_node(path)
+    identity = _require_owner_artifact_node(path)
+    if identity is None:
+        raise StoreError("unreferenced artifact is missing")
     quarantined = path.with_name(
         f".artifact-orphan-{artifact_id}-{uuid4().hex}{path.suffix}",
     )
-    path.replace(quarantined)
-    quarantined.chmod(_OWNER_FILE_MODE)
-    _fsync_artifact_directory(quarantined.parent)
+    with _open_owner_artifact_directory(path.parent) as directory:
+        _rename_owner_artifact(
+            directory,
+            source_name=_artifact_relative_name(directory, path),
+            destination_name=_artifact_relative_name(directory, quarantined),
+            expected_identity=identity,
+            expected_sha256=None,
+        )
 
 
 def _require_owner_artifact_directory(config: AnalyticsConfig) -> Path:
     directory = config.paths.artifacts_dir
     root = config.paths.analytics_root
-    try:
-        directory_node = directory.lstat()
-        root_node = root.lstat()
-        resolved_directory = directory.resolve(strict=True)
-        resolved_root = root.resolve(strict=True)
-    except OSError as error:
-        raise StoreValidationError("artifact directory is unavailable") from error
-    if (
-        stat.S_ISLNK(directory_node.st_mode)
-        or not stat.S_ISDIR(directory_node.st_mode)
-        or directory_node.st_uid != os.getuid()
-        or stat.S_IMODE(directory_node.st_mode) != _OWNER_DIRECTORY_MODE
-        or stat.S_ISLNK(root_node.st_mode)
-        or not stat.S_ISDIR(root_node.st_mode)
-        or root_node.st_uid != os.getuid()
-        or stat.S_IMODE(root_node.st_mode) != _OWNER_DIRECTORY_MODE
-        or resolved_directory == resolved_root
-        or not resolved_directory.is_relative_to(resolved_root)
-    ):
+    if directory.parent != root:
         raise StoreValidationError("artifact directory is not owner-contained")
-    return resolved_directory
+    with _open_owner_artifact_directory(directory) as opened:
+        if opened.path.parent != root.resolve(strict=True):
+            raise StoreValidationError("artifact directory is not owner-contained")
+        return opened.path
 
 
 def _count_targets(

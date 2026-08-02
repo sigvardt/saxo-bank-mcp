@@ -854,7 +854,48 @@ def test_artifact_runtime_environment_and_host_trust_are_not_caller_switches(
 
     assert isinstance(delivery, render_module.ArtifactResourceLink)
     assert delivery.owner_only is True
+    assert delivery.reason_code == "inline_private_not_enabled"
     assert any(line == "Environment: LIVE" for line in delivery.visible_stamps)
+
+
+def test_explicit_link_visible_artifact_keeps_link_requested_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binding_registry_type = getattr(render_module, "ArtifactBindingRegistry")
+    stored_render_request_type = getattr(render_module, "StoredRenderRequest")
+    config = _config(tmp_path)
+    result = _analysis_result(analysis_kind="market_comparison").model_copy(
+        update={"visibility": VisibilityMode.LOCAL_RESOURCE_LINK},
+    )
+    registry, _ = _registry(
+        analysis_kind="market_comparison",
+        artifact_template_ids=("relative_performance",),
+    )
+    _seed_store(config, result)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setattr(render_module, "_utc_now", lambda: _NOW)
+    bindings = binding_registry_type(config=config, proof_registry=registry)
+    issued = bindings.issue(result.analysis_id)
+    store = AnalyticsStore.open(config)
+    try:
+        delivery = render_module.render_analysis(
+            stored_render_request_type(
+                binding_id=issued.binding_id,
+                template_id="relative_performance",
+                output_format="png",
+                width=1200,
+                height=675,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+    finally:
+        store.close()
+
+    assert isinstance(delivery, render_module.ArtifactResourceLink)
+    assert delivery.reason_code == "local_resource_link_requested"
 
 
 @pytest.mark.parametrize(
