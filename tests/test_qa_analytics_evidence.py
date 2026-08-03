@@ -1439,6 +1439,52 @@ def test_producer_launcher_refuses_unbound_or_fabricated_child_output(
 
 
 @pytest.mark.parametrize(
+    ("field", "coercible_value"),
+    [
+        ("live_events", "0"),
+        ("live_mutation_calls", "0"),
+        ("uncleaned_resources", "0"),
+        ("cleanup_complete", 1),
+        ("account_state_unchanged", 1),
+        ("redacted_publication", 1),
+    ],
+)
+def test_producer_launcher_strictly_refuses_coercible_nested_safety_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    coercible_value: object,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    candidate = bundle.candidate_commit
+    kinds = ("market_comparison",)
+    payload = json.loads(
+        _installed_matrix_envelope_json(
+            bundle.sim_tool_matrix,
+            candidate_commit=candidate,
+            analysis_kinds=kinds,
+        ),
+    )
+    payload["matrix"][field] = coercible_value
+    stdout = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        _ = env, timeout_seconds
+        return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
+
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+        producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
     ("receipt_updates", "stderr"),
     [
         ({"name": "wrong_command"}, ""),

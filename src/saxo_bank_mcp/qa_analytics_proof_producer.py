@@ -564,7 +564,7 @@ def _run_installed_matrix_proof_session(
     ):
         raise ProofProducerError("installed_matrix_child_result_invalid")
     try:
-        envelope = InstalledMatrixEnvelope.model_validate_json(result.stdout)
+        envelope = InstalledMatrixEnvelope.model_validate_json(result.stdout, strict=True)
     except ValidationError as error:
         raise ProofProducerError("installed_matrix_child_result_invalid") from error
     if envelope.candidate_commit != candidate_commit or envelope.analysis_kinds != analysis_kinds:
