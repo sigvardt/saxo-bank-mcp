@@ -161,6 +161,14 @@ type AnalysisInputKind = Literal[
     "bounded_backtest",
     "pretrade_impact",
 ]
+type AccountAnalyticsKind = Literal[
+    "portfolio_performance",
+    "position_sizing",
+    "scenario_custom",
+    "portfolio_minimum_variance",
+    "derivatives_model",
+    "pretrade_impact",
+]
 
 
 class AccountSnapshotDatasetSummary(_StrictModel):
@@ -175,10 +183,28 @@ class AccountSnapshotDatasetSummary(_StrictModel):
             "position_sizing",
             "scenario_custom",
             "portfolio_minimum_variance",
+            "derivatives_model",
             "pretrade_impact",
         ],
         ...,
     ]
+    quality_state: QualityState
+    coverage_start: datetime
+    coverage_end: datetime
+    row_count: int = Field(ge=0)
+    warnings: tuple[str, ...]
+    fingerprints: IngestionFingerprints
+
+
+class AccountAnalysisSourceDatasetSummary(_StrictModel):
+    """Safe handle-only summary for an exact account-scoped Saxo source contract."""
+
+    dataset_id: DatasetId
+    data_kind: Literal["account_analysis_source"] = "account_analysis_source"
+    account_alias: str = Field(pattern=r"^aa_[0-9a-f]{32}$")
+    contract_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    instrument_handle: InstrumentHandle | None = None
+    eligible_analysis_kinds: tuple[AccountAnalyticsKind, ...]
     quality_state: QualityState
     coverage_start: datetime
     coverage_end: datetime
@@ -206,6 +232,7 @@ type DatasetHandleSummary = (
     | QuoteDatasetSummary
     | OptionChainDatasetSummary
     | AccountSnapshotDatasetSummary
+    | AccountAnalysisSourceDatasetSummary
     | AnalysisInputDatasetSummary
 )
 
@@ -251,6 +278,23 @@ class AccountSnapshotSyncSpec(_StrictModel):
     safe_account_selector: str = Field(pattern=r"^proc-acct-[A-Za-z0-9_-]{20,64}$")
 
 
+class AccountAnalyticsSyncSpec(_StrictModel):
+    """Request exact supplemental account sources by safe server-issued handles only."""
+
+    data_kind: Literal["account_analytics"] = "account_analytics"
+    safe_account_selector: str = Field(pattern=r"^proc-acct-[A-Za-z0-9_-]{20,64}$")
+    analysis_kinds: tuple[AccountAnalyticsKind, ...] = Field(min_length=1, max_length=6)
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(default=(), max_length=25)
+
+    @model_validator(mode="after")
+    def _validate_unique_scope(self) -> AccountAnalyticsSyncSpec:
+        if len(self.analysis_kinds) != len(set(self.analysis_kinds)):
+            raise ValueError("account analytics kinds must be unique")
+        if len(self.instrument_handles) != len(set(self.instrument_handles)):
+            raise ValueError("account analytics instrument handles must be unique")
+        return self
+
+
 class AnalysisInputSyncSpec(_StrictModel):
     """Request an authenticated typed context using only existing opaque source handles."""
 
@@ -271,6 +315,7 @@ type ResearchSyncSpec = (
     | QuoteSyncSpec
     | OptionChainSyncSpec
     | AccountSnapshotSyncSpec
+    | AccountAnalyticsSyncSpec
     | AnalysisInputSyncSpec
 )
 

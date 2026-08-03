@@ -58,21 +58,6 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
 DIGEST: Final = "d" * 64
 BOTH_HARNESS_COUNT: Final = 2
-# Short non-secret canary for allowlist binding in isolated-runtime unit tests.
-EVAL_ACCOUNT_CANARY: Final = "SIMACCT01"
-
-
-@pytest.fixture(autouse=True)
-def mock_eval_account_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bind a canary account allowlist so unit tests do not call Saxo."""
-
-    def _discover(_path: Path) -> str:
-        return EVAL_ACCOUNT_CANARY
-
-    monkeypatch.setattr(
-        "saxo_bank_mcp.agent_skill_matrix_env.discover_exactly_one_active_sim_account",
-        _discover,
-    )
 
 
 def _sim_token(
@@ -359,7 +344,7 @@ def test_prepare_eval_runtime_strips_parent_secrets_and_is_owner_only(
         assert runtime.env["SAXO_MCP_ENVIRONMENT"] == "SIM"
         assert runtime.env["SAXO_MCP_ENABLE_LIVE_READS"] == "0"
         assert runtime.env["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
-        assert runtime.env["SAXO_MCP_ACCOUNT_ALLOWLIST"] == EVAL_ACCOUNT_CANARY
+        assert "SAXO_MCP_ACCOUNT_ALLOWLIST" not in runtime.env
         assert "OPENAI_API_KEY" not in runtime.env
         assert "ANTHROPIC_API_KEY" not in runtime.env
         assert "SAXO_MCP_LIVE_APP_KEY" not in runtime.env

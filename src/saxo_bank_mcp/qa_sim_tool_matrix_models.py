@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.config import SIM_ENDPOINTS
 from saxo_bank_mcp.qa_analytics_sim import (
+    ANALYSIS_KIND_IDS,
     AnalyticsCaseReceipt,
     AnalyticsRuntimeResources,
     AnalyticsToolCaseEvidence,
@@ -115,6 +116,14 @@ class SimToolMatrixReceipt(BaseModel):
 
     @model_validator(mode="after")
     def _validate_pass_claim(self) -> SimToolMatrixReceipt:
+        passed_analysis_kinds = tuple(
+            receipt.analysis_kind
+            for receipt in self.analysis_execution_receipts
+            if receipt.kind == "success"
+            and receipt.state == "passed"
+            and receipt.result_parsed
+            and receipt.analysis_kind is not None
+        )
         if self.status == "passed" and (
             self.reason != ""
             or len(self.tool_receipts) != EXPECTED_TOOL_COUNT
@@ -135,6 +144,8 @@ class SimToolMatrixReceipt(BaseModel):
             or self.uncleaned_resources != 0
             or any(receipt.status == "failed" for receipt in self.tool_receipts)
             or analytics_case_evidence_errors(self.analytics_case_receipts)
+            or passed_analysis_kinds != ANALYSIS_KIND_IDS
+            or len(passed_analysis_kinds) != len(set(passed_analysis_kinds))
             or self.controlled_sim_lifecycle is None
             or self.controlled_sim_lifecycle.evidence_state != "passed"
             or any(

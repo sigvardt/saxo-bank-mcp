@@ -20,6 +20,7 @@ from saxo_bank_mcp.analytics_account_data import (
     AccountSyncResult,
     AccountSyncValidationError,
     new_account_alias,
+    sync_account_analysis_sources,
     sync_account_history,
     sync_closed_positions,
     sync_cost_sources,
@@ -1026,3 +1027,56 @@ def test_account_alias_is_opaque_and_selectors_are_secret() -> None:
             account_key=SecretStr("mocked-account-key"),
             client_key=SecretStr("mocked-client-key"),
         )
+
+
+@pytest.mark.anyio
+async def test_account_analysis_sources_capture_exact_performance_and_exposure_lineage(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    handle = _seed_instrument(config)
+    executor = _PayloadExecutor(
+        (
+            {"AccountValue": 1000.0, "TimeWeightedReturn": 1.0},
+            {
+                "Data": [
+                    {"Date": "2026-07-31", "EndOfDayBalance": 990.0},
+                    {"Date": "2026-08-01", "EndOfDayBalance": 1000.0},
+                ],
+            },
+            {
+                "Data": [
+                    {
+                        "Amount": 1.0,
+                        "AssetType": "Stock",
+                        "Currency": "DKK",
+                        "Uic": 1001,
+                    },
+                ],
+            },
+        ),
+    )
+
+    summaries, request_count = await sync_account_analysis_sources(
+        scope,
+        ("portfolio_performance", "scenario_custom", "pretrade_impact"),
+        (handle,),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert request_count == 3
+    assert {item.contract_id for item in summaries} == {
+        "exposure_instruments_v1",
+        "performance_summary_v4",
+        "performance_timeseries_v4",
+    }
+    assert all(item.account_alias == scope.alias for item in summaries)
+    assert all(item.quality_state.value == "complete" for item in summaries)
+    assert [call[0] for call in executor.calls] == [
+        "get.hist.v4.performance.summary",
+        "get.hist.v4.performance.timeseries",
+        "get.port.v1.exposure.instruments",
+    ]

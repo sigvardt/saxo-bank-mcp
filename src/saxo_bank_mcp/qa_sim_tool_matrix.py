@@ -6,8 +6,10 @@ import json
 import re
 import tempfile
 from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Final, Literal, Protocol, cast
 
 import anyio
 from fastmcp import Client
@@ -85,6 +87,7 @@ from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.trading_write_registry import trading_write_specs
 
 _SHA256_HEX_LENGTH = 64
+_MINIMUM_FIXTURE_READ_RESULTS = 2
 _SAFE_HANDLE = re.compile(r"^(?P<kind>ih|ds|an|ar|jb|dp)_[0-9a-f]{32}$")
 _ACTIVE_JOB_STATES: Final = frozenset({"job_queued", "job_running"})
 _TERMINAL_JOB_STATES: Final = frozenset(
@@ -106,6 +109,26 @@ class _ControlledGhostObservation:
     receipt_bound: bool
     mcp_call_count: int
     sim_mutation_call_count: int
+
+
+class _InstalledProofRecorder(Protocol):
+    def candidate_commit(self) -> str: ...
+
+    def controlled_backtest_source_binding(
+        self,
+        dataset_id: str,
+        instrument_handle: str,
+        *,
+        expected_uic: int,
+        expected_asset_type: str,
+    ) -> str: ...
+
+    def record_observed_ghost_lifecycle(
+        self,
+        evidence: GhostLifecycleEvidence,
+        *,
+        ledger_provenance_sha256: str,
+    ) -> None: ...
 
 
 # Re-export models for producer imports.
@@ -143,7 +166,11 @@ def handle_sim_tool_matrix(out: Path, fixtures: MatrixCliFixtures) -> int:
     return 0 if ok and receipt.status == "passed" else 1
 
 
-async def _run_matrix(fixtures: MatrixFixtures) -> SimToolMatrixReceipt:
+async def _run_matrix(
+    fixtures: MatrixFixtures,
+    *,
+    proof_recorder: _InstalledProofRecorder | None = None,
+) -> SimToolMatrixReceipt:
     state = MatrixRuntimeState(
         errors=[],
         hosts={SIM_GATEWAY_HOST},
@@ -178,7 +205,12 @@ async def _run_matrix(fixtures: MatrixFixtures) -> SimToolMatrixReceipt:
                 await _run_order_mutation_phase(client, state)
                 await _run_trading_write_phase(client, state)
                 await _run_trailing_phase(client, state, fixtures)
-                await run_analytics_case_phase(client, state, controlled_fixtures=fixtures)
+                await run_analytics_case_phase(
+                    client,
+                    state,
+                    controlled_fixtures=fixtures,
+                    proof_recorder=proof_recorder,
+                )
 
     return _finalize(state)
 
@@ -232,6 +264,11 @@ async def _run_mcp_account_and_fixture_preflight(
     ]
     for result in fixture_results:
         _observe_auxiliary(state, result)
+    if len(fixture_results) >= _MINIMUM_FIXTURE_READ_RESULTS:
+        _extend_unique(
+            state.analytics_resources.option_expiries,
+            list(_observed_option_expiries(fixture_results[1].payload)),
+        )
     fixtures_ok = fixture_values_match(fixtures) and all(
         result.result_parsed and result.result_state == "passed" for result in fixture_results
     )
@@ -408,6 +445,7 @@ async def run_analytics_case_phase(  # noqa: C901
     state: MatrixRuntimeState,
     *,
     controlled_fixtures: MatrixFixtures | None = None,
+    proof_recorder: _InstalledProofRecorder | None = None,
 ) -> None:
     """Exercise every applicable analytics case through the actual FastMCP call path."""
     coverage_errors = assert_analytics_case_coverage(analytics_sim_contracts())
@@ -442,6 +480,7 @@ async def run_analytics_case_phase(  # noqa: C901
                 state,
                 observed_call,
                 controlled_fixtures,
+                proof_recorder=proof_recorder,
             )
         result = await call_tool(
             client,
@@ -514,6 +553,7 @@ async def run_analytics_case_phase(  # noqa: C901
                 state,
                 None,
                 controlled_fixtures,
+                proof_recorder=proof_recorder,
             )
         await _refresh_post_cleanup_local_state(client, state)
         state.controlled_sim_lifecycle = _controlled_sim_lifecycle_receipt(
@@ -544,8 +584,17 @@ async def _prepare_server_owned_analysis_inputs(
                 "request": {
                     "items": [
                         {
-                            "data_kind": "account_snapshot",
+                            "data_kind": "account_analytics",
                             "safe_account_selector": resources.account_selectors[0],
+                            "analysis_kinds": [
+                                "portfolio_performance",
+                                "position_sizing",
+                                "scenario_custom",
+                                "portfolio_minimum_variance",
+                                "derivatives_model",
+                                "pretrade_impact",
+                            ],
+                            "instrument_handles": list(resources.instrument_handles[:25]),
                         },
                     ],
                 },
@@ -559,9 +608,48 @@ async def _prepare_server_owned_analysis_inputs(
             input_strategy="sync_issued_instrument",
         )
         _remember_analytics_handles(resources, auxiliary_call, account_capture)
-    source_dataset_ids = tuple(resources.source_dataset_ids)
-    if not source_dataset_ids:
-        return
+    if resources.instrument_handles:
+        market_items: list[dict[str, JsonValue]] = [
+            {
+                "data_kind": "quote",
+                "handle": resources.instrument_handles[0],
+            },
+        ]
+        if resources.option_expiries:
+            market_items.append(
+                {
+                    "data_kind": "option_chain",
+                    "handle": resources.instrument_handles[0],
+                    "expiries": list(resources.option_expiries),
+                },
+            )
+        market_capture = await call_tool(
+            client,
+            "saxo_sync_research_data",
+            {"request": {"items": market_items}},
+        )
+        _observe_auxiliary(state, market_capture)
+        _remember_analytics_handles(
+            resources,
+            AnalyticsCaseCall(
+                tool_id="saxo_sync_research_data",
+                kind="success",
+                arguments={},
+                input_strategy="sync_issued_instrument",
+            ),
+            market_capture,
+        )
+        quote_dataset_ids = resources.dataset_ids_by_analysis_kind.get("quote", [])
+        if quote_dataset_ids:
+            quote_read = await call_tool(
+                client,
+                "saxo_get_research_dataset",
+                {"dataset_id": quote_dataset_ids[-1], "page": 1, "limit": 1},
+            )
+            _observe_auxiliary(state, quote_read)
+            resources.pretrade_proposal_price = _observed_quote_midpoint(
+                quote_read.payload,
+            )
     for analysis_kind in (
         "portfolio_performance",
         "position_sizing",
@@ -570,6 +658,9 @@ async def _prepare_server_owned_analysis_inputs(
         "derivatives_model",
         "bounded_backtest",
     ):
+        source_dataset_ids = _source_datasets_for_execution(resources, analysis_kind)
+        if not source_dataset_ids:
+            continue
         routed = await call_tool(
             client,
             "saxo_sync_research_data",
@@ -579,7 +670,7 @@ async def _prepare_server_owned_analysis_inputs(
                         {
                             "data_kind": "analysis_input",
                             "analysis_kind": analysis_kind,
-                            "source_dataset_ids": list(source_dataset_ids),
+                            "source_dataset_ids": source_dataset_ids,
                         },
                     ],
                 },
@@ -602,7 +693,8 @@ async def _prepare_server_owned_pretrade_input(
     """Bind a proposal context to one replayable result and the exact current source set."""
     resources = state.analytics_resources
     origins = resources.analysis_ids_by_kind.get("instrument_price_return", [])
-    if len(origins) != 1 or not resources.source_dataset_ids:
+    source_dataset_ids = _source_datasets_for_execution(resources, "pretrade_impact")
+    if len(origins) != 1 or not source_dataset_ids:
         return
     routed = await call_tool(
         client,
@@ -613,7 +705,7 @@ async def _prepare_server_owned_pretrade_input(
                     {
                         "data_kind": "analysis_input",
                         "analysis_kind": "pretrade_impact",
-                        "source_dataset_ids": list(resources.source_dataset_ids),
+                        "source_dataset_ids": source_dataset_ids,
                         "origin_analysis_id": origins[0],
                     },
                 ],
@@ -633,21 +725,112 @@ async def _prepare_server_owned_pretrade_input(
     )
 
 
+def _source_datasets_for_execution(
+    resources: AnalyticsRuntimeResources,
+    analysis_kind: str,
+) -> list[str]:
+    """Select only the exact server-issued source families needed by one typed context."""
+    routes = {
+        "portfolio_performance": ("portfolio_performance",),
+        "position_sizing": ("position_sizing", "price_bars"),
+        "scenario_custom": ("scenario_custom",),
+        "portfolio_minimum_variance": (
+            "portfolio_minimum_variance",
+            "price_bars",
+        ),
+        "derivatives_model": ("derivatives_model", "option_chain", "quote"),
+        "bounded_backtest": ("price_bars",),
+        "pretrade_impact": ("pretrade_impact", "price_bars", "quote"),
+    }
+    selected: list[str] = []
+    for route in routes.get(analysis_kind, (analysis_kind,)):
+        _extend_unique(
+            selected,
+            resources.dataset_ids_by_analysis_kind.get(route, []),
+        )
+    return selected[:25]
+
+
+def _observed_option_expiries(payload: JsonValue) -> tuple[str, ...]:  # noqa: C901
+    """Read only ISO expiry dates observed through the logical fixture MCP response."""
+    found: set[str] = set()
+
+    def visit(value: JsonValue) -> None:
+        if isinstance(value, str):
+            try:
+                decoded: JsonValue = json.loads(value)
+            except json.JSONDecodeError:
+                return
+            visit(decoded)
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            if key.casefold() in {"expiry", "expirydate"} and isinstance(item, str):
+                try:
+                    parsed = date.fromisoformat(item[:10])
+                except ValueError:
+                    pass
+                else:
+                    found.add(parsed.isoformat())
+            else:
+                visit(item)
+
+    visit(payload)
+    return tuple(sorted(found))
+
+
+def _observed_quote_midpoint(payload: JsonValue) -> str | None:  # noqa: C901
+    """Read one exact normalized midpoint observed through the logical MCP path."""
+    found: list[Decimal] = []
+
+    def decimal_value(value: JsonValue | None) -> Decimal | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        return parsed if parsed.is_finite() and parsed > 0 else None
+
+    def visit(value: JsonValue) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("row_kind") == "quote":
+            midpoint = decimal_value(value.get("mid_value"))
+            if midpoint is None:
+                bid = decimal_value(value.get("bid_value"))
+                ask = decimal_value(value.get("ask_value"))
+                if bid is not None and ask is not None and ask >= bid:
+                    midpoint = (bid + ask) / Decimal(2)
+            if midpoint is not None:
+                found.append(midpoint)
+        for item in value.values():
+            visit(item)
+
+    visit(payload)
+    if len(found) != 1:
+        return None
+    return format(found[0], "f")
+
+
 async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
     client: MatrixClient,
     state: MatrixRuntimeState,
     backtest_call: AnalyticsCaseCall | None,
     fixtures: MatrixFixtures,
+    *,
+    proof_recorder: _InstalledProofRecorder | None,
 ) -> _ControlledGhostObservation:
     """Run at most one exact SIM fixture lifecycle, then reconcile before issuing proof."""
-    from saxo_bank_mcp.mcp_analytics_tools import (  # noqa: PLC0415
-        _bind_observed_sim_ghost_lifecycle,
-        _controlled_backtest_source_binding,
-        _current_process_proof_candidate,
-        _process_proof_session_authority,
-    )
-
-    authority = _process_proof_session_authority()
     reason = "controlled_ghost_input_unavailable"
     candidate: str | None = None
     account_alias: str | None = None
@@ -671,21 +854,23 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
             and state.preflight.session_ok
             and SaxoRuntimeConfig.from_env().requested_environment is SaxoEnvironment.SIM
         ):
-            try:
-                candidate = _current_process_proof_candidate(authority=authority)
-                account_alias = _controlled_backtest_source_binding(
-                    raw_dataset_id,
-                    raw_instrument_handle,
-                    expected_uic=fixtures.stock_uic,
-                    expected_asset_type=FIXTURE_ASSET_TYPE,
-                    authority=authority,
-                )
-            except (OSError, ValueError):
+            if proof_recorder is None:
                 reason = "controlled_ghost_source_binding_unavailable"
             else:
-                dataset_id = raw_dataset_id
-                instrument_handle = raw_instrument_handle
-                strategy = raw_strategy
+                try:
+                    candidate = proof_recorder.candidate_commit()
+                    account_alias = proof_recorder.controlled_backtest_source_binding(
+                        raw_dataset_id,
+                        raw_instrument_handle,
+                        expected_uic=fixtures.stock_uic,
+                        expected_asset_type=FIXTURE_ASSET_TYPE,
+                    )
+                except (OSError, ValueError):
+                    reason = "controlled_ghost_source_binding_unavailable"
+                else:
+                    dataset_id = raw_dataset_id
+                    instrument_handle = raw_instrument_handle
+                    strategy = raw_strategy
 
     calls = 0
     preview_state = "not_run"
@@ -867,17 +1052,19 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         and state_equal
         and not disclaimer_present
     ):
-        try:
-            _bind_observed_sim_ghost_lifecycle(
-                evidence,
-                ledger_provenance_sha256=ledger_sha256,
-                authority=authority,
-            )
-        except (OSError, ValueError):
+        if proof_recorder is None:
             reason = "controlled_ghost_receipt_binding_refused"
         else:
-            bound = True
-            reason = "passed"
+            try:
+                proof_recorder.record_observed_ghost_lifecycle(
+                    evidence,
+                    ledger_provenance_sha256=ledger_sha256,
+                )
+            except (OSError, ValueError):
+                reason = "controlled_ghost_receipt_binding_refused"
+            else:
+                bound = True
+                reason = "passed"
     elif not ledger_complete:
         reason = "controlled_ghost_request_ledger_incomplete"
     elif not state_equal:
@@ -1205,29 +1392,7 @@ def analytics_case_receipt(
 
 
 def _analysis_kind_from_case_call(case_call: AnalyticsCaseCall) -> str | None:
-    analysis_tools = {
-        "saxo_analyze_market",
-        "saxo_analyze_instruments",
-        "saxo_analyze_portfolio",
-        "saxo_size_position",
-        "saxo_run_scenario",
-        "saxo_optimize_portfolio",
-        "saxo_model_derivatives",
-        "saxo_backtest_strategy",
-        "saxo_propose_trade_from_analysis",
-    }
-    if case_call.tool_id not in analysis_tools or case_call.kind != "success":
-        return None
-    if case_call.tool_id == "saxo_propose_trade_from_analysis":
-        return "pretrade_impact"
-    request = case_call.arguments.get("request")
-    if isinstance(request, dict):
-        analysis_kind = request.get("analysis_kind")
-        if isinstance(analysis_kind, str):
-            return analysis_kind
-    if case_call.tool_id == "saxo_backtest_strategy":
-        return "bounded_backtest"
-    return None
+    return case_call.analysis_kind if case_call.kind == "success" else None
 
 
 def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - bounded dispatch
@@ -1295,6 +1460,24 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
     }:
         return _materialize_analysis_consumer_arguments(case_call, resources)
     if case_call.tool_id == "saxo_manage_analysis_job":
+        if case_call.analysis_kind in {"goal_model", "monte_carlo"}:
+            dataset_ids = resources.dataset_ids_by_analysis_kind.get(
+                "portfolio_performance",
+                resources.dataset_ids_by_analysis_kind.get("price_bars", []),
+            )
+            if not dataset_ids:
+                return {}
+            return {
+                "action": "start",
+                "request": {
+                    "job_kind": "monte_carlo",
+                    "dataset_ids": [dataset_ids[0]],
+                    "parameters": [
+                        {"name": "analysis_kind", "value": case_call.analysis_kind},
+                    ],
+                    "total_work_units": 1,
+                },
+            }
         if case_call.kind in {"timeout", "recovery"}:
             job_id = resources.job_ids[0] if resources.job_ids else None
             return {"action": "check", "job_id": job_id} if job_id is not None else {}
@@ -1323,7 +1506,7 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
     resources: AnalyticsRuntimeResources,
 ) -> dict[str, JsonValue]:
     degraded = case_call.kind == "degradation"
-    route = {
+    default_route = {
         "saxo_analyze_market": "price_bars",
         "saxo_analyze_instruments": "price_bars",
         "saxo_analyze_portfolio": "portfolio_performance",
@@ -1333,6 +1516,17 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         "saxo_model_derivatives": "derivatives_model",
         "saxo_backtest_strategy": "bounded_backtest",
     }[case_call.tool_id]
+    route = {
+        "portfolio_risk_parity": "portfolio_minimum_variance",
+        "margin_fire_drill": "scenario_custom",
+        "portfolio_scenario": "scenario_custom",
+    }.get(case_call.analysis_kind or "", case_call.analysis_kind or default_route)
+    if case_call.tool_id in {"saxo_analyze_market", "saxo_analyze_instruments"}:
+        route = "price_bars"
+    elif case_call.tool_id == "saxo_analyze_portfolio":
+        route = "portfolio_performance"
+    elif case_call.tool_id == "saxo_model_derivatives":
+        route = "derivatives_model"
     routed = (
         resources.degraded_dataset_ids_by_analysis_kind
         if degraded
@@ -1365,6 +1559,18 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         if instrument_handle is None:
             return {}
         request["instrument_handle"] = instrument_handle
+    if case_call.analysis_kind is not None:
+        request["analysis_kind"] = (
+            "scenario_margin"
+            if case_call.analysis_kind == "margin_fire_drill"
+            else case_call.analysis_kind
+        )
+        if case_call.tool_id == "saxo_optimize_portfolio":
+            request["objective"] = (
+                "risk_parity"
+                if case_call.analysis_kind == "portfolio_risk_parity"
+                else "minimum_variance"
+            )
     if degraded:
         if case_call.tool_id == "saxo_size_position":
             request["maximum_loss"] = "2"
@@ -1390,14 +1596,14 @@ def _materialize_analysis_consumer_arguments(
         ).get("instrument_price_return", [])
         analysis_id = analysis_ids[0] if analysis_ids else None
         instrument = resources.instrument_handles[0] if resources.instrument_handles else None
-        if analysis_id is None or instrument is None:
+        if analysis_id is None or instrument is None or resources.pretrade_proposal_price is None:
             return {}
         return {
             "analysis_id": analysis_id,
             "instrument_handle": instrument,
             "side": "buy",
             "quantity": "1" if not degraded else "2",
-            "proposal_price": "50",
+            "proposal_price": resources.pretrade_proposal_price,
             "maximum_loss": "1",
             "holding_period_days": 0,
             "visibility": "private_user_result",
@@ -1501,7 +1707,7 @@ def _remember_typed_resources(  # noqa: C901
         resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
     )
 
-    def visit(value: JsonValue) -> None:  # noqa: C901
+    def visit(value: JsonValue) -> None:  # noqa: C901, PLR0912
         if isinstance(value, list):
             for item in value:
                 visit(item)
@@ -1523,6 +1729,14 @@ def _remember_typed_resources(  # noqa: C901
             )
             if route is not None:
                 _extend_unique(dataset_routes.setdefault(route, []), [dataset_id])
+            eligible = value.get("eligible_analysis_kinds")
+            if isinstance(eligible, list):
+                for eligible_kind in eligible:
+                    if isinstance(eligible_kind, str):
+                        _extend_unique(
+                            dataset_routes.setdefault(eligible_kind, []),
+                            [dataset_id],
+                        )
         analysis_id = value.get("analysis_id")
         if isinstance(analysis_id, str) and isinstance(analysis_kind, str):
             _extend_unique(analysis_routes.setdefault(analysis_kind, []), [analysis_id])

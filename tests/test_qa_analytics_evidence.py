@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import json
+import xml.etree.ElementTree as ET
 from importlib import import_module
 from pathlib import Path
+from runpy import run_path
 from typing import Final, NoReturn
 
 import pytest
@@ -406,6 +409,12 @@ def _complete_bundle() -> tuple[
         )
         for contract in analytics_sim_contracts()
     )
+    analysis_execution_receipts = tuple(
+        _analytics_case_receipt("success", "verified").model_copy(
+            update={"analysis_kind": analysis_kind},
+        )
+        for analysis_kind in catalog.analysis_kinds
+    )
     lifecycle = ControlledSimLifecycleReceipt(
         environment="SIM",
         cases=tuple(
@@ -458,6 +467,7 @@ def _complete_bundle() -> tuple[
         analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=analytics_case_receipts,
+        analysis_execution_receipts=analysis_execution_receipts,
         controlled_sim_lifecycle=lifecycle,
         mcp_only_account_fixture_state=True,
         cleanup_complete=True,
@@ -715,35 +725,120 @@ def test_installed_producer_privately_validates_a_complete_executed_typed_bundle
 
 def test_installed_producer_requires_executed_nodes_for_every_proof_category() -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
-    nodes = tuple(
-        f"installed::{producer._PROOF_CATEGORY_MARKERS[category][0]}"  # noqa: SLF001
-        for category in producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
-    )
 
     with pytest.raises(
         producer.ProofProducerError,
         match="installed_proof_contract_receipts_missing",
     ):
         producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
-            nodes,
+            ("installed::aggregate_marker",),
             suite_receipt_sha256="e" * 64,
         )
+
+
+def test_installed_proof_contract_receipt_modules_exist_and_cover_exact_catalog() -> None:
+    """The installed suite must contain the exact nodes named by the producer."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    tests_root = Path(__file__).parent
+    analysis_tests = run_path(str(tests_root / "test_analytics_proof_contracts.py"))
+    artifact_tests = run_path(str(tests_root / "test_qa_analytics_artifacts.py"))
+    contracts = producer.build_proof_execution_contracts()
+    expected_analysis_cases = {
+        (contract.analysis_kind, case.kind)
+        for contract in contracts
+        for case in contract.cases
+        if case.applicability == "required"
+        and case.kind not in {"executable_sim", "artifact_parity", "visual_integrity"}
+    }
+    assert set(analysis_tests["ANALYSIS_PROOF_CASES"]) == expected_analysis_cases
+    assert set(artifact_tests["ARTIFACT_TEMPLATE_IDS"]) == set(
+        producer.load_analysis_kind_catalog().artifact_template_ids,
+    )
+    assert callable(analysis_tests["test_analysis_proof_contract"])
+    assert callable(artifact_tests["test_artifact_parity_contract"])
+    assert callable(artifact_tests["test_artifact_visual_contract"])
+    supporting_nodes = {
+        *analysis_tests["_DOMAIN_SUPPORT"].values(),
+        *analysis_tests["_CASE_SUPPORT"].values(),
+    }
+    for node_id in supporting_nodes - {""}:
+        module_name, test_name = node_id.split("::", maxsplit=1)
+        test_path = tests_root / f"{module_name.removeprefix('tests.').replace('.', '/')}.py"
+        tree = ast.parse(test_path.read_text(encoding="utf-8"))
+        assert test_name in {
+            item.name
+            for item in tree.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+    assert "test_qa_analytics_artifacts.py" in inspect.getsource(
+        producer._run_installed_offline_proof_suite,  # noqa: SLF001
+    )
 
 
 def test_aggregate_marker_nodes_cannot_mint_contract_keyed_proof() -> None:
     """One passing marker node per category is not evidence for every analysis."""
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
-    nodes = tuple(
-        f"synthetic::{producer._PROOF_CATEGORY_MARKERS[category][0]}"  # noqa: SLF001
-        for category in producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
-    )
 
     with pytest.raises(
         producer.ProofProducerError,
         match="installed_proof_contract_receipts_missing",
     ):
         producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
-            nodes,
+            ("synthetic::aggregate_category",),
+            suite_receipt_sha256="e" * 64,
+        )
+
+
+def test_contract_receipt_cannot_claim_an_unexecuted_supporting_node() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    contract = producer.build_proof_execution_contracts()[0]
+    case = next(
+        item
+        for item in contract.cases
+        if item.applicability == "required"
+        and item.kind not in {"executable_sim", "artifact_parity", "visual_integrity"}
+    )
+    testcase = ET.Element(
+        "testcase",
+        {
+            "classname": "tests.test_analytics_proof_contracts",
+            "name": f"test_analysis_proof_contract[{contract.analysis_kind}-{case.kind}]",
+        },
+    )
+    properties = ET.SubElement(testcase, "properties")
+    ET.SubElement(
+        properties,
+        "property",
+        {
+            "name": "saxo_analytics_proof_receipt_v1",
+            "value": json.dumps(
+                {
+                    "analysis_kind": contract.analysis_kind,
+                    "case_kind": case.kind,
+                    "comparison_count": int(case.kind == "known_answer"),
+                    "executed_case_count": 1,
+                    "failed_case_count": 0,
+                    "independent_path_observed": False,
+                    "mutation_count": 0,
+                    "mutation_killed_count": 0,
+                    "publication_scan_passed": False,
+                    "receipt_kind": "analysis_case",
+                    "recovery_observed": False,
+                    "requirement_code": case.requirement_code,
+                    "supporting_test_node_ids": ("tests.test_missing::test_never_executed",),
+                    "unexplained_difference_count": 0,
+                },
+            ),
+        },
+    )
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_proof_supporting_execution_missing",
+    ):
+        producer._proof_suite_evidence_from_junit(  # noqa: SLF001
+            (testcase,),
+            executed_test_count=1,
             suite_receipt_sha256="e" * 64,
         )
 
@@ -754,12 +849,24 @@ def test_installed_producer_child_requires_an_isolated_sim_auth_lease() -> None:
     command_source = inspect.getsource(producer._producer_command)  # noqa: SLF001
 
     assert "prepare_matrix_isolated_runtime" in source
-    assert "bind_eval_runtime_account_allowlist" in source
+    assert "bind_eval_runtime_account_allowlist" not in source
     assert "require_matrix_runtime_cleanup" in source
     assert "runtime.env" in source
+    assert "_run_mcp_account_and_fixture_preflight" in inspect.getsource(
+        import_module("saxo_bank_mcp.qa_sim_tool_matrix"),
+    )
     assert "SAXO_MCP_TOKEN_CACHE_PATH" not in command_source
     assert "SAXO_MCP_SIM_CREDENTIAL_FILE" not in command_source
     assert "SAXO_MCP_LIVE_TOKEN_CACHE_PATH" not in source
+
+
+def test_matrix_environment_never_discovers_accounts_with_direct_http() -> None:
+    matrix_env = import_module("saxo_bank_mcp.agent_skill_matrix_env")
+    source = inspect.getsource(matrix_env)
+
+    assert "discover_exactly_one_active_sim_account" not in source
+    assert "client.get(" not in source
+    assert '"port/v1/accounts/me"' not in source
 
 
 def test_public_or_fixture_authored_proof_bundle_cannot_reach_private_validator() -> None:

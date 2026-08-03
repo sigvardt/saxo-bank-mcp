@@ -1067,6 +1067,44 @@ def test_identical_payloads_in_distinct_account_scopes_do_not_collapse(
         store.close()
 
 
+def test_account_dataset_can_bind_aggregate_source_but_not_another_account(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    selected_scope = "aa_00000000000040008000000000000000"
+    try:
+        selected = _source_page(
+            store,
+            page_key="selected-account-page",
+            account_scope=selected_scope,
+        )
+        aggregate = _source_page(
+            store,
+            page_key="aggregate-instrument-page",
+            account_scope="aggregate",
+        )
+        foreign = _source_page(
+            store,
+            page_key="foreign-account-page",
+            account_scope="aa_11111111111141118111111111111111",
+        )
+
+        bound = _dataset_from_pages(
+            store,
+            (selected.page_id, aggregate.page_id),
+            account_scope=selected_scope,
+        )
+        assert store.get_authenticated_dataset(bound.dataset_id) == bound
+        with pytest.raises(StoreValidationError, match="account scope"):
+            _dataset_from_pages(
+                store,
+                (selected.page_id, foreign.page_id),
+                account_scope=selected_scope,
+            )
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("payload", "row_count", "source_timestamp"),
     [

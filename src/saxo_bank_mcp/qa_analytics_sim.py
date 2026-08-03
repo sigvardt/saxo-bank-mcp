@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, Self
@@ -89,6 +90,64 @@ _SAFE_DATASET_HANDLE: Final = f"ds_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_ANALYSIS_HANDLE: Final = f"an_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_DEGRADED_ANALYSIS_HANDLE: Final = "an_11111111111141118111111111111111"
 _SAFE_JOB_HANDLE: Final = f"jb_{_SAFE_UUID4_PAYLOAD}"
+
+ANALYSIS_KIND_TOOL_IDS: Final[tuple[tuple[str, str], ...]] = (
+    ("cash_and_settlement", "saxo_analyze_portfolio"),
+    ("corporate_action_center", "saxo_analyze_portfolio"),
+    ("cost_xray", "saxo_analyze_portfolio"),
+    ("derivatives_model", "saxo_model_derivatives"),
+    ("derivatives_scenario", "saxo_model_derivatives"),
+    ("execution_quality", "saxo_analyze_portfolio"),
+    ("fixed_income", "saxo_analyze_instruments"),
+    ("futures_curve", "saxo_model_derivatives"),
+    ("fx_forward_carry", "saxo_model_derivatives"),
+    ("goal_model", "saxo_manage_analysis_job"),
+    ("income_calendar", "saxo_analyze_portfolio"),
+    ("instrument_dossier", "saxo_analyze_instruments"),
+    ("instrument_price_return", "saxo_analyze_instruments"),
+    ("instrument_price_volume", "saxo_analyze_instruments"),
+    ("instrument_quote", "saxo_analyze_instruments"),
+    ("instrument_resolution", "saxo_resolve_research_universe"),
+    ("instrument_risk", "saxo_analyze_instruments"),
+    ("iv_surface", "saxo_model_derivatives"),
+    ("margin_fire_drill", "saxo_run_scenario"),
+    ("market_comparison", "saxo_analyze_market"),
+    ("market_correlation_regime", "saxo_analyze_market"),
+    ("market_microstructure", "saxo_analyze_market"),
+    ("market_volatility_dispersion", "saxo_analyze_market"),
+    ("monte_carlo", "saxo_manage_analysis_job"),
+    ("multi_instrument_comparison", "saxo_analyze_instruments"),
+    ("option_chain", "saxo_model_derivatives"),
+    ("option_greeks", "saxo_model_derivatives"),
+    ("option_payoff", "saxo_model_derivatives"),
+    ("portfolio_attribution", "saxo_analyze_portfolio"),
+    ("portfolio_comparison", "saxo_analyze_portfolio"),
+    ("portfolio_exposure", "saxo_analyze_portfolio"),
+    ("portfolio_margin", "saxo_analyze_portfolio"),
+    ("portfolio_minimum_variance", "saxo_optimize_portfolio"),
+    ("portfolio_overview", "saxo_analyze_portfolio"),
+    ("portfolio_performance", "saxo_analyze_portfolio"),
+    ("portfolio_risk", "saxo_analyze_portfolio"),
+    ("portfolio_risk_parity", "saxo_optimize_portfolio"),
+    ("portfolio_scenario", "saxo_run_scenario"),
+    ("portfolio_time_machine", "saxo_analyze_portfolio"),
+    ("position_sizing", "saxo_size_position"),
+    ("pretrade_impact", "saxo_propose_trade_from_analysis"),
+    ("regulatory_cost_report", "saxo_analyze_portfolio"),
+    ("scenario_combined", "saxo_run_scenario"),
+    ("scenario_currency", "saxo_run_scenario"),
+    ("scenario_custom", "saxo_run_scenario"),
+    ("scenario_historical", "saxo_run_scenario"),
+    ("scenario_margin", "saxo_run_scenario"),
+    ("scenario_rate", "saxo_run_scenario"),
+    ("scenario_volatility", "saxo_run_scenario"),
+    ("session_cockpit", "saxo_analyze_market"),
+    ("technical_indicators", "saxo_analyze_instruments"),
+    ("trading_conditions", "saxo_analyze_instruments"),
+    ("trading_mirror", "saxo_analyze_portfolio"),
+    ("wrapper_comparison", "saxo_analyze_market"),
+)
+ANALYSIS_KIND_IDS: Final = tuple(item[0] for item in ANALYSIS_KIND_TOOL_IDS)
 
 _SUCCESS_STATES_BY_TOOL: Final[dict[str, tuple[str, ...]]] = {
     "saxo_analytics_capabilities": ("passed",),
@@ -248,6 +307,10 @@ class AnalyticsCaseCall(_StrictReceipt):
     input_strategy: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     reconciles_kind: Literal["timeout"] | None = None
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
+    analysis_kind: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{0,127}$",
+    )
 
     @model_validator(mode="after")
     def _validate_recovery_strategy(self) -> Self:
@@ -258,6 +321,8 @@ class AnalyticsCaseCall(_StrictReceipt):
             raise ValueError("analytics recovery must bind the exact timed operation")
         if self.kind != "recovery" and self.reconciles_kind is not None:
             raise ValueError("only recovery calls may name a reconciled case")
+        if self.analysis_kind is not None and self.kind != "success":
+            raise ValueError("analysis-kind execution applies only to success calls")
         return self
 
 
@@ -293,6 +358,8 @@ class AnalyticsRuntimeResources:
     source_request_count: int = 0
     source_mcp_call_count: int = 0
     option_entitlement_state: Literal["available", "denied", "unknown"] = "unknown"
+    option_expiries: list[str] = field(default_factory=list)
+    pretrade_proposal_price: str | None = None
 
     def remember_timeout(
         self,
@@ -844,6 +911,40 @@ def analytics_case_calls() -> tuple[AnalyticsCaseCall, ...]:
                     timeout_seconds=0.001 if case.kind == "timeout" else None,
                 ),
             )
+    calls.extend(_analysis_kind_success_calls(primary))
+    return tuple(calls)
+
+
+def _analysis_kind_success_calls(
+    primary: Mapping[str, dict[str, JsonValue]],
+) -> tuple[AnalyticsCaseCall, ...]:
+    """Issue one distinct logical-MCP execution contract for every frozen analysis kind."""
+    calls: list[AnalyticsCaseCall] = []
+    for analysis_kind, tool_id in ANALYSIS_KIND_TOOL_IDS:
+        arguments = deepcopy(primary[tool_id])
+        request = arguments.get("request")
+        if isinstance(request, dict):
+            request["analysis_kind"] = analysis_kind
+            if tool_id == "saxo_optimize_portfolio":
+                objective = (
+                    "risk_parity"
+                    if analysis_kind == "portfolio_risk_parity"
+                    else "minimum_variance"
+                )
+                request["objective"] = objective
+            elif tool_id == "saxo_run_scenario":
+                request["analysis_kind"] = (
+                    "scenario_margin" if analysis_kind == "margin_fire_drill" else analysis_kind
+                )
+        calls.append(
+            AnalyticsCaseCall(
+                tool_id=tool_id,
+                kind="success",
+                arguments=arguments,
+                input_strategy=f"analyze_kind_{analysis_kind}",
+                analysis_kind=analysis_kind,
+            ),
+        )
     return tuple(calls)
 
 

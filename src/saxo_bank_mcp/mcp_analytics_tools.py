@@ -18,7 +18,12 @@ import mcp.types as mt
 from fastmcp.tools import ToolResult
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
-from saxo_bank_mcp.analytics_account_data import AccountScope
+from saxo_bank_mcp.analytics_account_data import (
+    AccountScope,
+    sync_account_analysis_sources,
+    sync_account_history,
+    sync_cost_sources,
+)
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
     AnalyticsConfigError,
@@ -51,8 +56,6 @@ from saxo_bank_mcp.analytics_export import (
 from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostLifecycleEvidence,
     GhostWorkflowRequest,
-    _receipt_issuer_authority,  # pyright: ignore[reportPrivateUsage]
-    issue_authenticated_ghost_receipt_from_lifecycle,
 )
 from saxo_bank_mcp.analytics_jobs import (
     AnalyticsJobManager,
@@ -107,7 +110,11 @@ from saxo_bank_mcp.analytics_proof_profiles import (
     load_proof_profile_catalog,
 )
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
-from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider, SourceProviderError
+from saxo_bank_mcp.analytics_provider import (
+    SaxoAnalyticsProvider,
+    SourceProviderError,
+    SourceRequestBudget,
+)
 from saxo_bank_mcp.analytics_query import (
     BreakdownDimension,
     BreakdownMetric,
@@ -160,6 +167,9 @@ from saxo_bank_mcp.analytics_strategy_schema import (
     strategy_definition_fingerprint,
 )
 from saxo_bank_mcp.analytics_sync import (
+    AccountAnalysisSourceDatasetSummary,
+    AccountAnalyticsKind,
+    AccountAnalyticsSyncSpec,
     AccountSnapshotDatasetSummary,
     AccountSnapshotSyncSpec,
     AnalysisInputDatasetSummary,
@@ -202,7 +212,6 @@ type AnalyticsExportFormat = Literal["csv", "parquet", "json", "html", "pdf"]
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _JOB_RUNTIME_LOCK: Final = RLock()
 _PROCESS_PROOF_LOCK: Final = RLock()
-_PROCESS_PROOF_AUTHORITY: Final = object()
 _MIN_REPORT_VIEWPORT_WIDTH: Final = 320
 _MAX_REPORT_VIEWPORT_WIDTH: Final = 2560
 _job_runtime: tuple[str, AnalyticsStore, AnalyticsJobManager] | None = None
@@ -539,7 +548,9 @@ _OPERATIONAL_OUTPUT_ADAPTERS: Final[dict[str, TypeAdapter[object]]] = {
 class StoredMarketToolRequest(_StrictToolModel):
     analysis_kind: Literal[
         "market_comparison",
+        "market_correlation_regime",
         "market_microstructure",
+        "market_volatility_dispersion",
         "wrapper_comparison",
         "saved_condition_checks",
         "session_cockpit",
@@ -552,9 +563,15 @@ class StoredMarketToolRequest(_StrictToolModel):
 
 class StoredInstrumentToolRequest(_StrictToolModel):
     analysis_kind: Literal[
+        "fixed_income",
         "instrument_price_return",
+        "instrument_price_volume",
         "instrument_quote",
         "instrument_dossier",
+        "instrument_risk",
+        "multi_instrument_comparison",
+        "technical_indicators",
+        "trading_conditions",
     ]
     dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=2)
     instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=25)
@@ -605,16 +622,22 @@ type StoredPortfolioQueryChoice = Annotated[
 
 class StoredPortfolioToolRequest(_StrictToolModel):
     analysis_kind: Literal[
+        "cash_and_settlement",
+        "corporate_action_center",
+        "cost_xray",
+        "execution_quality",
+        "income_calendar",
         "portfolio_performance",
         "portfolio_comparison",
-        "tax_lot_export",
         "portfolio_attribution",
         "portfolio_exposure",
-        "income_calendar",
-        "corporate_action_center",
-        "cash_and_settlement",
-        "cost_xray",
+        "portfolio_margin",
+        "portfolio_overview",
+        "portfolio_risk",
+        "portfolio_time_machine",
+        "regulatory_cost_report",
         "trading_mirror",
+        "tax_lot_export",
         "portfolio_query",
     ]
     dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
@@ -643,6 +666,8 @@ class ExplicitScenarioShock(_StrictToolModel):
 
 class StoredScenarioToolRequest(_StrictToolModel):
     analysis_kind: Literal[
+        "margin_fire_drill",
+        "portfolio_scenario",
         "scenario_historical",
         "scenario_custom",
         "scenario_currency",
@@ -674,6 +699,8 @@ class StoredOptimizationToolRequest(_StrictToolModel):
 class StoredDerivativesToolRequest(_StrictToolModel):
     analysis_kind: Literal[
         "derivatives_model",
+        "option_chain",
+        "option_greeks",
         "option_payoff",
         "iv_surface",
         "derivatives_scenario",
@@ -943,7 +970,10 @@ async def _sync_research_request(request: SyncResearchRequest) -> SyncResult:
     market_items = tuple(
         item
         for item in request.items
-        if not isinstance(item, AccountSnapshotSyncSpec | AnalysisInputSyncSpec)
+        if not isinstance(
+            item,
+            AccountSnapshotSyncSpec | AccountAnalyticsSyncSpec | AnalysisInputSyncSpec,
+        )
     )
     results: list[SyncResult] = []
     if market_items:
@@ -958,6 +988,10 @@ async def _sync_research_request(request: SyncResearchRequest) -> SyncResult:
         if isinstance(item, AccountSnapshotSyncSpec):
             results.append(
                 await _capture_server_account_snapshot(item, provider=provider, config=config),
+            )
+        elif isinstance(item, AccountAnalyticsSyncSpec):
+            results.append(
+                await _capture_server_account_analytics(item, provider=provider, config=config),
             )
         elif isinstance(item, AnalysisInputSyncSpec):
             results.append(_route_server_analysis_input(item, config=config))
@@ -984,22 +1018,9 @@ async def _capture_server_account_snapshot(
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
 ) -> SyncResult:
-    runtime = SaxoRuntimeConfig.from_env()
-    if runtime.requested_environment.value != "SIM":
-        raise SyncError("account analytics capture requires current SIM runtime proof")
-    settings = resolve_sim_auth_settings(require_redirect=False)
-    cached = cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
-    if isinstance(cached, CachedTokenBlocked):
-        raise SyncError("current SIM authentication is unavailable")
-    binding = resolve_bound_account_selector(cached.token, item.safe_account_selector)
-    if binding is None or not binding.client_key or not binding.currency:
-        raise SyncError("current server-owned account context is unavailable")
+    scope = _server_account_scope(item.safe_account_selector)
     snapshot = await capture_portfolio_snapshot(
-        AccountScope(
-            alias=binding.account_alias,
-            account_key=SecretStr(binding.account_key),
-            client_key=SecretStr(binding.client_key),
-        ),
+        scope,
         provider=provider,
         config=config,
     )
@@ -1015,6 +1036,7 @@ async def _capture_server_account_snapshot(
                     "position_sizing",
                     "scenario_custom",
                     "portfolio_minimum_variance",
+                    "derivatives_model",
                     "pretrade_impact",
                 ),
                 quality_state=(
@@ -1029,6 +1051,181 @@ async def _capture_server_account_snapshot(
                 fingerprints=snapshot.fingerprints,
             ),
         ),
+    )
+
+
+def _server_account_scope(safe_account_selector: str) -> AccountScope:
+    runtime = SaxoRuntimeConfig.from_env()
+    if runtime.requested_environment.value != "SIM":
+        raise SyncError("account analytics capture requires current SIM runtime proof")
+    settings = resolve_sim_auth_settings(require_redirect=False)
+    cached = cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
+    if isinstance(cached, CachedTokenBlocked):
+        raise SyncError("current SIM authentication is unavailable")
+    binding = resolve_bound_account_selector(cached.token, safe_account_selector)
+    if binding is None or not binding.client_key or not binding.currency:
+        raise SyncError("current server-owned account context is unavailable")
+    return AccountScope(
+        alias=binding.account_alias,
+        account_key=SecretStr(binding.account_key),
+        client_key=SecretStr(binding.client_key),
+    )
+
+
+async def _capture_server_account_analytics(
+    item: AccountAnalyticsSyncSpec,
+    *,
+    provider: SaxoAnalyticsProvider,
+    config: AnalyticsConfig,
+) -> SyncResult:
+    """Capture an exact bounded source closure from a process-issued account selector."""
+    scope = _server_account_scope(item.safe_account_selector)
+    budget = SourceRequestBudget(config.limits.sync_instruments)
+    snapshot = await capture_portfolio_snapshot(
+        scope,
+        provider=provider,
+        config=config,
+        request_budget=budget,
+    )
+    handles = tuple(dict.fromkeys((*item.instrument_handles, *snapshot.position_handles)))
+    results: list[AccountAnalysisSourceDatasetSummary] = []
+    source_count = snapshot.source_request_count
+    snapshot_summary = AccountSnapshotDatasetSummary(
+        dataset_id=snapshot.dataset_id,
+        account_alias=snapshot.account_alias,
+        eligible_analysis_kinds=tuple(
+            kind
+            for kind in item.analysis_kinds
+            if kind
+            in {
+                "portfolio_performance",
+                "position_sizing",
+                "scenario_custom",
+                "portfolio_minimum_variance",
+                "derivatives_model",
+                "pretrade_impact",
+            }
+        ),
+        quality_state=(
+            QualityState.COMPLETE if snapshot.status == "complete" else QualityState.PARTIAL
+        ),
+        coverage_start=snapshot.as_of,
+        coverage_end=snapshot.as_of,
+        row_count=snapshot.balance_row_count + snapshot.position_count + snapshot.order_count,
+        warnings=snapshot.warnings,
+        fingerprints=snapshot.fingerprints,
+    )
+    if "portfolio_performance" in item.analysis_kinds:
+        history = await sync_account_history(
+            scope,
+            snapshot.as_of - timedelta(days=365),
+            snapshot.as_of,
+            provider=provider,
+            config=config,
+            request_budget=budget,
+        )
+        source_count += history.source_request_count
+        contract_by_kind = {
+            "transactions": "transactions_v1",
+            "bookings": "bookings_v1",
+            "closed_positions": "closed_positions_history_v1",
+            "costs": "costs_v1",
+        }
+        results.extend(
+            AccountAnalysisSourceDatasetSummary(
+                dataset_id=summary.dataset_id,
+                account_alias=summary.account_alias,
+                contract_id=contract_by_kind[summary.data_kind],
+                instrument_handle=summary.instrument_handle,
+                eligible_analysis_kinds=("portfolio_performance",),
+                quality_state=summary.quality_state,
+                coverage_start=summary.coverage_start,
+                coverage_end=summary.coverage_end,
+                row_count=summary.row_count,
+                warnings=summary.warnings,
+                fingerprints=summary.fingerprints,
+            )
+            for summary in history.datasets
+        )
+    cost_kinds = cast(
+        "tuple[AccountAnalyticsKind, ...]",
+        tuple(
+            kind
+            for kind in item.analysis_kinds
+            if kind in {"position_sizing", "portfolio_minimum_variance", "pretrade_impact"}
+        ),
+    )
+    if handles and cost_kinds:
+        costs = await sync_cost_sources(
+            scope,
+            handles,
+            provider=provider,
+            config=config,
+            request_budget=budget,
+        )
+        source_count += costs.source_request_count
+        results.extend(
+            AccountAnalysisSourceDatasetSummary(
+                dataset_id=summary.dataset_id,
+                account_alias=summary.account_alias,
+                contract_id="costs_v1",
+                instrument_handle=summary.instrument_handle,
+                eligible_analysis_kinds=cost_kinds,
+                quality_state=summary.quality_state,
+                coverage_start=summary.coverage_start,
+                coverage_end=summary.coverage_end,
+                row_count=summary.row_count,
+                warnings=summary.warnings,
+                fingerprints=summary.fingerprints,
+            )
+            for summary in costs.datasets
+        )
+    supplemental, supplemental_count = await sync_account_analysis_sources(
+        scope,
+        item.analysis_kinds,
+        handles,
+        provider=provider,
+        config=config,
+        request_budget=budget,
+    )
+    source_count += supplemental_count
+    results.extend(
+        AccountAnalysisSourceDatasetSummary(
+            dataset_id=summary.dataset_id,
+            account_alias=summary.account_alias,
+            contract_id=summary.contract_id,
+            instrument_handle=summary.instrument_handle,
+            eligible_analysis_kinds=tuple(
+                kind
+                for kind in item.analysis_kinds
+                if summary.contract_id
+                in {
+                    "portfolio_performance": {
+                        "performance_summary_v4",
+                        "performance_timeseries_v4",
+                    },
+                    "scenario_custom": {"exposure_instruments_v1"},
+                    "portfolio_minimum_variance": {"exposure_instruments_v1"},
+                    "derivatives_model": set(),
+                    "pretrade_impact": set(),
+                    "position_sizing": set(),
+                }[kind]
+            ),
+            quality_state=summary.quality_state,
+            coverage_start=summary.coverage_start,
+            coverage_end=summary.coverage_end,
+            row_count=summary.row_count,
+            warnings=summary.warnings,
+            fingerprints=summary.fingerprints,
+        )
+        for summary in supplemental
+    )
+    summaries = (snapshot_summary, *results)
+    quality_complete = all(summary.quality_state is QualityState.COMPLETE for summary in summaries)
+    return SyncResult(
+        status=SyncStatus.COMPLETE if quality_complete else SyncStatus.DEGRADED,
+        source_request_count=source_count,
+        datasets=summaries,
     )
 
 
@@ -2052,39 +2249,14 @@ def _server_environment() -> str:
     return os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
 
 
-def _process_proof_session_authority() -> object:  # pyright: ignore[reportUnusedFunction]
-    return _PROCESS_PROOF_AUTHORITY
-
-
-def _current_process_proof_candidate(  # pyright: ignore[reportUnusedFunction]
-    *, authority: object
-) -> str:
-    """Return the candidate only to the installed in-process proof harness."""
-    if authority is not _PROCESS_PROOF_AUTHORITY:
-        raise ValueError("process proof authority is unavailable")
-    with _PROCESS_PROOF_LOCK:
-        if _process_proof_candidate is None:
-            raise ValueError("process proof session is unavailable")
-        return _process_proof_candidate
-
-
-def _begin_process_proof_session(  # pyright: ignore[reportUnusedFunction]
+async def _run_installed_matrix_proof_session(  # noqa: C901  # pyright: ignore[reportUnusedFunction]
     candidate_commit: str,
     analysis_kinds: Sequence[str],
-    *,
-    authority: object,
-) -> None:
-    """Begin one private provisional proof session inside the installed producer."""
+) -> object:
+    """Run the exact installed matrix; accept no caller lifecycle or recorder callback."""
     global _process_proof_candidate, _process_proof_kinds  # noqa: PLW0603
-    if (
-        authority is not _PROCESS_PROOF_AUTHORITY
-        or re.fullmatch(
-            r"[a-f0-9]{40}",
-            candidate_commit,
-        )
-        is None
-    ):
-        raise ValueError("process proof authority is unavailable")
+    if re.fullmatch(r"[a-f0-9]{40}", candidate_commit) is None:
+        raise ValueError("process proof candidate is invalid")
     kinds = frozenset(analysis_kinds)
     if not kinds:
         raise ValueError("process proof session requires bounded analysis kinds")
@@ -2096,111 +2268,145 @@ def _begin_process_proof_session(  # pyright: ignore[reportUnusedFunction]
         _process_proof_revisions.clear()
         _process_backtest_proofs.clear()
 
+    class InstalledMatrixRecorder:
+        """Function-local capability available only to this exact matrix invocation."""
 
-def _end_process_proof_session(  # pyright: ignore[reportUnusedFunction]
-    *, authority: object
-) -> None:
-    global _process_proof_candidate, _process_proof_kinds  # noqa: PLW0603
-    if authority is not _PROCESS_PROOF_AUTHORITY:
-        raise ValueError("process proof authority is unavailable")
-    with _PROCESS_PROOF_LOCK:
-        _process_proof_candidate = None
-        _process_proof_kinds = frozenset()
-        _process_proof_revisions.clear()
-        _process_backtest_proofs.clear()
+        def candidate_commit(self) -> str:
+            with _PROCESS_PROOF_LOCK:
+                if _process_proof_candidate is None:
+                    raise ValueError("process proof session is unavailable")
+                return _process_proof_candidate
 
+        def controlled_backtest_source_binding(
+            self,
+            dataset_id: str,
+            instrument_handle: str,
+            *,
+            expected_uic: int,
+            expected_asset_type: str,
+        ) -> str:
+            self.candidate_commit()
+            store = AnalyticsStore.open(_analytics_config())
+            try:
+                material = store.get_authenticated_dataset_material(dataset_id)
+                snapshot = store.get_authenticated_snapshot_material(
+                    dataset_id,
+                    "backtest_input",
+                )
+                context = StoredBacktestExecutionContext.model_validate(
+                    snapshot.payload,
+                    strict=False,
+                )
+            finally:
+                store.close()
+            identities: set[tuple[object | None, object | None]] = set()
+            for page in material.pages:
+                if page.contract_name != "reference_instruments_v1":
+                    continue
+                rows = page.payload.get("rows")
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if isinstance(row, Mapping):
+                        identities.add(
+                            (row.get("AssetType"), row.get("Identifier", row.get("Uic"))),
+                        )
+            if context.instrument_handle != instrument_handle or identities != {
+                (expected_asset_type, expected_uic)
+            }:
+                raise ValueError("controlled ghost fixture source binding mismatch")
+            return material.account_scope
 
-def _bind_observed_sim_ghost_lifecycle(  # pyright: ignore[reportUnusedFunction]
-    evidence: GhostLifecycleEvidence,
-    *,
-    ledger_provenance_sha256: str,
-    authority: object,
-) -> None:
-    """Bind one exact installed-matrix lifecycle to its backtest source and strategy."""
-    if authority is not _PROCESS_PROOF_AUTHORITY:
-        raise ValueError("process proof authority is unavailable")
-    with _PROCESS_PROOF_LOCK:
-        candidate = _process_proof_candidate
-        if candidate is None or candidate != evidence.candidate_commit:
-            raise ValueError("process ghost candidate is unavailable")
-    config = _analytics_config()
-    store = AnalyticsStore.open(config)
-    try:
-        material = store.get_authenticated_dataset_material(evidence.dataset_id)
-        snapshot = store.get_authenticated_snapshot_material(
-            evidence.dataset_id,
-            "backtest_input",
-        )
-        context = StoredBacktestExecutionContext.model_validate(snapshot.payload, strict=False)
-    finally:
-        store.close()
-    if (
-        material.account_scope != evidence.account_alias
-        or context.account_alias != evidence.account_alias
-        or context.instrument_handle != evidence.instrument_handle
-    ):
-        raise ValueError("process ghost stored source binding mismatch")
-    request = GhostWorkflowRequest(
-        candidate_commit=evidence.candidate_commit,
-        dataset_id=evidence.dataset_id,
-        account_alias=evidence.account_alias,
-        instrument_handle=evidence.instrument_handle,
-        strategy_fingerprint_sha256=evidence.strategy_fingerprint_sha256,
-        fill_model=evidence.fill_model,
-        controlled_fixture="task_18_controlled_stock",
-    )
-    receipt_id = issue_authenticated_ghost_receipt_from_lifecycle(
-        request,
-        evidence,
-        ledger_provenance_sha256=ledger_provenance_sha256,
-        authority=_receipt_issuer_authority(),
-    )
-    proof = AuthenticatedBacktestExecutionProof(
-        candidate_commit=evidence.candidate_commit,
-        authenticated_ghost_receipt_id=receipt_id,
-    )
-    key = (evidence.dataset_id, evidence.strategy_fingerprint_sha256)
-    with _PROCESS_PROOF_LOCK:
-        if _process_proof_candidate != candidate:
-            raise ValueError("process ghost candidate changed during issuance")
-        _process_backtest_proofs[key] = proof
-
-
-def _controlled_backtest_source_binding(  # pyright: ignore[reportUnusedFunction]
-    dataset_id: str,
-    instrument_handle: str,
-    *,
-    expected_uic: int,
-    expected_asset_type: str,
-    authority: object,
-) -> str:
-    """Authenticate the installed matrix fixture against exact stored Saxo source pages."""
-    _current_process_proof_candidate(authority=authority)
-    store = AnalyticsStore.open(_analytics_config())
-    try:
-        material = store.get_authenticated_dataset_material(dataset_id)
-        snapshot = store.get_authenticated_snapshot_material(dataset_id, "backtest_input")
-        context = StoredBacktestExecutionContext.model_validate(snapshot.payload, strict=False)
-    finally:
-        store.close()
-    identities: set[tuple[object, object]] = set()
-    for page in material.pages:
-        if page.contract_name != "reference_instruments_v1":
-            continue
-        rows = page.payload.get("rows")
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            identities.add(
-                (row.get("AssetType"), row.get("Identifier", row.get("Uic"))),
+        def record_observed_ghost_lifecycle(
+            self,
+            evidence: GhostLifecycleEvidence,
+            *,
+            ledger_provenance_sha256: str,
+        ) -> None:
+            from saxo_bank_mcp.analytics_ghost_portfolio import (  # noqa: PLC0415
+                _receipt_issuer_authority,  # pyright: ignore[reportPrivateUsage]
+                issue_authenticated_ghost_receipt_from_lifecycle,
             )
-    if context.instrument_handle != instrument_handle or identities != {
-        (expected_asset_type, expected_uic)
-    }:
-        raise ValueError("controlled ghost fixture source binding mismatch")
-    return material.account_scope
+
+            candidate = self.candidate_commit()
+            if candidate != evidence.candidate_commit:
+                raise ValueError("process ghost candidate is unavailable")
+            store = AnalyticsStore.open(_analytics_config())
+            try:
+                material = store.get_authenticated_dataset_material(evidence.dataset_id)
+                snapshot = store.get_authenticated_snapshot_material(
+                    evidence.dataset_id,
+                    "backtest_input",
+                )
+                context = StoredBacktestExecutionContext.model_validate(
+                    snapshot.payload,
+                    strict=False,
+                )
+            finally:
+                store.close()
+            if (
+                material.account_scope != evidence.account_alias
+                or context.account_alias != evidence.account_alias
+                or context.instrument_handle != evidence.instrument_handle
+            ):
+                raise ValueError("process ghost stored source binding mismatch")
+            request = GhostWorkflowRequest(
+                candidate_commit=evidence.candidate_commit,
+                dataset_id=evidence.dataset_id,
+                account_alias=evidence.account_alias,
+                instrument_handle=evidence.instrument_handle,
+                strategy_fingerprint_sha256=evidence.strategy_fingerprint_sha256,
+                fill_model=evidence.fill_model,
+                controlled_fixture="task_18_controlled_stock",
+            )
+            receipt_id = issue_authenticated_ghost_receipt_from_lifecycle(
+                request,
+                evidence,
+                ledger_provenance_sha256=ledger_provenance_sha256,
+                authority=_receipt_issuer_authority(),
+            )
+            proof = AuthenticatedBacktestExecutionProof(
+                candidate_commit=evidence.candidate_commit,
+                authenticated_ghost_receipt_id=receipt_id,
+            )
+            key = (evidence.dataset_id, evidence.strategy_fingerprint_sha256)
+            with _PROCESS_PROOF_LOCK:
+                if _process_proof_candidate != candidate:
+                    raise ValueError("process ghost candidate changed during issuance")
+                _process_backtest_proofs[key] = proof
+
+    try:
+        from saxo_bank_mcp.qa_sim_tool_matrix import (  # noqa: PLC0415
+            _run_matrix,  # pyright: ignore[reportPrivateUsage]
+        )
+        from saxo_bank_mcp.qa_sim_tool_matrix_models import (  # noqa: PLC0415
+            FIXTURE_INSTRUMENT,
+            FIXTURE_LIMIT_PRICE,
+            FIXTURE_MODIFIED_LIMIT_PRICE,
+            FIXTURE_ORDER_AMOUNT,
+            FIXTURE_STREAM_UIC,
+            MULTILEG_FIXTURE_UICS,
+            MatrixFixtures,
+        )
+
+        fixtures = MatrixFixtures(
+            stock_uic=FIXTURE_INSTRUMENT,
+            amount=float(FIXTURE_ORDER_AMOUNT),
+            limit_price=float(FIXTURE_LIMIT_PRICE),
+            modified_limit_price=float(FIXTURE_MODIFIED_LIMIT_PRICE),
+            option_uics=MULTILEG_FIXTURE_UICS,
+            stream_uic=FIXTURE_STREAM_UIC,
+        )
+        return await _run_matrix(  # pyright: ignore[reportPrivateUsage]
+            fixtures,
+            proof_recorder=InstalledMatrixRecorder(),
+        )
+    finally:
+        with _PROCESS_PROOF_LOCK:
+            _process_proof_candidate = None
+            _process_proof_kinds = frozenset()
+            _process_proof_revisions.clear()
+            _process_backtest_proofs.clear()
 
 
 def _process_backtest_proof(

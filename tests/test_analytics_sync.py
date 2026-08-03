@@ -127,6 +127,34 @@ def _config(tmp_path: Path) -> AnalyticsConfig:
     )
 
 
+def test_account_analytics_sync_spec_exposes_only_safe_on_demand_capture_scope() -> None:
+    spec_type = getattr(analytics_sync_module, "AccountAnalyticsSyncSpec", None)
+    assert spec_type is not None
+    spec = spec_type.model_validate(
+        {
+            "data_kind": "account_analytics",
+            "safe_account_selector": "proc-acct-abcdefghijklmnopqrstuvwx",
+            "analysis_kinds": (
+                "portfolio_performance",
+                "position_sizing",
+                "scenario_custom",
+                "portfolio_minimum_variance",
+                "pretrade_impact",
+            ),
+            "instrument_handles": ("ih_00000000000040008000000000000000",),
+        },
+    )
+    schema = spec_type.model_json_schema()
+
+    assert spec.data_kind == "account_analytics"
+    serialized = json.dumps(schema, sort_keys=True).casefold()
+    assert "account_key" not in serialized
+    assert "client_key" not in serialized
+    assert "source_fact" not in serialized
+    assert "holding" not in serialized
+    assert "balance" not in serialized
+
+
 async def _resolved_handle(config: AnalyticsConfig) -> str:
     executor = _PayloadExecutor(
         (

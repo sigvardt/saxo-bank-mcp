@@ -229,6 +229,8 @@ class ScenarioExecutionShock(_StrictExecutionModel):
 
 class ScenarioExecutionParameters(_StrictExecutionModel):
     analysis_kind: Literal[
+        "margin_fire_drill",
+        "portfolio_scenario",
         "scenario_historical",
         "scenario_custom",
         "scenario_currency",
@@ -1036,7 +1038,7 @@ def _build_backtest_context(  # noqa: PLR0913
     )
 
 
-def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
+def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
     dataset_id: str,
     snapshot_id: str,
@@ -1048,47 +1050,46 @@ def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
     source_dataset_ids: tuple[str, ...],
     origin_analysis: AnalysisResult | None,
 ) -> StoredPretradeExecutionContext:
-    _ = snapshot_id
+    _ = snapshot_id, source_dataset_ids
     if origin_analysis is None or not isinstance(
         origin_analysis.request,
         InstrumentAnalysisRequest,
     ):
         raise StoredAnalysisExecutionError("pretrade_origin_analysis_required")
-    if origin_analysis.account_scope != account_alias:
+    if origin_analysis.account_scope not in {account_alias, "aggregate"}:
         raise StoredAnalysisExecutionError("pretrade_origin_account_scope_mismatch")
     if len(origin_analysis.request.instrument_handles) != 1:
         raise StoredAnalysisExecutionError("pretrade_origin_scope_ambiguous")
     instrument_handle = origin_analysis.request.instrument_handles[0]
-    quote_rows = [
-        row
-        for source_dataset_id in source_dataset_ids
-        for row in _dataset_rows_or_empty(source_dataset_id, config=config)
-        if isinstance(row, QuoteDatasetRow) and row.instrument_handle == instrument_handle
-    ]
-    if len(quote_rows) != 1 or quote_rows[0].freshness != "fresh":
-        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
-    quote = quote_rows[0]
-    if quote.bid_value is None or quote.ask_value is None or quote.ask_value < quote.bid_value:
-        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    info_pages = tuple(
+        page
+        for page in pages
+        if page.contract_name == "info_price_v1" and page.instrument_handle == instrument_handle
+    )
     raw_quote_rows = tuple(
-        row
-        for row in _source_rows(pages, "info_price_v1")
-        if next(
-            (
-                page.instrument_handle
-                for page in pages
-                if page.contract_name == "info_price_v1"
-                and row in _source_rows((page,), "info_price_v1")
-            ),
-            None,
-        )
-        == instrument_handle
+        row for page in info_pages for row in _source_rows((page,), "info_price_v1")
     )
     if len(raw_quote_rows) != 1:
         raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    if origin_analysis.account_scope == "aggregate":
+        origin_store = AnalyticsStore.open(config)
+        try:
+            origin_material = origin_store.get_authenticated_dataset_material(
+                origin_analysis.provenance.dataset_id,
+            )
+        finally:
+            origin_store.close()
+        if origin_material.account_scope != "aggregate" or instrument_handle not in {
+            page.instrument_handle for page in origin_material.pages
+        }:
+            raise StoredAnalysisExecutionError("pretrade_origin_lineage_mismatch")
     raw_quote = _mapping_value(raw_quote_rows[0], "Quote")
     price_type = _text_value(raw_quote, "PriceType")
     if price_type.casefold() in {"noaccess", "no_access"}:
+        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    bid_value = _decimal_value(raw_quote, "Bid", positive=True)
+    ask_value = _decimal_value(raw_quote, "Ask", positive=True)
+    if ask_value < bid_value:
         raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
     balance = _single_source_row(pages, "balances_v1")
     reporting_currency = _text_value(balance, "Currency")
@@ -1119,13 +1120,7 @@ def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
     residual = total_cost - commission - stamp
     if residual < 0:
         raise StoredAnalysisExecutionError("pretrade_cost_reconciliation_unavailable")
-    reference_price = Decimal(
-        str(
-            quote.mid_value
-            if quote.mid_value is not None
-            else (quote.bid_value + quote.ask_value) / 2
-        ),
-    )
+    reference_price = (bid_value + ask_value) / Decimal(2)
     current_quantity = Decimal(0)
     current_exposure = Decimal(0)
     for position in _source_rows(pages, "positions_v1"):
@@ -1196,9 +1191,9 @@ def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
         decision_quote=DecisionPointQuote(
             dataset_id=dataset_id,
             instrument_handle=instrument_handle,
-            captured_at=quote.captured_at,
-            bid=Decimal(str(quote.bid_value)),
-            ask=Decimal(str(quote.ask_value)),
+            captured_at=info_pages[0].source_timestamp,
+            bid=bid_value,
+            ask=ask_value,
             price_type=price_type,
             delayed_by_minutes=(
                 None
@@ -1209,7 +1204,7 @@ def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
             entitlement_state="available",
             source_binding=info_binding,
             captured_by_mcp=True,
-            warnings=quote.warnings,
+            warnings=(),
         ),
         decision_bar=None,
         fx_quotes=(),
@@ -1239,23 +1234,40 @@ def _build_position_sizing_context(  # noqa: PLR0913
 ) -> StoredPositionSizingExecutionContext:
     _ = snapshot_id, as_of, config, source_dataset_ids, origin_analysis
     balance = _single_source_row(pages, "balances_v1")
-    positions = _source_rows(pages, "positions_v1")
-    costs = _source_rows(pages, "costs_v1")
-    if len(positions) != 1 or len(costs) != 1:
+    positions_by_handle: dict[str, Mapping[str, object]] = {}
+    for position in _source_rows(pages, "positions_v1"):
+        position_base = _mapping_value(position, "PositionBase")
+        position_handle = instrument_handle_for_saxo_identity(
+            _text_value(position_base, "AssetType"),
+            _integer_value(position_base, "Uic"),
+        )
+        positions_by_handle[position_handle] = position
+    costs_by_handle: dict[str, Mapping[str, object]] = {}
+    for page in pages:
+        if page.contract_name != "costs_v1" or page.instrument_handle is None:
+            continue
+        rows = _source_rows((page,), "costs_v1")
+        if len(rows) != 1:
+            raise StoredAnalysisExecutionError("position_sizing_source_scope_ambiguous")
+        costs_by_handle[page.instrument_handle] = rows[0]
+    selected_handles = set(positions_by_handle) & set(costs_by_handle)
+    if len(selected_handles) != 1:
         raise StoredAnalysisExecutionError("position_sizing_source_scope_ambiguous")
-    base = _mapping_value(positions[0], "PositionBase")
-    view = _mapping_value(positions[0], "PositionView")
+    selected_handle = next(iter(selected_handles))
+    selected_position = positions_by_handle[selected_handle]
+    selected_cost = costs_by_handle[selected_handle]
+    base = _mapping_value(selected_position, "PositionBase")
+    view = _mapping_value(selected_position, "PositionView")
     asset_type = _text_value(base, "AssetType")
     uic = _integer_value(base, "Uic")
     if asset_type != "Stock":
         raise StoredAnalysisExecutionError("position_sizing_asset_constraints_unavailable")
     instrument_handle = instrument_handle_for_saxo_identity(asset_type, uic)
-    cost_page = next(page for page in pages if page.contract_name == "costs_v1")
-    if cost_page.instrument_handle not in {None, instrument_handle}:
+    if selected_handle != instrument_handle:
         raise StoredAnalysisExecutionError("position_sizing_instrument_scope_mismatch")
-    cost = _mapping_value(costs[0], "Cost")
+    cost = _mapping_value(selected_cost, "Cost")
     reporting_currency = _text_value(balance, "Currency")
-    if costs[0].get("Currency") not in {None, reporting_currency}:
+    if selected_cost.get("Currency") not in {None, reporting_currency}:
         raise StoredAnalysisExecutionError("position_sizing_currency_mismatch")
     return StoredPositionSizingExecutionContext(
         request=PositionSizingRequest(
@@ -1908,8 +1920,7 @@ def _execute_scenario(  # noqa: PLR0913
     )
     base = context.request
     if (
-        context.analysis_kind != parameters.analysis_kind
-        or base.dataset_id != dataset_id
+        base.dataset_id != dataset_id
         or base.snapshot_id != snapshot.snapshot.snapshot_id
         or base.account_alias != primary.account_scope
     ):
@@ -1987,8 +1998,6 @@ def _execute_optimization(  # noqa: PLR0913
     registry: ProofRegistry,
     profile: ProofProfile,
 ) -> AnalysisResult:
-    if parameters.objective != "minimum_variance":
-        raise StoredAnalysisExecutionError("risk_parity_metric_binding_unavailable")
     snapshot = store.get_authenticated_snapshot_material(dataset_id, _OPTIMIZATION_CONTEXT_KIND)
     context = _parse_context(snapshot, StoredOptimizationExecutionContext)
     primary, supporting = _context_materials(
@@ -1999,8 +2008,7 @@ def _execute_optimization(  # noqa: PLR0913
     base = context.request
     base_dataset = base.dataset
     if (
-        context.analysis_kind != parameters.analysis_kind
-        or base_dataset.dataset_id != dataset_id
+        base_dataset.dataset_id != dataset_id
         or base_dataset.snapshot_id != snapshot.snapshot.snapshot_id
         or base_dataset.account_alias != primary.account_scope
         or parameters.analysis_kind != f"portfolio_{parameters.objective}"
@@ -2034,6 +2042,14 @@ def _execute_optimization(  # noqa: PLR0913
     values = domain_result.private_values
     if values is None:
         raise StoredAnalysisExecutionError("private_result_required")
+    metric_claim = (
+        _MetricClaim("minimum_variance_objective", values.objective_value)
+        if parameters.objective == "minimum_variance"
+        else _MetricClaim(
+            "risk_parity_contribution",
+            values.diagnostics.maximum_risk_contribution_deviation or Decimal(0),
+        )
+    )
     result = _build_proof_result(
         tool_name=tool_name,
         analysis_kind=parameters.analysis_kind,
@@ -2045,7 +2061,7 @@ def _execute_optimization(  # noqa: PLR0913
         start_at=request.dataset.estimation_start_at,
         end_at=request.dataset.estimation_end_at,
         reporting_currency=request.dataset.reporting_currency,
-        metric_claims=(_MetricClaim("minimum_variance_objective", values.objective_value),),
+        metric_claims=(metric_claim,),
         warnings=domain_result.warnings,
         request_material={
             "context_fingerprint_sha256": snapshot.snapshot.fingerprint_sha256,
@@ -2169,6 +2185,8 @@ def _execute_backtest(  # noqa: PLR0913
     profile: ProofProfile,
     backtest_proof: AuthenticatedBacktestExecutionProof | None,
 ) -> AnalysisResult:
+    if backtest_proof is None:
+        raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
     snapshot = store.get_authenticated_snapshot_material(dataset_id, _BACKTEST_CONTEXT_KIND)
     context = _parse_context(snapshot, StoredBacktestExecutionContext)
     primary, supporting = _context_materials(
@@ -2213,10 +2231,8 @@ def _execute_backtest(  # noqa: PLR0913
         ),
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         trusted_local_host=True,
-        authenticated_ghost_receipt_id=(
-            None if backtest_proof is None else backtest_proof.authenticated_ghost_receipt_id
-        ),
-        candidate_commit=(None if backtest_proof is None else backtest_proof.candidate_commit),
+        authenticated_ghost_receipt_id=backtest_proof.authenticated_ghost_receipt_id,
+        candidate_commit=backtest_proof.candidate_commit,
     )
     if isinstance(domain_result, ResearchRefusal):
         raise StoredAnalysisExecutionError(domain_result.reason_code)
@@ -2410,6 +2426,8 @@ def _scenario_shock_from_stored(
 
 def _scenario_type(analysis_kind: str) -> str:
     by_kind = {
+        "margin_fire_drill": "margin",
+        "portfolio_scenario": "equity",
         "scenario_custom": "equity",
         "scenario_currency": "currency",
         "scenario_volatility": "volatility",
@@ -2428,6 +2446,8 @@ def _scenario_metric_claim(
     values: PrivateScenarioValues,
 ) -> _MetricClaim:
     metric_ids = {
+        "margin_fire_drill": "combined_scenario_effect",
+        "portfolio_scenario": "custom_shock_effect",
         "scenario_custom": "custom_shock_effect",
         "scenario_currency": "currency_shock_effect",
         "scenario_volatility": "volatility_shock_effect",

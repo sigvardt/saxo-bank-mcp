@@ -90,6 +90,14 @@ _UNBOUND_EXISTING_ALIAS_MESSAGE: Final = (
 
 type Clock = Callable[[], datetime]
 type AccountDataKind = Literal["transactions", "bookings", "closed_positions", "costs"]
+type AccountAnalysisKind = Literal[
+    "portfolio_performance",
+    "position_sizing",
+    "scenario_custom",
+    "portfolio_minimum_variance",
+    "derivatives_model",
+    "pretrade_impact",
+]
 
 
 class AccountSyncError(RuntimeError):
@@ -182,6 +190,21 @@ class AccountSyncResult(_StrictModel):
         if is_private != (self.private_records is not None):
             raise ValueError("private account records do not match result visibility")
         return self
+
+
+class AccountAnalysisSourceSummary(_StrictModel):
+    """Handle-only receipt for one exact account-scoped Saxo source contract."""
+
+    dataset_id: DatasetId
+    account_alias: SafeAccountScope
+    contract_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    instrument_handle: InstrumentHandle | None = None
+    quality_state: QualityState
+    coverage_start: UtcDateTime
+    coverage_end: UtcDateTime
+    row_count: int = Field(ge=0)
+    warnings: tuple[str, ...]
+    fingerprints: IngestionFingerprints
 
 
 SyncResult = AccountSyncResult
@@ -442,6 +465,84 @@ async def sync_cost_sources(  # noqa: PLR0913
         prepared=prepared,
         response_rows=config.limits.response_rows,
     )
+
+
+async def sync_account_analysis_sources(  # noqa: PLR0913
+    scope: AccountScope,
+    analysis_kinds: Sequence[AccountAnalysisKind],
+    instruments: Sequence[str],
+    *,
+    provider: SaxoAnalyticsProvider,
+    config: AnalyticsConfig,
+    clock: Clock = lambda: datetime.now(UTC),
+    request_budget: SourceRequestBudget | None = None,
+) -> tuple[tuple[AccountAnalysisSourceSummary, ...], int]:
+    """Capture only the supplemental Saxo contracts required by typed execution inputs."""
+    validated_scope = _preflight(
+        scope,
+        provider,
+        VisibilityMode.FINGERPRINT_ONLY,
+        trusted_local_host=False,
+    )
+    assert_persisted_account_scope_binding(config, validated_scope)
+    kinds = tuple(dict.fromkeys(analysis_kinds))
+    if not kinds:
+        raise AccountSyncValidationError("account analysis source kinds are required")
+    handles = tuple(dict.fromkeys(instruments))
+    if len(handles) > config.limits.sync_instruments:
+        raise AccountSyncValidationError("account analysis instrument count exceeds its limit")
+    selectors = _instrument_selectors(config, handles)
+    captured_at = _require_utc_clock(clock())
+    budget = _source_budget(config, request_budget)
+    request_count_start = budget.used
+    account_key = validated_scope.account_key.get_secret_value()
+    client_key = validated_scope.client_key.get_secret_value()
+    requested: list[tuple[str, str | None, dict[str, object]]] = []
+    if "portfolio_performance" in kinds:
+        common = {
+            "AccountKey": account_key,
+            "ClientKey": client_key,
+            "StandardPeriod": "Year",
+        }
+        requested.extend(
+            (
+                ("performance_summary_v4", None, dict(common)),
+                ("performance_timeseries_v4", None, dict(common)),
+            ),
+        )
+    if {"scenario_custom", "portfolio_minimum_variance"} & set(kinds):
+        requested.extend(
+            (
+                "exposure_instruments_v1",
+                selector.handle,
+                {
+                    "AccountKey": account_key,
+                    "ClientKey": client_key,
+                    "AssetType": selector.asset_type,
+                    "Uic": selector.identifier,
+                },
+            )
+            for selector in selectors
+        )
+    if not requested:
+        return (), 0
+    if len(requested) > config.limits.sync_instruments:
+        raise AccountSyncValidationError("account analysis source request limit exceeded")
+    prepared: list[tuple[str, str | None, tuple[SourcePage, ...]]] = []
+    for contract_id, instrument_handle, request in requested:
+        capture = build_source_capture_context(
+            {contract_id: request},
+            captured_at=captured_at,
+        )
+        pages = await _fetch_pages(provider, contract_id, request, capture, budget)
+        prepared.append((contract_id, instrument_handle, pages))
+    summaries = _persist_account_analysis_sources(
+        config,
+        validated_scope,
+        tuple(prepared),
+        captured_at=captured_at,
+    )
+    return summaries, budget.used - request_count_start
 
 
 async def _sync_history_contracts(  # noqa: PLR0913
@@ -982,6 +1083,132 @@ def _persist_prepared(
     finally:
         store.close()
     return tuple(summaries), invalidated_total
+
+
+def _persist_account_analysis_sources(
+    config: AnalyticsConfig,
+    scope: AccountScope,
+    prepared: tuple[tuple[str, str | None, tuple[SourcePage, ...]], ...],
+    *,
+    captured_at: datetime,
+) -> tuple[AccountAnalysisSourceSummary, ...]:
+    pages = tuple(page for _contract, _handle, source_pages in prepared for page in source_pages)
+    if any(not source_pages for _contract, _handle, source_pages in prepared):
+        raise AccountSyncError("account analysis source capture contains no page")
+    reservation = conservative_ingestion_reservation(
+        raw_payload_bytes=sum(len(page.model_dump_json().encode()) for page in pages),
+        normalized_rows=0,
+        source_pages=len(pages),
+        datasets=len(prepared),
+    )
+    try:
+        AnalyticsStore.ensure_owner_capacity(config, reservation)
+    except StoreQuotaError as error:
+        raise AccountSyncValidationError(
+            "analytics store quota refuses account analysis ingestion",
+        ) from error
+    store = AnalyticsStore.open(config)
+    summaries: list[AccountAnalysisSourceSummary] = []
+    try:
+        with store.market_ingestion_transaction(reservation) as connection:
+            bind_account_scope(connection, scope)
+            for contract_id, instrument_handle, source_pages in prepared:
+                coverage_start = min(page.source_timestamp for page in source_pages)
+                coverage_end = max(page.source_timestamp for page in source_pages)
+                page_ids: list[str] = []
+                for page in source_pages:
+                    serialized = page.model_dump(mode="json")
+                    source_payload = _JSON_OBJECT_ADAPTER.validate_python(serialized, strict=True)
+                    rows = source_payload.get("rows")
+                    if not isinstance(rows, list):
+                        raise AccountSyncError("validated source page rows are unavailable")
+                    stored = store.put_source_page(
+                        source_kind=page.source_kind,
+                        page_key=(
+                            f"{page.contract_id}:{page.page_number}:"
+                            f"{page.capture_revision.removeprefix('capture:')}"
+                        ),
+                        source_revision=page.capture_revision,
+                        source_native_revision=page.source_revision,
+                        contract_name=page.contract_id,
+                        contract_sha256=page.contract_sha256,
+                        payload={
+                            "contract_id": page.contract_id,
+                            "data_version": page.data_version,
+                            "page_fingerprint_sha256": page.page_fingerprint_sha256,
+                            "page_number": page.page_number,
+                            "request_fingerprint_sha256": page.request_fingerprint_sha256,
+                            "rows": rows,
+                            "source_native_revision": page.source_revision,
+                            "source_quality": page.source_quality.model_dump(mode="json"),
+                        },
+                        row_count=page.row_count,
+                        source_timestamp=page.source_timestamp,
+                        account_scope=scope.alias,
+                        instrument_handle=instrument_handle,
+                        instrument_scope_sha256=page.instrument_scope_sha256,
+                    )
+                    page_ids.append(stored.page_id)
+                dataset = store.create_dataset(
+                    dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+                    account_scope=scope.alias,
+                    source_scope="saxo_openapi",
+                    source_revision=source_pages[0].capture_revision,
+                    source_page_ids=tuple(page_ids),
+                    created_at=captured_at,
+                    coverage_start=coverage_start,
+                    coverage_end=coverage_end,
+                    quality_state=(
+                        QualityState.PARTIAL
+                        if any(page.source_quality.state == "limited" for page in source_pages)
+                        else QualityState.COMPLETE
+                    ),
+                )
+                summaries.append(
+                    AccountAnalysisSourceSummary(
+                        dataset_id=dataset.dataset_id,
+                        account_alias=scope.alias,
+                        contract_id=contract_id,
+                        instrument_handle=instrument_handle,
+                        quality_state=dataset.quality_state,
+                        coverage_start=coverage_start,
+                        coverage_end=coverage_end,
+                        row_count=dataset.row_count,
+                        warnings=(
+                            ("source_quality_limited",)
+                            if dataset.quality_state is QualityState.PARTIAL
+                            else ()
+                        ),
+                        fingerprints=IngestionFingerprints(
+                            raw_pages_sha256=_fingerprint(
+                                [page.page_fingerprint_sha256 for page in source_pages],
+                            ),
+                            normalized_rows_sha256=_fingerprint([]),
+                            source_contract_sha256=_fingerprint(
+                                sorted({page.contract_sha256 for page in source_pages}),
+                            ),
+                            entitlements_sha256=_fingerprint(
+                                [
+                                    page.source_quality.model_dump(mode="json")
+                                    for page in source_pages
+                                ],
+                            ),
+                            correction_state_sha256=_fingerprint(
+                                {
+                                    "contract_id": contract_id,
+                                    "instrument_handle": instrument_handle,
+                                },
+                            ),
+                        ),
+                    ),
+                )
+    except StoreQuotaError as error:
+        raise AccountSyncValidationError(
+            "analytics store quota refuses account analysis ingestion",
+        ) from error
+    finally:
+        store.close()
+    return tuple(summaries)
 
 
 def _persist_one_dataset(
@@ -1580,6 +1807,8 @@ def _fingerprint(value: object) -> str:
 
 
 __all__ = (
+    "AccountAnalysisKind",
+    "AccountAnalysisSourceSummary",
     "AccountDatasetSummary",
     "AccountScope",
     "AccountSyncError",
@@ -1588,6 +1817,7 @@ __all__ = (
     "PrivateAccountRecord",
     "SyncResult",
     "new_account_alias",
+    "sync_account_analysis_sources",
     "sync_account_history",
     "sync_bookings",
     "sync_closed_positions",

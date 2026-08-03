@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import stat
@@ -29,7 +30,9 @@ from saxo_bank_mcp.mcp_analytics_tools import (
     StoredPositionSizingToolRequest,
     StoredScenarioToolRequest,
 )
+from saxo_bank_mcp.qa_analytics_evidence import load_analysis_kind_catalog
 from saxo_bank_mcp.qa_analytics_sim import (
+    ANALYSIS_KIND_IDS,
     ANALYTICS_CASE_KINDS,
     BROKERAGE_STATE_COMPONENTS,
     CONTROLLED_SIM_CASES,
@@ -171,6 +174,31 @@ def _analytics_case_evidence() -> tuple[AnalyticsToolCaseEvidence, ...]:
     )
 
 
+def _analysis_execution_receipts() -> tuple[AnalyticsCaseReceipt, ...]:
+    return tuple(
+        AnalyticsCaseReceipt(
+            kind="success",
+            state="passed",
+            reason_code="success_observed",
+            analysis_kind=call.analysis_kind,
+            mcp_call_observed=True,
+            result_parsed=True,
+            result_state=(
+                "resolved" if call.tool_id == "saxo_resolve_research_universe" else "verified"
+            ),
+            mcp_is_error=False,
+            network_call_made=False,
+            broker_write_made=False,
+            private_values_published=False,
+            request_sha256="1" * 64,
+            response_sha256="2" * 64,
+            evidence_sha256="3" * 64,
+        )
+        for call in analytics_case_calls()
+        if call.kind == "success" and call.analysis_kind is not None
+    )
+
+
 def _runtime_state() -> MatrixRuntimeState:
     return MatrixRuntimeState(
         errors=[],
@@ -236,7 +264,7 @@ def test_analytics_success_contracts_cover_every_tool_with_session_issued_inputs
 
 def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
     calls = analytics_case_calls()
-    by_case = {(call.tool_id, call.kind): call for call in calls}
+    by_case = {(call.tool_id, call.kind): call for call in calls if call.analysis_kind is None}
     for contract in analytics_sim_contracts():
         kinds = {case.kind for case in contract.cases}
         if {"success", "degradation"} <= kinds:
@@ -263,7 +291,11 @@ def test_real_success_result_states_are_not_marked_failed() -> None:
         )
         is not None
     }
-    calls = {call.tool_id: call for call in analytics_case_calls() if call.kind == "success"}
+    calls = {
+        call.tool_id: call
+        for call in analytics_case_calls()
+        if call.kind == "success" and call.analysis_kind is None
+    }
     for tool, observed_state in (
         ("saxo_resolve_research_universe", "resolved"),
         ("saxo_preview_analytics_deletion", "preview_ready"),
@@ -285,7 +317,11 @@ def test_real_success_result_states_are_not_marked_failed() -> None:
 def test_runtime_arguments_chain_server_issued_dataset_handles() -> None:
     resources = AnalyticsRuntimeResources()
     resources.dataset_ids.append("ds_11111111111141118111111111111111")
-    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    calls = {
+        (call.tool_id, call.kind): call
+        for call in analytics_case_calls()
+        if call.analysis_kind is None
+    }
 
     dataset_success = materialize_analytics_case_arguments(
         calls[("saxo_get_research_dataset", "success")], resources
@@ -295,7 +331,11 @@ def test_runtime_arguments_chain_server_issued_dataset_handles() -> None:
 
 
 def test_analysis_successes_require_their_exact_server_issued_input_kind() -> None:
-    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    calls = {
+        (call.tool_id, call.kind): call
+        for call in analytics_case_calls()
+        if call.analysis_kind is None
+    }
     routes = {
         "saxo_analyze_market": "price_bars",
         "saxo_analyze_instruments": "price_bars",
@@ -336,10 +376,46 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
         )
         == {}
     )
+    pretrade_resources.instrument_handles.append("ih_22222222222242228222222222222222")
+    pretrade_resources.analysis_ids_by_kind["instrument_price_return"] = [
+        "an_33333333333343338333333333333333"
+    ]
+    pretrade_resources.pretrade_proposal_price = "100"
+    materialized_pretrade = materialize_analytics_case_arguments(
+        calls[("saxo_propose_trade_from_analysis", "success")],
+        pretrade_resources,
+    )
+    assert materialized_pretrade["proposal_price"] == "100"
+
+
+def test_pretrade_price_is_observed_from_one_exact_logical_mcp_quote() -> None:
+    quote_row: dict[str, JsonValue] = {
+        "row_kind": "quote",
+        "bid_value": 99.0,
+        "ask_value": 101.0,
+        "mid_value": 100.0,
+    }
+    quote: dict[str, JsonValue] = {
+        "status": "passed",
+        "result": {"rows": [quote_row]},
+    }
+
+    assert matrix_module._observed_quote_midpoint(quote) == "100.0"  # noqa: SLF001
+    assert matrix_module._observed_quote_midpoint({"status": "passed"}) is None  # noqa: SLF001
+    assert (
+        matrix_module._observed_quote_midpoint(  # noqa: SLF001
+            {"result": {"rows": [quote_row, quote_row]}},
+        )
+        is None
+    )
 
 
 def test_analysis_refusal_probes_use_only_same_session_issued_dataset_handles() -> None:
-    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    calls = {
+        (call.tool_id, call.kind): call
+        for call in analytics_case_calls()
+        if call.analysis_kind is None
+    }
     resources = AnalyticsRuntimeResources()
     dataset_id = "ds_11111111111141118111111111111111"
     instrument_handle = "ih_22222222222242228222222222222222"
@@ -376,7 +452,11 @@ def test_analysis_refusal_probes_use_only_same_session_issued_dataset_handles() 
 
 
 def test_analysis_runtime_indexes_only_typed_server_issued_handles() -> None:
-    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    calls = {
+        (call.tool_id, call.kind): call
+        for call in analytics_case_calls()
+        if call.analysis_kind is None
+    }
     resources = AnalyticsRuntimeResources()
     dataset_id = "ds_11111111111141118111111111111111"
     untyped_dataset_id = "ds_22222222222242228222222222222222"
@@ -665,6 +745,28 @@ def test_matrix_analytics_state_is_disposable_owner_only_and_restores_env(
     assert os.environ.get("XDG_STATE_HOME") == previous
 
 
+def test_matrix_executes_one_distinct_success_call_for_every_analysis_kind() -> None:
+    catalog = load_analysis_kind_catalog()
+    success_calls = tuple(
+        call
+        for call in analytics_case_calls()
+        if call.kind == "success" and call.input_strategy.startswith("analyze_kind_")
+    )
+    observed = tuple(call.analysis_kind for call in success_calls)
+
+    assert len(success_calls) == len(catalog.analysis_kinds)
+    assert set(observed) == set(catalog.analysis_kinds)
+    assert len(observed) == len(set(observed))
+
+
+def test_passed_matrix_requires_one_distinct_success_receipt_per_analysis_kind() -> None:
+    source = inspect.getsource(SimToolMatrixReceipt)
+    assert "analysis_execution_receipts" in source
+    assert "analysis_kinds" in source
+    assert "analysis_execution_receipt" in source
+    assert load_analysis_kind_catalog().analysis_kinds == ANALYSIS_KIND_IDS
+
+
 def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
     receipts = tuple(
         receipt_for(tool, {"status": "completed"}, {}) for tool in sorted(ALL_LOGICAL_TOOL_IDS)
@@ -691,6 +793,7 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=case_evidence,
+        analysis_execution_receipts=_analysis_execution_receipts(),
         controlled_sim_lifecycle=_lifecycle_receipt(state),
         mcp_only_account_fixture_state=True,
         cleanup_complete=True,
@@ -1000,7 +1103,12 @@ def test_passed_matrix_requires_every_applicable_analytics_case_receipt() -> Non
         for case in contract.cases
     )
 
-    assert tuple((call.tool_id, call.kind) for call in calls) == expected
+    assert (
+        tuple((call.tool_id, call.kind) for call in calls if call.analysis_kind is None) == expected
+    )
+    assert len(tuple(call for call in calls if call.analysis_kind is not None)) == len(
+        ANALYSIS_KIND_IDS
+    )
 
 
 def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # noqa: C901

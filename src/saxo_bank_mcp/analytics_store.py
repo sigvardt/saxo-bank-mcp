@@ -1489,7 +1489,9 @@ class AnalyticsStore:
         if any(row[7] is not None and row[8] is None for row in rows):
             raise StoreNotFoundError("dataset instrument does not exist")
         if any(
-            (page_scope := _optional_str(row[4])) is not None and page_scope != account_scope
+            (page_scope := _optional_str(row[4])) is not None
+            and page_scope != account_scope
+            and not (page_scope == "aggregate" and account_scope != "aggregate")
             for row in rows
         ):
             raise StoreValidationError(

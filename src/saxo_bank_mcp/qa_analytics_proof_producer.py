@@ -34,15 +34,12 @@ from saxo_bank_mcp.agent_skill_install_paths import (
 )
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
-    bind_eval_runtime_account_allowlist,
     prepare_matrix_isolated_runtime,
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
 from saxo_bank_mcp.mcp_analytics_tools import (
-    _begin_process_proof_session,
-    _end_process_proof_session,
-    _process_proof_session_authority,
+    _run_installed_matrix_proof_session,
 )
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
@@ -64,17 +61,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     AnalyticsCaseReceipt,
     PostSendTimeoutReceipt,
 )
-from saxo_bank_mcp.qa_sim_tool_matrix import _run_matrix
-from saxo_bank_mcp.qa_sim_tool_matrix_models import (
-    FIXTURE_INSTRUMENT,
-    FIXTURE_LIMIT_PRICE,
-    FIXTURE_MODIFIED_LIMIT_PRICE,
-    FIXTURE_ORDER_AMOUNT,
-    FIXTURE_STREAM_UIC,
-    MULTILEG_FIXTURE_UICS,
-    MatrixFixtures,
-    SimToolMatrixReceipt,
-)
+from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -82,112 +69,6 @@ _PRODUCER_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.
 _COMMAND_NAME = "analytics_proof_producer"
 _PROCESS_AUTHORITY = object()
 _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
-
-type ProofSuiteCategory = Literal[
-    "source_contract",
-    "known_answer",
-    "property",
-    "metamorphic",
-    "independent_reference",
-    "mutation_kill",
-    "numerical_tolerance",
-    "accounting_identity",
-    "saxo_reconciliation",
-    "missing_data_behavior",
-    "replay",
-    "artifact_parity",
-    "visual_integrity",
-    "schema_drift",
-    "agent_use",
-    "privacy_safety",
-]
-_PROOF_SUITE_CATEGORIES: tuple[ProofSuiteCategory, ...] = (
-    "source_contract",
-    "known_answer",
-    "property",
-    "metamorphic",
-    "independent_reference",
-    "mutation_kill",
-    "numerical_tolerance",
-    "accounting_identity",
-    "saxo_reconciliation",
-    "missing_data_behavior",
-    "replay",
-    "artifact_parity",
-    "visual_integrity",
-    "schema_drift",
-    "agent_use",
-    "privacy_safety",
-)
-_PROOF_CATEGORY_MARKERS: dict[ProofSuiteCategory, tuple[str, ...]] = {
-    "source_contract": ("source_contract", "analytics_proof_profiles"),
-    "known_answer": ("known_answer", "golden", "hand_checked", "put_call_parity"),
-    "property": ("analytics_properties",),
-    "metamorphic": (
-        "translation_does_not_change",
-        "scale_does_not_change",
-        "permutation_preserves",
-        "neutral_to_external_cash_flows",
-        "monotone",
-    ),
-    "independent_reference": ("reference",),
-    "mutation_kill": ("mutation",),
-    "numerical_tolerance": (
-        "analytics_metrics",
-        "analytics_options",
-        "analytics_optimization",
-        "analytics_fixed_income",
-    ),
-    "accounting_identity": (
-        "accounting",
-        "reconcile",
-        "cash_flow",
-        "component_sum",
-        "turnover",
-    ),
-    "saxo_reconciliation": (
-        "saxo_cost_illustration",
-        "saxo_performance_difference",
-        "saxo_difference",
-        "unexplained_broker_difference",
-        "saxo_greek",
-    ),
-    "missing_data_behavior": (
-        "missing",
-        "stale",
-        "entitlement",
-        "partial",
-        "refuse",
-    ),
-    "replay": ("analytics_provenance",),
-    "artifact_parity": (
-        "structured_semantics",
-        "embeds_parity",
-        "exact_values",
-    ),
-    "visual_integrity": (
-        "bounded_nonblank_png",
-        "long_labels",
-        "responsive",
-        "clipping",
-        "mobile_html",
-    ),
-    "schema_drift": (
-        "definition_change_without_profile_rebinding",
-        "source_revision_engine_change",
-        "schema_drift",
-        "source_contract_is_deleted",
-    ),
-    "agent_use": ("saxo_analytics_skill",),
-    "privacy_safety": (
-        "private_path",
-        "identifier_shaped_export_keys",
-        "token_shapes",
-        "qa_secret_scan",
-        "secret_scan",
-        "redaction",
-    ),
-}
 
 
 class ProofProducerError(RuntimeError):
@@ -210,6 +91,7 @@ class _AnalysisProofProperty(_StrictModel):
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     case_kind: ProofExecutionKind
     requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    supporting_test_node_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
     executed_case_count: int = Field(ge=1)
     failed_case_count: int = Field(ge=0)
     comparison_count: int = Field(ge=0)
@@ -219,6 +101,14 @@ class _AnalysisProofProperty(_StrictModel):
     independent_path_observed: bool = False
     recovery_observed: bool = False
     publication_scan_passed: bool = False
+
+    @model_validator(mode="after")
+    def _validate_measured_support(self) -> Self:
+        if len(self.supporting_test_node_ids) != len(
+            set(self.supporting_test_node_ids)
+        ) or self.executed_case_count != len(self.supporting_test_node_ids):
+            raise ValueError("proof case counts must equal exact supporting executions")
+        return self
 
 
 class _ArtifactParityProperty(_StrictModel):
@@ -495,35 +385,22 @@ def _execute_installed_proof_bundle(
     catalog = load_analysis_kind_catalog()
     contracts = build_proof_execution_contracts(catalog=catalog)
     suite_evidence = _run_installed_offline_proof_suite()
-    authority = _process_proof_session_authority()
-    _begin_process_proof_session(
-        candidate_commit,
-        catalog.analysis_kinds,
-        authority=authority,
+    matrix = SimToolMatrixReceipt.model_validate(
+        anyio.run(
+            _run_installed_matrix_proof_session,
+            candidate_commit,
+            catalog.analysis_kinds,
+        ),
     )
-    try:
-        matrix = anyio.run(
-            _run_matrix,
-            MatrixFixtures(
-                stock_uic=FIXTURE_INSTRUMENT,
-                amount=float(FIXTURE_ORDER_AMOUNT),
-                limit_price=float(FIXTURE_LIMIT_PRICE),
-                modified_limit_price=float(FIXTURE_MODIFIED_LIMIT_PRICE),
-                option_uics=MULTILEG_FIXTURE_UICS,
-                stream_uic=FIXTURE_STREAM_UIC,
-            ),
-        )
-        if matrix.status != "passed":
-            raise ProofProducerError("installed_sim_matrix_not_passed")
-        return _bundle_from_process_executions(
-            candidate_commit=candidate_commit,
-            installed_cache_sha256=installed_cache_sha256,
-            suite_evidence=suite_evidence,
-            matrix=matrix,
-            contracts=contracts,
-        )
-    finally:
-        _end_process_proof_session(authority=authority)
+    if matrix.status != "passed":
+        raise ProofProducerError("installed_sim_matrix_not_passed")
+    return _bundle_from_process_executions(
+        candidate_commit=candidate_commit,
+        installed_cache_sha256=installed_cache_sha256,
+        suite_evidence=suite_evidence,
+        matrix=matrix,
+        contracts=contracts,
+    )
 
 
 def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
@@ -538,6 +415,7 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
             (
                 *tests_root.glob("test_analytics_*.py"),
                 tests_root / "test_mcp_analytics_tools.py",
+                tests_root / "test_qa_analytics_artifacts.py",
                 tests_root / "test_saxo_analytics_skill.py",
                 tests_root / "test_qa_secret_scan.py",
                 tests_root / "test_read_response_redaction.py",
@@ -643,6 +521,7 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
     parity: list[ArtifactParityReceipt] = []
     visual: list[ArtifactVisualIntegrityReceipt] = []
     receipt_nodes: set[str] = set()
+    passed_node_ids = {_junit_node_id(testcase) for testcase in passed_testcases}
     for testcase in passed_testcases:
         node_id = _junit_node_id(testcase)
         properties = testcase.find("properties")
@@ -668,19 +547,25 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
         receipt_kind = payload.get("receipt_kind")
         try:
             if receipt_kind == "analysis_case":
-                observed = _AnalysisProofProperty.model_validate(payload)
+                observed = _AnalysisProofProperty.model_validate_json(values[0])
                 if node_id != _analysis_proof_node_id(
                     observed.analysis_kind,
                     observed.case_kind,
                 ):
                     raise ProofProducerError("installed_proof_contract_node_mismatch")
+                if (
+                    len(observed.supporting_test_node_ids)
+                    != len(set(observed.supporting_test_node_ids))
+                    or not set(observed.supporting_test_node_ids) <= passed_node_ids
+                ):
+                    raise ProofProducerError("installed_proof_supporting_execution_missing")
                 analysis_cases.append(
                     MeasuredAnalysisProofObservation(
                         analysis_kind=observed.analysis_kind,
                         case_kind=observed.case_kind,
                         requirement_code=observed.requirement_code,
                         test_node_id=node_id,
-                        executed_case_count=observed.executed_case_count,
+                        executed_case_count=len(observed.supporting_test_node_ids),
                         failed_case_count=observed.failed_case_count,
                         comparison_count=observed.comparison_count,
                         unexplained_difference_count=observed.unexplained_difference_count,
@@ -699,7 +584,7 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
                     ),
                 )
             elif receipt_kind == "artifact_parity":
-                property_receipt = _ArtifactParityProperty.model_validate(payload).receipt
+                property_receipt = _ArtifactParityProperty.model_validate_json(values[0]).receipt
                 if node_id != _artifact_proof_node_id(
                     "parity",
                     property_receipt.template_id,
@@ -707,7 +592,7 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
                     raise ProofProducerError("installed_proof_contract_node_mismatch")
                 parity.append(property_receipt)
             elif receipt_kind == "artifact_visual":
-                property_receipt = _ArtifactVisualProperty.model_validate(payload).receipt
+                property_receipt = _ArtifactVisualProperty.model_validate_json(values[0]).receipt
                 if node_id != _artifact_proof_node_id(
                     "visual",
                     property_receipt.template_id,
@@ -1126,7 +1011,6 @@ def _execute_installed_child(
                 runtime_root,
                 runtime_name="proof-sim-runtime",
             )
-            bind_eval_runtime_account_allowlist(runtime)
         except MatrixEnvError as error:
             raise ProofProducerError("proof_sim_auth_lease_unavailable") from error
         command_error: CommandFailureError | None = None

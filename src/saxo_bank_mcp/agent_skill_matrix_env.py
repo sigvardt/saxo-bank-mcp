@@ -5,14 +5,10 @@ import os
 import shutil
 import stat
 import subprocess
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, cast
+from typing import Final
 
-import httpx2
-
-from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_env import (
     EnvironmentContainmentError,
     build_isolated_env,
@@ -20,9 +16,7 @@ from saxo_bank_mcp.agent_skill_install_env import (
 )
 from saxo_bank_mcp.agent_skill_install_paths import ensure_owner_only
 from saxo_bank_mcp.auth import SaxoTokenSet
-from saxo_bank_mcp.config import SIM_ENDPOINTS
 from saxo_bank_mcp.config_credentials import DEFAULT_SIM_CREDENTIAL_FILE
-from saxo_bank_mcp.strict_json import StrictJsonError, parse_json_value
 from saxo_bank_mcp.token_cache import (
     TokenCachePathError,
     default_token_cache_path,
@@ -278,8 +272,7 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
     Auth sources (source_*) default to actual global CLI roots when omitted.
     Retained install homes seed plugin registration/artifacts only. Never conflate.
     Sources are never written and never published as evidence fields.
-    Binds SAXO_MCP_ACCOUNT_ALLOWLIST from exactly one active SIM account discovered
-    via the copied token cache (never logged or returned in evidence).
+    Account discovery remains inside the logical FastMCP matrix call path.
     """
     runtime = prepare_matrix_isolated_runtime(
         evidence_root,
@@ -294,7 +287,6 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
             retained_claude_home=retained_claude_home,
             retained_codex_plugin_root=retained_codex_plugin_root,
         )
-        bind_eval_runtime_account_allowlist(runtime)
     except MatrixEnvError:
         cleanup_matrix_isolated_runtime(runtime.run_root)
         raise
@@ -302,80 +294,6 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
         cleanup_matrix_isolated_runtime(runtime.run_root)
         raise MatrixEnvError("eval_cli_home_seed_failed") from exc
     return runtime
-
-
-def bind_eval_runtime_account_allowlist(runtime: MatrixIsolatedRuntime) -> None:
-    """Discover exactly one active SIM account and bind it to the process allowlist.
-
-    Never logs or returns the raw account key. LIVE tokens are refused. Fail closed
-    when discovery returns zero or multiple active accounts.
-    """
-    account_key = discover_exactly_one_active_sim_account(runtime.token_cache_path)
-    runtime.env["SAXO_MCP_ACCOUNT_ALLOWLIST"] = account_key
-    # LIVE stays disabled for disposable eval runtimes.
-    runtime.env["SAXO_MCP_ENVIRONMENT"] = "SIM"
-    runtime.env["SAXO_MCP_ENABLE_LIVE_READS"] = "0"
-    runtime.env["SAXO_MCP_ENABLE_LIVE_WRITES"] = ""
-
-
-def discover_exactly_one_active_sim_account(token_cache_path: Path) -> str:
-    """Return the sole active SIM AccountKey from /port/v1/accounts/me using the cache.
-
-    Raises MatrixEnvError with a safe reason on any failure. Does not log the key.
-    """
-    token = load_token_cache(token_cache_path)
-    if token is None:
-        raise MatrixEnvError("eval_account_discovery_token_missing")
-    if token.environment == "LIVE":
-        raise MatrixEnvError("eval_account_discovery_live_token_refused")
-    try:
-        with httpx2.Client(
-            base_url=SIM_ENDPOINTS.rest_base_url,
-            timeout=30.0,
-        ) as client:
-            response = client.get(
-                "port/v1/accounts/me",
-                headers={
-                    "Accept": "application/json",
-                    "Authorization": f"Bearer {token.access_token}",
-                },
-            )
-    except httpx2.HTTPError as error:
-        raise MatrixEnvError("eval_account_discovery_network_error") from error
-    if not 200 <= response.status_code < 300:  # noqa: PLR2004
-        raise MatrixEnvError("eval_account_discovery_http_error")
-    try:
-        parsed = parse_json_value(response.content)
-    except StrictJsonError as error:
-        raise MatrixEnvError("eval_account_discovery_json_invalid") from error
-    keys = active_account_keys_from_port_payload(parsed)
-    if not keys:
-        raise MatrixEnvError("eval_account_discovery_zero_active")
-    if len(keys) > 1:
-        raise MatrixEnvError("eval_account_discovery_multiple_active")
-    return keys[0]
-
-
-def active_account_keys_from_port_payload(payload: JsonValue) -> list[str]:
-    """Extract active AccountKey values from a port accounts payload (no secrets logged)."""
-    if not isinstance(payload, Mapping):
-        return []
-    mapping = cast("Mapping[str, JsonValue]", payload)
-    data = mapping.get("Data")
-    if not isinstance(data, Sequence) or isinstance(data, str):
-        return []
-    keys: list[str] = []
-    for item in data:
-        if not isinstance(item, Mapping):
-            continue
-        row = cast("Mapping[str, JsonValue]", item)
-        account_key = row.get("AccountKey")
-        if not isinstance(account_key, str) or not account_key.strip():
-            continue
-        if row.get("Active") is False:
-            continue
-        keys.append(account_key.strip())
-    return keys
 
 
 def apply_case_eval_allowlists(env: dict[str, str], *, case_id: str) -> dict[str, str]:
