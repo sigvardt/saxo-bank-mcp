@@ -996,7 +996,7 @@ def test_contract_emitter_runs_measurements_instead_of_listing_cartesian_nodes()
     assert not hasattr(analysis_tests, "_proof_case_measurement_target")
 
 
-def test_exact_proof_measurement_is_analysis_specific_and_reports_observed_counts() -> None:
+def test_exact_proof_measurement_reports_typed_result_instead_of_fabricated_comparison() -> None:
     analysis_tests = import_module("test_analytics_proof_contracts")
 
     observed = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
@@ -1008,10 +1008,51 @@ def test_exact_proof_measurement_is_analysis_specific_and_reports_observed_count
     assert observed.case_kind == "known_answer"
     assert observed.operation_id.startswith("corporate_action_center_known_answer_")
     assert observed.executed_test_node_id.startswith("tests.test_analytics_income::")
-    assert observed.executed_case_count >= 1
+    assert observed.measurement_state == "unavailable"
+    assert observed.operation_kind == "analysis_result_observation"
+    assert observed.observed_result_count == len(("missing_basis", "denied"))
+    assert observed.observed_result_types == ("ResearchRefusal",)
+    assert observed.observed_result_sha256 == observed.observed_output_sha256
+    assert observed.observed_value_count > 0
+    assert observed.executed_case_count == observed.observed_result_count
     assert observed.failed_case_count == 0
-    assert observed.comparison_count >= 1
+    assert observed.comparison_count == 0
     assert observed.unexplained_difference_count == 0
+
+
+def test_generic_proof_operations_cannot_be_relabelled_for_an_analysis() -> None:
+    analysis_tests = import_module("test_analytics_proof_contracts")
+
+    mutation = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "corporate_action_center",
+        "mutation_kill",
+    )
+    schema = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "corporate_action_center",
+        "schema_drift",
+    )
+
+    assert mutation.measurement_state == schema.measurement_state == "unavailable"
+    assert mutation.operation_kind == schema.operation_kind == "analysis_result_observation"
+    assert mutation.mutation_count == mutation.mutation_killed_count == 0
+    assert schema.recovery_observed is False
+    assert mutation.observed_result_sha256 == schema.observed_result_sha256
+
+
+def test_measurement_digest_never_hashes_test_function_source_or_return_none() -> None:
+    analysis_tests = import_module("test_analytics_proof_contracts")
+
+    source = inspect.getsource(analysis_tests._invoke_measurement)  # noqa: SLF001
+    observed = analysis_tests._invoke_measurement(  # noqa: SLF001
+        "test_analytics_income",
+        "test_authoritative_corporate_action_claim_refuses_missing_basis_or_entitlement",
+    )
+
+    assert "inspect.getsource" not in source
+    assert "function_source_sha256" not in source
+    assert observed.observed_result_count == len(("missing_basis", "denied"))
+    assert observed.observed_result_types == ("ResearchRefusal",)
+    assert observed.observed_value_count > 0
 
 
 def test_producer_consumes_measured_operation_fields_instead_of_case_name_flags() -> None:
@@ -1019,9 +1060,14 @@ def test_producer_consumes_measured_operation_fields_instead_of_case_name_flags(
     fields = producer._AnalysisProofProperty.model_fields  # noqa: SLF001
 
     assert {
+        "measurement_state",
         "operation_id",
         "operation_kind",
         "executed_test_node_id",
+        "observed_result_count",
+        "observed_result_types",
+        "observed_result_sha256",
+        "observed_value_count",
         "observed_output_sha256",
         "executed_case_count",
         "failed_case_count",
@@ -1036,6 +1082,30 @@ def test_producer_consumes_measured_operation_fields_instead_of_case_name_flags(
     parser_source = inspect.getsource(producer._proof_suite_evidence_from_junit)  # noqa: SLF001
     assert "comparison_kinds" not in parser_source
     assert "int(observed.case_kind" not in parser_source
+
+
+def test_typed_result_observation_cannot_be_relabelled_as_passed_proof() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    analysis_tests = import_module("test_analytics_proof_contracts")
+    measurement = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "corporate_action_center",
+        "known_answer",
+    )
+    payload = {
+        name: getattr(measurement, name)
+        for name in producer._AnalysisProofProperty.model_fields  # noqa: SLF001
+        if name != "receipt_kind"
+    }
+
+    unavailable = producer._AnalysisProofProperty.model_validate(payload)  # noqa: SLF001
+    assert unavailable.measurement_state == "unavailable"
+    with pytest.raises(
+        ValidationError,
+        match="passed proof requires a measured proof-specific operation",
+    ):
+        producer._AnalysisProofProperty.model_validate(  # noqa: SLF001
+            {**payload, "measurement_state": "passed"},
+        )
 
 
 def test_agent_evaluation_artifact_is_required_and_cannot_be_synthesized() -> None:

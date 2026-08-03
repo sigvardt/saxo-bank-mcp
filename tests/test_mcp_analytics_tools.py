@@ -829,6 +829,7 @@ def test_installed_process_proof_overlay_is_candidate_bound_and_ephemeral(
 
 
 def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> None:
+    assert not hasattr(tools_module, "_run_installed_matrix_proof_session_impl")
     assert not hasattr(tools_module, "_process_proof_session_authority")
     assert not hasattr(tools_module, "_bind_observed_sim_ghost_lifecycle")
     assert not hasattr(tools_module, "_PROCESS_PROOF_RECORDER_SEAL")
@@ -854,6 +855,46 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
         tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
     ).parameters
     assert tuple(parameters) == ("candidate_commit", "analysis_kinds")
+    runner_source = inspect.getsource(
+        tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
+    )
+    assert "active_sessions" not in runner_source
+    assert "WeakSet" not in runner_source
+
+
+@pytest.mark.anyio
+async def test_installed_session_is_absent_from_module_before_during_and_after_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logging_safety = import_module("saxo_bank_mcp.fastmcp_logging_safety")
+
+    def exposed_capabilities() -> tuple[object, ...]:
+        return tuple(
+            value
+            for value in vars(tools_module).values()
+            if hasattr(value, "record_observed_ghost_lifecycle")
+        )
+
+    observed_during: tuple[object, ...] | None = None
+
+    def stop_inside_boundary() -> None:
+        nonlocal observed_during
+        observed_during = exposed_capabilities()
+        raise RuntimeError("stop before installed matrix execution")
+
+    assert exposed_capabilities() == ()
+    monkeypatch.setattr(
+        logging_safety,
+        "install_fastmcp_argument_log_filter",
+        stop_inside_boundary,
+    )
+    with pytest.raises(RuntimeError, match="stop before installed matrix execution"):
+        await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
+            _CANDIDATE_COMMIT,
+            ("bounded_backtest",),
+        )
+    assert observed_during == ()
+    assert exposed_capabilities() == ()
 
 
 def test_forged_lifespan_material_cannot_enter_the_process_proof_boundary(

@@ -9,12 +9,11 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import RLock
 from typing import Annotated, Final, Literal, Protocol, cast
-from weakref import WeakSet
 
 import mcp.types as mt
 from fastmcp.server.dependencies import get_context
@@ -2284,7 +2283,8 @@ def _server_environment() -> str:
 async def _run_installed_matrix_proof_session_impl(  # noqa: C901
     candidate_commit: str,
     analysis_kinds: Sequence[str],
-    active_sessions: WeakSet[object],
+    bind_session_type: Callable[[type[object]], None],
+    release_session_type: Callable[[type[object]], None],
 ) -> object:
     """Run the exact installed matrix; accept no caller lifecycle or recorder callback."""
     if re.fullmatch(r"[a-f0-9]{40}", candidate_commit) is None:
@@ -2292,11 +2292,14 @@ async def _run_installed_matrix_proof_session_impl(  # noqa: C901
     kinds = frozenset((*analysis_kinds, "bounded_backtest"))
     if not kinds:
         raise ValueError("process proof session requires bounded analysis kinds")
+    session_seal = object()
 
     class InstalledMatrixSession:
         """Function-local capability available only to this exact matrix invocation."""
 
-        def __init__(self) -> None:
+        def __init__(self, seal: object) -> None:
+            if seal is not session_seal:
+                raise ValueError("process proof session construction refused")
             self._active = True
             self._source_revisions: dict[str, str] = {}
             self._backtest_lifecycles: dict[
@@ -2478,10 +2481,13 @@ async def _run_installed_matrix_proof_session_impl(  # noqa: C901
                 profile,
             )
 
-    session = InstalledMatrixSession()
-    active_sessions.add(session)
+    session = InstalledMatrixSession(session_seal)
+    session_type = type(session)
+    type_bound = False
 
     try:
+        bind_session_type(session_type)
+        type_bound = True
         from contextlib import asynccontextmanager  # noqa: PLC0415
 
         from saxo_bank_mcp.fastmcp_logging_safety import (  # noqa: PLC0415
@@ -2547,32 +2553,45 @@ async def _run_installed_matrix_proof_session_impl(  # noqa: C901
         )
     finally:
         session.clear()
-        active_sessions.discard(session)
+        if type_bound:
+            release_session_type(session_type)
 
 
-def _build_installed_proof_boundary():  # noqa: ANN202
-    """Keep proof-session membership inside one non-exported process closure."""
-    active_sessions: WeakSet[object] = WeakSet()
+def _build_installed_proof_boundary():  # noqa: ANN202, C901
+    """Keep proof-session identity inside one non-exported process closure."""
+    active_session_type: type[object] | None = None
+    implementation = _run_installed_matrix_proof_session_impl  # noqa: F821
+
+    def bind_session_type(session_type: type[object]) -> None:
+        nonlocal active_session_type
+        if active_session_type is not None:
+            raise RuntimeError("installed proof session is already active")
+        active_session_type = session_type
+
+    def release_session_type(session_type: type[object]) -> None:
+        nonlocal active_session_type
+        if active_session_type is session_type:
+            active_session_type = None
+
+    async def invoke(candidate_commit: str, analysis_kinds: Sequence[str]) -> object:
+        return await implementation(
+            candidate_commit,
+            analysis_kinds,
+            bind_session_type,
+            release_session_type,
+        )
 
     def current_session() -> _InstalledProofRequestSession | None:
         try:
             candidate = get_context().lifespan_context.get("installed_analytics_proof_session")
         except RuntimeError:
             return None
-        try:
-            active = candidate in active_sessions
-        except TypeError:
-            return None
-        if not active:
+        if active_session_type is None or type(candidate) is not active_session_type:
             return None
         return cast("_InstalledProofRequestSession", candidate)
 
     async def run(candidate_commit: str, analysis_kinds: Sequence[str]) -> object:
-        return await _run_installed_matrix_proof_session_impl(
-            candidate_commit,
-            analysis_kinds,
-            active_sessions,
-        )
+        return await invoke(candidate_commit, analysis_kinds)
 
     def registry(
         config: AnalyticsConfig,
@@ -2623,6 +2642,7 @@ def _build_installed_proof_boundary():  # noqa: ANN202
     _execute_current_proof_backtest,
 ) = _build_installed_proof_boundary()
 del _build_installed_proof_boundary
+del _run_installed_matrix_proof_session_impl
 
 
 def _proof_registry(

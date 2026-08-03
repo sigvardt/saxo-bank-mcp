@@ -76,6 +76,7 @@ _PROCESS_AUTHORITY = object()
 _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
 
 type MeasuredProofOperationKind = Literal[
+    "analysis_result_observation",
     "source_binding_assertion",
     "known_answer_comparison",
     "property_assertion",
@@ -127,11 +128,16 @@ class _AnalysisProofProperty(_StrictModel):
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     case_kind: ProofExecutionKind
     requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    measurement_state: Literal["passed", "unavailable"]
     operation_kind: MeasuredProofOperationKind
     operation_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,191}$")
     executed_test_node_id: str = Field(
         pattern=r"^tests\.test_analytics_[a-z0-9_]+::test_[a-z0-9_]+$",
     )
+    observed_result_count: int = Field(ge=1)
+    observed_result_types: tuple[str, ...] = Field(min_length=1)
+    observed_result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observed_value_count: int = Field(ge=1)
     observed_output_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     executed_case_count: int = Field(ge=1)
     failed_case_count: int = Field(ge=0)
@@ -144,9 +150,27 @@ class _AnalysisProofProperty(_StrictModel):
     publication_scan_passed: bool
 
     @model_validator(mode="after")
-    def _validate_measured_operation(self) -> Self:
+    def _validate_measured_operation(self) -> Self:  # noqa: C901, PLR0912
         if not self.operation_id.startswith(f"{self.analysis_kind}_{self.case_kind}_"):
             raise ValueError("proof operation is not bound to the exact analysis contract")
+        if self.observed_output_sha256 != self.observed_result_sha256:
+            raise ValueError("proof output is not bound to the typed observed result")
+        if self.measurement_state == "unavailable":
+            if (
+                self.operation_kind != "analysis_result_observation"
+                or self.comparison_count
+                or self.mutation_count
+                or self.mutation_killed_count
+                or self.independent_path_observed
+                or self.recovery_observed
+                or self.publication_scan_passed
+                or self.failed_case_count
+                or self.unexplained_difference_count
+            ):
+                raise ValueError("unavailable proof observation claims unmeasured semantics")
+            return self
+        if self.operation_kind == "analysis_result_observation":
+            raise ValueError("passed proof requires a measured proof-specific operation")
         comparison_required = self.operation_kind.endswith("_comparison")
         if comparison_required != (self.comparison_count > 0):
             raise ValueError("proof comparison count does not match the measured operation")
@@ -184,11 +208,16 @@ class MeasuredAnalysisProofObservation(_StrictModel):
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     case_kind: ProofExecutionKind
     requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    measurement_state: Literal["passed", "unavailable"]
     operation_kind: MeasuredProofOperationKind
     operation_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,191}$")
     executed_test_node_id: str = Field(
         pattern=r"^tests\.test_analytics_[a-z0-9_]+::test_[a-z0-9_]+$",
     )
+    observed_result_count: int = Field(ge=1)
+    observed_result_types: tuple[str, ...] = Field(min_length=1)
+    observed_result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observed_value_count: int = Field(ge=1)
     observed_output_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     test_node_id: str = Field(min_length=1, max_length=512)
     executed_case_count: int = Field(ge=1)
@@ -203,7 +232,25 @@ class MeasuredAnalysisProofObservation(_StrictModel):
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
-    def _validate_observation(self) -> Self:
+    def _validate_observation(self) -> Self:  # noqa: C901
+        if self.observed_output_sha256 != self.observed_result_sha256:
+            raise ValueError("proof output is not bound to the typed observed result")
+        if self.measurement_state == "unavailable":
+            if (
+                self.operation_kind != "analysis_result_observation"
+                or self.comparison_count
+                or self.mutation_count
+                or self.mutation_killed_count
+                or self.independent_path_observed
+                or self.recovery_observed
+                or self.publication_scan_passed
+                or self.failed_case_count
+                or self.unexplained_difference_count
+            ):
+                raise ValueError("unavailable proof observation claims unmeasured semantics")
+            return self
+        if self.operation_kind == "analysis_result_observation":
+            raise ValueError("passed proof requires a measured proof-specific operation")
         if self.failed_case_count or self.unexplained_difference_count:
             raise ValueError("proof observation contains a failed or unexplained case")
         if self.operation_kind.endswith("_comparison") and self.comparison_count < 1:
@@ -626,9 +673,14 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
                         analysis_kind=observed.analysis_kind,
                         case_kind=observed.case_kind,
                         requirement_code=observed.requirement_code,
+                        measurement_state=observed.measurement_state,
                         operation_kind=observed.operation_kind,
                         operation_id=observed.operation_id,
                         executed_test_node_id=observed.executed_test_node_id,
+                        observed_result_count=observed.observed_result_count,
+                        observed_result_types=observed.observed_result_types,
+                        observed_result_sha256=observed.observed_result_sha256,
+                        observed_value_count=observed.observed_value_count,
                         observed_output_sha256=observed.observed_output_sha256,
                         test_node_id=node_id,
                         executed_case_count=observed.executed_case_count,
@@ -710,7 +762,8 @@ def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) ->
     for key, contract_case in expected_cases.items():
         observed = observed_cases[key]
         if (
-            observed.requirement_code != contract_case.requirement_code
+            observed.measurement_state != "passed"
+            or observed.requirement_code != contract_case.requirement_code
             or observed.operation_kind != _MEASURED_OPERATION_BY_CASE[contract_case.kind]
             or observed.executed_test_node_id != exact_analysis_measurement_node_id(key[0])
             or observed.executed_case_count < contract_case.minimum_case_count

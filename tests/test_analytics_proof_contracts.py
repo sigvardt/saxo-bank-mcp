@@ -8,24 +8,25 @@ import inspect
 import json
 import os
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from functools import wraps
 from importlib import import_module
 from pathlib import Path
+from typing import Literal, cast
 
 import pytest
+from pydantic import BaseModel
 
-from saxo_bank_mcp.analytics_source_contracts import (
-    compare_source_schema,
-    source_contracts_by_id,
-)
 from saxo_bank_mcp.qa_analytics_evidence import (
     ProofExecutionKind,
     build_proof_execution_contracts,
     exact_analysis_measurement_node_id,
 )
-from saxo_bank_mcp.secret_scan import scan_secret_text
 
 _CONTRACTS = build_proof_execution_contracts()
 ANALYSIS_PROOF_CASES = tuple(
@@ -35,24 +36,6 @@ ANALYSIS_PROOF_CASES = tuple(
     if case.applicability == "required"
     and case.kind not in {"agent_use", "artifact_parity", "executable_sim", "visual_integrity"}
 )
-
-_OPERATION_KIND_BY_CASE: dict[ProofExecutionKind, str] = {
-    "source_contract": "source_binding_assertion",
-    "known_answer": "known_answer_comparison",
-    "property": "property_assertion",
-    "metamorphic": "metamorphic_assertion",
-    "independent_reference": "independent_reference_comparison",
-    "mutation_kill": "mutation_kill",
-    "numerical_tolerance": "numerical_tolerance_comparison",
-    "accounting_identity": "accounting_identity_comparison",
-    "saxo_reconciliation": "saxo_reconciliation_comparison",
-    "schema_drift": "schema_drift_recovery",
-    "privacy_safety": "privacy_scan",
-    "executable_sim": "source_binding_assertion",
-    "artifact_parity": "source_binding_assertion",
-    "visual_integrity": "source_binding_assertion",
-    "agent_use": "source_binding_assertion",
-}
 
 
 def _analysis_measurement_target(  # noqa: C901, PLR0911, PLR0912
@@ -274,102 +257,19 @@ def _analysis_measurement_target(  # noqa: C901, PLR0911, PLR0912
             raise AssertionError(f"unrouted analysis measurement: {analysis_kind}")
 
 
-_REFERENCE_TARGET_BY_MODULE: dict[str, tuple[str, str]] = {
-    "test_analytics_attribution": (
-        "test_analytics_attribution",
-        "test_attribution_partial_history_is_reduced_with_its_named_gap",
-    ),
-    "test_analytics_costs": (
-        "test_analytics_costs",
-        "test_charge_classification_normalizes_positive_or_negative_source_fee_signs",
-    ),
-    "test_analytics_derivatives": (
-        "test_analytics_derivatives",
-        "test_source_quality_entitlement_and_missing_contracts_fail_closed",
-    ),
-    "test_analytics_exposure": (
-        "test_analytics_exposure",
-        "test_zero_delta_equivalent_gross_exposure_returns_typed_refusal",
-    ),
-    "test_analytics_fixed_income": (
-        "test_analytics_fixed_income",
-        "test_missing_authoritative_fields_refuse_all_fixed_income_measures",
-    ),
-    "test_analytics_income": (
-        "test_analytics_income",
-        "test_income_money_is_owner_only_and_public_evidence_is_redacted",
-    ),
-    "test_analytics_indicators": (
-        "test_analytics_indicators",
-        "test_atr_matches_an_independent_true_range_wilder_loop",
-    ),
-    "test_analytics_instruments": (
-        "test_analytics_instruments",
-        "test_raw_broker_identifier_cannot_replace_an_opaque_instrument_handle",
-    ),
-    "test_analytics_liquidity": (
-        "test_analytics_liquidity",
-        "test_liquidity_private_boundary_and_public_evidence_redaction",
-    ),
-    "test_analytics_market": (
-        "test_analytics_market",
-        "test_universe_hard_limit_refuses_more_than_25_safe_instruments",
-    ),
-    "test_analytics_market_data": (
-        "test_analytics_market_data",
-        "test_quote_fingerprint_distinguishes_fresh_from_stale_quality",
-    ),
-    "test_analytics_metrics": (
-        "test_analytics_metrics",
-        "test_reference_path_does_not_call_patched_production_formulas",
-    ),
-    "test_analytics_monte_carlo": (
-        "test_analytics_monte_carlo",
-        "test_calibration_order_sample_count_returns_and_cash_flow_schedule_are_exact",
-    ),
-    "test_analytics_optimization": (
-        "test_analytics_optimization",
-        "test_source_quality_privacy_and_no_order_authority_are_fail_closed",
-    ),
-    "test_analytics_options": (
-        "test_analytics_options",
-        "test_black_scholes_put_call_parity_and_cross_library_golden",
-    ),
-    "test_analytics_portfolio": (
-        "test_analytics_portfolio",
-        "test_every_supplied_source_binding_must_match_the_frozen_catalog",
-    ),
-    "test_analytics_position_sizing": (
-        "test_analytics_position_sizing",
-        "test_volatility_sizing_scales_with_budget_and_requires_explicit_method_inputs",
-    ),
-    "test_analytics_pretrade": (
-        "test_analytics_pretrade",
-        "test_sell_proposal_preserves_signed_exposure_and_currency_effects",
-    ),
-    "test_analytics_resolver": (
-        "test_analytics_resolver",
-        "test_safe_display_label_never_contains_the_broker_identifier",
-    ),
-    "test_analytics_scenarios": (
-        "test_analytics_scenarios",
-        "test_scenario_privacy_alias_isolation_and_typed_input_only",
-    ),
-    "test_analytics_trade_review": (
-        "test_analytics_trade_review",
-        "test_trade_review_money_is_owner_only_and_public_evidence_is_redacted",
-    ),
-}
-
-
 @dataclass(frozen=True, slots=True)
 class ExactAnalysisProofMeasurement:
     analysis_kind: str
     case_kind: ProofExecutionKind
     requirement_code: str
+    measurement_state: Literal["passed", "unavailable"]
     operation_kind: str
     operation_id: str
     executed_test_node_id: str
+    observed_result_count: int
+    observed_result_types: tuple[str, ...]
+    observed_result_sha256: str
+    observed_value_count: int
     observed_output_sha256: str
     executed_case_count: int
     failed_case_count: int
@@ -385,7 +285,10 @@ class ExactAnalysisProofMeasurement:
 @dataclass(frozen=True, slots=True)
 class _ExecutedAnalysisAssertion:
     test_node_id: str
-    observed_output_sha256: str
+    observed_result_count: int
+    observed_result_types: tuple[str, ...]
+    observed_result_sha256: str
+    observed_value_count: int
 
 
 def _golden_fixture() -> object:
@@ -396,16 +299,113 @@ def _golden_fixture() -> object:
     return factory()
 
 
-def _invoke_measurement(module_name: str, function_name: str) -> _ExecutedAnalysisAssertion:
-    function = getattr(import_module(module_name), function_name)
+_CAPTURE_EXCLUDED_MODULES = frozenset(
+    {
+        "saxo_bank_mcp.analytics_instrument_identity",
+        "saxo_bank_mcp.analytics_models",
+        "saxo_bank_mcp.analytics_source_contracts",
+    },
+)
+
+type _ObservedJsonValue = (
+    str | int | float | bool | None | list[_ObservedJsonValue] | dict[str, _ObservedJsonValue]
+)
+
+
+def _observed_json_value(value: object) -> _ObservedJsonValue:  # noqa: PLR0911
+    if isinstance(value, BaseModel):
+        return {
+            "result_type": type(value).__qualname__,
+            "value": _observed_json_value(
+                cast("dict[str, object]", value.model_dump(mode="json")),
+            ),
+        }
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "result_type": type(value).__qualname__,
+            "value": repr(value),
+        }
+    if isinstance(value, Mapping):
+        mapping = cast("Mapping[object, object]", value)
+        return {
+            str(key): _observed_json_value(item)
+            for key, item in sorted(mapping.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_observed_json_value(item) for item in cast("Sequence[object]", value)]
+    if isinstance(value, Enum):
+        return _observed_json_value(value.value)
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return {"result_type": type(value).__qualname__}
+
+
+def _observed_value_count(value: object) -> int:
+    if isinstance(value, Mapping):
+        return sum(
+            _observed_value_count(item) for item in cast("Mapping[object, object]", value).values()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return sum(_observed_value_count(item) for item in cast("Sequence[object]", value))
+    return 1
+
+
+def _invoke_measurement(  # noqa: C901
+    module_name: str,
+    function_name: str,
+) -> _ExecutedAnalysisAssertion:
+    module = import_module(module_name)
+    function = getattr(module, function_name)
     signature = inspect.signature(function)
+    observed_results: list[object] = []
     with ExitStack() as stack:
+        patcher = stack.enter_context(pytest.MonkeyPatch.context())
+        for name, candidate in tuple(vars(module).items()):
+            if not inspect.isfunction(candidate):
+                continue
+            origin = candidate.__module__
+            if (
+                not origin.startswith("saxo_bank_mcp.analytics_")
+                or origin in _CAPTURE_EXCLUDED_MODULES
+            ):
+                continue
+            if inspect.iscoroutinefunction(candidate):
+                async_candidate = cast("Callable[..., Awaitable[object]]", candidate)
+
+                @wraps(async_candidate)
+                async def async_capture(
+                    *args: object,
+                    __candidate: Callable[..., Awaitable[object]] = async_candidate,
+                    **kwargs: object,
+                ) -> object:
+                    result = await __candidate(*args, **kwargs)
+                    observed_results.append(result)
+                    return result
+
+                patcher.setattr(module, name, async_capture)
+            else:
+
+                @wraps(candidate)
+                def capture(
+                    *args: object,
+                    __candidate: Callable[..., object] = candidate,
+                    **kwargs: object,
+                ) -> object:
+                    result = __candidate(*args, **kwargs)
+                    observed_results.append(result)
+                    return result
+
+                patcher.setattr(module, name, capture)
         arguments: dict[str, object] = {}
         for name in signature.parameters:
             if name == "golden":
                 arguments[name] = _golden_fixture()
             elif name == "monkeypatch":
-                arguments[name] = stack.enter_context(pytest.MonkeyPatch.context())
+                arguments[name] = patcher
             elif name == "tmp_path":
                 temporary = stack.enter_context(
                     tempfile.TemporaryDirectory(
@@ -419,21 +419,18 @@ def _invoke_measurement(module_name: str, function_name: str) -> _ExecutedAnalys
         observed = function(**arguments)
         if inspect.isawaitable(observed):
             asyncio.run(_await_measurement(observed))
-    observed_output_sha256 = hashlib.sha256(
-        json.dumps(
-            {
-                "function_source_sha256": hashlib.sha256(
-                    inspect.getsource(function).encode(),
-                ).hexdigest(),
-                "return_type": type(observed).__qualname__,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode(),
+    if not observed_results:
+        raise AssertionError("analysis proof measurement observed no typed domain result")
+    result_values = tuple(_observed_json_value(item) for item in observed_results)
+    observed_result_sha256 = hashlib.sha256(
+        json.dumps(result_values, separators=(",", ":"), sort_keys=True).encode(),
     ).hexdigest()
     return _ExecutedAnalysisAssertion(
         test_node_id=f"tests.{module_name}::{function_name}",
-        observed_output_sha256=observed_output_sha256,
+        observed_result_count=len(observed_results),
+        observed_result_types=tuple(sorted({type(item).__qualname__ for item in observed_results})),
+        observed_result_sha256=observed_result_sha256,
+        observed_value_count=_observed_value_count(result_values),
     )
 
 
@@ -445,7 +442,7 @@ def _execute_exact_proof_measurement(
     analysis_kind: str,
     case_kind: ProofExecutionKind,
 ) -> ExactAnalysisProofMeasurement:
-    """Execute one analysis-specific assertion and measure the exact proof operation."""
+    """Observe the exact analysis result without inventing unsupported proof semantics."""
     contract = next(item for item in _CONTRACTS if item.analysis_kind == analysis_kind)
     case = next(item for item in contract.cases if item.kind == case_kind)
     target = _analysis_measurement_target(analysis_kind)
@@ -453,94 +450,28 @@ def _execute_exact_proof_measurement(
         analysis_kind,
     )
     primary = _invoke_measurement(*target)
-    comparison_count = 0
-    mutation_count = 0
-    mutation_killed_count = 0
-    independent_path_observed = False
-    recovery_observed = False
-    publication_scan_passed = False
-    observations = [primary.observed_output_sha256]
-    if case_kind in {
-        "known_answer",
-        "numerical_tolerance",
-        "accounting_identity",
-        "saxo_reconciliation",
-    }:
-        repeated = _invoke_measurement(*target)
-        assert repeated.observed_output_sha256 == primary.observed_output_sha256
-        observations.append(repeated.observed_output_sha256)
-        comparison_count = 1
-    elif case_kind == "independent_reference":
-        reference_target = _REFERENCE_TARGET_BY_MODULE[target[0]]
-        reference = _invoke_measurement(*reference_target)
-        observations.append(reference.observed_output_sha256)
-        independent_path_observed = reference.test_node_id != primary.test_node_id
-        assert independent_path_observed
-    elif case_kind == "mutation_kill":
-        mutation = _invoke_measurement(
-            "test_analytics_metrics",
-            "test_mutation_kill_sign",
-        )
-        mutation_count = 1
-        mutation_killed_count = 1
-        assert mutation_killed_count == mutation_count
-        observations.append(mutation.observed_output_sha256)
-    elif case_kind == "schema_drift":
-        drift = compare_source_schema(
-            source_contracts_by_id()["chart_v3"],
-            {"Data": [{"CloseBid": 100.0}], "DataVersion": 1},
-        )
-        recovery_observed = not drift.compatible and drift.missing_required_fields == ("Time",)
-        assert recovery_observed
-        observations.append(
-            hashlib.sha256(
-                json.dumps(drift.model_dump(mode="json"), sort_keys=True).encode(),
-            ).hexdigest(),
-        )
-    elif case_kind == "privacy_safety":
-        findings, errors = scan_secret_text(
-            "analysis-proof-measurement",
-            json.dumps(
-                {
-                    "analysis_kind": analysis_kind,
-                    "test_node_id": primary.test_node_id,
-                    "observation": primary.observed_output_sha256,
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-        )
-        publication_scan_passed = not findings and not errors
-        assert publication_scan_passed
-    operation_sha256 = hashlib.sha256(
-        json.dumps(
-            {
-                "analysis_kind": analysis_kind,
-                "case_kind": case_kind,
-                "observations": observations,
-                "test_node_id": primary.test_node_id,
-            },
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode(),
-    ).hexdigest()
     return ExactAnalysisProofMeasurement(
         analysis_kind=analysis_kind,
         case_kind=case_kind,
         requirement_code=case.requirement_code,
-        operation_kind=_OPERATION_KIND_BY_CASE[case_kind],
-        operation_id=f"{analysis_kind}_{case_kind}_{operation_sha256[:12]}",
+        measurement_state="unavailable",
+        operation_kind="analysis_result_observation",
+        operation_id=(f"{analysis_kind}_{case_kind}_{primary.observed_result_sha256[:12]}"),
         executed_test_node_id=primary.test_node_id,
-        observed_output_sha256=operation_sha256,
-        executed_case_count=1,
+        observed_result_count=primary.observed_result_count,
+        observed_result_types=primary.observed_result_types,
+        observed_result_sha256=primary.observed_result_sha256,
+        observed_value_count=primary.observed_value_count,
+        observed_output_sha256=primary.observed_result_sha256,
+        executed_case_count=primary.observed_result_count,
         failed_case_count=0,
-        comparison_count=comparison_count,
+        comparison_count=0,
         unexplained_difference_count=0,
-        mutation_count=mutation_count,
-        mutation_killed_count=mutation_killed_count,
-        independent_path_observed=independent_path_observed,
-        recovery_observed=recovery_observed,
-        publication_scan_passed=publication_scan_passed,
+        mutation_count=0,
+        mutation_killed_count=0,
+        independent_path_observed=False,
+        recovery_observed=False,
+        publication_scan_passed=False,
     )
 
 
@@ -554,8 +485,20 @@ def test_analysis_proof_contract(
     case_kind: ProofExecutionKind,
     record_property: Callable[[str, object], None],
 ) -> None:
-    """Emit only after the exact domain and proof-case measurements both passed."""
+    """Emit the typed result observation and keep unmeasured proof semantics unavailable."""
     measurement = _execute_exact_proof_measurement(analysis_kind, case_kind)
+    assert measurement.observed_result_count > 0
+    assert measurement.observed_result_types
+    assert measurement.observed_value_count > 0
+    assert measurement.observed_output_sha256 == measurement.observed_result_sha256
+    assert measurement.executed_case_count == measurement.observed_result_count
+    assert measurement.measurement_state == "unavailable"
+    assert measurement.operation_kind == "analysis_result_observation"
+    assert measurement.comparison_count == 0
+    assert measurement.mutation_count == measurement.mutation_killed_count == 0
+    assert not measurement.independent_path_observed
+    assert not measurement.recovery_observed
+    assert not measurement.publication_scan_passed
     record_property(
         "saxo_analytics_proof_receipt_v1",
         json.dumps(
@@ -564,9 +507,14 @@ def test_analysis_proof_contract(
                 "analysis_kind": measurement.analysis_kind,
                 "case_kind": measurement.case_kind,
                 "requirement_code": measurement.requirement_code,
+                "measurement_state": measurement.measurement_state,
                 "operation_kind": measurement.operation_kind,
                 "operation_id": measurement.operation_id,
                 "executed_test_node_id": measurement.executed_test_node_id,
+                "observed_result_count": measurement.observed_result_count,
+                "observed_result_types": measurement.observed_result_types,
+                "observed_result_sha256": measurement.observed_result_sha256,
+                "observed_value_count": measurement.observed_value_count,
                 "observed_output_sha256": measurement.observed_output_sha256,
                 "executed_case_count": measurement.executed_case_count,
                 "failed_case_count": measurement.failed_case_count,
