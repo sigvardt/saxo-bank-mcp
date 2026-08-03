@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import os
 import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import RLock
 from typing import Annotated, Final, Literal, cast
 
 import mcp.types as mt
 from fastmcp.tools import ToolResult
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
+from saxo_bank_mcp.analytics_account_data import AccountScope
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
     AnalyticsConfigError,
@@ -36,6 +39,7 @@ from saxo_bank_mcp.analytics_execution import (
     execute_market_comparison,
     execute_pretrade_proposal,
     execute_stored_analysis,
+    issue_stored_analysis_input,
 )
 from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
@@ -62,6 +66,8 @@ from saxo_bank_mcp.analytics_market import (
 )
 from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinition,
+    MetricDefinitionBinding,
+    MetricDefinitionCatalog,
     load_metric_definition_catalog,
 )
 from saxo_bank_mcp.analytics_models import (
@@ -72,15 +78,24 @@ from saxo_bank_mcp.analytics_models import (
     DatasetId,
     InstrumentHandle,
     JobId,
+    QualityState,
     VisibilityMode,
 )
 from saxo_bank_mcp.analytics_portfolio import (
     PortfolioAnalyticsError,
 )
+from saxo_bank_mcp.analytics_portfolio_snapshots import (
+    PortfolioSnapshotError,
+    capture_portfolio_snapshot,
+)
 from saxo_bank_mcp.analytics_proof_profiles import (
+    EngineProofBinding,
+    ProfileActivationState,
     ProofProfile,
+    ProofProfileCatalog,
     ProofProfileError,
     ProofRegistry,
+    SourceContractProofBinding,
     load_proof_profile_catalog,
 )
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
@@ -108,6 +123,11 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionResult,
     ResolutionStatus,
 )
+from saxo_bank_mcp.analytics_source_contracts import (
+    source_contract_catalog_sha256,
+    source_contract_fingerprint,
+    source_contracts_by_id,
+)
 from saxo_bank_mcp.analytics_storage_tools import (
     DeletionPreviewResult,
     DeletionResult,
@@ -129,12 +149,18 @@ from saxo_bank_mcp.analytics_store import (
 )
 from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
 from saxo_bank_mcp.analytics_sync import (
+    AccountSnapshotDatasetSummary,
+    AccountSnapshotSyncSpec,
+    AnalysisInputDatasetSummary,
+    AnalysisInputSyncSpec,
     DatasetNotFoundError,
     DatasetPage,
+    IngestionFingerprints,
     SyncError,
     SyncLimitError,
     SyncResearchRequest,
     SyncResult,
+    SyncStatus,
     get_dataset,
     sync_research_data,
 )
@@ -146,6 +172,9 @@ from saxo_bank_mcp.analytics_universes import (
     UniverseSummary,
     UniverseValidationError,
 )
+from saxo_bank_mcp.config import SaxoRuntimeConfig, resolve_sim_auth_settings
+from saxo_bank_mcp.mcp_token_state import CachedTokenBlocked, cached_token_for_tool
+from saxo_bank_mcp.process_scoped_selectors import resolve_bound_account_selector
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 
 type AnalysisVisibility = Literal[
@@ -161,9 +190,14 @@ type AnalyticsExportFormat = Literal["csv", "parquet", "json", "html", "pdf"]
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _JOB_RUNTIME_LOCK: Final = RLock()
+_PROCESS_PROOF_LOCK: Final = RLock()
+_PROCESS_PROOF_AUTHORITY: Final = object()
 _MIN_REPORT_VIEWPORT_WIDTH: Final = 320
 _MAX_REPORT_VIEWPORT_WIDTH: Final = 2560
 _job_runtime: tuple[str, AnalyticsStore, AnalyticsJobManager] | None = None
+_process_proof_candidate: str | None = None
+_process_proof_kinds: frozenset[str] = frozenset()
+_process_proof_revisions: dict[str, str] = {}
 
 
 class _StrictToolModel(BaseModel):
@@ -855,12 +889,17 @@ async def saxo_sync_research_data(request: SyncResearchRequest) -> SyncResponse:
     """Run one bounded source sync through the existing Saxo-only provider."""
     tool = "saxo_sync_research_data"
     try:
-        result = await sync_research_data(
-            request,
-            provider=SaxoAnalyticsProvider(),
-            config=_analytics_config(),
-        )
-    except (AnalyticsConfigError, SourceProviderError, SyncError, StoreError, OSError) as error:
+        result = await _sync_research_request(request)
+    except (
+        AnalyticsConfigError,
+        PortfolioSnapshotError,
+        SourceProviderError,
+        StoredAnalysisExecutionError,
+        SyncError,
+        StoreError,
+        OSError,
+        ValueError,
+    ) as error:
         next_tool = "saxo_manage_analysis_job" if isinstance(error, SyncLimitError) else tool
         return _known_failure(tool, error, next_tool=next_tool)
     if result.status.value == "refused":
@@ -879,6 +918,151 @@ async def saxo_sync_research_data(request: SyncResearchRequest) -> SyncResponse:
         next_action="Inspect dataset lineage and quality before calculation.",
         network_call_made=result.source_request_count > 0,
         local_state_changed=True,
+    )
+
+
+async def _sync_research_request(request: SyncResearchRequest) -> SyncResult:
+    """Dispatch special server-owned inputs while retaining one bounded public tool."""
+    config = _analytics_config()
+    provider = SaxoAnalyticsProvider()
+    market_items = tuple(
+        item
+        for item in request.items
+        if not isinstance(item, AccountSnapshotSyncSpec | AnalysisInputSyncSpec)
+    )
+    results: list[SyncResult] = []
+    if market_items:
+        results.append(
+            await sync_research_data(
+                SyncResearchRequest(items=market_items),
+                provider=provider,
+                config=config,
+            ),
+        )
+    for item in request.items:
+        if isinstance(item, AccountSnapshotSyncSpec):
+            results.append(
+                await _capture_server_account_snapshot(item, provider=provider, config=config),
+            )
+        elif isinstance(item, AnalysisInputSyncSpec):
+            results.append(_route_server_analysis_input(item, config=config))
+    if not results:
+        raise SyncError("research sync contains no executable item")
+    statuses = {result.status for result in results}
+    status = (
+        SyncStatus.COMPLETE
+        if statuses == {SyncStatus.COMPLETE}
+        else SyncStatus.REFUSED
+        if statuses == {SyncStatus.REFUSED}
+        else SyncStatus.DEGRADED
+    )
+    return SyncResult(
+        status=status,
+        source_request_count=sum(result.source_request_count for result in results),
+        datasets=tuple(dataset for result in results for dataset in result.datasets),
+    )
+
+
+async def _capture_server_account_snapshot(
+    item: AccountSnapshotSyncSpec,
+    *,
+    provider: SaxoAnalyticsProvider,
+    config: AnalyticsConfig,
+) -> SyncResult:
+    runtime = SaxoRuntimeConfig.from_env()
+    if runtime.requested_environment.value != "SIM":
+        raise SyncError("account analytics capture requires current SIM runtime proof")
+    settings = resolve_sim_auth_settings(require_redirect=False)
+    cached = cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
+    if isinstance(cached, CachedTokenBlocked):
+        raise SyncError("current SIM authentication is unavailable")
+    binding = resolve_bound_account_selector(cached.token, item.safe_account_selector)
+    if binding is None or not binding.client_key or not binding.currency:
+        raise SyncError("current server-owned account context is unavailable")
+    snapshot = await capture_portfolio_snapshot(
+        AccountScope(
+            alias=binding.account_alias,
+            account_key=SecretStr(binding.account_key),
+            client_key=SecretStr(binding.client_key),
+        ),
+        provider=provider,
+        config=config,
+    )
+    return SyncResult(
+        status=(SyncStatus.COMPLETE if snapshot.status == "complete" else SyncStatus.DEGRADED),
+        source_request_count=snapshot.source_request_count,
+        datasets=(
+            AccountSnapshotDatasetSummary(
+                dataset_id=snapshot.dataset_id,
+                account_alias=snapshot.account_alias,
+                eligible_analysis_kinds=(
+                    "portfolio_performance",
+                    "position_sizing",
+                    "scenario_custom",
+                    "portfolio_minimum_variance",
+                    "pretrade_impact",
+                ),
+                quality_state=(
+                    QualityState.COMPLETE if snapshot.status == "complete" else QualityState.PARTIAL
+                ),
+                coverage_start=snapshot.as_of,
+                coverage_end=snapshot.as_of,
+                row_count=(
+                    snapshot.balance_row_count + snapshot.position_count + snapshot.order_count
+                ),
+                warnings=snapshot.warnings,
+                fingerprints=snapshot.fingerprints,
+            ),
+        ),
+    )
+
+
+def _route_server_analysis_input(
+    item: AnalysisInputSyncSpec,
+    *,
+    config: AnalyticsConfig,
+) -> SyncResult:
+    store = AnalyticsStore.open(config)
+    try:
+        issued = issue_stored_analysis_input(
+            analysis_kind=item.analysis_kind,
+            source_dataset_ids=item.source_dataset_ids,
+            store=store,
+        )
+    finally:
+        store.close()
+    fingerprint = issued.fingerprint_sha256
+    return SyncResult(
+        status=(
+            SyncStatus.COMPLETE if issued.quality_state.value == "complete" else SyncStatus.DEGRADED
+        ),
+        source_request_count=0,
+        datasets=(
+            AnalysisInputDatasetSummary.model_validate(
+                {
+                    "dataset_id": issued.dataset_id,
+                    "analysis_kind": issued.analysis_kind,
+                    "quality_state": issued.quality_state,
+                    "coverage_start": issued.coverage_start,
+                    "coverage_end": issued.coverage_end,
+                    "row_count": issued.row_count,
+                    "warnings": (),
+                    "fingerprints": IngestionFingerprints(
+                        raw_pages_sha256=fingerprint,
+                        normalized_rows_sha256=fingerprint,
+                        source_contract_sha256=fingerprint,
+                        entitlements_sha256=hashlib.sha256(b"available").hexdigest(),
+                        correction_state_sha256=hashlib.sha256(
+                            json.dumps(
+                                {"analysis_kind": issued.analysis_kind},
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode(),
+                        ).hexdigest(),
+                    ),
+                },
+            ),
+        ),
     )
 
 
@@ -1110,9 +1294,21 @@ def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices o
     store: AnalyticsStore | None = None
     try:
         config = _analytics_config()
-        registry = _proof_registry(config)
-        result = replay_analysis(analysis_id, config=config, registry=registry)
         store = AnalyticsStore.open(config)
+        matching_contexts = tuple(
+            snapshot
+            for snapshot in store.find_authenticated_snapshot_materials("pretrade_input")
+            if snapshot.payload.get("origin_analysis_id") == analysis_id
+            and snapshot.payload.get("instrument_handle") == instrument_handle
+        )
+        registry = _proof_registry(
+            config,
+            analysis_kind=("pretrade_impact" if len(matching_contexts) == 1 else None),
+            source_revision=(
+                matching_contexts[0].source_revision if len(matching_contexts) == 1 else None
+            ),
+        )
+        result = replay_analysis(analysis_id, config=config, registry=registry)
         store.get_authenticated_dataset(result.provenance.dataset_id)
         bound_handles = tuple(getattr(result.request, "instrument_handles", ()))
         if not bound_handles or instrument_handle not in bound_handles:
@@ -1511,9 +1707,19 @@ def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0913
     try:
         config = _analytics_config()
         store = AnalyticsStore.open(config)
-        for dataset_id in dataset_ids:
-            store.get_authenticated_dataset(dataset_id)
-        registry = _proof_registry(config)
+        authenticated_datasets = tuple(
+            store.get_authenticated_dataset(dataset_id) for dataset_id in dataset_ids
+        )
+        source_revisions = {dataset.source_revision for dataset in authenticated_datasets}
+        if len(source_revisions) != 1:
+            raise StoredAnalysisExecutionError(  # noqa: TRY301
+                "multi_revision_proof_binding_unavailable"
+            )
+        registry = _proof_registry(
+            config,
+            analysis_kind=analysis_kind,
+            source_revision=next(iter(source_revisions)),
+        )
         profile = registry.profile(analysis_kind)
         if profile is None:
             return _canonical_analysis_refusal(
@@ -1819,12 +2025,175 @@ def _server_environment() -> str:
     return os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
 
 
-def _proof_registry(config: AnalyticsConfig) -> ProofRegistry:
+def _process_proof_session_authority() -> object:  # pyright: ignore[reportUnusedFunction]
+    return _PROCESS_PROOF_AUTHORITY
+
+
+def _begin_process_proof_session(  # pyright: ignore[reportUnusedFunction]
+    candidate_commit: str,
+    analysis_kinds: Sequence[str],
+    *,
+    authority: object,
+) -> None:
+    """Begin one private provisional proof session inside the installed producer."""
+    global _process_proof_candidate, _process_proof_kinds  # noqa: PLW0603
+    if (
+        authority is not _PROCESS_PROOF_AUTHORITY
+        or re.fullmatch(
+            r"[a-f0-9]{40}",
+            candidate_commit,
+        )
+        is None
+    ):
+        raise ValueError("process proof authority is unavailable")
+    kinds = frozenset(analysis_kinds)
+    if not kinds:
+        raise ValueError("process proof session requires bounded analysis kinds")
+    with _PROCESS_PROOF_LOCK:
+        if _process_proof_candidate is not None:
+            raise ValueError("process proof session is already active")
+        _process_proof_candidate = candidate_commit
+        _process_proof_kinds = kinds | {"bounded_backtest"}
+        _process_proof_revisions.clear()
+
+
+def _end_process_proof_session(  # pyright: ignore[reportUnusedFunction]
+    *, authority: object
+) -> None:
+    global _process_proof_candidate, _process_proof_kinds  # noqa: PLW0603
+    if authority is not _PROCESS_PROOF_AUTHORITY:
+        raise ValueError("process proof authority is unavailable")
+    with _PROCESS_PROOF_LOCK:
+        _process_proof_candidate = None
+        _process_proof_kinds = frozenset()
+        _process_proof_revisions.clear()
+
+
+def _proof_registry(
+    config: AnalyticsConfig,
+    *,
+    analysis_kind: str | None = None,
+    source_revision: str | None = None,
+) -> ProofRegistry:
     definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    with _PROCESS_PROOF_LOCK:
+        candidate = _process_proof_candidate
+        allowed = _process_proof_kinds
+        revisions = dict(_process_proof_revisions)
+        if candidate is not None and analysis_kind in allowed and source_revision is not None:
+            prior = _process_proof_revisions.setdefault(analysis_kind, source_revision)
+            if prior != source_revision:
+                raise ProofProfileError("process proof source revision changed")
+            revisions[analysis_kind] = source_revision
+    if candidate is not None:
+        catalog = _process_active_catalog(
+            catalog,
+            definitions=definitions,
+            candidate_commit=candidate,
+            allowed_kinds=allowed,
+            source_revisions=revisions,
+        )
     return ProofRegistry(
         definitions=definitions,
-        catalog=load_proof_profile_catalog(definitions=definitions),
+        catalog=catalog,
         config=config,
+    )
+
+
+def _process_active_catalog(
+    catalog: ProofProfileCatalog,
+    *,
+    definitions: MetricDefinitionCatalog,
+    candidate_commit: str,
+    allowed_kinds: frozenset[str],
+    source_revisions: dict[str, str],
+) -> ProofProfileCatalog:
+    profiles = list(catalog.profiles)
+    if "bounded_backtest" in allowed_kinds and not any(
+        profile.analysis_kind == "bounded_backtest" for profile in profiles
+    ):
+        metric = definitions.by_id()["total_return"]
+        fields: dict[str, set[str]] = {}
+        for binding in metric.input_bindings:
+            if binding.source_contract_id is not None:
+                fields.setdefault(binding.source_contract_id, set()).update(binding.field_paths)
+        profiles.append(
+            ProofProfile(
+                proof_profile_id="vp_bounded_backtest_runtime_v1",
+                profile_version="1",
+                activation_state=ProfileActivationState.QUARANTINED,
+                quarantine_reason="authenticated_ghost_required",
+                analysis_kind="bounded_backtest",
+                schema_version="1",
+                metric_definitions=(
+                    MetricDefinitionBinding(
+                        metric_id=metric.metric_id,
+                        definition_version=metric.definition_version,
+                    ),
+                ),
+                source_contracts=tuple(
+                    SourceContractProofBinding(
+                        contract_id=contract_id,
+                        contract_sha256=source_contract_fingerprint(
+                            source_contracts_by_id()[contract_id]
+                        ),
+                        field_paths=tuple(sorted(field_paths)),
+                    )
+                    for contract_id, field_paths in sorted(fields.items())
+                ),
+                source_revision=None,
+                engines=(),
+                artifact_template_ids=(),
+                definition_catalog_sha256=definitions.fingerprint_sha256,
+                source_catalog_sha256=source_contract_catalog_sha256(),
+                valid_until=None,
+            ),
+        )
+    active_profiles: list[ProofProfile] = []
+    for profile in profiles:
+        revision = source_revisions.get(profile.analysis_kind)
+        if profile.analysis_kind not in allowed_kinds or revision is None:
+            active_profiles.append(profile)
+            continue
+        active_profiles.append(
+            profile.model_copy(
+                update={
+                    "activation_state": ProfileActivationState.ACTIVE,
+                    "quarantine_reason": None,
+                    "source_revision": revision,
+                    "engines": (
+                        EngineProofBinding(
+                            engine_name="saxo_analytics",
+                            engine_version="task23-installed-proof",
+                            code_commit=candidate_commit,
+                        ),
+                    ),
+                    "valid_until": datetime.now(UTC) + timedelta(hours=1),
+                }
+            )
+        )
+    production_kinds = tuple(
+        dict.fromkeys((*catalog.production_analysis_kinds, *(p.analysis_kind for p in profiles)))
+    )
+    production_metrics = tuple(
+        dict.fromkeys(
+            (
+                *catalog.production_metric_ids,
+                *(
+                    binding.metric_id
+                    for profile in profiles
+                    for binding in profile.metric_definitions
+                ),
+            ),
+        )
+    )
+    return catalog.model_copy(
+        update={
+            "production_analysis_kinds": production_kinds,
+            "production_metric_ids": production_metrics,
+            "profiles": tuple(active_profiles),
+        }
     )
 
 

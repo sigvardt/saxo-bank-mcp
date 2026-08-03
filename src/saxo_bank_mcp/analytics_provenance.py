@@ -378,10 +378,21 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             source_contract_sha256s=frozenset(source_contracts.values()),
         )
         engine_versions = _result_engine_bindings(result)
+        profile = registry.profile(result.analysis_kind)
+        if profile is None:
+            raise AnalysisReplayRefused("missing_proof_profile")
+        declared_contract_ids = {binding.contract_id for binding in profile.source_contracts}
+        proof_source_contracts = {
+            contract_id: contract_sha256
+            for contract_id, contract_sha256 in source_contracts.items()
+            if contract_id in declared_contract_ids
+        }
+        if set(proof_source_contracts) != declared_contract_ids:
+            raise AnalysisReplayRefused("proof_source_contract_missing")
         proof_status = registry.status(
             result.analysis_kind,
             result.schema_version,
-            source_contracts,
+            proof_source_contracts,
             source_revision=result.provenance.source_revision,
             engine_versions=engine_versions,
             at=checked_at,
@@ -587,20 +598,18 @@ def _verify_result_source_bindings(
     source_revision: str,
     source_contract_sha256s: frozenset[str],
 ) -> None:
-    provenance_hashes = frozenset(
-        (
-            result.provenance.source_contract_sha256,
-            *result.provenance.source_contract_sha256s,
-        ),
+    provenance_hashes = (
+        frozenset(result.provenance.source_contract_sha256s)
+        if result.provenance.source_contract_sha256s
+        else frozenset((result.provenance.source_contract_sha256,))
     )
     if provenance_hashes != source_contract_sha256s:
         raise AnalysisReplayRefused("source_binding_mismatch")
     for receipt in result.provenance.proof_receipts:
-        receipt_hashes = frozenset(
-            (
-                receipt.source_binding.source_contract_sha256,
-                *receipt.source_binding.source_contract_sha256s,
-            ),
+        receipt_hashes = (
+            frozenset(receipt.source_binding.source_contract_sha256s)
+            if receipt.source_binding.source_contract_sha256s
+            else frozenset((receipt.source_binding.source_contract_sha256,))
         )
         if (
             receipt.analysis_kind != result.analysis_kind

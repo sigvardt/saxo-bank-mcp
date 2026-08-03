@@ -17,6 +17,7 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, cast
+from uuid import UUID
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.auth import SaxoTokenSet
@@ -35,6 +36,7 @@ ORDER_SELECTOR_TTL_SECONDS: Final = 15 * 60
 class AccountRow:
     account_key: str
     account_id: str = ""
+    client_key: str = ""
     active: bool = True
     currency: str = ""
     account_type: str = ""
@@ -51,6 +53,20 @@ class OrderSelectorBinding:
 
 
 _ORDER_BINDINGS: dict[str, OrderSelectorBinding] = {}
+
+
+@dataclass(frozen=True, slots=True)
+class BoundAccountSelector:
+    """Private account material retained only for this token generation and process."""
+
+    token_generation: str
+    account_key: str
+    client_key: str
+    account_alias: str
+    currency: str
+
+
+_ACCOUNT_BINDINGS: dict[str, BoundAccountSelector] = {}
 
 
 def is_account_selector(value: str) -> bool:
@@ -70,6 +86,23 @@ def account_selector_for(token: SaxoTokenSet, account_key: str) -> str:
     digest = hmac.digest(_PROCESS_SECRET, message, "sha256")[:18]
     encoded = base64.urlsafe_b64encode(digest).decode().rstrip("=")
     return f"{ACCOUNT_SELECTOR_PREFIX}{encoded}"
+
+
+def resolve_bound_account_selector(
+    token: SaxoTokenSet,
+    selector: str,
+) -> BoundAccountSelector | None:
+    """Resolve only a selector issued from an observed account row in this process."""
+    if not is_account_selector(selector):
+        return None
+    with _LOCK:
+        binding = _ACCOUNT_BINDINGS.get(selector)
+    if binding is None or not hmac.compare_digest(
+        binding.token_generation,
+        token_generation(token),
+    ):
+        return None
+    return binding
 
 
 def resolve_account_selector(
@@ -365,6 +398,7 @@ def public_order_selectors(
 def clear_process_scoped_selector_state_for_tests() -> None:
     """Test-only reset of in-process order bindings."""
     with _LOCK:
+        _ACCOUNT_BINDINGS.clear()
         _ORDER_BINDINGS.clear()
 
 
@@ -410,7 +444,35 @@ def _inject_accounts(value: JsonValue, token: SaxoTokenSet) -> JsonValue:
         if _looks_like_account_row(mapping):
             account_key = mapping.get("AccountKey")
             if isinstance(account_key, str) and account_key.strip():
-                out[_SAFE_ACCOUNT_FIELD] = account_selector_for(token, account_key.strip())
+                selector = account_selector_for(token, account_key.strip())
+                out[_SAFE_ACCOUNT_FIELD] = selector
+                client_key = mapping.get("ClientKey")
+                currency = mapping.get("Currency")
+                if isinstance(client_key, str) and client_key.strip():
+                    alias_bytes = hmac.digest(
+                        _PROCESS_SECRET,
+                        b"\0".join(
+                            (
+                                b"analytics-account-alias-v1",
+                                token_generation(token).encode(),
+                                account_key.strip().encode(),
+                                client_key.strip().encode(),
+                            ),
+                        ),
+                        "sha256",
+                    )[:16]
+                    with _LOCK:
+                        _ACCOUNT_BINDINGS[selector] = BoundAccountSelector(
+                            token_generation=token_generation(token),
+                            account_key=account_key.strip(),
+                            client_key=client_key.strip(),
+                            account_alias=f"aa_{UUID(bytes=alias_bytes, version=4).hex}",
+                            currency=(
+                                currency.strip().upper()
+                                if isinstance(currency, str) and currency.strip()
+                                else ""
+                            ),
+                        )
         return out
     if isinstance(value, Sequence) and not isinstance(value, str):
         return [_inject_accounts(child, token) for child in value]

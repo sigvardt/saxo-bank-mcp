@@ -69,6 +69,7 @@ from saxo_bank_mcp.analytics_store import (
     StoreQuotaError,
     StoreValidationError,
 )
+from saxo_bank_mcp.analytics_universes import ResearchUniverseStore
 
 _OWNER_FILE_MODE = 0o600
 _SCHEMA_SHA256 = "a" * 64
@@ -1753,6 +1754,76 @@ def test_safe_instrument_scope_lists_and_deletes_only_the_matching_handle(
             StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
         )
         assert tuple(entry.object_id for entry in remaining) == (unrelated,)
+    finally:
+        store.close()
+
+
+def test_safe_instrument_deletion_refuses_a_retained_source_page_reference(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        selected = _seed_safe_instrument(store, fingerprint="1" * 64)
+        page = _source_page(
+            store,
+            page_key="referencing-source-page",
+            instrument_handle=selected,
+        )
+
+        with pytest.raises(StoreValidationError, match="retained source page"):
+            store.preview_delete(
+                StorageScope(
+                    data_types=(StorageDataType.SAFE_INSTRUMENTS,),
+                    instrument_handles=(selected,),
+                ),
+            )
+
+        assert tuple(
+            entry.object_id
+            for entry in store.list_storage(
+                StorageScope(data_types=(StorageDataType.SOURCE_PAGES,)),
+            )
+        ) == (page.page_id,)
+        assert tuple(
+            entry.object_id
+            for entry in store.list_storage(
+                StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
+            )
+        ) == (selected,)
+    finally:
+        store.close()
+
+
+def test_safe_instrument_deletion_refuses_a_retained_universe_reference(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = AnalyticsStore.open(config)
+    try:
+        selected = _seed_safe_instrument(store, fingerprint="1" * 64)
+    finally:
+        store.close()
+    universe = ResearchUniverseStore(config).create_universe(
+        "Referenced fixture",
+        (selected,),
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        with pytest.raises(StoreValidationError, match="retained universe"):
+            store.preview_delete(
+                StorageScope(
+                    data_types=(StorageDataType.SAFE_INSTRUMENTS,),
+                    instrument_handles=(selected,),
+                ),
+            )
+
+        assert tuple(
+            entry.object_id
+            for entry in store.list_storage(
+                StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
+            )
+        ) == (selected,)
+        assert ResearchUniverseStore(config).list_universes() == (universe,)
     finally:
         store.close()
 

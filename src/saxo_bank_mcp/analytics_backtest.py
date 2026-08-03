@@ -9,7 +9,11 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from saxo_bank_mcp.analytics_ghost_portfolio import GhostPortfolioVerification
+from saxo_bank_mcp.analytics_ghost_portfolio import (
+    GhostPortfolioVerification,
+    GhostWorkflowRequest,
+    authenticate_ghost_receipt,
+)
 from saxo_bank_mcp.analytics_instruments import ResearchRefusal, ResearchStatus
 from saxo_bank_mcp.analytics_models import (
     ContractName,
@@ -105,9 +109,7 @@ class BacktestDataset(_StrictModel):
         if self.bars[-1].at > self.as_of:
             raise ValueError("backtest bars cannot follow the dataset cutoff")
         delisted = tuple(
-            index
-            for index, bar in enumerate(self.bars)
-            if bar.lifecycle_state == "delisted"
+            index for index, bar in enumerate(self.bars) if bar.lifecycle_state == "delisted"
         )
         if delisted and delisted != (len(self.bars) - 1,):
             raise ValueError("a delisting event must be unique and terminal")
@@ -255,9 +257,9 @@ class BacktestResult(_StrictModel):
         "signal_at_close_fill_next_bar_open"
     )
     order_fill_model: Literal["next_bar_open"] = "next_bar_open"
-    survivorship_disclosure: Literal[
+    survivorship_disclosure: Literal["single_instrument_only_no_point_in_time_universe_claim"] = (
         "single_instrument_only_no_point_in_time_universe_claim"
-    ] = "single_instrument_only_no_point_in_time_universe_claim"
+    )
     overfit_warnings: tuple[ContractName, ...]
     warnings: tuple[ContractName, ...]
     evidence: PortfolioPublicEvidence
@@ -276,9 +278,7 @@ class BacktestResult(_StrictModel):
         private = self.visibility is VisibilityMode.PRIVATE_USER_RESULT
         if private != (self.private_values is not None):
             raise ValueError("backtest values do not match their delivery visibility")
-        if (self.verification_state == "verified") != (
-            self.ghost_validation_state == "passed"
-        ):
+        if (self.verification_state == "verified") != (self.ghost_validation_state == "passed"):
             raise ValueError("backtest verification requires equivalent ghost validation")
         return self
 
@@ -294,12 +294,14 @@ class _ExecutionRun:
     ending_position_weight: float
 
 
-def run_backtest(  # noqa: PLR0911
+def run_backtest(  # noqa: PLR0911, PLR0913
     request: BacktestRequest,
     *,
     visibility: VisibilityMode,
     trusted_local_host: bool,
     ghost_verification: GhostPortfolioVerification | None = None,
+    authenticated_ghost_receipt_id: str | None = None,
+    candidate_commit: str | None = None,
 ) -> BacktestResult | ResearchRefusal:
     """Run the bounded vectorized signal engine with explicit next-open execution."""
     private_delivery = require_delivery_boundary(
@@ -346,7 +348,12 @@ def run_backtest(  # noqa: PLR0911
             "history does not cover indicator warm-up plus a next-bar fill and evaluation",
             missing_fields=("indicator_warmup",),
         )
-    ghost_state = _assess_ghost_verification(request, ghost_verification)
+    ghost_state = _assess_ghost_verification(
+        request,
+        ghost_verification,
+        authenticated_ghost_receipt_id=authenticated_ghost_receipt_id,
+        candidate_commit=candidate_commit,
+    )
     if isinstance(ghost_state, ResearchRefusal):
         return ghost_state
 
@@ -417,9 +424,7 @@ def run_backtest(  # noqa: PLR0911
         delisting_event_count=int(dataset.bars[-1].lifecycle_state == "delisted"),
     )
     material: tuple[BaseModel, ...] = (
-        (request,)
-        if ghost_verification is None
-        else (request, ghost_verification)
+        (request,) if ghost_verification is None else (request, ghost_verification)
     )
     verification_state: BacktestVerificationState = (
         "verified" if ghost_state == "passed" else "unverified"
@@ -456,7 +461,36 @@ def run_backtest(  # noqa: PLR0911
 def _assess_ghost_verification(
     request: BacktestRequest,
     verification: GhostPortfolioVerification | None,
+    *,
+    authenticated_ghost_receipt_id: str | None,
+    candidate_commit: str | None,
 ) -> Literal["not_run", "passed"] | ResearchRefusal:
+    if authenticated_ghost_receipt_id is not None:
+        if candidate_commit is None:
+            return _refusal(
+                request,
+                "ghost_authenticated_receipt_required",
+                "authenticated ghost receipt lacks the exact installed candidate binding",
+            )
+        authenticated = authenticate_ghost_receipt(
+            authenticated_ghost_receipt_id,
+            GhostWorkflowRequest(
+                candidate_commit=candidate_commit,
+                dataset_id=request.dataset.dataset_id,
+                account_alias=request.dataset.account_alias,
+                instrument_handle=request.dataset.instrument_handle,
+                strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
+                fill_model=request.strategy.rebalancing.fill_timing,
+                controlled_fixture="task_18_controlled_stock",
+            ),
+        )
+        if authenticated:
+            return "passed"
+        return _refusal(
+            request,
+            "ghost_authenticated_receipt_required",
+            "authenticated ghost receipt is missing, stale, or bound to another candidate",
+        )
     if verification is None:
         return "not_run"
     dataset = request.dataset
@@ -541,17 +575,11 @@ def _rule_matches(closes: FloatArray, rule: SignalRule) -> NDArray[np.bool_]:
     current_valid = valid[1:]
     if rule.comparison == "crosses_above":
         crossing = (
-            previous_valid
-            & current_valid
-            & (left[:-1] <= right[:-1])
-            & (left[1:] > right[1:])
+            previous_valid & current_valid & (left[:-1] <= right[:-1]) & (left[1:] > right[1:])
         )
     else:
         crossing = (
-            previous_valid
-            & current_valid
-            & (left[:-1] >= right[:-1])
-            & (left[1:] < right[1:])
+            previous_valid & current_valid & (left[:-1] >= right[:-1]) & (left[1:] < right[1:])
         )
     matches[1:] = crossing
     return matches
@@ -634,10 +662,7 @@ def _execute_path(  # noqa: PLR0915
                     / 10_000.0
                     * cost_multiplier
                 )
-                fixed_fee = (
-                    request.strategy.transaction_costs.fixed_cost_per_fill
-                    * cost_multiplier
-                )
+                fixed_fee = request.strategy.transaction_costs.fixed_cost_per_fill * cost_multiplier
                 slippage = (
                     equity_at_open
                     * turnover
@@ -671,11 +696,7 @@ def _execute_path(  # noqa: PLR0915
         if (
             not math.isfinite(equity)
             or equity < 0
-            or (
-                equity <= 0
-                and position_units != 0.0
-                and current.lifecycle_state != "delisted"
-            )
+            or (equity <= 0 and position_units != 0.0 and current.lifecycle_state != "delisted")
         ):
             raise ArithmeticError("modeled backtest path is undefined")
         if current.lifecycle_state == "delisted":
@@ -690,9 +711,7 @@ def _execute_path(  # noqa: PLR0915
     if equity == 0.0 and position_units != 0.0:
         raise ArithmeticError("ending position weight is undefined after equity exhaustion")
     ending_position_weight = (
-        0.0
-        if equity == 0.0
-        else position_units * _price(bars[-1].close_price) / equity
+        0.0 if equity == 0.0 else position_units * _price(bars[-1].close_price) / equity
     )
     if not math.isfinite(ending_position_weight) or ending_position_weight > 1.0:
         raise ArithmeticError("ending position weight is outside the solvent cash model")

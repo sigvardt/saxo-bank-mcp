@@ -1,3 +1,4 @@
+# pyright: reportPrivateUsage=false
 from __future__ import annotations
 
 import json
@@ -21,6 +22,8 @@ from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostStateFingerprint,
     GhostWorkflowPlan,
     GhostWorkflowRequest,
+    _receipt_issuer_authority,
+    issue_authenticated_ghost_receipt,
     prepare_ghost_workflow,
     reconcile_ghost_lifecycle,
 )
@@ -434,6 +437,40 @@ def test_forged_caller_receipt_cannot_verify_any_candidate(
 
     assert isinstance(refused, ResearchRefusal)
     assert refused.reason_code == "ghost_authenticated_receipt_required"
+
+
+def test_process_issued_candidate_bound_ghost_receipt_verifies_exact_backtest() -> None:
+    request = _backtest_request()
+    verification = _caller_constructed_verification(
+        dataset_id=request.dataset.dataset_id,
+        account_alias=request.dataset.account_alias,
+        instrument_handle=request.dataset.instrument_handle,
+        strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
+        candidate_commit=_COMMIT,
+    )
+    with pytest.raises(ValueError, match="issuer authority"):
+        issue_authenticated_ghost_receipt(
+            verification,
+            ledger_provenance_sha256="9" * 64,
+            authority=object(),
+        )
+    receipt_id = issue_authenticated_ghost_receipt(
+        verification,
+        ledger_provenance_sha256="9" * 64,
+        authority=_receipt_issuer_authority(),
+    )
+
+    result = run_backtest(
+        request,
+        visibility=VisibilityMode.FINGERPRINT_ONLY,
+        trusted_local_host=True,
+        authenticated_ghost_receipt_id=receipt_id,
+        candidate_commit=_COMMIT,
+    )
+
+    assert isinstance(result, BacktestResult)
+    assert result.verification_state == "verified"
+    assert result.ghost_validation_state == "passed"
 
 
 def test_non_equivalent_ghost_receipt_refuses_backtest_promotion() -> None:

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hmac
+import secrets
+import threading
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -46,6 +51,27 @@ _UNCERTAIN_PLACE_STATES: Final = frozenset(
         "post_boundary_transport_failure",
     }
 )
+_AUTHENTICATED_RECEIPT_TTL: Final = timedelta(hours=1)
+_SHA256_HEX_LENGTH: Final = 64
+_RECEIPT_AUTHORITY: Final = object()
+_RECEIPT_SECRET: Final = secrets.token_bytes(32)
+_RECEIPT_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedGhostBinding:
+    receipt_id: str
+    candidate_commit: str
+    dataset_id: str
+    account_alias: str
+    instrument_handle: str
+    strategy_fingerprint_sha256: str
+    fill_model: str
+    ledger_provenance_sha256: str
+    expires_at: datetime
+
+
+_AUTHENTICATED_RECEIPTS: dict[str, _AuthenticatedGhostBinding] = {}
 
 
 class _StrictModel(BaseModel):
@@ -104,9 +130,7 @@ class GhostWorkflowPlan(_StrictModel):
     approval_authority: Literal[False] = False
     execution_authority: Literal[False] = False
     verification_state: Literal["unverified"] = "unverified"
-    warnings: tuple[Literal["ghost_workflow_not_executed"], ...] = (
-        "ghost_workflow_not_executed",
-    )
+    warnings: tuple[Literal["ghost_workflow_not_executed"], ...] = ("ghost_workflow_not_executed",)
 
 
 class GhostStateFingerprint(_StrictModel):
@@ -199,15 +223,101 @@ class GhostPortfolioVerification(_StrictModel):
     execution_authority: Literal[False] = False
 
 
+def _receipt_issuer_authority() -> object:  # pyright: ignore[reportUnusedFunction]
+    """Return the module-private capability used only by the installed SIM harness."""
+    return _RECEIPT_AUTHORITY
+
+
+def issue_authenticated_ghost_receipt(
+    verification: GhostPortfolioVerification,
+    *,
+    ledger_provenance_sha256: str,
+    authority: object,
+    now: datetime | None = None,
+) -> str:
+    """Issue one process-local receipt after the installed harness validated SIM evidence."""
+    if authority is not _RECEIPT_AUTHORITY:
+        raise ValueError("ghost receipt issuer authority is unavailable")
+    if (
+        verification.environment != "SIM"
+        or verification.cleanup_state != "proved_equal"
+        or verification.request_ledger_state != "complete_and_last"
+        or len(ledger_provenance_sha256) != _SHA256_HEX_LENGTH
+    ):
+        raise ValueError("ghost receipt evidence is incomplete")
+    current = now or datetime.now(UTC)
+    material = b"\0".join(
+        (
+            verification.candidate_commit.encode(),
+            verification.dataset_id.encode(),
+            verification.account_alias.encode(),
+            verification.instrument_handle.encode(),
+            verification.strategy_fingerprint_sha256.encode(),
+            ledger_provenance_sha256.encode(),
+            secrets.token_bytes(32),
+        ),
+    )
+    receipt_id = f"ghost_{hmac.digest(_RECEIPT_SECRET, material, 'sha256').hex()}"
+    binding = _AuthenticatedGhostBinding(
+        receipt_id=receipt_id,
+        candidate_commit=verification.candidate_commit,
+        dataset_id=verification.dataset_id,
+        account_alias=verification.account_alias,
+        instrument_handle=verification.instrument_handle,
+        strategy_fingerprint_sha256=verification.strategy_fingerprint_sha256,
+        fill_model=verification.fill_model,
+        ledger_provenance_sha256=ledger_provenance_sha256,
+        expires_at=current + _AUTHENTICATED_RECEIPT_TTL,
+    )
+    with _RECEIPT_LOCK:
+        _AUTHENTICATED_RECEIPTS[receipt_id] = binding
+    return receipt_id
+
+
+def authenticate_ghost_receipt(
+    receipt_id: str,
+    request: GhostWorkflowRequest,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Authenticate exact current candidate, source, strategy, fill, and expiry bindings."""
+    current = now or datetime.now(UTC)
+    with _RECEIPT_LOCK:
+        binding = _AUTHENTICATED_RECEIPTS.get(receipt_id)
+    if binding is None or binding.expires_at <= current:
+        return False
+    supplied = (
+        request.candidate_commit,
+        request.dataset_id,
+        request.account_alias,
+        request.instrument_handle,
+        request.strategy_fingerprint_sha256,
+        request.fill_model,
+    )
+    expected = (
+        binding.candidate_commit,
+        binding.dataset_id,
+        binding.account_alias,
+        binding.instrument_handle,
+        binding.strategy_fingerprint_sha256,
+        binding.fill_model,
+    )
+    return all(
+        hmac.compare_digest(left, right) for left, right in zip(supplied, expected, strict=True)
+    )
+
+
+def clear_authenticated_ghost_receipts_for_tests() -> None:
+    with _RECEIPT_LOCK:
+        _AUTHENTICATED_RECEIPTS.clear()
+
+
 def prepare_ghost_workflow(  # noqa: PLR0911
     request: GhostWorkflowRequest,
     preconditions: GhostSessionPreconditions,
 ) -> GhostWorkflowPlan | ResearchRefusal:
     """Return an inert typed plan only after every pre-write SIM gate is proved."""
-    if (
-        preconditions.requested_environment != "SIM"
-        or preconditions.session_environment != "SIM"
-    ):
+    if preconditions.requested_environment != "SIM" or preconditions.session_environment != "SIM":
         return _refusal(
             request,
             "ghost_environment_not_sim",
@@ -393,8 +503,7 @@ def _state_equality(
         "positions": before.positions_fingerprint_sha256 == after.positions_fingerprint_sha256,
         "position_count": before.position_count == after.position_count,
         "trade_messages": (
-            before.trade_messages_fingerprint_sha256
-            == after.trade_messages_fingerprint_sha256
+            before.trade_messages_fingerprint_sha256 == after.trade_messages_fingerprint_sha256
         ),
         "trade_message_count": before.trade_message_count == after.trade_message_count,
     }

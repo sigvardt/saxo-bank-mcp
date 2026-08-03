@@ -4,7 +4,7 @@ import inspect
 import json
 from importlib import import_module
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 import pytest
 from pydantic import ValidationError
@@ -603,12 +603,47 @@ def test_verified_installed_candidate_executes_process_owned_producer(
     def verified_digests(_install: object) -> tuple[str, str, str]:
         return cache_sha256, cache_sha256, cache_sha256
 
+    def block_proof_bundle(**_kwargs: object) -> NoReturn:
+        raise producer.ProofProducerError("installed_sim_requirements_unavailable")
+
     monkeypatch.setattr(producer, "_require_clean_source_commit", accept_clean_source)
     monkeypatch.setattr(
         producer,
         "_verified_install_digests",
         verified_digests,
     )
+    monkeypatch.setattr(
+        producer,
+        "_execute_installed_proof_bundle",
+        block_proof_bundle,
+    )
+
+    def execute_child(cache_root: Path, command: tuple[str, ...]):  # noqa: ANN202
+        command_models = import_module("saxo_bank_mcp.agent_skill_install_models")
+        runner = import_module("saxo_bank_mcp.agent_skill_command_runner")
+        produced = producer.produce_installed_result(
+            candidate_commit=commit,
+            installed_cache_sha256=cache_sha256,
+        )
+        stdout = produced.model_dump_json()
+        return runner.CommandResult(
+            receipt=command_models.CommandReceipt(
+                name="analytics_proof_producer",
+                argv=command,
+                cwd=str(cache_root.resolve()),
+                pid=1,
+                pgid=1,
+                exit_code=0,
+                stdout_sha256=producer.hashlib.sha256(stdout.encode()).hexdigest(),
+                stderr_sha256=producer.hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout=stdout,
+            stderr="",
+        )
+
+    monkeypatch.setattr(producer, "_execute_installed_child", execute_child)
 
     validated = producer.run_verified_installed_producer(
         install,
@@ -617,19 +652,106 @@ def test_verified_installed_candidate_executes_process_owned_producer(
 
     assert validated.status == "blocked"
     assert validated.producer_authenticated is True
-    assert validated.execution_performed is True
+    assert validated.execution_performed is False
     assert validated.candidate_commit == commit
     assert validated.installed_cache_sha256 == cache_sha256
-    assert validated.executed_receipt_count == len(
-        evidence_module.load_analysis_kind_catalog().analysis_kinds
-    )
+    assert validated.executed_receipt_count == 0
     assert len(validated.proof_execution_sha256) == SHA256_HEX_LENGTH
-    assert validated.validation_errors == ("proof_profiles_not_active",)
+    assert validated.validation_errors == ("installed_sim_requirements_unavailable",)
 
     producer_parameters = inspect.signature(producer.produce_installed_result).parameters
     assert "executed_bundle" not in producer_parameters
     assert "receipt_path" not in producer_parameters
     assert "evidence_path" not in producer_parameters
+
+
+def test_installed_producer_privately_validates_a_complete_executed_typed_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    catalog, contracts, bundle = _complete_bundle()
+    active_contracts = tuple(
+        contract.model_copy(
+            update={"proof_activation_state": "active", "quarantine_reason": None},
+        )
+        for contract in contracts
+    )
+
+    def selected_contracts(**_kwargs: object) -> tuple[AnalysisProofExecutionContract, ...]:
+        return active_contracts
+
+    def executed_bundle(**_kwargs: object) -> AnalyticsProofMatrixBundle:
+        return bundle
+
+    monkeypatch.setattr(producer, "load_analysis_kind_catalog", lambda: catalog)
+    monkeypatch.setattr(
+        producer,
+        "build_proof_execution_contracts",
+        selected_contracts,
+    )
+    monkeypatch.setattr(
+        producer,
+        "_execute_installed_proof_bundle",
+        executed_bundle,
+    )
+
+    produced = producer.produce_installed_result(
+        candidate_commit=bundle.candidate_commit,
+        installed_cache_sha256="2" * 64,
+    )
+
+    assert produced.status == "validated"
+    assert produced.process_local_activation is True
+    assert produced.executed_receipt_count == len(active_contracts)
+    assert produced.validation_errors == ()
+    assert produced.bundle_sha256 == producer._digest(  # noqa: SLF001
+        bundle.model_dump(mode="json"),
+    )
+
+
+def test_installed_producer_requires_executed_nodes_for_every_proof_category() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    nodes = tuple(
+        f"installed::{producer._PROOF_CATEGORY_MARKERS[category][0]}"  # noqa: SLF001
+        for category in producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
+    )
+
+    evidence = producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
+        nodes,
+        suite_receipt_sha256="e" * 64,
+    )
+
+    assert tuple(receipt.category for receipt in evidence.categories) == (
+        producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
+    )
+    privacy_marker = producer._PROOF_CATEGORY_MARKERS["privacy_safety"][0]  # noqa: SLF001
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_proof_category_missing:privacy_safety",
+    ):
+        producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
+            tuple(node for node in nodes if privacy_marker not in node),
+            suite_receipt_sha256="e" * 64,
+        )
+
+
+def test_public_or_fixture_authored_proof_bundle_cannot_reach_private_validator() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, contracts, bundle = _complete_bundle()
+    active_contracts = tuple(
+        contract.model_copy(
+            update={"proof_activation_state": "active", "quarantine_reason": None},
+        )
+        for contract in contracts
+    )
+
+    with pytest.raises(producer.ProofProducerError, match="trusted_producer_provenance_missing"):
+        producer._validate_executed_bundle(  # noqa: SLF001
+            bundle,
+            contracts=active_contracts,
+            candidate_commit=bundle.candidate_commit,
+            authority=object(),
+        )
 
 
 def test_fixture_install_cannot_acquire_proof_producer_authority() -> None:
@@ -655,11 +777,11 @@ def test_copied_installed_producer_json_has_no_process_authority(tmp_path: Path)
         catalog_sha256="4" * 64,
         contract_sha256="5" * 64,
         status="blocked",
-        execution_performed=True,
+        execution_performed=False,
         process_local_activation=False,
-        executed_receipt_count=len(evidence_module.load_analysis_kind_catalog().analysis_kinds),
+        executed_receipt_count=0,
         proof_execution_sha256="6" * 64,
-        validation_errors=("proof_profiles_not_active",),
+        validation_errors=("installed_sim_requirements_unavailable",),
     )
     copied_path = tmp_path / "copied-producer.json"
     copied_path.write_text(copied.model_dump_json(), encoding="utf-8")

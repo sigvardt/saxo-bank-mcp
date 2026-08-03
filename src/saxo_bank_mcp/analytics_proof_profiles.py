@@ -152,13 +152,12 @@ class ProofProfile(_StrictModel):
         if self.activation_state is ProfileActivationState.ACTIVE:
             if (
                 self.quarantine_reason is not None
-                or not self.source_contracts
                 or self.source_revision is None
                 or not self.engines
                 or self.valid_until is None
             ):
                 raise ValueError(
-                    "active proof profiles require exact sources, a source revision, "
+                    "active proof profiles require a source revision, "
                     "engines, expiry, and no quarantine",
                 )
         elif self.quarantine_reason is None:

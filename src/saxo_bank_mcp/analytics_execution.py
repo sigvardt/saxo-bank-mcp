@@ -141,6 +141,17 @@ _OPTIMIZATION_CONTEXT_KIND: Final = "optimization_input"
 _DERIVATIVES_CONTEXT_KIND: Final = "derivatives_input"
 _BACKTEST_CONTEXT_KIND: Final = "backtest_input"
 _PRETRADE_CONTEXT_KIND: Final = "pretrade_input"
+
+_CONTEXT_KIND_BY_ANALYSIS: Final[dict[str, str]] = {
+    "portfolio_performance": _PORTFOLIO_CONTEXT_KIND,
+    "position_sizing": _SIZING_CONTEXT_KIND,
+    "scenario_custom": _SCENARIO_CONTEXT_KIND,
+    "portfolio_minimum_variance": _OPTIMIZATION_CONTEXT_KIND,
+    "derivatives_model": _DERIVATIVES_CONTEXT_KIND,
+    "bounded_backtest": _BACKTEST_CONTEXT_KIND,
+    "pretrade_impact": _PRETRADE_CONTEXT_KIND,
+}
+
 _REQUEST_FINGERPRINT_CHUNKS: Final = 16
 
 
@@ -296,6 +307,17 @@ class StoredBacktestExecutionContext(_StoredContextBase):
     missing_interval_count: int = Field(ge=0)
     missing_fields: tuple[str, ...]
     warnings: tuple[str, ...]
+    candidate_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    authenticated_ghost_receipt_id: str | None = Field(
+        default=None,
+        pattern=r"^ghost_[a-f0-9]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def _validate_ghost_binding(self) -> Self:
+        if (self.candidate_commit is None) != (self.authenticated_ghost_receipt_id is None):
+            raise ValueError("backtest candidate and authenticated ghost receipt must be paired")
+        return self
 
 
 class StoredPretradeExecutionContext(_StoredContextBase):
@@ -340,6 +362,82 @@ class StoredPretradeExecutionContext(_StoredContextBase):
         if bool(self.missing_fields) != (self.quality_state is QualityState.PARTIAL):
             raise ValueError("partial pretrade context must name missing fields")
         return self
+
+
+_CONTEXT_MODEL_BY_ANALYSIS: Final[dict[str, type[BaseModel]]] = {
+    "portfolio_performance": StoredPortfolioExecutionContext,
+    "position_sizing": StoredPositionSizingExecutionContext,
+    "scenario_custom": StoredScenarioExecutionContext,
+    "portfolio_minimum_variance": StoredOptimizationExecutionContext,
+    "derivatives_model": StoredDerivativesExecutionContext,
+    "bounded_backtest": StoredBacktestExecutionContext,
+    "pretrade_impact": StoredPretradeExecutionContext,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedStoredAnalysisInput:
+    """Value-free proof that one exact typed context is already server-owned."""
+
+    dataset_id: str
+    analysis_kind: str
+    quality_state: QualityState
+    coverage_start: datetime
+    coverage_end: datetime
+    row_count: int
+    fingerprint_sha256: str
+
+
+def issue_stored_analysis_input(
+    *,
+    analysis_kind: str,
+    source_dataset_ids: Sequence[str],
+    store: AnalyticsStore,
+) -> IssuedStoredAnalysisInput:
+    """Authenticate and route one existing typed input without accepting source facts.
+
+    Context payloads can only have entered through server-owned capture code. This boundary
+    accepts opaque dataset handles, authenticates every bound source page and snapshot, and
+    refuses a widened or mismatched source set.
+    """
+    context_kind = _CONTEXT_KIND_BY_ANALYSIS.get(analysis_kind)
+    model_type = _CONTEXT_MODEL_BY_ANALYSIS.get(analysis_kind)
+    if context_kind is None or model_type is None:
+        raise StoredAnalysisExecutionError("analysis_input_kind_unsupported")
+    dataset_ids = tuple(source_dataset_ids)
+    if not dataset_ids or len(dataset_ids) != len(set(dataset_ids)):
+        raise StoredAnalysisExecutionError("analysis_input_source_scope_invalid")
+    primary = store.get_authenticated_dataset_material(dataset_ids[0])
+    snapshot = store.get_authenticated_snapshot_material(dataset_ids[0], context_kind)
+    context = _parse_context(snapshot, model_type)
+    supporting = tuple(getattr(context, "supporting_dataset_ids", ()))
+    if dataset_ids != (dataset_ids[0], *supporting):
+        raise StoredAnalysisExecutionError("analysis_input_source_scope_mismatch")
+    materials = (primary, *(store.get_authenticated_dataset_material(item) for item in supporting))
+    if any(material.account_scope != primary.account_scope for material in materials):
+        raise StoredAnalysisExecutionError("analysis_input_account_scope_mismatch")
+    fingerprint_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "analysis_kind": analysis_kind,
+                "context_fingerprint_sha256": snapshot.snapshot.fingerprint_sha256,
+                "dataset_fingerprints": [
+                    material.dataset.fingerprint_sha256 for material in materials
+                ],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    return IssuedStoredAnalysisInput(
+        dataset_id=primary.dataset.dataset_id,
+        analysis_kind=analysis_kind,
+        quality_state=primary.dataset.quality_state,
+        coverage_start=primary.coverage_start,
+        coverage_end=primary.coverage_end,
+        row_count=primary.dataset.row_count,
+        fingerprint_sha256=fingerprint_sha256,
+    )
 
 
 def execute_market_comparison(  # noqa: PLR0913
@@ -1054,7 +1152,9 @@ def _execute_derivatives(  # noqa: PLR0913
     )
     if isinstance(domain_result, ResearchRefusal):
         raise StoredAnalysisExecutionError(domain_result.reason_code)
-    if domain_result.status is ResearchStatus.REDUCED:
+    if domain_result.status is ResearchStatus.REDUCED and set(domain_result.warnings) != {
+        "saxo_greeks_not_compared"
+    }:
         raise StoredAnalysisExecutionError("saxo_greek_reconciliation_unavailable")
     values = domain_result.private_values
     if not isinstance(values, OptionAnalyticsValues):
@@ -1143,6 +1243,8 @@ def _execute_backtest(  # noqa: PLR0913
         ),
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         trusted_local_host=True,
+        authenticated_ghost_receipt_id=context.authenticated_ghost_receipt_id,
+        candidate_commit=context.candidate_commit,
     )
     if isinstance(domain_result, ResearchRefusal):
         raise StoredAnalysisExecutionError(domain_result.reason_code)
@@ -1413,17 +1515,28 @@ def _build_proof_result(  # noqa: C901, PLR0912, PLR0913, PLR0915
     if len(engines) != 1 or engines[0].engine_name != _ENGINE_NAME:
         raise StoredAnalysisExecutionError("proof_engine_executor_unavailable")
     engine = engines[0]
-    source_contracts: dict[str, str] = {}
+    authenticated_source_contracts: dict[str, str] = {}
     for page in primary.pages:
-        existing = source_contracts.setdefault(page.contract_name, page.contract_sha256)
+        existing = authenticated_source_contracts.setdefault(
+            page.contract_name,
+            page.contract_sha256,
+        )
         if existing != page.contract_sha256:
             raise StoredAnalysisExecutionError("source_binding_ambiguous")
-    if not source_contracts:
+    if not authenticated_source_contracts:
         raise StoredAnalysisExecutionError("source_contract_missing")
+    declared_contract_ids = {binding.contract_id for binding in profile.source_contracts}
+    proof_source_contracts = {
+        contract_id: contract_sha256
+        for contract_id, contract_sha256 in authenticated_source_contracts.items()
+        if contract_id in declared_contract_ids
+    }
+    if set(proof_source_contracts) != declared_contract_ids:
+        raise StoredAnalysisExecutionError("proof_source_contract_missing")
     proof_status = registry.status(
         analysis_kind,
         "1",
-        source_contracts,
+        proof_source_contracts,
         source_revision=dataset.source_revision,
         engine_versions={
             engine.engine_name: (engine.engine_version, engine.code_commit),
@@ -1461,8 +1574,7 @@ def _build_proof_result(  # noqa: C901, PLR0912, PLR0913, PLR0915
                         currency=reporting_currency,
                     )
                     for claim in metric_claims
-                    if registry.definitions.by_id()[claim.metric_id].unit_class
-                    is ValueUnitClass.MONETARY
+                    if registry.definitions.by_id()[claim.metric_id].output_unit == "price_currency"
                 ),
                 key=lambda binding: binding.metric_id,
             ),
@@ -1518,7 +1630,7 @@ def _build_proof_result(  # noqa: C901, PLR0912, PLR0913, PLR0915
         engine_versions,
         None,
     )
-    contract_shas = tuple(sorted(source_contracts.values()))
+    contract_shas = tuple(sorted(authenticated_source_contracts.values()))
     if len(contract_shas) == 1:
         primary_contract_sha = contract_shas[0]
         contract_sha_set: tuple[str, ...] = ()

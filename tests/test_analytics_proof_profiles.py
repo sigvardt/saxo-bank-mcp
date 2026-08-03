@@ -503,13 +503,27 @@ def test_checked_in_profiles_cover_every_declared_surface_and_current_source() -
     )
 
 
-def test_active_profile_requires_exact_nonempty_source_contract_fields() -> None:
-    _, profile, _ = _active_registry()
+def test_active_profile_allows_derived_only_metrics_but_refuses_missing_source_bindings() -> None:
+    registry, profile, source_contracts = _active_registry()
+    empty_profile = ProofProfile.model_validate(
+        profile.model_dump(mode="python") | {"source_contracts": ()},
+    )
+    missing_binding_registry = ProofRegistry(
+        definitions=registry.definitions,
+        catalog=registry.catalog.model_copy(update={"profiles": (empty_profile,)}),
+    )
 
-    with pytest.raises(ValidationError):
-        ProofProfile.model_validate(
-            profile.model_dump(mode="python") | {"source_contracts": ()},
-        )
+    status = missing_binding_registry.status(
+        profile.analysis_kind,
+        "1",
+        source_contracts,
+        source_revision="revision-a",
+        engine_versions={"saxo_analytics": ("1", "abcdef0")},
+        at=_NOW,
+    )
+
+    assert status.state is ProofState.STALE
+    assert status.reason_code == "metric_source_binding_changed"
 
 
 def test_active_profile_must_cover_each_metric_source_field() -> None:

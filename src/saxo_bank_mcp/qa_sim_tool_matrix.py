@@ -200,6 +200,7 @@ async def _run_mcp_account_and_fixture_preflight(
     account = await call_tool(client, account_tool, account_arguments)
     _record(state, account_tool, account, account_arguments)
     selectors = safe_account_selectors(account.payload)
+    _extend_unique(state.analytics_resources.account_selectors, list(selectors))
     account_ok = account.result_state == "passed" and len(selectors) == 1
     fixture_results = [
         await call_tool(client, tool, arguments) for tool, arguments in fixture_read_calls(fixtures)
@@ -428,6 +429,13 @@ async def run_analytics_case_phase(
         )
         per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
         _remember_analytics_handles(state.analytics_resources, observed_call, result)
+        if (
+            observed_call.tool_id == "saxo_sync_research_data"
+            and observed_call.kind == "success"
+            and result.result_parsed
+            and state.analytics_resources.dataset_ids_by_analysis_kind.get("price_bars")
+        ):
+            await _prepare_server_owned_analysis_inputs(client, state)
         if observed_call.kind == "success":
             _record(
                 state,
@@ -459,6 +467,73 @@ async def run_analytics_case_phase(
         )
         for contract in analytics_sim_contracts()
     )
+
+
+async def _prepare_server_owned_analysis_inputs(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+) -> None:
+    """Capture and route only current server-owned inputs; missing coverage stays absent."""
+    resources = state.analytics_resources
+    if resources.account_selectors:
+        account_capture = await call_tool(
+            client,
+            "saxo_sync_research_data",
+            {
+                "request": {
+                    "items": [
+                        {
+                            "data_kind": "account_snapshot",
+                            "safe_account_selector": resources.account_selectors[0],
+                        },
+                    ],
+                },
+            },
+        )
+        _observe_auxiliary(state, account_capture)
+        auxiliary_call = AnalyticsCaseCall(
+            tool_id="saxo_sync_research_data",
+            kind="success",
+            arguments={},
+            input_strategy="sync_issued_instrument",
+        )
+        _remember_analytics_handles(resources, auxiliary_call, account_capture)
+    source_dataset_ids = tuple(resources.dataset_ids)
+    for analysis_kind in (
+        "portfolio_performance",
+        "position_sizing",
+        "scenario_custom",
+        "portfolio_minimum_variance",
+        "derivatives_model",
+        "bounded_backtest",
+        "pretrade_impact",
+    ):
+        for dataset_id in source_dataset_ids:
+            routed = await call_tool(
+                client,
+                "saxo_sync_research_data",
+                {
+                    "request": {
+                        "items": [
+                            {
+                                "data_kind": "analysis_input",
+                                "analysis_kind": analysis_kind,
+                                "source_dataset_ids": [dataset_id],
+                            },
+                        ],
+                    },
+                },
+            )
+            _observe_auxiliary(state, routed)
+            auxiliary_call = AnalyticsCaseCall(
+                tool_id="saxo_sync_research_data",
+                kind="success",
+                arguments={},
+                input_strategy="sync_issued_instrument",
+            )
+            _remember_analytics_handles(resources, auxiliary_call, routed)
+            if resources.dataset_ids_by_analysis_kind.get(analysis_kind):
+                break
 
 
 def analytics_case_receipt(
@@ -638,8 +713,8 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         else resources.dataset_ids_by_analysis_kind
     )
     dataset_ids = routed.get(route, [])
-    if degraded and not dataset_ids:
-        dataset_ids = resources.dataset_ids_by_analysis_kind.get("price_bars", [])
+    if degraded and not dataset_ids and route == "price_bars":
+        dataset_ids = resources.dataset_ids_by_analysis_kind.get(route, [])
     dataset_id = dataset_ids[0] if dataset_ids else None
     if dataset_id is None:
         return {}

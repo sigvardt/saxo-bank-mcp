@@ -151,7 +151,62 @@ class OptionChainDatasetSummary(_DatasetHandleSummary):
     entitlement_error_code: str | None = Field(max_length=128)
 
 
-type DatasetHandleSummary = PriceBarDatasetSummary | QuoteDatasetSummary | OptionChainDatasetSummary
+type AnalysisInputKind = Literal[
+    "portfolio_performance",
+    "position_sizing",
+    "scenario_custom",
+    "portfolio_minimum_variance",
+    "derivatives_model",
+    "bounded_backtest",
+    "pretrade_impact",
+]
+
+
+class AccountSnapshotDatasetSummary(_StrictModel):
+    """Handle-only summary for one current server-captured Saxo account snapshot."""
+
+    dataset_id: DatasetId
+    data_kind: Literal["account_snapshot"] = "account_snapshot"
+    account_alias: str = Field(pattern=r"^aa_[0-9a-f]{32}$")
+    eligible_analysis_kinds: tuple[
+        Literal[
+            "portfolio_performance",
+            "position_sizing",
+            "scenario_custom",
+            "portfolio_minimum_variance",
+            "pretrade_impact",
+        ],
+        ...,
+    ]
+    quality_state: QualityState
+    coverage_start: datetime
+    coverage_end: datetime
+    row_count: int = Field(ge=0)
+    warnings: tuple[str, ...]
+    fingerprints: IngestionFingerprints
+
+
+class AnalysisInputDatasetSummary(_StrictModel):
+    """Safe route to one authenticated typed execution context already held by the server."""
+
+    dataset_id: DatasetId
+    data_kind: Literal["analysis_input"] = "analysis_input"
+    analysis_kind: AnalysisInputKind
+    quality_state: QualityState
+    coverage_start: datetime
+    coverage_end: datetime
+    row_count: int = Field(ge=0)
+    warnings: tuple[str, ...]
+    fingerprints: IngestionFingerprints
+
+
+type DatasetHandleSummary = (
+    PriceBarDatasetSummary
+    | QuoteDatasetSummary
+    | OptionChainDatasetSummary
+    | AccountSnapshotDatasetSummary
+    | AnalysisInputDatasetSummary
+)
 
 
 class SyncResult(_StrictModel):
@@ -188,7 +243,28 @@ class OptionChainSyncSpec(_StrictModel):
     expiries: tuple[date, ...]
 
 
-type ResearchSyncSpec = PriceBarSyncSpec | QuoteSyncSpec | OptionChainSyncSpec
+class AccountSnapshotSyncSpec(_StrictModel):
+    """Request current account source material by a process-issued safe selector only."""
+
+    data_kind: Literal["account_snapshot"] = "account_snapshot"
+    safe_account_selector: str = Field(pattern=r"^proc-acct-[A-Za-z0-9_-]{20,64}$")
+
+
+class AnalysisInputSyncSpec(_StrictModel):
+    """Request an authenticated typed context using only existing opaque source handles."""
+
+    data_kind: Literal["analysis_input"] = "analysis_input"
+    analysis_kind: AnalysisInputKind
+    source_dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+
+
+type ResearchSyncSpec = (
+    PriceBarSyncSpec
+    | QuoteSyncSpec
+    | OptionChainSyncSpec
+    | AccountSnapshotSyncSpec
+    | AnalysisInputSyncSpec
+)
 
 
 class SyncResearchRequest(_StrictModel):
@@ -782,7 +858,7 @@ async def sync_research_data(
                 max_age=item.max_age,
                 request_budget=budget,
             )
-        else:
+        elif isinstance(item, OptionChainSyncSpec):
             result = await capture_option_chain(
                 item.handle,
                 item.expiries,
@@ -791,6 +867,8 @@ async def sync_research_data(
                 clock=clock,
                 request_budget=budget,
             )
+        else:
+            raise SyncValidationError("server-owned analysis input handler is required")
         results.append(result)
     return _combine_sync_results(
         results,
@@ -798,13 +876,17 @@ async def sync_research_data(
     )
 
 
-def _preflight_research_request(
+def _preflight_research_request(  # noqa: C901
     request: SyncResearchRequest,
     config: AnalyticsConfig,
 ) -> None:
     if len(request.items) > config.limits.sync_instruments:
         raise SyncLimitError("synchronous research instrument limit exceeded")
-    handles = {item.handle for item in request.items}
+    handles = {
+        item.handle
+        for item in request.items
+        if isinstance(item, PriceBarSyncSpec | QuoteSyncSpec | OptionChainSyncSpec)
+    }
     if len(handles) > config.limits.sync_instruments:
         raise SyncLimitError("synchronous research instrument limit exceeded")
     projected_rows = 0
@@ -821,10 +903,13 @@ def _preflight_research_request(
             _validate_max_age(item.max_age)
             projected_storage_rows += 1
             projected_source_requests += 1
-        else:
+        elif isinstance(item, OptionChainSyncSpec):
             item_expiries = _validate_expiries(item.expiries, config)
             projected_storage_rows += len(item_expiries)
             projected_source_requests += len(item_expiries)
+        elif isinstance(item, AnalysisInputSyncSpec):
+            if len(item.source_dataset_ids) != len(set(item.source_dataset_ids)):
+                raise SyncValidationError("analysis input source handles must be unique")
     if projected_rows > config.limits.sync_rows:
         raise SyncLimitError("synchronous market data row limit exceeded")
     if projected_source_requests > config.limits.sync_instruments:

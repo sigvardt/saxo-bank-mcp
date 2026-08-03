@@ -76,20 +76,13 @@ _DEGRADATION_TOOLS: Final = frozenset(
         "saxo_backtest_strategy",
     },
 )
-DECLARED_ANALYTICS_SUCCESS_TOOL_IDS: Final[tuple[str, ...]] = (
-    "saxo_analytics_capabilities",
-    "saxo_resolve_research_universe",
-    "saxo_manage_research_universe",
-    "saxo_sync_research_data",
-    "saxo_get_research_dataset",
-    "saxo_list_analytics_storage",
-    "saxo_preview_analytics_deletion",
-    "saxo_delete_analytics_data",
-)
+DECLARED_ANALYTICS_SUCCESS_TOOL_IDS: Final[tuple[str, ...]] = (*ANALYTICS_TOOL_IDS,)
 _DECLARED_ANALYTICS_SUCCESS_TOOLS: Final = frozenset(
     DECLARED_ANALYTICS_SUCCESS_TOOL_IDS,
 )
-_TIMEOUT_RECOVERY_TOOLS: Final[frozenset[str]] = frozenset()
+_TIMEOUT_RECOVERY_TOOLS: Final[frozenset[str]] = frozenset(
+    {"saxo_manage_analysis_job"},
+)
 _SAFE_UUID4_PAYLOAD: Final = "00000000000040008000000000000000"
 _SAFE_INSTRUMENT_HANDLE: Final = f"ih_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_DATASET_HANDLE: Final = f"ds_{_SAFE_UUID4_PAYLOAD}"
@@ -276,6 +269,7 @@ class AnalyticsRuntimeResources:
     """Server-issued handles retained only for one isolated FastMCP matrix session."""
 
     instrument_handles: list[str] = field(default_factory=list)
+    account_selectors: list[str] = field(default_factory=list)
     degraded_instrument_handles: list[str] = field(default_factory=list)
     dataset_ids: list[str] = field(default_factory=list)
     degraded_dataset_ids: list[str] = field(default_factory=list)

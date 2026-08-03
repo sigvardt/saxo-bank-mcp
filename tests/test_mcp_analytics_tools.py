@@ -15,10 +15,27 @@ from typing import Final, cast
 import httpx2
 import pytest
 from fastmcp import Client
+from pydantic import BaseModel
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
-from saxo_bank_mcp.analytics_execution import StoredBacktestExecutionContext
+from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
+from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
+from saxo_bank_mcp.analytics_execution import (
+    StoredBacktestExecutionContext,
+    StoredDerivativesExecutionContext,
+    StoredOptimizationExecutionContext,
+    StoredPortfolioExecutionContext,
+    StoredPositionSizingExecutionContext,
+    StoredPretradeExecutionContext,
+    StoredScenarioExecutionContext,
+)
+from saxo_bank_mcp.analytics_ghost_portfolio import (
+    GhostPortfolioVerification,
+    GhostStateEquality,
+    _receipt_issuer_authority,
+    issue_authenticated_ghost_receipt,
+)
 from saxo_bank_mcp.analytics_instrument_identity import (
     instrument_handle_for_saxo_identity,
     put_saxo_instrument_identity,
@@ -36,15 +53,33 @@ from saxo_bank_mcp.analytics_metric_definitions import (
 )
 from saxo_bank_mcp.analytics_models import (
     HandleKind,
+    QualityState,
     VisibilityMode,
     new_safe_handle,
 )
+from saxo_bank_mcp.analytics_optimization import (
+    CovariancePerturbation,
+    OptimizationAsset,
+    OptimizationDataset,
+    OptimizationRequest,
+    SolverSettings,
+)
+from saxo_bank_mcp.analytics_options import OptionContract, OptionModelInput
+from saxo_bank_mcp.analytics_portfolio import (
+    LedgerEntry,
+    LedgerKind,
+    PortfolioPeriodDataset,
+    SaxoPerformanceTotals,
+    SaxoSourceBinding,
+)
+from saxo_bank_mcp.analytics_position_sizing import PositionSizingRequest
 from saxo_bank_mcp.analytics_proof_profiles import (
     ArtifactOwnerBinding,
     EngineProofBinding,
     ProfileActivationState,
     ProofProfile,
     ProofProfileCatalog,
+    ProofProfileError,
     ProofRegistry,
     SourceContractProofBinding,
 )
@@ -59,14 +94,22 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionStatus,
     ResolvedInstrument,
 )
+from saxo_bank_mcp.analytics_scenarios import (
+    CurrencyShock,
+    PortfolioScenarioRequest,
+    ScenarioComponent,
+    ScenarioShock,
+)
 from saxo_bank_mcp.analytics_source_contracts import (
     source_contract_catalog_sha256,
     source_contract_fingerprint,
     source_contracts_by_id,
 )
 from saxo_bank_mcp.analytics_store import AnalyticsStore
-from saxo_bank_mcp.analytics_sync import DatasetPage, sync_price_bars
+from saxo_bank_mcp.analytics_strategy_schema import strategy_definition_fingerprint
+from saxo_bank_mcp.analytics_sync import AnalysisInputKind, DatasetPage, sync_price_bars
 from saxo_bank_mcp.analytics_tool_descriptions import ANALYTICS_TOOL_DESCRIPTIONS
+from saxo_bank_mcp.analytics_trade_review import DecisionPointQuote
 from saxo_bank_mcp.endpoint_registry import EndpointOperation
 from saxo_bank_mcp.server import create_mcp_server
 from saxo_bank_mcp.server_tool_ids import (
@@ -100,6 +143,8 @@ EXACT_ANALYTICS_TOOL_IDS: Final[tuple[str, ...]] = (
 )
 _EXPECTED_TOOL_COUNT: Final = 60
 _NOW = datetime(2026, 8, 3, 10, tzinfo=UTC)
+_ACCOUNT_ALIAS = "aa_00000000000040008000000000000099"
+_CANDIDATE_COMMIT = "a" * 40
 
 
 class _ChartFixtureExecutor:
@@ -208,6 +253,124 @@ async def _synced_chart_fixture(
     finally:
         store.close()
     return handle, dataset_id, source_revision, executor
+
+
+def _source_binding(contract_id: str, source_revision: str) -> SaxoSourceBinding:
+    contract = source_contracts_by_id()[contract_id]
+    return SaxoSourceBinding(
+        contract_id=contract_id,
+        contract_sha256=source_contract_fingerprint(contract),
+        source_revision=source_revision,
+        capture_fingerprint_sha256=hashlib.sha256(
+            f"{contract_id}:{source_revision}".encode(),
+        ).hexdigest(),
+        quality_state=QualityState.COMPLETE,
+        entitlement_state="available",
+    )
+
+
+def _persist_typed_context(
+    config: AnalyticsConfig,
+    *,
+    context_kind: str,
+    contract_ids: tuple[str, ...],
+    at: datetime,
+    build_context: Callable[
+        [str, str, str, tuple[SaxoSourceBinding, ...]],
+        BaseModel,
+    ],
+) -> tuple[str, str, str]:
+    """Persist one synthetic Saxo-shaped context through the real owner-local store boundary."""
+    source_revision = f"capture:{context_kind}"
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    snapshot_id = new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID)
+    store = AnalyticsStore.open(config)
+    try:
+
+        def source_payload(contract_id: str) -> dict[str, object]:
+            if contract_id == "info_price_v1":
+                return {
+                    "contract_id": contract_id,
+                    "rows": [
+                        {
+                            "Uic": 1,
+                            "AssetType": "Stock",
+                            "Quote": {
+                                "Ask": 100,
+                                "Bid": 100,
+                                "DelayedByMinutes": 0,
+                                "Mid": 100,
+                                "PriceType": "RealTime",
+                            },
+                            "PriceTypeAsk": "RealTime",
+                            "PriceTypeBid": "RealTime",
+                        }
+                    ],
+                    "source_quality": {
+                        "state": "complete",
+                        "entitlement_limited_fields": [],
+                        "delayed_fields": [],
+                        "missing_fields": [],
+                    },
+                }
+            return {
+                "contract_id": contract_id,
+                "rows": [{"schema": "synthetic_saxo_contract_fixture"}],
+            }
+
+        page_ids = tuple(
+            store.put_source_page(
+                source_kind=source_contracts_by_id()[contract_id].source_kind,
+                page_key=f"{context_kind}:{contract_id}",
+                source_revision=source_revision,
+                contract_name=contract_id,
+                contract_sha256=source_contract_fingerprint(
+                    source_contracts_by_id()[contract_id],
+                ),
+                payload=source_payload(contract_id),
+                row_count=1,
+                source_timestamp=at,
+                account_scope=_ACCOUNT_ALIAS,
+                instrument_handle=None,
+            ).page_id
+            for contract_id in contract_ids
+        )
+        store.create_dataset(
+            dataset_id=dataset_id,
+            account_scope=_ACCOUNT_ALIAS,
+            source_scope="saxo_openapi",
+            source_revision=source_revision,
+            source_page_ids=page_ids,
+            created_at=at,
+            coverage_start=at,
+            coverage_end=at,
+            quality_state=QualityState.COMPLETE,
+        )
+        material = store.get_authenticated_dataset_material(dataset_id)
+        bindings = tuple(
+            SaxoSourceBinding(
+                contract_id=page.contract_name,
+                contract_sha256=page.contract_sha256,
+                source_revision=page.source_revision,
+                capture_fingerprint_sha256=page.fingerprint_sha256,
+                quality_state=QualityState.COMPLETE,
+                entitlement_state="available",
+            )
+            for page in material.pages
+        )
+        context = build_context(dataset_id, snapshot_id, source_revision, bindings)
+        store.create_snapshot(
+            snapshot_id=snapshot_id,
+            dataset_id=dataset_id,
+            snapshot_kind=context_kind,
+            account_scope=_ACCOUNT_ALIAS,
+            source_revision=source_revision,
+            as_of=at,
+            payload=context.model_dump(mode="json"),
+        )
+    finally:
+        store.close()
+    return dataset_id, snapshot_id, source_revision
 
 
 def _active_market_registry(
@@ -413,6 +576,52 @@ def test_exact_analytics_catalog_moves_server_from_39_to_60() -> None:
     assert EXPECTED_TOOL_COUNT == _EXPECTED_TOOL_COUNT
     assert len(ALL_LOGICAL_TOOL_IDS) == EXPECTED_TOOL_COUNT
     assert set(ANALYTICS_TOOL_DESCRIPTIONS) == set(ANALYTICS_TOOL_IDS)
+
+
+def test_installed_process_proof_overlay_is_candidate_bound_and_ephemeral(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    config = tools_module._analytics_config()  # noqa: SLF001
+    definitions = load_metric_definition_catalog()
+    checked = tools_module.load_proof_profile_catalog(definitions=definitions)
+    checked_profile = next(
+        profile for profile in checked.profiles if profile.analysis_kind == "market_comparison"
+    )
+    assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
+    authority = tools_module._process_proof_session_authority()  # noqa: SLF001
+
+    tools_module._begin_process_proof_session(  # noqa: SLF001
+        _CANDIDATE_COMMIT,
+        ("market_comparison",),
+        authority=authority,
+    )
+    try:
+        active = tools_module._proof_registry(  # noqa: SLF001
+            config,
+            analysis_kind="market_comparison",
+            source_revision="capture:installed-proof",
+        ).profile("market_comparison")
+        assert active is not None
+        assert active.activation_state is ProfileActivationState.ACTIVE
+        assert active.source_revision == "capture:installed-proof"
+        assert active.engines[0].code_commit == _CANDIDATE_COMMIT
+        with pytest.raises(ProofProfileError, match="source revision changed"):
+            tools_module._proof_registry(  # noqa: SLF001
+                config,
+                analysis_kind="market_comparison",
+                source_revision="capture:stale",
+            )
+    finally:
+        tools_module._end_process_proof_session(authority=authority)  # noqa: SLF001
+
+    restored = tools_module._proof_registry(config).profile(  # noqa: SLF001
+        "market_comparison"
+    )
+    assert restored is not None
+    assert restored.activation_state is ProfileActivationState.QUARANTINED
+    assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
 
 
 @pytest.mark.anyio
@@ -778,7 +987,7 @@ def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
     class _Store:
         def get_authenticated_dataset(self, selected: str) -> object:
             authenticated.append(selected)
-            return object()
+            return SimpleNamespace(source_revision="capture:test")
 
         def close(self) -> None:
             closed.append(True)
@@ -794,7 +1003,7 @@ def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
     def open_store(_config: AnalyticsConfig) -> _Store:
         return _Store()
 
-    def proof_registry(_config: AnalyticsConfig) -> _Registry:
+    def proof_registry(_config: AnalyticsConfig, **_kwargs: object) -> _Registry:
         return _Registry()
 
     monkeypatch.setattr(
@@ -838,7 +1047,7 @@ async def test_active_proof_market_adapter_persists_replays_renders_and_explains
         source_revision=source_revision,
     )
 
-    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
         return registry
 
     monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
@@ -936,7 +1145,7 @@ async def test_active_proof_instrument_adapter_uses_domain_engine_and_replays(
         source_revision=source_revision,
     )
 
-    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
         return instrument_registry
 
     monkeypatch.setattr(
@@ -970,7 +1179,442 @@ async def test_active_proof_instrument_adapter_uses_domain_engine_and_replays(
 
 
 @pytest.mark.anyio
-async def test_bounded_backtest_adapter_executes_then_requires_authenticated_ghost_proof(
+async def test_real_stored_context_adapters_execute_five_distinct_domain_engines(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Portfolio, sizing, scenario, optimization, and derivatives use distinct typed inputs."""
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    sizing_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    scenario_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    optimization_handles = (
+        new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
+        new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
+    )
+    option_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    underlying_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+
+    portfolio_ids = _persist_typed_context(
+        config,
+        context_kind="portfolio_performance_input",
+        contract_ids=(
+            "performance_summary_v4",
+            "performance_timeseries_v4",
+            "transactions_v1",
+            "bookings_v1",
+        ),
+        at=_NOW,
+        build_context=lambda dataset_id, snapshot_id, revision, _bindings: (
+            StoredPortfolioExecutionContext(
+                dataset=PortfolioPeriodDataset(
+                    dataset_id=dataset_id,
+                    snapshot_id=snapshot_id,
+                    account_alias=_ACCOUNT_ALIAS,
+                    start_at=_NOW - timedelta(days=1),
+                    end_at=_NOW,
+                    reporting_currency="USD",
+                    opening_value=Decimal(1000),
+                    closing_value=Decimal(1050),
+                    ledger_entries=(
+                        LedgerEntry(
+                            account_alias=_ACCOUNT_ALIAS,
+                            event_key_sha256="1" * 64,
+                            revision=1,
+                            occurred_at=_NOW,
+                            kind=LedgerKind.TRADING_PNL,
+                            amount=Decimal(50),
+                            currency="USD",
+                        ),
+                    ),
+                    source_bindings=tuple(
+                        _source_binding(contract_id, revision)
+                        for contract_id in (
+                            "performance_summary_v4",
+                            "performance_timeseries_v4",
+                            "transactions_v1",
+                            "bookings_v1",
+                        )
+                    ),
+                    quality_state=QualityState.COMPLETE,
+                    missing_fields=(),
+                    warnings=(),
+                    benchmark=None,
+                    saxo_totals=SaxoPerformanceTotals(
+                        closing_value=Decimal(1050),
+                        total_profit_loss=Decimal(50),
+                        currency="USD",
+                    ),
+                    named_differences=(),
+                ),
+            )
+        ),
+    )
+    sizing_ids = _persist_typed_context(
+        config,
+        context_kind="position_sizing_input",
+        contract_ids=("balances_v1", "positions_v1", "costs_v1"),
+        at=_NOW,
+        build_context=lambda dataset_id, _snapshot_id, revision, _bindings: (
+            StoredPositionSizingExecutionContext(
+                request=PositionSizingRequest(
+                    dataset_id=dataset_id,
+                    account_alias=_ACCOUNT_ALIAS,
+                    instrument_handle=sizing_handle,
+                    reporting_currency="USD",
+                    method="stop_distance",
+                    maximum_loss=Decimal(1),
+                    risk_budget_confirmed=True,
+                    entry_price=Decimal(100),
+                    stop_price=Decimal(95),
+                    volatility_measure=None,
+                    volatility_multiplier=None,
+                    value_per_price_unit=Decimal(1),
+                    lot_size=Decimal(1),
+                    portfolio_value=Decimal(100000),
+                    maximum_weight=Decimal("0.5"),
+                    buying_power=Decimal(100000),
+                    reserved_buffer=Decimal(0),
+                    estimated_transaction_cost=Decimal(0),
+                    margin_headroom=Decimal(100000),
+                    margin_requirement_per_money_unit=Decimal("0.2"),
+                    source_bindings=tuple(
+                        _source_binding(contract_id, revision)
+                        for contract_id in ("balances_v1", "positions_v1", "costs_v1")
+                    ),
+                    quality_state=QualityState.COMPLETE,
+                    missing_fields=(),
+                    warnings=(),
+                ),
+            )
+        ),
+    )
+    scenario_ids = _persist_typed_context(
+        config,
+        context_kind="scenario_input",
+        contract_ids=("balances_v1", "positions_v1", "exposure_instruments_v1"),
+        at=_NOW,
+        build_context=lambda dataset_id, snapshot_id, revision, _bindings: (
+            StoredScenarioExecutionContext(
+                analysis_kind="scenario_custom",
+                request=PortfolioScenarioRequest(
+                    dataset_id=dataset_id,
+                    snapshot_id=snapshot_id,
+                    account_alias=_ACCOUNT_ALIAS,
+                    as_of=_NOW,
+                    reporting_currency="USD",
+                    scenario_type="equity",
+                    input_mode="numeric",
+                    narrative_fingerprint_sha256=None,
+                    numeric_shocks_echoed_by_caller=False,
+                    caller_accepted_numeric_shocks=False,
+                    echoed_shock_map_sha256=None,
+                    accepted_shock_map_sha256=None,
+                    historical_start_at=None,
+                    historical_end_at=None,
+                    components=(
+                        ScenarioComponent(
+                            account_alias=_ACCOUNT_ALIAS,
+                            instrument_handle=scenario_handle,
+                            branch_id="linear",
+                            current_value=Decimal(100),
+                            currency="USD",
+                            current_margin_requirement=Decimal(20),
+                            model_analysis_id=None,
+                        ),
+                    ),
+                    component_shocks=(
+                        ScenarioShock(
+                            instrument_handle=scenario_handle,
+                            price_shock_ratio=Decimal(0),
+                            volatility_shock_points=Decimal(0),
+                            rate_shock_basis_points=Decimal(0),
+                            cash_flow_shock=Decimal(0),
+                            repriced_value_at_base_fx=None,
+                            stressed_margin_requirement=Decimal(20),
+                        ),
+                    ),
+                    currency_shocks=(CurrencyShock(currency="USD", shock_ratio=Decimal(0)),),
+                    current_margin_headroom=Decimal(100),
+                    source_bindings=tuple(
+                        _source_binding(contract_id, revision)
+                        for contract_id in (
+                            "balances_v1",
+                            "positions_v1",
+                            "exposure_instruments_v1",
+                        )
+                    ),
+                    quality_state=QualityState.COMPLETE,
+                    missing_fields=(),
+                    warnings=(),
+                ),
+            )
+        ),
+    )
+
+    def build_optimization(
+        dataset_id: str,
+        snapshot_id: str,
+        revision: str,
+        _bindings: tuple[SaxoSourceBinding, ...],
+    ) -> BaseModel:
+        assets = tuple(
+            OptimizationAsset(
+                account_alias=_ACCOUNT_ALIAS,
+                instrument_handle=handle,
+                asset_class="equity",
+                currency="USD",
+                current_weight=Decimal("0.5"),
+                expected_return=Decimal("0.05"),
+                lower_bound=Decimal(0),
+                upper_bound=Decimal(1),
+                transaction_cost_rate=Decimal("0.01"),
+                margin_requirement_rate=Decimal("0.1"),
+                minimum_trade_weight=Decimal(0),
+                excluded=False,
+            )
+            for handle in optimization_handles
+        )
+        covariance = ((Decimal("0.04"), Decimal(0)), (Decimal(0), Decimal("0.01")))
+        dataset = OptimizationDataset(
+            dataset_id=dataset_id,
+            snapshot_id=snapshot_id,
+            account_alias=_ACCOUNT_ALIAS,
+            estimation_start_at=_NOW - timedelta(days=60),
+            estimation_end_at=_NOW - timedelta(days=1),
+            as_of=_NOW,
+            reporting_currency="USD",
+            assets=assets,
+            covariance_matrix=covariance,
+            sample_count=60,
+            return_model="historical_arithmetic",
+            covariance_model="sample_covariance",
+            source_bindings=tuple(
+                _source_binding(contract_id, revision)
+                for contract_id in (
+                    "chart_v3",
+                    "positions_v1",
+                    "exposure_instruments_v1",
+                    "balances_v1",
+                    "costs_v1",
+                )
+            ),
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+        )
+        return StoredOptimizationExecutionContext(
+            analysis_kind="portfolio_minimum_variance",
+            request=OptimizationRequest(
+                dataset=dataset,
+                objective="minimum_variance",
+                objective_confirmed_by_caller=True,
+                constraints_confirmed_by_caller=True,
+                short_policy="long_only",
+                asset_class_constraints=(),
+                currency_constraints=(),
+                maximum_turnover=Decimal(2),
+                maximum_transaction_cost_ratio=Decimal(2),
+                maximum_margin_ratio=Decimal(2),
+                perturbations=(
+                    CovariancePerturbation(
+                        perturbation_id="identity_check",
+                        covariance_matrix=covariance,
+                    ),
+                ),
+                solver_settings=SolverSettings(
+                    method="SLSQP",
+                    maximum_iterations=1000,
+                    objective_tolerance=Decimal("0.00000001"),
+                    feasibility_tolerance=Decimal("0.00000001"),
+                    kkt_tolerance=Decimal("0.00001"),
+                ),
+                lexicographic_tie_break_rule="asset_order_within_objective_tolerance",
+                concentration_warning_threshold=Decimal("0.95"),
+                condition_number_warning_threshold=Decimal(1000000),
+                stability_warning_threshold=Decimal("0.05"),
+                stability_refusal_threshold=Decimal("0.25"),
+            ),
+        )
+
+    optimization_ids = _persist_typed_context(
+        config,
+        context_kind="optimization_input",
+        contract_ids=(
+            "chart_v3",
+            "positions_v1",
+            "exposure_instruments_v1",
+            "balances_v1",
+            "costs_v1",
+        ),
+        at=_NOW,
+        build_context=build_optimization,
+    )
+
+    def build_derivatives(
+        dataset_id: str,
+        _snapshot_id: str,
+        revision: str,
+        _bindings: tuple[SaxoSourceBinding, ...],
+    ) -> BaseModel:
+        bindings = tuple(
+            _source_binding(contract_id, revision)
+            for contract_id in ("options_chain_reference_v1", "info_price_v1")
+        )
+        contract = OptionContract(
+            dataset_id=dataset_id,
+            option_handle=option_handle,
+            underlying_handle=underlying_handle,
+            contract_currency="USD",
+            pricing_model="black_scholes",
+            reference_kind="spot",
+            option_type="call",
+            exercise_style="european",
+            payoff_style="vanilla",
+            rate_model="constant",
+            reference_price=100,
+            strike=100,
+            time_to_expiry_years=1,
+            risk_free_rate=0.05,
+            dividend_yield=0,
+            days_per_year=365,
+        )
+        model_input = OptionModelInput(contract=contract, volatility=0.2)
+        return StoredDerivativesExecutionContext(
+            dataset=DerivativeDataset(
+                dataset_id=dataset_id,
+                account_alias=_ACCOUNT_ALIAS,
+                as_of=_NOW,
+                instrument_handles=(option_handle, underlying_handle),
+                source_bindings=bindings,
+                quality_state=QualityState.COMPLETE,
+                missing_fields=(),
+                warnings=(),
+            ),
+            model_input=model_input,
+            saxo_greeks=None,
+        )
+
+    derivative_ids = _persist_typed_context(
+        config,
+        context_kind="derivatives_input",
+        contract_ids=("options_chain_reference_v1", "info_price_v1"),
+        at=_NOW,
+        build_context=build_derivatives,
+    )
+    registrations = (
+        ("portfolio_performance", ("time_weighted_return",), portfolio_ids[2], ()),
+        ("position_sizing", ("position_size",), sizing_ids[2], ()),
+        ("scenario_custom", ("custom_shock_effect",), scenario_ids[2], ()),
+        (
+            "portfolio_minimum_variance",
+            ("minimum_variance_objective",),
+            optimization_ids[2],
+            (),
+        ),
+        ("derivatives_model", ("theoretical_option_value",), derivative_ids[2], ()),
+    )
+    registry = _active_test_registry_many(config, registrations)
+
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
+        return registry
+
+    monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
+    analysis_routes: tuple[tuple[AnalysisInputKind, str], ...] = (
+        ("portfolio_performance", portfolio_ids[0]),
+        ("position_sizing", sizing_ids[0]),
+        ("scenario_custom", scenario_ids[0]),
+        ("portfolio_minimum_variance", optimization_ids[0]),
+        ("derivatives_model", derivative_ids[0]),
+    )
+    for analysis_kind, dataset_id in analysis_routes:
+        issued = await tools_module.saxo_sync_research_data(
+            tools_module.SyncResearchRequest(
+                items=(
+                    tools_module.AnalysisInputSyncSpec(
+                        analysis_kind=analysis_kind,
+                        source_dataset_ids=(dataset_id,),
+                    ),
+                ),
+            ),
+        )
+        assert issued.status == "passed"
+
+    responses = (
+        tools_module.saxo_analyze_portfolio(
+            tools_module.StoredPortfolioToolRequest(
+                analysis_kind="portfolio_performance",
+                dataset_ids=(portfolio_ids[0],),
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        ),
+        tools_module.saxo_size_position(
+            tools_module.StoredPositionSizingToolRequest(
+                dataset_id=sizing_ids[0],
+                instrument_handle=sizing_handle,
+                method="stop_distance",
+                maximum_loss=Decimal(100),
+                risk_budget_confirmed=True,
+                stop_price=Decimal(95),
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        ),
+        tools_module.saxo_run_scenario(
+            tools_module.StoredScenarioToolRequest(
+                analysis_kind="scenario_custom",
+                dataset_id=scenario_ids[0],
+                shocks=(
+                    tools_module.ExplicitScenarioShock(
+                        instrument_handle=scenario_handle,
+                        price_shock_ratio=Decimal("-0.1"),
+                    ),
+                ),
+                numeric_shocks_echoed_by_caller=True,
+                caller_accepted_numeric_shocks=True,
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        ),
+        tools_module.saxo_optimize_portfolio(
+            tools_module.StoredOptimizationToolRequest(
+                analysis_kind="portfolio_minimum_variance",
+                dataset_id=optimization_ids[0],
+                objective="minimum_variance",
+                objective_confirmed_by_caller=True,
+                constraints_confirmed_by_caller=True,
+                short_policy="long_only",
+                maximum_turnover=Decimal(2),
+                maximum_transaction_cost_ratio=Decimal(2),
+                maximum_margin_ratio=Decimal(2),
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        ),
+        tools_module.saxo_model_derivatives(
+            tools_module.StoredDerivativesToolRequest(
+                analysis_kind="derivatives_model",
+                dataset_id=derivative_ids[0],
+                instrument_handles=(option_handle, underlying_handle),
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        ),
+    )
+
+    assert all(
+        isinstance(response, tools_module.VerifiedAnalysisToolResponse) for response in responses
+    ), tuple((response.status, getattr(response, "reason_code", None)) for response in responses)
+    assert tuple(response.analysis_kind for response in responses) == tuple(
+        registration[0] for registration in registrations
+    )
+    assert all(
+        replay_analysis(response.analysis_id, config=config, registry=registry) == response.result
+        for response in responses
+        if isinstance(response, tools_module.VerifiedAnalysisToolResponse)
+    )
+    assert all(response.broker_write_made is False for response in responses)
+
+
+@pytest.mark.anyio
+async def test_bounded_backtest_adapter_executes_with_authenticated_ghost_proof(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1015,6 +1659,35 @@ async def test_bounded_backtest_adapter_executes_then_requires_authenticated_gho
         )
     finally:
         store.close()
+    strategy_payload = _bounded_strategy().model_dump(mode="json")
+    strategy_payload["evaluation_split"] = {
+        "kind": "holdout",
+        "train_end_at": datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+        "holdout_start_at": datetime(2026, 8, 3, 9, 1, tzinfo=UTC),
+    }
+    strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
+    receipt_id = issue_authenticated_ghost_receipt(
+        GhostPortfolioVerification(
+            candidate_commit=_CANDIDATE_COMMIT,
+            dataset_id=dataset_id,
+            account_alias=chart_material.account_scope,
+            instrument_handle=handle,
+            strategy_fingerprint_sha256=strategy_definition_fingerprint(strategy),
+            fill_model="next_bar_open",
+            state_equality=GhostStateEquality(
+                balance=True,
+                orders=True,
+                order_count=True,
+                positions=True,
+                position_count=True,
+                trade_messages=True,
+                trade_message_count=True,
+            ),
+            evidence_fingerprint_sha256="b" * 64,
+        ),
+        ledger_provenance_sha256="c" * 64,
+        authority=_receipt_issuer_authority(),
+    )
     registry = _active_test_registry(
         config,
         analysis_kind="bounded_backtest",
@@ -1022,7 +1695,7 @@ async def test_bounded_backtest_adapter_executes_then_requires_authenticated_gho
         source_revision=source_revision,
     )
 
-    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
         return registry
 
     store = AnalyticsStore.open(config)
@@ -1035,6 +1708,8 @@ async def test_bounded_backtest_adapter_executes_then_requires_authenticated_gho
             missing_interval_count=0,
             missing_fields=(),
             warnings=(),
+            candidate_commit=_CANDIDATE_COMMIT,
+            authenticated_ghost_receipt_id=receipt_id,
         )
         store.create_snapshot(
             snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
@@ -1048,13 +1723,21 @@ async def test_bounded_backtest_adapter_executes_then_requires_authenticated_gho
     finally:
         store.close()
     monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
-    strategy_payload = _bounded_strategy().model_dump(mode="json")
-    strategy_payload["evaluation_split"] = {
-        "kind": "holdout",
-        "train_end_at": datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
-        "holdout_start_at": datetime(2026, 8, 3, 9, 1, tzinfo=UTC),
-    }
-    strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
+
+    issued = await tools_module.saxo_sync_research_data(
+        tools_module.SyncResearchRequest(
+            items=(
+                tools_module.AnalysisInputSyncSpec(
+                    analysis_kind="bounded_backtest",
+                    source_dataset_ids=(dataset_id,),
+                ),
+            ),
+        ),
+    )
+    assert issued.status == "passed"
+    assert issued.result is not None
+    assert issued.result.datasets[0].dataset_id == dataset_id
+    assert issued.result.datasets[0].data_kind == "analysis_input"
 
     response = tools_module.saxo_backtest_strategy(
         tools_module.StoredBacktestToolRequest(
@@ -1066,9 +1749,11 @@ async def test_bounded_backtest_adapter_executes_then_requires_authenticated_gho
         )
     )
 
-    assert isinstance(response, tools_module.RefusedAnalysisToolResponse)
-    assert response.reason_code == "ghost_authenticated_receipt_required"
-    assert response.analysis_id is None
+    assert isinstance(response, tools_module.VerifiedAnalysisToolResponse)
+    assert response.analysis_kind == "bounded_backtest"
+    assert (
+        replay_analysis(response.analysis_id, config=config, registry=registry) == response.result
+    )
     assert response.broker_write_made is False
 
 
@@ -1088,13 +1773,13 @@ async def test_pretrade_adapter_replays_real_analysis_and_requires_server_owned_
             (
                 "pretrade_impact",
                 ("estimated_transaction_cost", "maximum_loss"),
-                source_revision,
+                "capture:pretrade_input",
                 (),
             ),
         ),
     )
 
-    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
         return registry
 
     monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
@@ -1130,6 +1815,116 @@ async def test_pretrade_adapter_replays_real_analysis_and_requires_server_owned_
     assert proposal.execution_authority is False
     assert proposal.next_tool != "saxo_create_order_preview"
 
+    def build_pretrade_context(
+        pretrade_dataset_id: str,
+        _snapshot_id: str,
+        _revision: str,
+        bindings: tuple[SaxoSourceBinding, ...],
+    ) -> BaseModel:
+        quote_binding = next(
+            binding for binding in bindings if binding.contract_id == "info_price_v1"
+        )
+        return StoredPretradeExecutionContext(
+            origin_analysis_id=origin.analysis_id,
+            dataset_id=pretrade_dataset_id,
+            account_alias=_ACCOUNT_ALIAS,
+            instrument_handle=handle,
+            as_of=_NOW,
+            reference_price=Decimal(100),
+            contract_multiplier=Decimal(1),
+            instrument_currency="USD",
+            reporting_currency="USD",
+            current_position_quantity=Decimal(0),
+            current_position_exposure=Decimal(0),
+            portfolio_value=Decimal(1000),
+            current_currency_exposure=Decimal(0),
+            buying_power_available=Decimal(1000),
+            margin_available=Decimal(1000),
+            buy_cash_required_per_unit=Decimal(100),
+            sell_cash_required_per_unit=Decimal(0),
+            margin_required_per_unit=Decimal(20),
+            unit_cost_estimate=CostComponents(
+                commission=Decimal(1),
+                spread=Decimal(0),
+                fx_conversion=Decimal(0),
+                financing=Decimal(0),
+                borrow=Decimal(0),
+                custody=Decimal(0),
+                tax=Decimal(0),
+                turnover=Decimal(100),
+                total_cost=Decimal(1),
+            ),
+            saxo_illustration=SaxoCostIllustration(
+                commission=Decimal(1),
+                stamp_duty=Decimal(0),
+                total_cost=Decimal(1),
+                currency="USD",
+            ),
+            named_cost_difference=None,
+            decision_quote=DecisionPointQuote(
+                dataset_id=pretrade_dataset_id,
+                instrument_handle=handle,
+                captured_at=_NOW,
+                bid=Decimal(99),
+                ask=Decimal(101),
+                price_type="Tradable",
+                delayed_by_minutes=0,
+                quality_state=QualityState.COMPLETE,
+                entitlement_state="available",
+                source_binding=quote_binding,
+                captured_by_mcp=True,
+                warnings=(),
+            ),
+            decision_bar=None,
+            fx_quotes=(),
+            cost_holding_period_days=0,
+            source_bindings=bindings,
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+        )
+
+    pretrade_ids = _persist_typed_context(
+        config,
+        context_kind="pretrade_input",
+        contract_ids=("balances_v1", "positions_v1", "costs_v1", "info_price_v1"),
+        at=_NOW,
+        build_context=build_pretrade_context,
+    )
+    issued = await tools_module.saxo_sync_research_data(
+        tools_module.SyncResearchRequest(
+            items=(
+                tools_module.AnalysisInputSyncSpec(
+                    analysis_kind="pretrade_impact",
+                    source_dataset_ids=(pretrade_ids[0],),
+                ),
+            ),
+        ),
+    )
+    assert issued.status == "passed"
+
+    verified = tools_module.saxo_propose_trade_from_analysis(
+        origin.analysis_id,
+        handle,
+        "buy",
+        Decimal(1),
+        proposal_price=Decimal(100),
+        maximum_loss=Decimal(10),
+        holding_period_days=0,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+    )
+
+    assert isinstance(verified, tools_module.VerifiedAnalysisToolResponse)
+    assert verified.analysis_kind == "pretrade_impact"
+    assert verified.analysis_id != origin.analysis_id
+    assert (
+        replay_analysis(verified.analysis_id, config=config, registry=registry) == verified.result
+    )
+    assert verified.broker_write_made is False
+    assert verified.approval_authority is False
+    assert verified.execution_authority is False
+    assert verified.next_tool == "saxo_explain_analysis"
+
 
 @pytest.mark.anyio
 async def test_active_portfolio_adapter_refuses_price_bars_and_nonprivate_delivery(
@@ -1147,7 +1942,7 @@ async def test_active_portfolio_adapter_refuses_price_bars_and_nonprivate_delive
         source_revision=source_revision,
     )
 
-    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+    def active_registry(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
         return registry
 
     monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
@@ -1439,6 +2234,17 @@ def test_trade_proposal_binds_instrument_and_authenticates_analysis_dataset(
     authenticated: list[str] = []
 
     class _Store:
+        def find_authenticated_snapshot_materials(self, _kind: str) -> tuple[object, ...]:
+            return (
+                SimpleNamespace(
+                    source_revision="capture:test",
+                    payload={
+                        "origin_analysis_id": analysis_id,
+                        "instrument_handle": bound_handle,
+                    },
+                ),
+            )
+
         def get_authenticated_dataset(self, selected: str) -> object:
             authenticated.append(selected)
             return object()
@@ -1461,7 +2267,7 @@ def test_trade_proposal_binds_instrument_and_authenticates_analysis_dataset(
     def open_store(_config: AnalyticsConfig) -> _Store:
         return _Store()
 
-    def proof_registry(_config: AnalyticsConfig) -> object:
+    def proof_registry(_config: AnalyticsConfig, **_kwargs: object) -> object:
         return object()
 
     monkeypatch.setattr(
@@ -1509,6 +2315,17 @@ def test_bound_pretrade_context_dispatches_proposal_without_broker_authority(
     instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
 
     class _Store:
+        def find_authenticated_snapshot_materials(self, _kind: str) -> tuple[object, ...]:
+            return (
+                SimpleNamespace(
+                    source_revision="capture:test",
+                    payload={
+                        "origin_analysis_id": analysis_id,
+                        "instrument_handle": instrument_handle,
+                    },
+                ),
+            )
+
         def get_authenticated_dataset(self, _dataset_id: str) -> object:
             return object()
 
@@ -1530,7 +2347,7 @@ def test_bound_pretrade_context_dispatches_proposal_without_broker_authority(
     def open_store(_config: AnalyticsConfig) -> _Store:
         return _Store()
 
-    def proof_registry(_config: AnalyticsConfig) -> object:
+    def proof_registry(_config: AnalyticsConfig, **_kwargs: object) -> object:
         return object()
 
     monkeypatch.setattr(

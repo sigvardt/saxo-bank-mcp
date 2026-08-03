@@ -3245,6 +3245,11 @@ class AnalyticsStore:
             for entry in entries
             if entry.data_type is StorageDataType.SAFE_INSTRUMENTS
         }
+        _refuse_retained_safe_instrument_references(
+            connection,
+            safe_instrument_handles=safe_instrument_handles,
+            deleted_source_page_ids=source_page_ids,
+        )
 
         dataset_ids.update(
             _select_strings(
@@ -3491,6 +3496,45 @@ def _select_strings(
         ).fetchall(),
     )
     return {_require_str(row[0]) for row in rows}
+
+
+def _refuse_retained_safe_instrument_references(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    safe_instrument_handles: set[str],
+    deleted_source_page_ids: set[str],
+) -> None:
+    """Fail before preview when retained local rows still reference a safe handle."""
+    if not safe_instrument_handles:
+        return
+    handles = sorted(safe_instrument_handles)
+    retained_page = connection.execute(
+        """
+        SELECT 1
+        FROM source_pages
+        WHERE instrument_handle = ANY(?)
+          AND NOT (page_id = ANY(?))
+        LIMIT 1
+        """,
+        (handles, sorted(deleted_source_page_ids)),
+    ).fetchone()
+    if retained_page is not None:
+        raise StoreValidationError(
+            "safe instrument deletion has a retained source page reference",
+        )
+    retained_universe = connection.execute(
+        """
+        SELECT 1
+        FROM universe_instruments
+        WHERE instrument_handle = ANY(?)
+        LIMIT 1
+        """,
+        (handles,),
+    ).fetchone()
+    if retained_universe is not None:
+        raise StoreValidationError(
+            "safe instrument deletion has a retained universe reference",
+        )
 
 
 def _require_stored_analysis(
