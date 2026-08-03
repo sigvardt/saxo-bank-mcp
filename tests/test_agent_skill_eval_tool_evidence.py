@@ -95,7 +95,7 @@ def test_prose_only_non_router_fails_without_structured_tool_events(
     prose_only = _codex_success_stream(
         (),
         (
-            "matched natural prompts 39 logical tools cleanup "
+            "matched natural prompts 60 logical tools cleanup "
             "LIVE no-purchase proof no wildcard exact tool grants "
             "saxo_health saxo_list_registered_endpoints"
         ),
@@ -141,7 +141,7 @@ def test_structured_exact_calls_pass_without_real_clients(
     grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
     required = case.required_logical_tools
     text = (
-        "matched natural prompts 39 logical tools cleanup "
+        "matched natural prompts 60 logical tools cleanup "
         "LIVE no-purchase proof no wildcard exact tool grants"
     )
     stream = _codex_success_stream(required, text)

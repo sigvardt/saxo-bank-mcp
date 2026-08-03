@@ -77,7 +77,10 @@ class _RuntimeOutcome:
 
 
 def run_eval_suite(options: EvalRunOptions) -> int:
-    validation = validate_eval_suite(case_root=options.case_root)
+    validation_root = (
+        options.case_root.parent if options.case_root.parent.name == "evals" else options.case_root
+    )
+    validation = validate_eval_suite(case_root=validation_root)
     cases = select_cases(
         load_eval_cases(options.case_root),
         case_id=options.case_id,
@@ -550,9 +553,7 @@ def _cleanup_fields(
     cleanup_error: MatrixEnvError | None,
 ) -> dict[str, JsonValue]:
     complete = process_error is None and promote_error is None and cleanup_error is None
-    process_cleanup = (
-        "residue" if process_error is not None else process_manager.process_cleanup
-    )
+    process_cleanup = "residue" if process_error is not None else process_manager.process_cleanup
     return {
         "complete": complete,
         "runtime_cleanup": "residue" if cleanup_error is not None else "passed",

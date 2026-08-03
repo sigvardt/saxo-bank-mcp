@@ -14,6 +14,14 @@ STATUS_SOURCE: Final = ROOT / "data/saxo/agent_status_routes.json"
 JSON_ADAPTER: Final[TypeAdapter[JsonValue]] = TypeAdapter(JsonValue)
 STREAMING_PAYLOAD_MODULE: Final = "src/saxo_bank_mcp/streaming_tool_payloads.py"
 STREAMING_PAYLOAD_STATUSES: Final = frozenset({"auth_required", "denied"})
+ANALYTICS_STATUS_MODULES: Final = frozenset(
+    {
+        "src/saxo_bank_mcp/analytics_ghost_portfolio.py",
+        "src/saxo_bank_mcp/analytics_jobs.py",
+        "src/saxo_bank_mcp/analytics_render.py",
+        "src/saxo_bank_mcp/mcp_analytics_tools.py",
+    }
+)
 
 
 def test_streaming_tool_payload_status_module_is_classified_and_routed() -> None:
@@ -32,6 +40,16 @@ def test_streaming_tool_payload_status_module_is_classified_and_routed() -> None
     assert missing_routes == frozenset()
     for status in STREAMING_PAYLOAD_STATUSES:
         assert status_rows[status].get("unqualified_mutation_success") is False
+
+
+def test_all_registered_analytics_status_modules_are_classified_and_routed() -> None:
+    discovery = status_discovery(ROOT)
+    included = {module.module: frozenset(module.statuses) for module in discovery.included}
+    status_rows = _status_rows()
+
+    assert set(included) >= ANALYTICS_STATUS_MODULES
+    for module in ANALYTICS_STATUS_MODULES:
+        assert included[module] <= set(status_rows)
 
 
 def _status_rows() -> dict[str, dict[str, JsonValue]]:

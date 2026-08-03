@@ -15,7 +15,9 @@ import sys
 from pathlib import Path
 from typing import Final, cast
 
-from saxo_bank_mcp._evidence import write_json
+from pydantic import TypeAdapter
+
+from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_eval_models import Harness, SkillEvalCase
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
@@ -32,12 +34,13 @@ BROKER_WRITE_TOOLS: Final = frozenset(
         "saxo_register_disclaimer_response",
     }
 )
+JSON_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(dict[str, JsonValue])
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run matched Codex and Claude Saxo skill evals.")
     parser.add_argument("--harness", choices=("codex", "claude", "both"), required=True)
-    parser.add_argument("--case-root", type=Path, default=Path("evals/saxo-bank"))
+    parser.add_argument("--case-root", type=Path, default=Path("evals"))
     parser.add_argument("--case", dest="case_id", default=None)
     parser.add_argument("--tag", default=None)
     parser.add_argument("--environment", choices=("LOCAL", "SIM", "LIVE"), default=None)
@@ -200,11 +203,13 @@ def _run_analytics_local_fixture(*, harness: str, out: Path) -> int:
         case = SkillEvalCase.model_validate_json(
             (root / ANALYTICS_CASE_PATH).read_text(encoding="utf-8")
         )
-        raw = json.loads((root / ANALYTICS_FIXTURE_PATH).read_text(encoding="utf-8"))
+        raw = JSON_OBJECT_ADAPTER.validate_json(
+            (root / ANALYTICS_FIXTURE_PATH).read_text(encoding="utf-8")
+        )
     except (OSError, ValueError, json.JSONDecodeError):
         write_json(out, _analytics_fixture_failure("fixture_invalid"))
         return 1
-    if not isinstance(raw, dict) or raw.get("case_id") != case.id:
+    if raw.get("case_id") != case.id:
         write_json(out, _analytics_fixture_failure("fixture_binding_invalid"))
         return 1
     responses = raw.get("responses")
@@ -215,7 +220,7 @@ def _run_analytics_local_fixture(*, harness: str, out: Path) -> int:
     selected: tuple[Harness, ...] = (
         ("codex", "claude") if harness == "both" else (cast("Harness", harness),)
     )
-    records: list[dict[str, object]] = []
+    records: list[dict[str, JsonValue]] = []
     for client in selected:
         response = responses.get(client)
         passed, invoked = _analytics_fixture_response_passes(case, client, response)
@@ -250,7 +255,7 @@ def _run_analytics_local_fixture(*, harness: str, out: Path) -> int:
 def _analytics_fixture_response_passes(
     case: SkillEvalCase,
     harness: Harness,
-    response: object,
+    response: JsonValue,
 ) -> tuple[bool, tuple[str, ...]]:
     if not isinstance(response, dict):
         return False, ()
@@ -278,7 +283,7 @@ def _analytics_fixture_response_passes(
     return required_all and required_any and forbidden_clear and tools_valid, invoked
 
 
-def _analytics_fixture_failure(reason: str) -> dict[str, object]:
+def _analytics_fixture_failure(reason: str) -> dict[str, JsonValue]:
     return {
         "status": "failed",
         "fixture": ANALYTICS_LOCAL_FIXTURE,

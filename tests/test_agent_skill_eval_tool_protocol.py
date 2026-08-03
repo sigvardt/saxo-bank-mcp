@@ -77,7 +77,6 @@ def test_codex_parser_dedupes_start_completion_and_keeps_order() -> None:
     assert "session recovered" in trace.assistant_text
 
 
-
 def test_codex_parser_rejects_malicious_prose_without_events() -> None:
     # Given: assistant prose that names a tool but no MCP event exists.
     stream = "\n".join(
@@ -172,7 +171,7 @@ def test_claude_parser_successful_required_sequence() -> None:
                 {
                     "type": "result",
                     "subtype": "success",
-                    "result": "matched natural prompts 39 logical tools cleanup",
+                    "result": "matched natural prompts 60 logical tools cleanup",
                 },
             ),
         ),
@@ -187,7 +186,7 @@ def test_claude_parser_successful_required_sequence() -> None:
         "saxo_list_registered_endpoints",
     )
     assert trace.saxo_event_count == TWO_EVENTS
-    assert "39 logical tools" in trace.assistant_text
+    assert "60 logical tools" in trace.assistant_text
 
 
 def test_claude_parser_dedupes_and_flags_forbidden_builtin() -> None:

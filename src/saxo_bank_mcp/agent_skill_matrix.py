@@ -12,7 +12,7 @@ from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 
-EXPECTED_TOOL_COUNT = 39
+EXPECTED_TOOL_COUNT = 60
 SCENARIO_MANIFEST = Path(__file__).resolve().parents[2] / "data/saxo/agent_tool_scenarios.json"
 LIFECYCLE_TOOLS = (
     "saxo_create_write_preview",
@@ -196,9 +196,7 @@ def verify_matrix_report(*, report_path: Path, require_environment: str, out: Pa
             "candidate_commit": report.candidate_commit,
             "tool_count": report.tool_count,
             "tool_call_count": len(report.tool_calls),
-            "state_unchanged": (
-                report.before_state_fingerprint == report.after_state_fingerprint
-            ),
+            "state_unchanged": (report.before_state_fingerprint == report.after_state_fingerprint),
             "cleanup_complete": report.cleanup.complete,
             "errors": [],
         },

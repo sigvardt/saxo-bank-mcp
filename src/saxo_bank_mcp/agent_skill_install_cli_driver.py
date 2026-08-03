@@ -19,7 +19,11 @@ from saxo_bank_mcp.agent_skill_install_discovery import (
     skill_inventory,
 )
 from saxo_bank_mcp.agent_skill_install_env import auth_env_keys, build_isolated_env
-from saxo_bank_mcp.agent_skill_install_models import CommandReceipt, StartupEvidence
+from saxo_bank_mcp.agent_skill_install_models import (
+    EXPECTED_TOOLS,
+    CommandReceipt,
+    StartupEvidence,
+)
 from saxo_bank_mcp.agent_skill_install_paths import (
     PLUGIN_NAME,
     PLUGIN_REF,
@@ -499,7 +503,7 @@ def _proof_ok(value: JsonValue | None, expected_version: str) -> bool:
     missing = value.get("annotations_missing")
     return (
         value.get("version") == expected_version
-        and value.get("tool_count") == 39  # noqa: PLR2004
+        and value.get("tool_count") == EXPECTED_TOOLS
         and value.get("inventory_exact_match") is True
         and value.get("digest") == value.get("source_digest")
         and isinstance(missing, list)

@@ -149,9 +149,9 @@ def test_ledger_ignores_unrelated_trailing_events(tmp_path: Path) -> None:
                 "consumers": list(REQUIRED_FIXTURE_CONSUMERS),
                 "teardown_owner": "post-final-completion-gate",
                 "owner_only": True,
-                "cleanup_deadline": (
-                    datetime.now(tz=UTC) + timedelta(days=10)
-                ).replace(microsecond=0).isoformat(),
+                "cleanup_deadline": (datetime.now(tz=UTC) + timedelta(days=10))
+                .replace(microsecond=0)
+                .isoformat(),
                 "registered_at": datetime.now(tz=UTC).replace(microsecond=0).isoformat(),
             },
         )
@@ -193,16 +193,13 @@ def test_ledger_rejects_relative_path_and_omitted_ledger(tmp_path: Path) -> None
         cleanup_deadline="2099-01-01T00:00:00+00:00",
         run_root="run_root",
     )
-    assert (
-        verify_fixture_ledger_binding(
-            binding,
-            candidate_commit=COMMIT,
-            run_root=run_root,
-            version="0.1.0",
-            ledger_path=None,
-        )
-        == ["fixture_ledger_required"]
-    )
+    assert verify_fixture_ledger_binding(
+        binding,
+        candidate_commit=COMMIT,
+        run_root=run_root,
+        version="0.1.0",
+        ledger_path=None,
+    ) == ["fixture_ledger_required"]
     with pytest.raises(ValueError, match="ledger_path_must_be_absolute"):
         append_fixture_ledger_event(
             Path("relative.jsonl"),
@@ -263,9 +260,13 @@ def test_ledger_rejects_stale_deadline_and_path_substitution(tmp_path: Path) -> 
     bad_paths = list(expected_preserved_paths(run_root, version="0.1.0"))
     bad_paths[-1] = str((run_root / "evil").resolve())
     (run_root / "evil").mkdir()
-    event2 = {**event, "preserved_paths": bad_paths, "cleanup_deadline": (
-        datetime.now(tz=UTC) + timedelta(days=5)
-    ).replace(microsecond=0).isoformat()}
+    event2 = {
+        **event,
+        "preserved_paths": bad_paths,
+        "cleanup_deadline": (datetime.now(tz=UTC) + timedelta(days=5))
+        .replace(microsecond=0)
+        .isoformat(),
+    }
     line2 = json.dumps(event2) + "\n"
     ledger.write_text(line2, encoding="utf-8")
     deadline2 = str(event2["cleanup_deadline"])
@@ -349,7 +350,7 @@ def test_version_cache_proof_rejects_registration_mismatch() -> None:
                 "digest": "1" * 64,
                 "source_digest": "1" * 64,
                 "inventory_exact_match": True,
-                "tool_count": 39,
+                "tool_count": 60,
                 "annotations_missing": [],
                 "probe_stdout_sha256": "2" * 64,
                 "list_receipt_name": "codex_plugin_list_bumped",
@@ -521,12 +522,8 @@ def test_scan_directory_rejects_special_node(tmp_path: Path) -> None:
 
 def _seed_retained_fixture(run_root: Path) -> tuple[Path, Path]:
     """Registration + both caches under retained homes; return cache paths."""
-    codex_cache = (
-        run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
-    )
-    claude_cache = (
-        run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
-    )
+    codex_cache = run_root / "codex-home/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+    claude_cache = run_root / "home/.claude/plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
     for relative in (
         "source-clone",
         "home",
@@ -640,8 +637,7 @@ def _plant_retained_canaries(run_root: Path) -> dict[Path, str]:
         run_root / "home/.cache/canary.txt": "retained-cache\n",
         run_root / "home/.config/canary.txt": "retained-config\n",
         run_root / "home/.local/canary.txt": "retained-local\n",
-        run_root
-        / "home/Library/Application Support/fastmcp/canary.txt": "retained-fastmcp\n",
+        run_root / "home/Library/Application Support/fastmcp/canary.txt": "retained-fastmcp\n",
         run_root / "home/.claude/backups/canary.txt": "retained-backups\n",
         run_root / "codex-home/.tmp/canary.txt": "retained-codex-dot-tmp\n",
         run_root / "codex-home/tmp/canary.txt": "retained-codex-tmp\n",
@@ -704,7 +700,7 @@ def test_verify_startup_uses_throwaway_homes_and_cleans(
         )
         return CommandResult(
             receipt=receipt,
-            stdout=json.dumps({"tool_count": 39, "annotations_missing": []}),
+            stdout=json.dumps({"tool_count": 60, "annotations_missing": []}),
             stderr="",
         )
 
@@ -785,7 +781,7 @@ def test_retained_secret_survives_verify_cleanup_for_privacy(
         )
         return CommandResult(
             receipt=receipt,
-            stdout=json.dumps({"tool_count": 39, "annotations_missing": []}),
+            stdout=json.dumps({"tool_count": 60, "annotations_missing": []}),
             stderr="",
         )
 
@@ -1067,11 +1063,11 @@ def _probe_result(name: str, payload: dict[str, JsonValue], *, cwd: Path) -> Com
     )
 
 
-def test_list_tools_nonempty_annotations_fails_with_39_tools(tmp_path: Path) -> None:
-    """Independent list_tools missing annotations fails even when tool_count is 39."""
-    clean: dict[str, JsonValue] = {"tool_count": 39, "annotations_missing": []}
+def test_list_tools_nonempty_annotations_fails_with_60_tools(tmp_path: Path) -> None:
+    """Independent list_tools missing annotations fails at the complete tool count."""
+    clean: dict[str, JsonValue] = {"tool_count": 60, "annotations_missing": []}
     dirty: dict[str, JsonValue] = {
-        "tool_count": 39,
+        "tool_count": 60,
         "annotations_missing": ["saxo_health"],
     }
     source = _probe_result("source", clean, cwd=tmp_path)
@@ -1121,34 +1117,34 @@ def test_list_tools_nonempty_annotations_fails_with_39_tools(tmp_path: Path) -> 
 
 def test_missing_annotations_missing_key_fails() -> None:
     with pytest.raises(ProbePayloadError, match="annotations_missing_missing"):
-        startup_check_from_payload({"tool_count": 39})
+        startup_check_from_payload({"tool_count": 60})
 
 
 def test_annotations_missing_wrong_type_and_mixed_members_fail() -> None:
     with pytest.raises(ProbePayloadError, match="annotations_missing_not_list"):
         startup_check_from_payload(
-            {"tool_count": 39, "annotations_missing": "saxo_health"},
+            {"tool_count": 60, "annotations_missing": "saxo_health"},
         )
     with pytest.raises(ProbePayloadError, match="annotations_missing_null"):
-        startup_check_from_payload({"tool_count": 39, "annotations_missing": None})
+        startup_check_from_payload({"tool_count": 60, "annotations_missing": None})
     with pytest.raises(ProbePayloadError, match="annotations_missing_non_string"):
         startup_check_from_payload(
-            {"tool_count": 39, "annotations_missing": ["ok", 1]},
+            {"tool_count": 60, "annotations_missing": ["ok", 1]},
         )
     with pytest.raises(ValidationError):
         StartupCheck.model_validate(
-            {"status": "passed", "tool_count": 39, "annotations_missing": None},
+            {"status": "passed", "tool_count": 60, "annotations_missing": None},
         )
     with pytest.raises(ValidationError):
         StartupCheck.model_validate(
-            {"status": "passed", "tool_count": 39, "annotations_missing": ["ok", 2]},
+            {"status": "passed", "tool_count": 60, "annotations_missing": ["ok", 2]},
         )
 
 
 def test_clean_three_probe_startup_evidence_preserves_per_probe_fields(
     tmp_path: Path,
 ) -> None:
-    clean: dict[str, JsonValue] = {"tool_count": 39, "annotations_missing": []}
+    clean: dict[str, JsonValue] = {"tool_count": 60, "annotations_missing": []}
     startup = startup_from_probes(
         _probe_result("source", clean, cwd=tmp_path),
         _probe_result("cache", clean, cwd=tmp_path),

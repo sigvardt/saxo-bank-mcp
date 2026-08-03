@@ -1,9 +1,13 @@
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final, cast
 
 import pytest
@@ -11,15 +15,17 @@ from fastmcp import Client
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
-from saxo_bank_mcp.analytics_instruments import ResearchRefusal
-from saxo_bank_mcp.analytics_jobs import AnalyticsJobManager, JobProgress, JobStatus
+from saxo_bank_mcp.analytics_jobs import (
+    AnalyticsJobManager,
+    JobProgress,
+    JobRequest,
+    JobStatus,
+)
 from saxo_bank_mcp.analytics_models import (
     HandleKind,
-    QualityState,
     VisibilityMode,
     new_safe_handle,
 )
-from saxo_bank_mcp.analytics_position_sizing import PositionSizingRequest
 from saxo_bank_mcp.analytics_resolver import (
     InstrumentState,
     ResolutionError,
@@ -29,6 +35,7 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionStatus,
     ResolvedInstrument,
 )
+from saxo_bank_mcp.analytics_store import AnalyticsStore
 from saxo_bank_mcp.analytics_sync import DatasetPage
 from saxo_bank_mcp.analytics_tool_descriptions import ANALYTICS_TOOL_DESCRIPTIONS
 from saxo_bank_mcp.server import create_mcp_server
@@ -122,6 +129,124 @@ async def test_analytics_schemas_expose_no_paths_raw_broker_ids_or_trust_switche
     }
     property_names = {name for tool in tools for name in _schema_property_names(tool.inputSchema)}
     assert forbidden.isdisjoint(property_names)
+
+
+@pytest.mark.anyio
+async def test_analysis_schemas_accept_only_handles_and_user_parameters() -> None:
+    server = create_mcp_server(allowed_tools=frozenset(ANALYTICS_TOOL_IDS))
+    async with Client(server) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    source_fact_fields = {
+        "account_alias",
+        "bars",
+        "buying_power_available",
+        "components",
+        "cost_estimate",
+        "current_position_exposure",
+        "current_position_quantity",
+        "dataset",
+        "datasets",
+        "decision_bar",
+        "decision_quote",
+        "holdings",
+        "margin_available",
+        "portfolio_value",
+        "quote",
+        "quotes",
+        "saxo_greeks",
+        "source_bindings",
+    }
+    analysis_tools = (
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+    )
+    for tool_id in analysis_tools:
+        fields = set(_schema_property_names(listed[tool_id].inputSchema))
+        assert source_fact_fields.isdisjoint(fields), tool_id
+        assert "dataset_id" in fields or "dataset_ids" in fields
+
+    proposal_fields = set(
+        _schema_property_names(listed["saxo_propose_trade_from_analysis"].inputSchema)
+    )
+    assert "proposal" not in proposal_fields
+    assert {
+        "analysis_id",
+        "side",
+        "quantity",
+        "instrument_handle",
+    } <= proposal_fields
+    assert source_fact_fields.isdisjoint(proposal_fields)
+
+
+@pytest.mark.anyio
+async def test_analysis_and_artifact_tools_publish_discriminated_output_schemas() -> None:
+    server = create_mcp_server(allowed_tools=frozenset(ANALYTICS_TOOL_IDS))
+    async with Client(server) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    for tool_id in (
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+    ):
+        schema = listed[tool_id].outputSchema
+        assert schema is not None, tool_id
+        assert {"verified", "degraded", "refused"} <= set(_schema_literal_values(schema))
+        for field in (
+            "network_call_made",
+            "local_state_changed",
+            "broker_write_made",
+            "next_action",
+        ):
+            assert field in _schema_property_names(schema), (tool_id, field)
+
+    for tool_id in ("saxo_render_analysis", "saxo_export_analysis"):
+        schema = listed[tool_id].outputSchema
+        assert schema is not None, tool_id
+        assert {"inline", "resource_link", "refused"} <= set(_schema_literal_values(schema))
+        assert "broker_write_made" in _schema_property_names(schema)
+
+
+@pytest.mark.anyio
+async def test_analysis_fastmcp_request_accepts_safe_handles_and_returns_canonical_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    server = create_mcp_server(allowed_tools=frozenset({"saxo_size_position"}))
+
+    async with Client(server) as client:
+        response = await client.call_tool(
+            "saxo_size_position",
+            {
+                "request": {
+                    "dataset_id": new_safe_handle(HandleKind.DATASET_ID),
+                    "instrument_handle": new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
+                    "method": "stop_distance",
+                    "maximum_loss": "10",
+                    "risk_budget_confirmed": True,
+                    "stop_price": "99",
+                    "visibility": "fingerprint_only",
+                }
+            },
+        )
+
+    assert response.structured_content is not None
+    assert response.structured_content["status"] == "refused"
+    assert response.structured_content["analysis_id"] is None
+    assert response.structured_content["broker_write_made"] is False
 
 
 @pytest.mark.anyio
@@ -238,67 +363,87 @@ def test_dataset_adapter_calls_existing_service_and_returns_exact_next_hint(
 
 def test_private_delivery_is_derived_from_server_environment(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    request = PositionSizingRequest(
+    _state_env(monkeypatch, tmp_path)
+    request = tools_module.StoredPositionSizingToolRequest(
         dataset_id=new_safe_handle(HandleKind.DATASET_ID),
-        account_alias="aa_00000000000040008000000000000051",
         instrument_handle=new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
-        reporting_currency="USD",
         method="stop_distance",
         maximum_loss=Decimal(10),
         risk_budget_confirmed=True,
-        entry_price=Decimal(100),
         stop_price=Decimal(99),
-        value_per_price_unit=Decimal(1),
-        lot_size=Decimal(1),
-        portfolio_value=Decimal(1000),
-        maximum_weight=Decimal("0.2"),
-        buying_power=Decimal(500),
-        reserved_buffer=Decimal(0),
-        estimated_transaction_cost=Decimal(1),
-        margin_headroom=Decimal(500),
-        margin_requirement_per_money_unit=Decimal(1),
-        source_bindings=(),
-        quality_state=QualityState.COMPLETE,
-        missing_fields=(),
-        warnings=(),
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
     )
-    observed: list[tuple[VisibilityMode, bool]] = []
-
-    def sizing(
-        _request: PositionSizingRequest,
-        *,
-        visibility: VisibilityMode,
-        trusted_local_host: bool,
-    ) -> ResearchRefusal:
-        observed.append((visibility, trusted_local_host))
-        return ResearchRefusal(
-            analysis_kind="position_sizing",
-            reason_code="source_binding_required",
-            reason="A current bound source is required.",
-            dataset_ids=(_request.dataset_id,),
-            instrument_handles=(_request.instrument_handle,),
-            warnings=("source_quality_reduced",),
-            source_scope=None,
-        )
-
-    monkeypatch.setattr(tools_module, "size_position", sizing)
     monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
-    sim = tools_module.saxo_size_position(
-        request,
-        visibility=VisibilityMode.PRIVATE_USER_RESULT,
-    )
+    sim = tools_module.saxo_size_position(request)
     monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
-    live = tools_module.saxo_size_position(
-        request,
-        visibility=VisibilityMode.PRIVATE_USER_RESULT,
-    )
+    live = tools_module.saxo_size_position(request)
 
-    assert observed == [(VisibilityMode.PRIVATE_USER_RESULT, True)]
-    assert sim.warnings == ("source_quality_reduced",)
+    assert sim.status == "refused"
+    assert sim.reason_code == "analytics_object_not_found"
     assert live.status == "refused"
     assert live.reason_code == "inline_private_not_enabled"
     assert live.next_tool == "saxo_export_analysis"
+
+
+def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    authenticated: list[str] = []
+    closed: list[bool] = []
+
+    class _Store:
+        def get_authenticated_dataset(self, selected: str) -> object:
+            authenticated.append(selected)
+            return object()
+
+        def close(self) -> None:
+            closed.append(True)
+
+    class _Registry:
+        def profile(self, analysis_kind: str) -> object:
+            assert analysis_kind == "position_sizing"
+            return SimpleNamespace(
+                activation_state=SimpleNamespace(value="quarantined"),
+                quarantine_reason="implementation_pending",
+            )
+
+    def open_store(_config: AnalyticsConfig) -> _Store:
+        return _Store()
+
+    def proof_registry(_config: AnalyticsConfig) -> _Registry:
+        return _Registry()
+
+    monkeypatch.setattr(
+        tools_module.AnalyticsStore,
+        "open",
+        staticmethod(open_store),
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", proof_registry)
+
+    response = tools_module.saxo_size_position(
+        tools_module.StoredPositionSizingToolRequest(
+            dataset_id=dataset_id,
+            instrument_handle=instrument_handle,
+            method="stop_distance",
+            maximum_loss=Decimal(10),
+            risk_budget_confirmed=True,
+            stop_price=Decimal(99),
+        )
+    )
+
+    assert authenticated == [dataset_id]
+    assert closed == [True]
+    assert isinstance(response, tools_module.RefusedAnalysisToolResponse)
+    assert response.status == "refused"
+    assert response.analysis_id is None
+    assert response.reason_code == "implementation_pending"
+    assert response.local_state_changed is False
 
 
 @pytest.mark.anyio
@@ -349,6 +494,199 @@ async def test_job_adapter_preserves_bounded_transitions_and_no_partial_conclusi
     assert missing.next_tool == "saxo_manage_analysis_job"
 
 
+@pytest.mark.anyio
+async def test_process_job_runtime_registers_real_handler_and_closes_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    manager = tools_module._job_manager_for_config(  # noqa: SLF001
+        tools_module._analytics_config()  # noqa: SLF001
+    )
+
+    assert set(manager._handlers) == {  # noqa: SLF001
+        "monte_carlo",
+        "optimization",
+        "backtest",
+        "report_generation",
+    }
+    request = JobRequest(
+        job_kind="report_generation",
+        analysis_ids=(new_safe_handle(HandleKind.ANALYSIS_ID),),
+        total_work_units=1,
+    )
+    status = await manager.start_job(request)
+    assert status.state in {"queued", "running"}
+    cancelled = await manager.cancel_job(status.job_id)
+    checked = await manager.get_job(status.job_id)
+    assert cancelled.state == "cancelled"
+    assert checked.state == "cancelled"
+    assert checked.conclusion_available is False
+
+    await tools_module.shutdown_analytics_runtime()
+    assert tools_module._job_runtime is None  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_fastmcp_lifespan_owns_job_runtime_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    server = create_mcp_server(allowed_tools=frozenset({"saxo_manage_analysis_job"}))
+
+    async with Client(server) as client:
+        response = await client.call_tool(
+            "saxo_manage_analysis_job",
+            {
+                "action": "start",
+                "request": {
+                    "job_kind": "report_generation",
+                    "dataset_ids": [],
+                    "analysis_ids": [new_safe_handle(HandleKind.ANALYSIS_ID)],
+                    "instrument_handles": [],
+                    "parameters": [],
+                    "total_work_units": 1,
+                    "restart_interrupted": False,
+                },
+            },
+        )
+        assert response.structured_content is not None
+        assert response.structured_content["status"] in {"queued", "running"}
+        assert tools_module._job_runtime is not None  # noqa: SLF001
+
+    assert tools_module._job_runtime is None  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_runtime_shutdown_finishes_cleanup_when_transport_is_cancelled() -> None:
+    started = asyncio.Event()
+    manager_stopped: list[bool] = []
+    store_closed: list[bool] = []
+
+    class _Manager:
+        async def shutdown(self) -> None:
+            started.set()
+            await asyncio.sleep(0.05)
+            manager_stopped.append(True)
+
+    class _Store:
+        def close(self) -> None:
+            store_closed.append(True)
+
+    runtime = cast(
+        "tuple[str, AnalyticsStore, AnalyticsJobManager]",
+        ("fixture-runtime", _Store(), _Manager()),
+    )
+    tools_module._job_runtime = runtime  # noqa: SLF001
+    shutdown = asyncio.create_task(tools_module.shutdown_analytics_runtime())
+    await started.wait()
+
+    shutdown.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown
+
+    assert manager_stopped == [True]
+    assert store_closed == [True]
+    assert tools_module._job_runtime is None  # noqa: SLF001
+
+
+@pytest.mark.anyio
+async def test_trade_proposal_replays_then_refuses_unbound_context_without_preview_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    server = create_mcp_server(allowed_tools=frozenset({"saxo_propose_trade_from_analysis"}))
+    async with Client(server) as client:
+        response = await client.call_tool(
+            "saxo_propose_trade_from_analysis",
+            {
+                "analysis_id": new_safe_handle(HandleKind.ANALYSIS_ID),
+                "instrument_handle": new_safe_handle(HandleKind.INSTRUMENT_HANDLE),
+                "side": "buy",
+                "quantity": "1",
+                "visibility": "fingerprint_only",
+            },
+        )
+
+    assert response.structured_content is not None
+    assert response.structured_content["status"] == "refused"
+    assert response.structured_content["next_tool"] != "saxo_create_order_preview"
+    assert response.structured_content["broker_write_made"] is False
+
+
+def test_trade_proposal_binds_instrument_and_authenticates_analysis_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    analysis_id = new_safe_handle(HandleKind.ANALYSIS_ID)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    bound_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    other_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    authenticated: list[str] = []
+
+    class _Store:
+        def get_authenticated_dataset(self, selected: str) -> object:
+            authenticated.append(selected)
+            return object()
+
+        def close(self) -> None:
+            return None
+
+    def replay(
+        _analysis_id: str,
+        *,
+        config: AnalyticsConfig,
+        registry: object,
+    ) -> object:
+        del config, registry
+        return SimpleNamespace(
+            provenance=SimpleNamespace(dataset_id=dataset_id),
+            request=SimpleNamespace(instrument_handles=(bound_handle,)),
+        )
+
+    def open_store(_config: AnalyticsConfig) -> _Store:
+        return _Store()
+
+    def proof_registry(_config: AnalyticsConfig) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        tools_module,
+        "replay_analysis",
+        replay,
+    )
+    monkeypatch.setattr(
+        tools_module.AnalyticsStore,
+        "open",
+        staticmethod(open_store),
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", proof_registry)
+
+    mismatch = tools_module.saxo_propose_trade_from_analysis(
+        analysis_id,
+        other_handle,
+        "buy",
+        Decimal(1),
+    )
+    bound = tools_module.saxo_propose_trade_from_analysis(
+        analysis_id,
+        bound_handle,
+        "buy",
+        Decimal(1),
+    )
+
+    assert authenticated == [dataset_id, dataset_id]
+    assert isinstance(mismatch, tools_module.RefusedAnalysisToolResponse)
+    assert isinstance(bound, tools_module.RefusedAnalysisToolResponse)
+    assert mismatch.reason_code == "proposal_context_mismatch"
+    assert bound.reason_code == "pretrade_context_unavailable"
+    assert mismatch.next_tool != "saxo_create_order_preview"
+    assert bound.next_tool != "saxo_create_order_preview"
+
+
 def _schema_property_names(schema: object) -> tuple[str, ...]:
     if isinstance(schema, dict):
         mapping = cast("dict[object, object]", schema)
@@ -363,4 +701,26 @@ def _schema_property_names(schema: object) -> tuple[str, ...]:
     if isinstance(schema, list):
         values = cast("list[object]", schema)
         return tuple(nested for value in values for nested in _schema_property_names(value))
+    return ()
+
+
+def _schema_literal_values(schema: object) -> tuple[str, ...]:
+    if isinstance(schema, dict):
+        mapping = cast("dict[object, object]", schema)
+        values: list[str] = []
+        const = mapping.get("const")
+        if isinstance(const, str):
+            values.append(const)
+        enum = mapping.get("enum")
+        if isinstance(enum, list):
+            values.extend(item for item in cast("list[object]", enum) if isinstance(item, str))
+        return tuple(values) + tuple(
+            nested for value in mapping.values() for nested in _schema_literal_values(value)
+        )
+    if isinstance(schema, list):
+        return tuple(
+            nested
+            for value in cast("list[object]", schema)
+            for nested in _schema_literal_values(value)
+        )
     return ()

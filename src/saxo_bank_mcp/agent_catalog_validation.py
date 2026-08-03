@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_catalog_runtime import (
@@ -11,9 +10,8 @@ from saxo_bank_mcp.agent_catalog_runtime import (
     RuntimeTool,
 )
 from saxo_bank_mcp.endpoint_registry import EndpointInventory, implemented_read_operations
+from saxo_bank_mcp.server_tool_ids import EXPECTED_TOOL_COUNT
 from saxo_bank_mcp.trading_write_registry import trading_write_specs
-
-EXPECTED_TOOL_COUNT: Final = 39
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,9 +138,7 @@ def _operation_count_issues(inventory: EndpointInventory) -> tuple[CatalogIssue,
         (len(inventory.service_group_counts), 17),
     )
     return tuple(
-        CatalogIssue("operation_count", str(actual))
-        for actual, want in checks
-        if actual != want
+        CatalogIssue("operation_count", str(actual)) for actual, want in checks if actual != want
     )
 
 
@@ -153,9 +149,7 @@ def _operation_set(name: str, inventory: EndpointInventory) -> tuple[str, ...]:
         return tuple(spec.operation_id for spec in trading_write_specs())
     if name == "generic_trading_write_operations":
         return tuple(
-            spec.operation_id
-            for spec in trading_write_specs()
-            if spec.specialized_tool is None
+            spec.operation_id for spec in trading_write_specs() if spec.specialized_tool is None
         )
     raise CatalogValidationError((CatalogIssue("unknown_operation_set", name),))
 

@@ -64,7 +64,7 @@ class EvalValidationResult:
 def validate_eval_suite(
     *,
     root: Path = Path(),
-    case_root: Path = Path("evals/saxo-bank"),
+    case_root: Path = Path("evals"),
 ) -> EvalValidationResult:
     errors: list[str] = []
     cases = _load_cases(case_root, errors)
@@ -178,18 +178,14 @@ def _case_errors(
     errors.extend(_prompt_errors(case))
     errors.extend(_cleanup_errors(case))
     errors.extend(_router_errors(case))
-    group_tools = frozenset(
-        tool for group in case.required_tool_groups for tool in group
-    )
+    group_tools = frozenset(tool for group in case.required_tool_groups for tool in group)
     unknown_required = frozenset(case.required_logical_tools) - known_tools
     unknown_groups = group_tools - known_tools
     unknown_forbidden = frozenset(case.forbidden_logical_tools) - known_tools
     unknown_grants = _grants(case) - known_tools
     errors.extend(
         f"{case.id}: stale expected tool {tool}"
-        for tool in sorted(
-            unknown_required | unknown_groups | unknown_forbidden | unknown_grants
-        )
+        for tool in sorted(unknown_required | unknown_groups | unknown_forbidden | unknown_grants)
     )
     errors.extend(_live_errors(case))
     if _grants(case).intersection(case.forbidden_logical_tools):

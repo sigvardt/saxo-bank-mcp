@@ -13,7 +13,9 @@ type Harness = Literal["codex", "claude"]
 type HarnessSelector = Literal["codex", "claude", "both"]
 type EvalEnvironment = Literal["LOCAL", "SIM", "LIVE"]
 type RouterEnvironment = Literal["LOCAL", "SIM", "LIVE", "AMBIGUOUS"]
-type RouterIntent = Literal["auth", "read", "stream", "trade", "recovery", "QA", "unsupported"]
+type RouterIntent = Literal[
+    "analytics", "auth", "read", "stream", "trade", "recovery", "QA", "unsupported"
+]
 type RouterMutationRisk = Literal[
     "none",
     "local-state",
@@ -32,6 +34,7 @@ type RouterEvidenceNeed = Literal[
     "release/QA evidence",
 ]
 type FocusedSkill = Literal[
+    "saxo-analytics",
     "saxo-auth-session",
     "saxo-openapi",
     "saxo-reads",
@@ -42,11 +45,12 @@ type FocusedSkill = Literal[
 ]
 
 CASE_FILE_NAME: Final = "case.yaml"
-DEFAULT_CASE_ROOT: Final = Path("evals/saxo-bank")
+DEFAULT_CASE_ROOT: Final = Path("evals")
 SCENARIO_SOURCE: Final = Path("data/saxo/agent_tool_scenarios.json")
 ROUTE_SOURCE: Final = Path("data/saxo/agent_tool_routes.json")
 EXPECTED_SKILLS: Final = frozenset(
     {
+        "saxo-analytics",
         "saxo-bank",
         "saxo-auth-session",
         "saxo-openapi",
@@ -191,6 +195,8 @@ def load_json_object(path: Path) -> dict[str, JsonValue]:
 
 def load_eval_cases(root: Path = DEFAULT_CASE_ROOT) -> tuple[SkillEvalCase, ...]:
     case_files = tuple(sorted(root.glob(f"*/{CASE_FILE_NAME}")))
+    if root.name == "evals":
+        case_files = tuple(sorted(root.glob(f"*/*/{CASE_FILE_NAME}")))
     if not case_files:
         raise EvalCaseLoadError(root, "missing eval case files")
     return tuple(_load_case(path) for path in case_files)

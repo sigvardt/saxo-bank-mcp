@@ -29,10 +29,11 @@ def build_install_fixture(base: Path) -> InstallFixture:
     repo = base / "source"
     clone = base / "clone"
     git("clone", "--no-local", "--quiet", str(ROOT), str(repo), cwd=ROOT)
+    _overlay_tracked_worktree(repo)
     router = repo / "skills/saxo-bank/SKILL.md"
     router.parent.mkdir(parents=True, exist_ok=True)
     router.write_text("---\nname: saxo-bank\ndescription: Fixture router.\n---\n", encoding="utf-8")
-    git("add", "skills/saxo-bank/SKILL.md", cwd=repo)
+    git("add", "--all", cwd=repo)
     git(
         "-c",
         "user.name=Fixture",
@@ -60,6 +61,22 @@ def build_install_fixture(base: Path) -> InstallFixture:
     return InstallFixture(report=report, commit=commit, clone=clone, repo=repo)
 
 
+def _overlay_tracked_worktree(repo: Path) -> None:
+    """Make the disposable install fixture exercise the current tracked candidate."""
+    changed = git("diff", "--name-only", "--diff-filter=ACMRTUXB", "HEAD", cwd=ROOT)
+    for relative in changed.stdout.splitlines():
+        source = ROOT / relative
+        target = repo / relative
+        if source.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    deleted = git("diff", "--name-only", "--diff-filter=D", "HEAD", cwd=ROOT)
+    for relative in deleted.stdout.splitlines():
+        target = repo / relative
+        if target.is_file():
+            target.unlink()
+
+
 def build_release_evidence(
     root: Path,
     installed_report: InstallFixture,
@@ -74,7 +91,7 @@ def build_release_evidence(
         payload: dict[str, JsonValue] = {"status": "passed", "source_commit": commit}
         if number == CATALOG_TASK_NUMBER:
             payload["counts"] = {
-                "tools": 39,
+                "tools": 60,
                 "operations": 294,
                 "implemented": 182,
                 "refused": 112,
@@ -300,9 +317,9 @@ def _install_payload(
             "clean": True,
             "mode": "0o700",
         },
-        "expected_skills": 8,
+        "expected_skills": 9,
         "expected_mcp_servers": 1,
-        "expected_tools": 39,
+        "expected_tools": 60,
         "global_state": {"before": fingerprints, "after": fingerprints, "scope": {}},
         "global_state_unchanged": True,
         "project_version": "0.1.0",
@@ -335,6 +352,7 @@ def _install_payload(
                 "pyproject.toml",
                 "uv.lock",
                 "skills/saxo-bank/SKILL.md",
+                "skills/saxo-analytics/SKILL.md",
                 "skills/saxo-auth-session/SKILL.md",
                 "skills/saxo-openapi/SKILL.md",
                 "skills/saxo-qa-operations/SKILL.md",
@@ -377,9 +395,9 @@ def _install_payload(
 
 def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
     startup: dict[str, JsonValue] = {
-        "source": {"status": "passed", "tool_count": 39, "annotations_missing": []},
-        "cache": {"status": "passed", "tool_count": 39, "annotations_missing": []},
-        "list_tools": {"status": "passed", "tool_count": 39, "annotations_missing": []},
+        "source": {"status": "passed", "tool_count": 60, "annotations_missing": []},
+        "cache": {"status": "passed", "tool_count": 60, "annotations_missing": []},
+        "list_tools": {"status": "passed", "tool_count": 60, "annotations_missing": []},
     }
     receipt = {
         "name": source,
@@ -394,6 +412,7 @@ def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
         "cleanup_attempted": False,
     }
     skills = [
+        "saxo-analytics",
         "saxo-auth-session",
         "saxo-bank",
         "saxo-openapi",
@@ -409,10 +428,10 @@ def _client_payload(cache: Path, *, source: str) -> dict[str, JsonValue]:
         "identity": "saxo-bank-mcp",
         "version": "0.1.0",
         "cache_root_source": source,
-        "skill_count": 8,
+        "skill_count": 9,
         "skills": skills,
         "mcp_server_count": 1,
-        "tool_count": 39,
+        "tool_count": 60,
         "annotations_missing": [],
         "source_annotations_missing": [],
         "cache_annotations_missing": [],

@@ -1882,6 +1882,12 @@ class AnalyticsStore:
             quality_state=quality_state,
         )
 
+    def get_authenticated_dataset(self, dataset_id: str) -> StoredDataset:
+        """Authenticate one opaque dataset and every bound source page server-side."""
+        self._require_open()
+        with self._read_connection() as connection:
+            return self.authenticate_dataset(connection, dataset_id)
+
     @staticmethod
     def _dataset_by_id(
         connection: duckdb.DuckDBPyConnection,

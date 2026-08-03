@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from contextlib import asynccontextmanager
 from typing import Final
 
 from saxo_bank_mcp.fastmcp_logging_safety import (
@@ -11,6 +12,7 @@ from saxo_bank_mcp.fastmcp_logging_safety import (
     SafeFastMCP,
     install_fastmcp_argument_log_filter,
 )
+from saxo_bank_mcp.mcp_analytics_tools import shutdown_analytics_runtime
 from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
 from saxo_bank_mcp.server_core_tools import (
     AUTH_STATUS_TOOL_DESCRIPTION,
@@ -59,11 +61,24 @@ def create_mcp_server(
 ) -> SafeFastMCP:
     """Build a SafeFastMCP instance with optional SIM-only eval tool filter."""
     install_fastmcp_argument_log_filter()
-    server = SafeFastMCP(SERVICE_NAME, strict_input_validation=False)
+    server = SafeFastMCP(
+        SERVICE_NAME,
+        strict_input_validation=False,
+        lifespan=_analytics_lifespan,
+    )
     server.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
     server.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
     register_saxo_tools(server, allowed_tools=allowed_tools)
     return server
+
+
+@asynccontextmanager
+async def _analytics_lifespan(_server: object) -> AsyncGenerator[dict[str, bool]]:
+    """Tie the in-process analytics runtime to one FastMCP process lifespan."""
+    try:
+        yield {"analytics_runtime_owned": True}
+    finally:
+        await shutdown_analytics_runtime()
 
 
 def create_mcp_server_from_env(env: Mapping[str, str] | None = None) -> SafeFastMCP:

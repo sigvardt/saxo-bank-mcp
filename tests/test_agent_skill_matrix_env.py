@@ -92,7 +92,7 @@ def _matrix_options(tmp_path: Path, evidence: Path) -> MatrixPlanOptions:
     return MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=tmp_path / "install.json",
         fixtures=SimFixtureOptions(
             stock_uic="211",
@@ -254,7 +254,7 @@ def testrun_sim_matrix_probe_passes_isolated_env_and_cleans_up(
     options = MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=tmp_path / "install.json",
         fixtures=SimFixtureOptions(
             stock_uic="211",
@@ -313,7 +313,7 @@ def testrun_sim_matrix_probe_cleans_up_after_command_failure(
     options = MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=tmp_path / "install.json",
         fixtures=SimFixtureOptions(
             stock_uic="211",
@@ -589,7 +589,7 @@ def testrun_sim_matrix_probe_removes_stale_receipt_before_spawn(
     options = MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=tmp_path / "install.json",
         fixtures=SimFixtureOptions(
             stock_uic="211",
@@ -641,7 +641,7 @@ def testrun_sim_matrix_probe_rejects_symlink_receipt_path(
     options = MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=tmp_path / "install.json",
         fixtures=SimFixtureOptions(
             stock_uic="211",
@@ -726,7 +726,7 @@ def testrun_sim_matrix_probe_relative_out_is_absolute_under_evidence(
     options = MatrixPlanOptions(
         manifest=Path("data/saxo/agent_tool_scenarios.json"),
         environment="SIM",
-        require_tools=39,
+        require_tools=60,
         install_report=Path("install.json"),
         fixtures=SimFixtureOptions(
             stock_uic="211",

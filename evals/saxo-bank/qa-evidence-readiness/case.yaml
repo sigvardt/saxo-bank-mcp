@@ -16,7 +16,7 @@
     "claude": ["saxo_health", "saxo_list_registered_endpoints", "saxo_list_trading_write_operations", "saxo_get_safe_request_ledger"]
   },
   "transcript_assertions": {
-    "required_all": ["matched natural prompts", "39 logical tools", "cleanup", "LIVE no-purchase proof"],
+    "required_all": ["matched natural prompts", "60 logical tools", "cleanup", "LIVE no-purchase proof"],
     "required_any": ["no wildcard", "exact tool grants"],
     "forbidden": ["execute now", "model-backed suite passed"]
   },

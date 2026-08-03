@@ -16,7 +16,7 @@ from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Codex Saxo skill eval cases.")
-    parser.add_argument("--case-root", type=Path, default=Path("evals/saxo-bank"))
+    parser.add_argument("--case-root", type=Path, default=Path("evals"))
     parser.add_argument("--case", dest="case_id", default=None)
     parser.add_argument("--tag", default=None)
     parser.add_argument("--environment", default=None)

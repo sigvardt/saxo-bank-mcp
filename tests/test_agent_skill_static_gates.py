@@ -33,7 +33,7 @@ from saxo_bank_mcp.agent_skill_static_gates import (
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 SCRIPT: Final = ROOT / "scripts/run_agent_skill_static_gates.py"
-EXPECTED_SKILL_COUNT: Final = 8
+EXPECTED_SKILL_COUNT: Final = 9
 CANARY: Final = FIXTURE_CANARY
 EXPECTED_FIXTURE_RESULTS: Final = {
     "missing-annotation": ("missing_annotation",),
@@ -297,6 +297,7 @@ def test_malformed_skill_yaml_cli_never_echoes_canary(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     for skill in (
+        "saxo-analytics",
         "saxo-auth-session",
         "saxo-openapi",
         "saxo-qa-operations",

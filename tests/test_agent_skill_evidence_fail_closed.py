@@ -46,7 +46,7 @@ from saxo_bank_mcp.agent_skill_matrix_producer import (
 INSTALL_QA = ROOT / "scripts/qa_dual_plugin_install.py"
 MATRIX_RUNNER = ROOT / "scripts/run_mcp_tool_matrix.py"
 EXPECTED_INSTALL_STARTUP_PROBES = 4
-EXPECTED_TOOL_CALLS = 39
+EXPECTED_TOOL_CALLS = 60
 EXPECTED_LIFECYCLE_CALLS = 22
 
 
@@ -84,7 +84,7 @@ def test_install_rejects_unresolved_commit_with_exact_reason(tmp_path: Path) -> 
 def test_install_verify_rejects_missing_fingerprint_contract(tmp_path: Path) -> None:
     report = tmp_path / "install.json"
     out = tmp_path / "out.json"
-    write_json(report, {"status": "passed", "expected_skills": 8, "expected_tools": 39})
+    write_json(report, {"status": "passed", "expected_skills": 9, "expected_tools": 60})
 
     result = run_cli(
         INSTALL_QA,
@@ -179,7 +179,11 @@ def test_matrix_manifest_only_zero_calls_is_validated_not_passed(
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, (
+        payload.get("reason"),
+        payload.get("error"),
+        payload.get("errors"),
+    )
     assert payload["status"] == "validated"
     assert payload["execution_mode"] == "manifest_validation"
     assert payload["created_mcp_calls"] == 0
@@ -194,7 +198,7 @@ def test_matrix_verify_rejects_zero_call_execution_report(tmp_path: Path) -> Non
             "status": "passed",
             "execution_mode": "sim_execution",
             "environment": "SIM",
-            "tool_count": 39,
+            "tool_count": 60,
             "tool_calls": [],
             "cleanup": {"complete": True},
         },
@@ -265,9 +269,9 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
         "--claude-global-home",
         str(claude_global),
         "--expected-skills",
-        "8",
+        "9",
         "--expected-tools",
-        "39",
+        "60",
         "--preserve-for",
         "task-15,task-16,final-f3,final-f4,post-final-h1",
         "--fixture-cleanup-ledger",
@@ -280,7 +284,11 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     payload = json.loads(out.read_text(encoding="utf-8"))
     commands = _logged_commands(log)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 0, (
+        payload.get("reason"),
+        payload.get("error"),
+        payload.get("errors"),
+    )
     assert payload["status"] == "passed"
     assert payload["codex"]["installed"] is True
     assert payload["claude"]["installed"] is True
@@ -306,9 +314,7 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
     assert any(row.startswith("plugin marketplace add ") for row in commands)
     assert f"plugin install {plugin_ref} --scope user" in commands
     assert f"plugin uninstall {plugin_ref} --scope user" in commands
-    assert any(
-        row.startswith(f"plugin install {plugin_ref} --scope user") for row in commands
-    )
+    assert any(row.startswith(f"plugin install {plugin_ref} --scope user") for row in commands)
     # Initial install probes + post-restore probes for both clients.
     assert sum(1 for row in commands if row.startswith("run --project ")) >= (
         EXPECTED_INSTALL_STARTUP_PROBES
@@ -907,7 +913,7 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "    cache = _install_cache('claude')",
                 "    print('updated')",
                 "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'details']:",
-                "    print('Skills (8) saxo-auth-session, saxo-bank, saxo-openapi, "
+                "    print('Skills (9) saxo-analytics, saxo-auth-session, saxo-bank, saxo-openapi, "
                 "saxo-qa-operations, saxo-reads, saxo-safety-recovery, "
                 "saxo-streaming, saxo-trading')",
                 "else:",
@@ -930,7 +936,7 @@ def _write_fake_uv_install_probe(path: Path, log: Path) -> None:
                 "LOG.parent.mkdir(parents=True, exist_ok=True)",
                 "LOG.open('a', encoding='utf-8').write(json.dumps({'argv': sys.argv[1:]}) + '\\n')",
                 "if '-c' in sys.argv:",
-                "    print(json.dumps({'tool_count': 39, 'annotations_missing': []}))",
+                "    print(json.dumps({'tool_count': 60, 'annotations_missing': []}))",
                 "    raise SystemExit(0)",
                 "raise SystemExit(2)",
             )

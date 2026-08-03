@@ -16,7 +16,7 @@ from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 MIN_CASE_COUNT: Final = 10
-EXPECTED_TOOL_COUNT: Final = 39
+EXPECTED_TOOL_COUNT: Final = 60
 QA_DRY_RUN_RECORDS: Final = 2
 EXPECTED_ROUTER_CASES: Final = frozenset(
     {
@@ -41,9 +41,9 @@ RELEASE_ASSEMBLER: Final = ROOT / "scripts/assemble_agent_skill_release.py"
 
 
 def test_eval_suite_covers_all_tools_and_skills() -> None:
-    cases = load_eval_cases(ROOT / "evals/saxo-bank")
+    cases = load_eval_cases(ROOT / "evals")
     tools = load_scenario_tools(ROOT)
-    result = validate_eval_suite(root=ROOT, case_root=ROOT / "evals/saxo-bank")
+    result = validate_eval_suite(root=ROOT, case_root=ROOT / "evals")
 
     used_tools = {
         tool
@@ -66,7 +66,7 @@ def test_eval_suite_covers_all_tools_and_skills() -> None:
 
 
 def test_eval_cases_forbid_broad_grants_and_live_mutations() -> None:
-    cases = load_eval_cases(ROOT / "evals/saxo-bank")
+    cases = load_eval_cases(ROOT / "evals")
 
     for case in cases:
         assert "*" not in json.dumps(case.exact_tool_grants, sort_keys=True)
@@ -81,11 +81,7 @@ def test_eval_cases_forbid_broad_grants_and_live_mutations() -> None:
 
 def test_router_eval_cases_are_structured_plan_only_and_tool_free() -> None:
     # Given: router-proof cases loaded through the production parser.
-    cases = tuple(
-        case
-        for case in load_eval_cases(ROOT / "evals/saxo-bank")
-        if "router-proof" in case.tags
-    )
+    cases = tuple(case for case in load_eval_cases(ROOT / "evals") if "router-proof" in case.tags)
 
     # When: their structured expectations and grants are inspected.
     case_ids = frozenset(case.id for case in cases)

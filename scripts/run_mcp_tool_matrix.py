@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
         "--manifest", type=Path, default=Path("data/saxo/agent_tool_scenarios.json")
     )
     parser.add_argument("--environment", default="SIM")
-    parser.add_argument("--require-tools", type=int, default=39)
+    parser.add_argument("--require-tools", type=int, default=60)
     parser.add_argument("--install-report", type=Path, default=None)
     parser.add_argument("--fixture-stock-uic", default=None)
     parser.add_argument("--fixture-amount", default=None)

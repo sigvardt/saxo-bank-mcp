@@ -101,7 +101,7 @@ async def test_catalog_check_passes_for_runtime_and_inventory_contract() -> None
     assert "implemented_count=182" in result.stdout
     assert "refused_count=112" in result.stdout
     assert "service_group_count=17" in result.stdout
-    assert "scenarios=39" in result.stdout
+    assert "scenarios=60" in result.stdout
     assert "only_completed_unqualified_success=true" in result.stdout
 
 

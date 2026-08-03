@@ -34,7 +34,7 @@ Switch to execution only after the user names the exact command or case set to r
 Require exact dual-client evidence before claiming the Saxo MCP is agent-ready:
 
 - Matched natural prompts across Codex and Claude for every case.
-- All 39 logical tools covered by scenario coverage and eval grants.
+- All 60 logical tools covered by scenario coverage and eval grants.
 - Exact tool grants only. No wildcard MCP grants and no broad Claude grants.
 - Every created SIM order, preview, token fixture, disclaimer fixture, and stream has cleanup evidence.
 - Before and after global-state fingerprints prove real Codex and Claude homes did not change.
@@ -67,7 +67,7 @@ Use `--dry-run` only for manifest validation. Dry-run output must say `execution
 
 Use `scripts/qa_dual_plugin_install.py` for install and cache evidence. It must record before/after global-state fingerprints and process cleanup.
 
-Use `scripts/run_mcp_tool_matrix.py` for the 39-tool SIM matrix. A manifest validation report is not SIM execution proof.
+Use `scripts/run_mcp_tool_matrix.py` for the 60-tool SIM matrix. A manifest validation report is not SIM execution proof.
 
 Use `scripts/assemble_agent_skill_release.py` only after the static, install, SIM, and LIVE task evidence exists and is bound to the candidate commit.
 

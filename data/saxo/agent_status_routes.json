@@ -205,6 +205,18 @@
         "reason": "Registered read gateway analytics mode returns these server-validated receipt statuses."
       },
       {
+        "module": "src/saxo_bank_mcp/analytics_ghost_portfolio.py",
+        "reason": "Registered bounded backtest results expose this controlled verification state."
+      },
+      {
+        "module": "src/saxo_bank_mcp/analytics_jobs.py",
+        "reason": "Registered analytics job management exposes these bounded lifecycle states."
+      },
+      {
+        "module": "src/saxo_bank_mcp/analytics_render.py",
+        "reason": "Registered render and export tools expose these explicit delivery states."
+      },
+      {
         "module": "src/saxo_bank_mcp/fastmcp_logging_safety.py",
         "reason": "FastMCP validation and unknown-tool wrappers return agent-visible ToolResult statuses."
       },
@@ -231,6 +243,10 @@
       {
         "module": "src/saxo_bank_mcp/mcp_live_account_tools.py",
         "reason": "Registered LIVE account list tool returns these statuses."
+      },
+      {
+        "module": "src/saxo_bank_mcp/mcp_analytics_tools.py",
+        "reason": "Registered analytics adapters expose canonical proof, job, storage, and artifact states."
       },
       {
         "module": "src/saxo_bank_mcp/mcp_live_session_tools.py",
@@ -759,6 +775,168 @@
       "safe_user_wording": "The precheck response unexpectedly contained an order identifier. Treat state as unsafe.",
       "source": "live_precheck_results",
       "status": "unsafe_precheck_response",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "retry resolution with a distinguishing asset type or exchange",
+      "retry_class": "correct_request_then_retry",
+      "safe_user_wording": "Several safe research matches remain; no analysis was produced.",
+      "source": "mcp_analytics_tools.saxo_resolve_research_universe",
+      "status": "ambiguous",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "inspect warnings and refresh missing stored source coverage",
+      "retry_class": "refresh_source_then_retry",
+      "safe_user_wording": "A reduced owner-local analysis was stored with explicit limitations.",
+      "source": "mcp_analytics_tools.DegradedAnalysisToolResponse",
+      "status": "degraded",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "list local analytics storage to inspect the remaining metadata",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The exact previewed owner-local dependency closure was deleted.",
+      "source": "mcp_analytics_tools.saxo_delete_analytics_data",
+      "status": "deleted",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "use the bounded inline owner artifact or request another format",
+      "retry_class": "not_needed",
+      "safe_user_wording": "A bounded owner artifact is available inline; no broker write occurred.",
+      "source": "analytics_render/mcp_analytics_tools",
+      "status": "inline",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "the bounded local job stopped without a conclusion",
+      "retry_class": "explicit_restart_only",
+      "safe_user_wording": "The analytics job was cancelled and exposed no partial conclusion.",
+      "source": "analytics_jobs",
+      "status": "job_cancelled",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "explain, render, or export the safe completed handle",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The bounded analytics job completed with a safe conclusion handle.",
+      "source": "analytics_jobs",
+      "status": "job_completed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "start the deterministic request again only by explicit choice",
+      "retry_class": "explicit_restart_only",
+      "safe_user_wording": "The analytics job expired and exposed no partial conclusion.",
+      "source": "analytics_jobs",
+      "status": "job_expired",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "inspect value-free recovery state before an explicit retry",
+      "retry_class": "inspect_before_retry",
+      "safe_user_wording": "The analytics job failed and exposed no partial conclusion.",
+      "source": "analytics_jobs",
+      "status": "job_failed",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "explicitly restart the same deterministic request if still wanted",
+      "retry_class": "explicit_restart_only",
+      "safe_user_wording": "The prior in-process analytics job was interrupted and was not resumed.",
+      "source": "analytics_jobs",
+      "status": "job_interrupted_restart_required",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "check the job later by its safe handle",
+      "retry_class": "poll_bounded_job",
+      "safe_user_wording": "The bounded local analytics job is queued with no partial conclusion.",
+      "source": "analytics_jobs",
+      "status": "job_queued",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "check or cancel the job by its safe handle",
+      "retry_class": "poll_bounded_job",
+      "safe_user_wording": "The bounded local analytics job is running with no partial conclusion.",
+      "source": "analytics_jobs",
+      "status": "job_running",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "satisfy the named controlled workflow preconditions before retrying",
+      "retry_class": "satisfy_gate_then_retry",
+      "safe_user_wording": "The controlled ghost workflow did not run.",
+      "source": "analytics_ghost_portfolio",
+      "status": "not_run",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "reconcile controlled workflow state before any retry",
+      "retry_class": "blind_retry_forbidden",
+      "safe_user_wording": "Transport failed after a possible mutable boundary; state requires reconciliation.",
+      "source": "analytics_ghost_portfolio",
+      "status": "post_boundary_transport_failure",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "consume the exact token once before expiry or preview again",
+      "retry_class": "consume_once_or_refresh",
+      "safe_user_wording": "An exact owner-local deletion preview is ready; no data was deleted.",
+      "source": "mcp_analytics_tools.saxo_preview_analytics_deletion",
+      "status": "preview_ready",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "continue with safe handles or refine an ambiguous request",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The research universe resolved to safe local handles.",
+      "source": "mcp_analytics_tools.saxo_resolve_research_universe",
+      "status": "resolved",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "read the owner-only resource through its opaque local link",
+      "retry_class": "not_needed",
+      "safe_user_wording": "The artifact is available through an owner-only local resource link.",
+      "source": "analytics_render/mcp_analytics_tools",
+      "status": "resource_link",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": false,
+      "next_action": "refresh source coverage or use a supported capability",
+      "retry_class": "refresh_source_then_retry",
+      "safe_user_wording": "The requested analytics source or capability is unavailable.",
+      "source": "mcp_analytics_tools",
+      "status": "unavailable",
+      "unqualified_mutation_success": false
+    },
+    {
+      "mutation_possible": true,
+      "next_action": "explain, render, or export the stored safe analysis handle",
+      "retry_class": "not_needed",
+      "safe_user_wording": "A proof-verified owner-local analysis was stored with a safe handle.",
+      "source": "mcp_analytics_tools.VerifiedAnalysisToolResponse",
+      "status": "verified",
       "unqualified_mutation_success": false
     }
   ]

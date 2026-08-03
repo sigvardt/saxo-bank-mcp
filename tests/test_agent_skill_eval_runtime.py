@@ -758,7 +758,7 @@ def test_non_router_execute_model_case_uses_provided_env_only(
                     "id": "answer",
                     "type": "agent_message",
                     "text": (
-                        "matched natural prompts 39 logical tools cleanup "
+                        "matched natural prompts 60 logical tools cleanup "
                         "LIVE no-purchase proof no wildcard exact tool grants"
                     ),
                 },
@@ -975,7 +975,7 @@ def test_non_router_success_path_with_real_zero_returncode(
                     "id": "answer",
                     "type": "agent_message",
                     "text": (
-                        "matched natural prompts 39 logical tools cleanup "
+                        "matched natural prompts 60 logical tools cleanup "
                         "LIVE no-purchase proof no wildcard exact tool grants"
                     ),
                 },

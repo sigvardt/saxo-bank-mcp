@@ -5,7 +5,7 @@
 SIM execution proof must come from current FastMCP calls, not old logs. Required fields:
 
 - Selected environment is SIM.
-- All 39 tools are covered by the scenario manifest.
+- All 60 tools are covered by the scenario manifest.
 - Every lifecycle tool that creates an order, preview, token, disclaimer response, or stream records cleanup.
 - Before and after mutable-state fingerprints match after cleanup.
 - The ledger contains no LIVE host and no LIVE mutation.

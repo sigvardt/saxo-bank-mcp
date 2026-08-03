@@ -20,7 +20,7 @@ from saxo_bank_mcp.agent_skill_eval_validation import (
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Saxo agent skill eval cases.")
     parser.add_argument("--all", action="store_true")
-    parser.add_argument("--case-root", type=Path, default=Path("evals/saxo-bank"))
+    parser.add_argument("--case-root", type=Path, default=Path("evals"))
     parser.add_argument(
         "--self-test-fixture",
         choices=(
@@ -39,7 +39,8 @@ def main(argv: list[str] | None = None) -> int:
         for error in errors:
             sys.stderr.write(f"{error}\n")
         return 1 if errors else 0
-    result = validate_eval_suite(case_root=args.case_root)
+    case_root = Path("evals") if args.all else args.case_root
+    result = validate_eval_suite(case_root=case_root)
     sys.stdout.write(result.line() + "\n")
     for error in result.errors:
         sys.stderr.write(f"{error}\n")

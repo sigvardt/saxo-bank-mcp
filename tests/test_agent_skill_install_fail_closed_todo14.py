@@ -43,7 +43,7 @@ def _proof(version: str, *, list_name: str) -> dict[str, object]:
         "digest": "1" * 64,
         "source_digest": "1" * 64,
         "inventory_exact_match": True,
-        "tool_count": 39,
+        "tool_count": 60,
         "annotations_missing": [],
         "probe_stdout_sha256": "2" * 64,
         "list_receipt_name": list_name,
@@ -189,8 +189,8 @@ def test_verify_only_requires_global_homes_and_ledger(tmp_path: Path) -> None:
         {
             "status": "passed",
             "execution_mode": "installed_verification",
-            "expected_skills": 8,
-            "expected_tools": 39,
+            "expected_skills": 9,
+            "expected_tools": 60,
         },
     )
     out = tmp_path / "out.json"

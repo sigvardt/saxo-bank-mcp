@@ -23,7 +23,7 @@ def _proof(*, version: str, cache_root: str = "run_root/cache") -> dict[str, Jso
         "digest": DIGEST,
         "source_digest": DIGEST,
         "inventory_exact_match": True,
-        "tool_count": 39,
+        "tool_count": 60,
         "annotations_missing": [],
         "probe_stdout_sha256": DIGEST,
         "list_receipt_name": "codex_plugin_list_restored",

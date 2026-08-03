@@ -11,6 +11,7 @@ from saxo_bank_mcp._evidence import JsonValue
 type JsonObject = dict[str, JsonValue]
 
 EXPECTED_SKILLS: Final = (
+    "saxo-analytics",
     "saxo-auth-session",
     "saxo-bank",
     "saxo-openapi",

@@ -86,6 +86,6 @@ ignore = [
 "tests/**" = ["S101"]
 
 [tool.basedpyright]
-include = ["src", "tests"]
+include = ["src", "tests", "scripts/run_dual_harness_skill_evals.py"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"

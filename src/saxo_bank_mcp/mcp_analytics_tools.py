@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import re
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
+from decimal import Decimal
 from threading import RLock
 from typing import Annotated, Final, Literal, cast
 
@@ -15,93 +18,46 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_core import to_jsonable_python
 
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.analytics_attribution import (
-    AttributionDataset,
-    analyze_portfolio_attribution,
-)
-from saxo_bank_mcp.analytics_backtest import BacktestRequest, run_backtest
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
     AnalyticsConfigError,
     load_analytics_config,
-)
-from saxo_bank_mcp.analytics_costs import CostDataset, analyze_cost_xray
-from saxo_bank_mcp.analytics_derivatives import (
-    DerivativeDataset,
-    FuturesCurveRequest,
-    FxForwardRequest,
-    IvSurfaceRequest,
-    LifecycleRadarRequest,
-    SaxoGreekSnapshot,
-    analyze_futures_curve,
-    analyze_fx_forward,
-    analyze_iv_surface,
-    analyze_lifecycle_radar,
-    analyze_option_model,
-    analyze_option_strategy,
 )
 from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
     StoredTableExportRequest,
     export_analysis,
 )
-from saxo_bank_mcp.analytics_exposure import ExposureDataset, analyze_portfolio_exposure
-from saxo_bank_mcp.analytics_income import (
-    CorporateActionClaimDataset,
-    IncomeDataset,
-    analyze_income,
-    authoritative_corporate_action_claim,
-)
-from saxo_bank_mcp.analytics_instruments import (
-    PriceSeriesDataset,
-    QuoteResearchDataset,
-    ResearchRefusal,
-    analyze_instrument_prices,
-    analyze_quote,
-    build_instrument_dossier,
-)
 from saxo_bank_mcp.analytics_jobs import (
     AnalyticsJobManager,
     JobCapacityError,
+    JobConclusion,
     JobError,
+    JobExecutionContext,
+    JobHandler,
+    JobKind,
     JobNotFoundError,
+    JobParameter,
     JobRequest,
     JobStateError,
 )
-from saxo_bank_mcp.analytics_liquidity import (
-    LiquidityDataset,
-    analyze_cash_and_settlement,
-)
 from saxo_bank_mcp.analytics_market import (
-    BoundedResearchUniverse,
-    MarketDepthDataset,
     SavedCondition,
-    WrapperCostDataset,
-    analyze_bounded_market,
-    analyze_entitled_depth,
-    check_saved_conditions,
-    compare_wrappers,
-    prepare_bounded_session,
 )
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_models import (
     AnalysisId,
+    AnalysisResult,
+    AnalyticsDegradation,
+    AnalyticsRefusal,
     DatasetId,
     InstrumentHandle,
     JobId,
     VisibilityMode,
 )
-from saxo_bank_mcp.analytics_optimization import OptimizationRequest, optimize_portfolio
-from saxo_bank_mcp.analytics_options import OptionModelInput, OptionStrategyRequest
 from saxo_bank_mcp.analytics_portfolio import (
     PortfolioAnalyticsError,
-    PortfolioPeriodDataset,
-    analyze_multi_account_portfolios,
-    analyze_portfolio_truth,
-    authoritative_tax_lot_export,
 )
-from saxo_bank_mcp.analytics_position_sizing import PositionSizingRequest, size_position
-from saxo_bank_mcp.analytics_pretrade import TradeProposal, build_pretrade_impact
 from saxo_bank_mcp.analytics_proof_profiles import (
     ProofProfileError,
     ProofRegistry,
@@ -110,10 +66,13 @@ from saxo_bank_mcp.analytics_proof_profiles import (
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider, SourceProviderError
 from saxo_bank_mcp.analytics_query import (
+    BreakdownDimension,
+    BreakdownMetric,
+    PortfolioAnalysisKind,
+    PortfolioCapability,
+    PortfolioEventType,
+    PortfolioMetric,
     PortfolioQueryError,
-    PortfolioQueryIntent,
-    parse_portfolio_query,
-    portfolio_query_catalog,
 )
 from saxo_bank_mcp.analytics_render import (
     ArtifactBindingRegistry,
@@ -127,9 +86,7 @@ from saxo_bank_mcp.analytics_resolver import (
     InstrumentResolver,
     ResolutionError,
     ResolutionStatus,
-    ResolvedInstrument,
 )
-from saxo_bank_mcp.analytics_scenarios import PortfolioScenarioRequest, run_portfolio_scenario
 from saxo_bank_mcp.analytics_storage_tools import (
     StorageBoundaryError,
     delete_analytics_data,
@@ -146,6 +103,7 @@ from saxo_bank_mcp.analytics_store import (
     StoreQuotaError,
     StoreValidationError,
 )
+from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
 from saxo_bank_mcp.analytics_sync import (
     DatasetNotFoundError,
     SyncError,
@@ -154,7 +112,6 @@ from saxo_bank_mcp.analytics_sync import (
     get_dataset,
     sync_research_data,
 )
-from saxo_bank_mcp.analytics_trade_review import TradeReviewDataset, analyze_trading_mirror
 from saxo_bank_mcp.analytics_universes import (
     ResearchUniverseStore,
     UniverseConflictError,
@@ -180,6 +137,8 @@ _RESULT_ADAPTER: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(
     dict[str, JsonValue],
 )
 _JOB_RUNTIME_LOCK: Final = RLock()
+_MIN_REPORT_VIEWPORT_WIDTH: Final = 320
+_MAX_REPORT_VIEWPORT_WIDTH: Final = 2560
 _job_runtime: tuple[str, AnalyticsStore, AnalyticsJobManager] | None = None
 
 
@@ -187,7 +146,7 @@ class _StrictToolModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         frozen=True,
-        strict=True,
+        strict=False,
         revalidate_instances="always",
         hide_input_in_errors=True,
     )
@@ -212,213 +171,322 @@ class AnalyticsToolResponse(_StrictToolModel):
     disclaimer_response_available: Literal[False] = False
 
 
-class BoundedMarketToolRequest(_StrictToolModel):
-    analysis_kind: Literal["bounded_market"] = "bounded_market"
-    universe: BoundedResearchUniverse
-    periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
+class VerifiedAnalysisToolResponse(_StrictToolModel):
+    status: Literal["verified"] = "verified"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    analysis_id: AnalysisId
+    result: AnalysisResult
+    warnings: tuple[str, ...] = ()
+    next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
+    next_action: str = Field(min_length=1, max_length=500)
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[True] = True
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
 
 
-class MarketDepthToolRequest(_StrictToolModel):
-    analysis_kind: Literal["depth"] = "depth"
-    dataset: MarketDepthDataset
+class DegradedAnalysisToolResponse(_StrictToolModel):
+    status: Literal["degraded"] = "degraded"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    analysis_id: AnalysisId
+    result: AnalyticsDegradation
+    warnings: tuple[str, ...]
+    next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
+    next_action: str = Field(min_length=1, max_length=500)
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[True] = True
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
 
 
-class WrapperComparisonToolRequest(_StrictToolModel):
-    analysis_kind: Literal["wrapper_comparison"] = "wrapper_comparison"
-    datasets: tuple[WrapperCostDataset, ...] = Field(min_length=1, max_length=25)
+class RefusedAnalysisToolResponse(_StrictToolModel):
+    status: Literal["refused"] = "refused"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    analysis_id: None = None
+    result: AnalyticsRefusal
+    reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    message: str = Field(min_length=1, max_length=500)
+    warnings: tuple[str, ...] = ()
+    next_tool: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    next_action: str = Field(min_length=1, max_length=500)
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[False] = False
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
 
 
-class SavedConditionsToolRequest(_StrictToolModel):
-    analysis_kind: Literal["saved_conditions"] = "saved_conditions"
-    conditions: tuple[SavedCondition, ...] = Field(min_length=1, max_length=100)
-    universe: BoundedResearchUniverse
-    quotes: tuple[QuoteResearchDataset, ...] = Field(default=(), max_length=25)
-
-
-class SessionPreparationToolRequest(_StrictToolModel):
-    analysis_kind: Literal["session_cockpit"] = "session_cockpit"
-    universe: BoundedResearchUniverse
-    quotes: tuple[QuoteResearchDataset, ...] = Field(default=(), max_length=25)
-    periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
-
-
-type MarketToolRequest = Annotated[
-    BoundedMarketToolRequest
-    | MarketDepthToolRequest
-    | WrapperComparisonToolRequest
-    | SavedConditionsToolRequest
-    | SessionPreparationToolRequest,
-    Field(discriminator="analysis_kind"),
+type CanonicalAnalysisToolResponse = Annotated[
+    VerifiedAnalysisToolResponse | DegradedAnalysisToolResponse | RefusedAnalysisToolResponse,
+    Field(discriminator="status"),
 ]
 
 
-class InstrumentPriceToolRequest(_StrictToolModel):
-    analysis_kind: Literal["price"] = "price"
-    dataset: PriceSeriesDataset
-    rolling_window: int = Field(default=20, ge=2)
+class InlineArtifactToolResponse(_StrictToolModel):
+    status: Literal["inline"] = "inline"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    artifact_id: str = Field(pattern=r"^ar_[0-9a-f]{32}$")
+    media_type: str = Field(pattern=r"^[a-z0-9.+-]+/[a-z0-9.+-]+$")
+    byte_count: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    semantics_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    visible_stamps: tuple[str, ...]
+    next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
+    next_action: str = "Use this bounded inline owner result or request another format."
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[True] = True
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
+
+
+class ResourceArtifactToolResponse(_StrictToolModel):
+    status: Literal["resource_link"] = "resource_link"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    artifact_id: str = Field(pattern=r"^ar_[0-9a-f]{32}$")
+    resource_uri: str = Field(pattern=r"^saxo-analytics://artifacts/ar_[0-9a-f]{32}$")
+    media_type: str = Field(pattern=r"^[a-z0-9.+-]+/[a-z0-9.+-]+$")
+    byte_count: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    semantics_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    owner_only: Literal[True] = True
+    reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    visible_stamps: tuple[str, ...]
+    next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
+    next_action: str = "Read the owner-only resource by its opaque resource link."
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[True] = True
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
+
+
+class RefusedArtifactToolResponse(_StrictToolModel):
+    status: Literal["refused"] = "refused"
+    tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    message: str = Field(min_length=1, max_length=500)
+    next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
+    next_action: str = Field(min_length=1, max_length=500)
+    network_call_made: Literal[False] = False
+    local_state_changed: Literal[False] = False
+    broker_write_made: Literal[False] = False
+    approval_authority: Literal[False] = False
+    execution_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
+
+
+type ArtifactToolResponse = Annotated[
+    InlineArtifactToolResponse | ResourceArtifactToolResponse | RefusedArtifactToolResponse,
+    Field(discriminator="status"),
+]
+
+
+_CANONICAL_ANALYSIS_OUTPUT_ADAPTER: Final[TypeAdapter[CanonicalAnalysisToolResponse]] = TypeAdapter(
+    CanonicalAnalysisToolResponse
+)
+_ARTIFACT_OUTPUT_ADAPTER: Final[TypeAdapter[ArtifactToolResponse]] = TypeAdapter(
+    ArtifactToolResponse
+)
+
+
+class StoredMarketToolRequest(_StrictToolModel):
+    analysis_kind: Literal[
+        "market_comparison",
+        "market_microstructure",
+        "wrapper_comparison",
+        "saved_condition_checks",
+        "session_cockpit",
+    ]
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+    periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
+    conditions: tuple[SavedCondition, ...] = Field(default=(), max_length=100)
+    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+
+
+class StoredInstrumentToolRequest(_StrictToolModel):
+    analysis_kind: Literal[
+        "instrument_price_return",
+        "instrument_quote",
+        "instrument_dossier",
+    ]
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=2)
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=25)
+    rolling_window: int = Field(default=20, ge=2, le=1000)
     periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
     requested_return: Literal["price_return", "adjusted_price_return", "total_return"] = (
         "price_return"
     )
+    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class InstrumentQuoteToolRequest(_StrictToolModel):
-    analysis_kind: Literal["quote"] = "quote"
-    dataset: QuoteResearchDataset
+class StoredMetricQueryChoice(_StrictToolModel):
+    intent: Literal["metric"] = "metric"
+    metric: PortfolioMetric
 
 
-class InstrumentDossierToolRequest(_StrictToolModel):
-    analysis_kind: Literal["dossier"] = "dossier"
-    instrument: ResolvedInstrument
-    price_dataset: PriceSeriesDataset
-    quote_dataset: QuoteResearchDataset | None = None
-    rolling_window: int = Field(default=20, ge=2)
-    periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
+class StoredBreakdownQueryChoice(_StrictToolModel):
+    intent: Literal["breakdown"] = "breakdown"
+    metric: BreakdownMetric
+    dimension: BreakdownDimension
 
 
-type InstrumentToolRequest = Annotated[
-    InstrumentPriceToolRequest | InstrumentQuoteToolRequest | InstrumentDossierToolRequest,
-    Field(discriminator="analysis_kind"),
+class StoredEventQueryChoice(_StrictToolModel):
+    intent: Literal["events"] = "events"
+    event_type: PortfolioEventType
+    instrument_handle: InstrumentHandle | None = None
+
+
+class StoredCapabilityQueryChoice(_StrictToolModel):
+    intent: Literal["capability"] = "capability"
+    capability: PortfolioCapability
+
+
+class StoredAnalysisQueryChoice(_StrictToolModel):
+    intent: Literal["analysis"] = "analysis"
+    requested_analysis: PortfolioAnalysisKind
+
+
+type StoredPortfolioQueryChoice = Annotated[
+    StoredMetricQueryChoice
+    | StoredBreakdownQueryChoice
+    | StoredEventQueryChoice
+    | StoredCapabilityQueryChoice
+    | StoredAnalysisQueryChoice,
+    Field(discriminator="intent"),
 ]
 
 
-class PortfolioTruthToolRequest(_StrictToolModel):
-    analysis_kind: Literal["performance"] = "performance"
-    dataset: PortfolioPeriodDataset
+class StoredPortfolioToolRequest(_StrictToolModel):
+    analysis_kind: Literal[
+        "portfolio_performance",
+        "portfolio_comparison",
+        "tax_lot_export",
+        "portfolio_attribution",
+        "portfolio_exposure",
+        "income_calendar",
+        "corporate_action_center",
+        "cash_and_settlement",
+        "cost_xray",
+        "trading_mirror",
+        "portfolio_query",
+    ]
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+    query_intent: StoredPortfolioQueryChoice | None = None
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class MultiAccountPortfolioToolRequest(_StrictToolModel):
-    analysis_kind: Literal["multi_account"] = "multi_account"
-    datasets: tuple[PortfolioPeriodDataset, ...] = Field(min_length=1, max_length=25)
+class StoredPositionSizingToolRequest(_StrictToolModel):
+    analysis_kind: Literal["position_sizing"] = "position_sizing"
+    dataset_id: DatasetId
+    instrument_handle: InstrumentHandle
+    method: Literal["stop_distance", "volatility"]
+    maximum_loss: Decimal = Field(gt=0, allow_inf_nan=False)
+    risk_budget_confirmed: bool
+    stop_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    volatility_multiple: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class TaxLotToolRequest(_StrictToolModel):
-    analysis_kind: Literal["tax_lot_export"] = "tax_lot_export"
-    dataset: PortfolioPeriodDataset
+class ExplicitScenarioShock(_StrictToolModel):
+    instrument_handle: InstrumentHandle
+    price_shock_ratio: Decimal = Field(ge=-1, allow_inf_nan=False)
+    volatility_shock_points: Decimal = Field(default=Decimal(0), allow_inf_nan=False)
+    rate_shock_basis_points: Decimal = Field(default=Decimal(0), allow_inf_nan=False)
 
 
-class AttributionToolRequest(_StrictToolModel):
-    analysis_kind: Literal["attribution"] = "attribution"
-    dataset: AttributionDataset
+class StoredScenarioToolRequest(_StrictToolModel):
+    analysis_kind: Literal[
+        "scenario_historical",
+        "scenario_custom",
+        "scenario_currency",
+        "scenario_volatility",
+        "scenario_rate",
+        "scenario_margin",
+        "scenario_combined",
+    ]
+    dataset_id: DatasetId
+    shocks: tuple[ExplicitScenarioShock, ...] = Field(min_length=1, max_length=100)
+    numeric_shocks_echoed_by_caller: bool
+    caller_accepted_numeric_shocks: bool
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class ExposureToolRequest(_StrictToolModel):
-    analysis_kind: Literal["exposure"] = "exposure"
-    dataset: ExposureDataset
+class StoredOptimizationToolRequest(_StrictToolModel):
+    analysis_kind: Literal["portfolio_minimum_variance", "portfolio_risk_parity"]
+    dataset_id: DatasetId
+    objective: Literal["minimum_variance", "risk_parity"]
+    objective_confirmed_by_caller: bool
+    constraints_confirmed_by_caller: bool
+    short_policy: Literal["long_only", "bounded_short"]
+    maximum_turnover: Decimal = Field(ge=0, allow_inf_nan=False)
+    maximum_transaction_cost_ratio: Decimal = Field(ge=0, allow_inf_nan=False)
+    maximum_margin_ratio: Decimal = Field(ge=0, allow_inf_nan=False)
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class IncomeToolRequest(_StrictToolModel):
-    analysis_kind: Literal["income"] = "income"
-    dataset: IncomeDataset
+class StoredDerivativesToolRequest(_StrictToolModel):
+    analysis_kind: Literal[
+        "derivatives_model",
+        "option_payoff",
+        "iv_surface",
+        "derivatives_scenario",
+        "futures_curve",
+        "fx_forward_carry",
+    ]
+    dataset_id: DatasetId
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=25)
+    volatility_assumption: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+    rate_assumption: Decimal | None = Field(default=None, allow_inf_nan=False)
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class CorporateActionToolRequest(_StrictToolModel):
-    analysis_kind: Literal["corporate_action"] = "corporate_action"
-    dataset: CorporateActionClaimDataset
-
-
-class LiquidityToolRequest(_StrictToolModel):
-    analysis_kind: Literal["cash_and_settlement"] = "cash_and_settlement"
-    dataset: LiquidityDataset
+class StoredBacktestToolRequest(_StrictToolModel):
+    analysis_kind: Literal["bounded_backtest"] = "bounded_backtest"
+    dataset_id: DatasetId
+    instrument_handle: InstrumentHandle
+    strategy: StrategyDefinition
+    starting_equity: float = Field(gt=0, allow_inf_nan=False)
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
 
 
-class CostToolRequest(_StrictToolModel):
-    analysis_kind: Literal["costs"] = "costs"
-    dataset: CostDataset
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+class AnalyticsJobParameter(_StrictToolModel):
+    name: str = Field(min_length=1, max_length=64)
+    value: str | int | float | bool | None
 
 
-class TradeReviewToolRequest(_StrictToolModel):
-    analysis_kind: Literal["trade_review"] = "trade_review"
-    dataset: TradeReviewDataset
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+class AnalyticsJobToolRequest(_StrictToolModel):
+    job_kind: JobKind
+    dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=100)
+    analysis_ids: tuple[AnalysisId, ...] = Field(default=(), max_length=100)
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(default=(), max_length=100)
+    parameters: tuple[AnalyticsJobParameter, ...] = Field(default=(), max_length=100)
+    total_work_units: int = Field(ge=1, le=5_000_000)
+    restart_interrupted: bool = False
 
-
-class PortfolioIntentToolRequest(_StrictToolModel):
-    analysis_kind: Literal["query"] = "query"
-    intent: PortfolioQueryIntent
-
-
-class PortfolioQueryCatalogToolRequest(_StrictToolModel):
-    analysis_kind: Literal["query_catalog"] = "query_catalog"
-
-
-type PortfolioToolRequest = Annotated[
-    PortfolioTruthToolRequest
-    | MultiAccountPortfolioToolRequest
-    | TaxLotToolRequest
-    | AttributionToolRequest
-    | ExposureToolRequest
-    | IncomeToolRequest
-    | CorporateActionToolRequest
-    | LiquidityToolRequest
-    | CostToolRequest
-    | TradeReviewToolRequest
-    | PortfolioIntentToolRequest
-    | PortfolioQueryCatalogToolRequest,
-    Field(discriminator="analysis_kind"),
-]
-
-
-class OptionModelToolRequest(_StrictToolModel):
-    analysis_kind: Literal["option_model"] = "option_model"
-    dataset: DerivativeDataset
-    model_input: OptionModelInput
-    saxo_greeks: SaxoGreekSnapshot | None = None
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-class OptionStrategyToolRequest(_StrictToolModel):
-    analysis_kind: Literal["option_strategy"] = "option_strategy"
-    dataset: DerivativeDataset
-    request: OptionStrategyRequest
-    expiry_reference_prices: tuple[float, ...] = Field(min_length=1, max_length=500)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-class IvSurfaceToolRequest(_StrictToolModel):
-    analysis_kind: Literal["iv_surface"] = "iv_surface"
-    dataset: DerivativeDataset
-    request: IvSurfaceRequest
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-class LifecycleRadarToolRequest(_StrictToolModel):
-    analysis_kind: Literal["lifecycle_radar"] = "lifecycle_radar"
-    dataset: DerivativeDataset
-    request: LifecycleRadarRequest
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-class FuturesCurveToolRequest(_StrictToolModel):
-    analysis_kind: Literal["futures_curve"] = "futures_curve"
-    dataset: DerivativeDataset
-    request: FuturesCurveRequest
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-class FxForwardToolRequest(_StrictToolModel):
-    analysis_kind: Literal["fx_forward"] = "fx_forward"
-    dataset: DerivativeDataset
-    request: FxForwardRequest
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
-
-
-type DerivativesToolRequest = Annotated[
-    OptionModelToolRequest
-    | OptionStrategyToolRequest
-    | IvSurfaceToolRequest
-    | LifecycleRadarToolRequest
-    | FuturesCurveToolRequest
-    | FxForwardToolRequest,
-    Field(discriminator="analysis_kind"),
-]
+    def to_domain(self) -> JobRequest:
+        return JobRequest(
+            job_kind=self.job_kind,
+            dataset_ids=self.dataset_ids,
+            analysis_ids=self.analysis_ids,
+            instrument_handles=self.instrument_handles,
+            parameters=tuple(
+                JobParameter(name=parameter.name, value=parameter.value)
+                for parameter in self.parameters
+            ),
+            total_work_units=self.total_work_units,
+            restart_interrupted=self.restart_interrupted,
+        )
 
 
 def saxo_analytics_capabilities() -> AnalyticsToolResponse:
@@ -641,300 +709,187 @@ def saxo_get_research_dataset(
     )
 
 
-def saxo_analyze_market(request: MarketToolRequest) -> AnalyticsToolResponse:
-    """Dispatch one typed market request without duplicating domain calculations."""
-    tool = "saxo_analyze_market"
-    try:
-        if isinstance(request, BoundedMarketToolRequest):
-            result = analyze_bounded_market(
-                request.universe,
-                periods_per_year=request.periods_per_year,
-            )
-        elif isinstance(request, MarketDepthToolRequest):
-            result = analyze_entitled_depth(request.dataset)
-        elif isinstance(request, WrapperComparisonToolRequest):
-            result = compare_wrappers(request.datasets)
-        elif isinstance(request, SavedConditionsToolRequest):
-            result = check_saved_conditions(
-                request.conditions,
-                request.universe,
-                quotes=request.quotes,
-            )
-        else:
-            result = prepare_bounded_session(
-                request.universe,
-                quotes=request.quotes,
-                periods_per_year=request.periods_per_year,
-            )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+def saxo_analyze_market(
+    request: StoredMarketToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Authenticate stored Saxo material and refuse until its proof profile is active."""
+    return _stored_analysis_response(
+        "saxo_analyze_market",
+        request.analysis_kind,
+        request.dataset_ids,
+        VisibilityMode(request.visibility),
+    )
 
 
-def saxo_analyze_instruments(request: InstrumentToolRequest) -> AnalyticsToolResponse:
-    """Dispatch one typed instrument request to the existing domain services."""
-    tool = "saxo_analyze_instruments"
-    try:
-        if isinstance(request, InstrumentPriceToolRequest):
-            result = analyze_instrument_prices(
-                request.dataset,
-                rolling_window=request.rolling_window,
-                periods_per_year=request.periods_per_year,
-                requested_return=request.requested_return,
-            )
-        elif isinstance(request, InstrumentQuoteToolRequest):
-            result = analyze_quote(request.dataset)
-        else:
-            result = build_instrument_dossier(
-                request.instrument,
-                request.price_dataset,
-                quote_dataset=request.quote_dataset,
-                rolling_window=request.rolling_window,
-                periods_per_year=request.periods_per_year,
-            )
-    except (ArithmeticError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+def saxo_analyze_instruments(
+    request: StoredInstrumentToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Accept only opaque stored datasets and bounded calculation parameters."""
+    return _stored_analysis_response(
+        "saxo_analyze_instruments",
+        request.analysis_kind,
+        request.dataset_ids,
+        VisibilityMode(request.visibility),
+    )
 
 
-def saxo_analyze_portfolio(  # noqa: C901, PLR0912 - typed domain dispatch
-    request: PortfolioToolRequest,
-) -> AnalyticsToolResponse:
-    """Dispatch one typed portfolio request to existing accounting domain services."""
-    tool = "saxo_analyze_portfolio"
-    delivery = _portfolio_request_delivery(request)
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    visibility, trusted = delivery
-    try:
-        if isinstance(request, PortfolioTruthToolRequest):
-            result = analyze_portfolio_truth(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, MultiAccountPortfolioToolRequest):
-            result = analyze_multi_account_portfolios(
-                request.datasets,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, TaxLotToolRequest):
-            result = authoritative_tax_lot_export(request.dataset)
-        elif isinstance(request, AttributionToolRequest):
-            result = analyze_portfolio_attribution(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, ExposureToolRequest):
-            result = analyze_portfolio_exposure(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, IncomeToolRequest):
-            result = analyze_income(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, CorporateActionToolRequest):
-            result = authoritative_corporate_action_claim(request.dataset)
-        elif isinstance(request, LiquidityToolRequest):
-            result = analyze_cash_and_settlement(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, CostToolRequest):
-            result = analyze_cost_xray(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, TradeReviewToolRequest):
-            result = analyze_trading_mirror(
-                request.dataset,
-                visibility=visibility,
-                trusted_local_host=trusted,
-            )
-        elif isinstance(request, PortfolioIntentToolRequest):
-            result = parse_portfolio_query(request.intent.model_dump(mode="python"))
-        else:
-            result = portfolio_query_catalog()
-    except (ArithmeticError, PortfolioAnalyticsError, PortfolioQueryError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+def saxo_analyze_portfolio(
+    request: StoredPortfolioToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Authenticate stored account datasets without accepting caller-built account facts."""
+    return _stored_analysis_response(
+        "saxo_analyze_portfolio",
+        request.analysis_kind,
+        request.dataset_ids,
+        VisibilityMode(request.visibility),
+    )
 
 
 def saxo_size_position(
-    request: PositionSizingRequest,
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
-) -> AnalyticsToolResponse:
-    """Call the explicit-risk sizing service with server-derived delivery trust."""
-    tool = "saxo_size_position"
-    delivery = _delivery_context(tool, VisibilityMode(visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    try:
-        result = size_position(
-            request,
-            visibility=VisibilityMode(visibility),
-            trusted_local_host=delivery,
-        )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_run_scenario")
+    request: StoredPositionSizingToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Bind caller-selected risk budget to authenticated stored account material."""
+    return _stored_analysis_response(
+        "saxo_size_position",
+        request.analysis_kind,
+        (request.dataset_id,),
+        VisibilityMode(request.visibility),
+    )
 
 
 def saxo_run_scenario(
-    request: PortfolioScenarioRequest,
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
-) -> AnalyticsToolResponse:
-    """Call the explicit numerical scenario service only."""
-    tool = "saxo_run_scenario"
-    delivery = _delivery_context(tool, VisibilityMode(visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    try:
-        result = run_portfolio_scenario(
-            request,
-            visibility=VisibilityMode(visibility),
-            trusted_local_host=delivery,
+    request: StoredScenarioToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Bind explicit accepted shocks to authenticated stored portfolio material."""
+    if not request.numeric_shocks_echoed_by_caller or not request.caller_accepted_numeric_shocks:
+        return _canonical_analysis_refusal(
+            "saxo_run_scenario",
+            request.analysis_kind,
+            VisibilityMode(request.visibility),
+            "numeric_shocks_not_accepted",
+            "Explicit numeric shocks must be echoed and accepted before calculation.",
+            next_tool="saxo_run_scenario",
+            next_action="Echo and accept the exact numeric shock map, then retry.",
         )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool=tool)
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+    return _stored_analysis_response(
+        "saxo_run_scenario",
+        request.analysis_kind,
+        (request.dataset_id,),
+        VisibilityMode(request.visibility),
+    )
 
 
 def saxo_optimize_portfolio(
-    request: OptimizationRequest,
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
-) -> AnalyticsToolResponse:
-    """Call the bounded optimizer without adding objective or risk choices."""
-    tool = "saxo_optimize_portfolio"
-    delivery = _delivery_context(tool, VisibilityMode(visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    try:
-        result = optimize_portfolio(
-            request,
-            visibility=VisibilityMode(visibility),
-            trusted_local_host=delivery,
+    request: StoredOptimizationToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Bind caller-selected objective and constraints to authenticated stored inputs."""
+    if not request.objective_confirmed_by_caller or not request.constraints_confirmed_by_caller:
+        return _canonical_analysis_refusal(
+            "saxo_optimize_portfolio",
+            request.analysis_kind,
+            VisibilityMode(request.visibility),
+            "optimizer_choices_not_confirmed",
+            "The objective and bounded constraints require explicit caller confirmation.",
+            next_tool="saxo_optimize_portfolio",
+            next_action="Confirm the exact objective and constraints, then retry.",
         )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool=tool)
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+    return _stored_analysis_response(
+        "saxo_optimize_portfolio",
+        request.analysis_kind,
+        (request.dataset_id,),
+        VisibilityMode(request.visibility),
+    )
 
 
-def saxo_model_derivatives(request: DerivativesToolRequest) -> AnalyticsToolResponse:
-    """Dispatch one explicitly supported derivative model."""
-    tool = "saxo_model_derivatives"
-    delivery = _delivery_context(tool, VisibilityMode(request.visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    visibility = VisibilityMode(request.visibility)
-    try:
-        if isinstance(request, OptionModelToolRequest):
-            result = analyze_option_model(
-                request.dataset,
-                request.model_input,
-                visibility=visibility,
-                trusted_local_host=delivery,
-                saxo_greeks=request.saxo_greeks,
-            )
-        elif isinstance(request, OptionStrategyToolRequest):
-            result = analyze_option_strategy(
-                request.dataset,
-                request.request,
-                expiry_reference_prices=request.expiry_reference_prices,
-                visibility=visibility,
-                trusted_local_host=delivery,
-            )
-        elif isinstance(request, IvSurfaceToolRequest):
-            result = analyze_iv_surface(
-                request.dataset,
-                request.request,
-                visibility=visibility,
-                trusted_local_host=delivery,
-            )
-        elif isinstance(request, LifecycleRadarToolRequest):
-            result = analyze_lifecycle_radar(
-                request.dataset,
-                request.request,
-                visibility=visibility,
-                trusted_local_host=delivery,
-            )
-        elif isinstance(request, FuturesCurveToolRequest):
-            result = analyze_futures_curve(
-                request.dataset,
-                request.request,
-                visibility=visibility,
-                trusted_local_host=delivery,
-            )
-        else:
-            result = analyze_fx_forward(
-                request.dataset,
-                request.request,
-                visibility=visibility,
-                trusted_local_host=delivery,
-            )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_render_analysis")
+def saxo_model_derivatives(
+    request: StoredDerivativesToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Bind model assumptions to authenticated stored derivative records."""
+    return _stored_analysis_response(
+        "saxo_model_derivatives",
+        request.analysis_kind,
+        (request.dataset_id,),
+        VisibilityMode(request.visibility),
+    )
 
 
 def saxo_backtest_strategy(
-    request: BacktestRequest,
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
-) -> AnalyticsToolResponse:
-    """Call the bounded declarative research engine without execution authority."""
-    tool = "saxo_backtest_strategy"
-    delivery = _delivery_context(tool, VisibilityMode(visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
-    try:
-        result = run_backtest(
-            request,
-            visibility=VisibilityMode(visibility),
-            trusted_local_host=delivery,
-        )
-    except (ArithmeticError, PortfolioAnalyticsError, ValueError) as error:
-        return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _domain_response(tool, result, next_tool="saxo_explain_analysis")
+    request: StoredBacktestToolRequest,
+) -> CanonicalAnalysisToolResponse:
+    """Bind a declarative strategy to authenticated stored bars only."""
+    return _stored_analysis_response(
+        "saxo_backtest_strategy",
+        request.analysis_kind,
+        (request.dataset_id,),
+        VisibilityMode(request.visibility),
+    )
 
 
-def saxo_propose_trade_from_analysis(
+def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices only
     analysis_id: AnalysisId,
-    proposal: TradeProposal,
+    instrument_handle: InstrumentHandle,
+    side: Literal["buy", "sell"],
+    quantity: Annotated[Decimal, Field(gt=0, allow_inf_nan=False)],
+    proposal_price: Annotated[
+        Decimal | None,
+        Field(default=None, gt=0, allow_inf_nan=False),
+    ] = None,
+    maximum_loss: Annotated[Decimal | None, Field(default=None, gt=0, allow_inf_nan=False)] = None,
+    holding_period_days: Annotated[int, Field(default=0, ge=0, le=36500)] = 0,
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
-) -> AnalyticsToolResponse:
-    """Return only the existing non-authorizing typed precheck input."""
+) -> CanonicalAnalysisToolResponse:
+    """Replay one stored analysis and accept only explicit user trade choices."""
+    del side, quantity, proposal_price, maximum_loss, holding_period_days
     tool = "saxo_propose_trade_from_analysis"
-    delivery = _delivery_context(tool, VisibilityMode(visibility))
-    if isinstance(delivery, AnalyticsToolResponse):
-        return delivery
+    selected_visibility = VisibilityMode(visibility)
     try:
         config = _analytics_config()
-        replay_analysis(analysis_id, config=config, registry=_proof_registry(config))
-        result = build_pretrade_impact(
-            analysis_id,
-            proposal,
-            visibility=VisibilityMode(visibility),
-            trusted_local_host=delivery,
-        )
+        result = replay_analysis(analysis_id, config=config, registry=_proof_registry(config))
+        store = AnalyticsStore.open(config)
+        try:
+            store.get_authenticated_dataset(result.provenance.dataset_id)
+        finally:
+            store.close()
     except (
         AnalysisReplayRefused,
         AnalyticsConfigError,
-        PortfolioAnalyticsError,
         ProofProfileError,
         StoreError,
         OSError,
         ValueError,
-    ) as error:
-        return _known_failure(tool, error, next_tool="saxo_explain_analysis")
-    return _domain_response(tool, result, next_tool="saxo_create_order_preview")
+    ):
+        return _canonical_analysis_refusal(
+            tool,
+            "pretrade_impact",
+            selected_visibility,
+            "analysis_replay_refused",
+            "The stored analysis is stale, unavailable, or no longer proof-verified.",
+            next_tool="saxo_explain_analysis",
+            next_action="Explain or refresh the stored analysis before any new proposal request.",
+        )
+    bound_handles = tuple(getattr(result.request, "instrument_handles", ()))
+    if not bound_handles or instrument_handle not in bound_handles:
+        return _canonical_analysis_refusal(
+            tool,
+            "pretrade_impact",
+            selected_visibility,
+            "proposal_context_mismatch",
+            "The explicit instrument choice is not bound to the replayed analysis.",
+            next_tool="saxo_explain_analysis",
+            next_action="Inspect the stored analysis and make a separate explicit matching choice.",
+        )
+    return _canonical_analysis_refusal(
+        tool,
+        "pretrade_impact",
+        selected_visibility,
+        "pretrade_context_unavailable",
+        "The replayed analysis lacks a complete current server-owned pretrade context.",
+        next_tool="saxo_explain_analysis",
+        next_action=(
+            "Refresh the required stored account and market sources; a broker preview requires a "
+            "separate later user request."
+        ),
+    )
 
 
 def saxo_render_analysis(
@@ -976,7 +931,10 @@ def saxo_render_analysis(
         OSError,
         ValueError,
     ) as error:
-        return _tool_result(_known_failure(tool, error, next_tool="saxo_explain_analysis"))
+        return _artifact_failure_result(
+            tool,
+            _known_failure(tool, error, next_tool="saxo_explain_analysis"),
+        )
     finally:
         if store is not None:
             store.close()
@@ -992,7 +950,8 @@ def saxo_export_analysis(
     """Issue a server-owned binding and export exact proof-replayed values."""
     tool = "saxo_export_analysis"
     if export_kind == "table" and output_format not in {"csv", "parquet", "json", "html"}:
-        return _tool_result(
+        return _artifact_failure_result(
+            tool,
             _refusal(
                 tool,
                 "export_format_unsupported",
@@ -1002,7 +961,8 @@ def saxo_export_analysis(
             ),
         )
     if export_kind == "report" and (output_format not in {"html", "pdf"} or template_id is None):
-        return _tool_result(
+        return _artifact_failure_result(
+            tool,
             _refusal(
                 tool,
                 "export_request_incomplete",
@@ -1049,7 +1009,10 @@ def saxo_export_analysis(
         OSError,
         ValueError,
     ) as error:
-        return _tool_result(_known_failure(tool, error, next_tool="saxo_explain_analysis"))
+        return _artifact_failure_result(
+            tool,
+            _known_failure(tool, error, next_tool="saxo_explain_analysis"),
+        )
     finally:
         if store is not None:
             store.close()
@@ -1100,7 +1063,7 @@ def saxo_explain_analysis(analysis_id: AnalysisId) -> AnalyticsToolResponse:
 
 async def saxo_manage_analysis_job(
     action: ManageJobAction,
-    request: JobRequest | None = None,
+    request: AnalyticsJobToolRequest | None = None,
     job_id: JobId | None = None,
 ) -> AnalyticsToolResponse:
     """Apply one bounded in-process job transition."""
@@ -1112,7 +1075,7 @@ async def saxo_manage_analysis_job(
     try:
         manager = _job_manager_for_config(_analytics_config())
         if action == "start":
-            status = await manager.start_job(cast("JobRequest", request))
+            status = await manager.start_job(cast("AnalyticsJobToolRequest", request).to_domain())
         elif action == "check":
             status = await manager.get_job(cast("str", job_id))
         else:
@@ -1232,31 +1195,115 @@ def saxo_delete_analytics_data(token: str) -> AnalyticsToolResponse:
     )
 
 
-def _domain_response(
+def _stored_analysis_response(
     tool: str,
-    result: object,
+    analysis_kind: str,
+    dataset_ids: Sequence[str],
+    visibility: VisibilityMode,
+) -> CanonicalAnalysisToolResponse:
+    """Authenticate exact stored lineage and fail closed before any unproved calculation."""
+    if visibility is VisibilityMode.PRIVATE_USER_RESULT and _server_environment() == "LIVE":
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            "inline_private_not_enabled",
+            "Private LIVE values require owner-only proof-bound artifact delivery.",
+            next_tool="saxo_export_analysis",
+            next_action="Export a verified stored analysis through owner-only bound delivery.",
+        )
+    store: AnalyticsStore | None = None
+    try:
+        config = _analytics_config()
+        store = AnalyticsStore.open(config)
+        for dataset_id in dataset_ids:
+            store.get_authenticated_dataset(dataset_id)
+        profile = _proof_registry(config).profile(analysis_kind)
+    except (
+        AnalyticsConfigError,
+        ProofProfileError,
+        StoreError,
+        OSError,
+        ValueError,
+    ) as error:
+        reason_code, message = _known_failure_details(error)
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            reason_code,
+            message,
+            next_tool="saxo_sync_research_data",
+            next_action=(
+                "Synchronize the exact stored source coverage, then retry by its safe handle."
+            ),
+        )
+    finally:
+        if store is not None:
+            store.close()
+    if profile is None:
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            "missing_proof_profile",
+            "No checked-in proof profile covers this stored analysis kind.",
+            next_tool="saxo_analytics_capabilities",
+            next_action="Inspect the installed proof state; do not substitute a calculation.",
+        )
+    if profile.activation_state.value != "active":
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            profile.quarantine_reason or "proof_quarantined",
+            "The checked-in proof profile is not active, so no analytical claim was produced.",
+            next_tool="saxo_analytics_capabilities",
+            next_action="Inspect proof maturity and wait for an active checked-in profile.",
+        )
+    return _canonical_analysis_refusal(
+        tool,
+        analysis_kind,
+        visibility,
+        "proof_bound_executor_unavailable",
+        "No proof-bound stored-input executor is registered for this exact analysis request.",
+        next_tool="saxo_analytics_capabilities",
+        next_action=(
+            "Use only an installed proof-bound analysis kind; do not provide source values."
+        ),
+    )
+
+
+def _canonical_analysis_refusal(  # noqa: PLR0913 - explicit safe recovery envelope
+    tool: str,
+    analysis_kind: str,
+    visibility: VisibilityMode,
+    reason_code: str,
+    message: str,
     *,
     next_tool: str,
-) -> AnalyticsToolResponse:
-    if isinstance(result, ResearchRefusal):
-        return _response(
-            tool,
-            result,
-            status="refused",
-            reason_code=result.reason_code,
-            message=result.reason,
-            next_tool=_refusal_next_tool(result.reason_code, next_tool),
-            next_action=_refusal_next_action(result.reason_code),
-            network_call_made=False,
-            local_state_changed=False,
-        )
-    return _response(
-        tool,
-        result,
+    next_action: str,
+) -> RefusedAnalysisToolResponse:
+    refusal = AnalyticsRefusal(
+        visibility=visibility,
+        tool_name=tool,
+        analysis_kind=analysis_kind,
+        as_of=datetime.now(UTC),
+        reason_code=reason_code,
+        reason=message,
+        next_action=next_action,
+        warnings=(),
+        verifies=("No unproved Saxo source or analytical value was returned.",),
+        does_not_verify=("The requested analytical conclusion.",),
+    )
+    return RefusedAnalysisToolResponse(
+        tool_name=tool,
+        analysis_kind=analysis_kind,
+        result=refusal,
+        reason_code=reason_code,
+        message=message,
         next_tool=next_tool,
-        next_action=f"Continue with {next_tool} only if that output is needed.",
-        network_call_made=False,
-        local_state_changed=False,
+        next_action=next_action,
     )
 
 
@@ -1447,47 +1494,8 @@ def _known_failure_details(error: Exception) -> tuple[str, str]:
     return "analytics_request_invalid", "The typed analytics request is invalid."
 
 
-def _delivery_context(
-    tool: str,
-    visibility: VisibilityMode,
-) -> bool | AnalyticsToolResponse:
-    allowed = {
-        VisibilityMode.PUBLIC_EVIDENCE,
-        VisibilityMode.FINGERPRINT_ONLY,
-        VisibilityMode.REDACTED_PREVIEW,
-        VisibilityMode.PRIVATE_USER_RESULT,
-    }
-    if visibility not in allowed:
-        return _refusal(
-            tool,
-            "analytics_visibility_unsupported",
-            "Use public evidence, fingerprint-only, redacted preview, or private owner output.",
-            next_tool="saxo_export_analysis",
-            next_action="Use bound export for owner-only resource-link delivery.",
-        )
-    if visibility is not VisibilityMode.PRIVATE_USER_RESULT:
-        return False
-    environment = os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
-    if environment == "SIM":
-        return True
-    return _refusal(
-        tool,
-        "inline_private_not_enabled",
-        "Private LIVE values require owner-only bound artifact delivery.",
-        next_tool="saxo_export_analysis",
-        next_action="Persist and export a verified analysis through owner-only bound delivery.",
-    )
-
-
-def _portfolio_request_delivery(
-    request: PortfolioToolRequest,
-) -> tuple[VisibilityMode, bool] | AnalyticsToolResponse:
-    raw = getattr(request, "visibility", VisibilityMode.FINGERPRINT_ONLY)
-    visibility = VisibilityMode(raw)
-    trusted = _delivery_context("saxo_analyze_portfolio", visibility)
-    if isinstance(trusted, AnalyticsToolResponse):
-        return trusted
-    return visibility, trusted
+def _server_environment() -> str:
+    return os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
 
 
 def _proof_registry(config: AnalyticsConfig) -> ProofRegistry:
@@ -1514,12 +1522,118 @@ def _job_manager_for_config(config: AnalyticsConfig) -> AnalyticsJobManager:
             return manager
         store = AnalyticsStore.open(config)
         try:
-            manager = AnalyticsJobManager(store=store, config=config, handlers={})
+            manager = AnalyticsJobManager(
+                store=store,
+                config=config,
+                handlers=_analytics_job_handlers(config, store),
+            )
         except BaseException:
             store.close()
             raise
         _job_runtime = (key, store, manager)
         return manager
+
+
+def _analytics_job_handlers(
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+) -> dict[JobKind, JobHandler]:
+    async def verify_persisted_job_input(
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        expected_instruments = 1 if request.job_kind == "backtest" else 0
+        if (
+            len(request.dataset_ids) != 1
+            or request.analysis_ids
+            or len(request.instrument_handles) != expected_instruments
+        ):
+            raise JobStateError("analytics job persisted-input shape is invalid")
+        store.get_authenticated_dataset(request.dataset_ids[0])
+        await context.report_progress(context.total_work_units)
+        raise JobStateError("proof-bound analytics job executor is unavailable")
+
+    async def generate_report(
+        request: JobRequest,
+        context: JobExecutionContext,
+    ) -> JobConclusion:
+        if request.dataset_ids or request.instrument_handles or len(request.analysis_ids) != 1:
+            raise JobStateError("report generation requires one stored analysis handle")
+        parameters = {parameter.name: parameter.value for parameter in request.parameters}
+        template_id = parameters.get("template_id")
+        output_format = parameters.get("output_format")
+        viewport_width = parameters.get("viewport_width", 1280)
+        if (
+            not isinstance(template_id, str)
+            or output_format not in {"html", "pdf"}
+            or type(viewport_width) is not int
+            or not _MIN_REPORT_VIEWPORT_WIDTH <= viewport_width <= _MAX_REPORT_VIEWPORT_WIDTH
+        ):
+            raise JobStateError("report generation parameters are invalid")
+        bindings = ArtifactBindingRegistry(
+            config=config,
+            proof_registry=_proof_registry(config),
+        )
+        issued = bindings.issue(request.analysis_ids[0])
+        delivery = export_analysis(
+            StoredReportExportRequest(
+                binding_id=issued.binding_id,
+                template_id=template_id,
+                output_format=cast("Literal['html', 'pdf']", output_format),
+                viewport_width=viewport_width,
+            ),
+            config=config,
+            store=store,
+            bindings=bindings,
+        )
+        if isinstance(delivery, ArtifactRefusal):
+            raise JobStateError("proof-bound report generation was refused")
+        await context.report_progress(context.total_work_units)
+        return JobConclusion(analysis_id=None, artifact_ids=(delivery.artifact_id,))
+
+    return {
+        "monte_carlo": verify_persisted_job_input,
+        "optimization": verify_persisted_job_input,
+        "backtest": verify_persisted_job_input,
+        "report_generation": generate_report,
+    }
+
+
+async def shutdown_analytics_runtime() -> None:
+    """Stop process-owned jobs, close their store, and reset the singleton exactly once."""
+    with _JOB_RUNTIME_LOCK:
+        runtime = _job_runtime
+    if runtime is None:
+        return
+    cleanup = asyncio.create_task(
+        _shutdown_analytics_runtime(runtime),
+        name="analytics-runtime-shutdown",
+    )
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+    cleanup.result()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
+async def _shutdown_analytics_runtime(
+    runtime: tuple[str, AnalyticsStore, AnalyticsJobManager],
+) -> None:
+    global _job_runtime  # noqa: PLW0603
+    _key, store, manager = runtime
+    try:
+        await manager.shutdown()
+    finally:
+        try:
+            store.close()
+        finally:
+            with _JOB_RUNTIME_LOCK:
+                if _job_runtime is runtime:
+                    _job_runtime = None
 
 
 def _job_field_refusal(reason_code: str, message: str) -> AnalyticsToolResponse:
@@ -1563,26 +1677,6 @@ def _universe_missing_field(
     return None
 
 
-def _refusal_next_tool(reason_code: str, default: str) -> str:
-    if "source" in reason_code or "quality" in reason_code or "stale" in reason_code:
-        return "saxo_sync_research_data"
-    if "risk_budget" in reason_code or "shock" in reason_code:
-        return default
-    if "proof" in reason_code or "replay" in reason_code:
-        return "saxo_explain_analysis"
-    return default
-
-
-def _refusal_next_action(reason_code: str) -> str:
-    if "source" in reason_code or "quality" in reason_code or "stale" in reason_code:
-        return "Synchronize the exact missing or stale Saxo dataset, then retry."
-    if "risk_budget" in reason_code:
-        return "Supply and confirm an explicit numeric risk budget, then retry."
-    if "shock" in reason_code:
-        return "Echo and accept the explicit numeric shock map, then retry."
-    return "Follow the named next tool without substituting data or calculations."
-
-
 def _status_value(value: object) -> str | None:
     if value is None:
         return None
@@ -1618,24 +1712,37 @@ def _artifact_result(
     delivery: InlineArtifact | ArtifactResourceLink | ArtifactRefusal,
 ) -> ToolResult:
     if isinstance(delivery, ArtifactRefusal):
-        response = _refusal(
-            tool,
-            delivery.reason_code,
-            delivery.reason,
-            next_tool="saxo_explain_analysis",
+        response = RefusedArtifactToolResponse(
+            tool_name=tool,
+            reason_code=delivery.reason_code,
+            message=delivery.reason,
             next_action=delivery.next_action,
         )
-        return _tool_result(response)
+        return ToolResult(
+            structured_content=response.model_dump(mode="json"),
+            is_error=False,
+        )
     structured = delivery.model_dump(mode="json", exclude={"content"})
     structured.update(
         {
             "tool_name": tool,
+            "next_action": (
+                "Read the owner-only resource by its opaque resource link."
+                if isinstance(delivery, ArtifactResourceLink)
+                else "Use this bounded inline owner result or request another format."
+            ),
+            "network_call_made": False,
+            "local_state_changed": True,
             "broker_write_made": False,
             "approval_authority": False,
             "execution_authority": False,
             "disclaimer_response_available": False,
         },
     )
+    if isinstance(delivery, ArtifactResourceLink):
+        structured = ResourceArtifactToolResponse.model_validate(structured).model_dump(mode="json")
+    else:
+        structured = InlineArtifactToolResponse.model_validate(structured).model_dump(mode="json")
     if isinstance(delivery, ArtifactResourceLink):
         content: list[mt.ContentBlock] = [
             cast(
@@ -1672,11 +1779,46 @@ def _artifact_result(
     return ToolResult(content=content, structured_content=structured, is_error=False)
 
 
-def _tool_result(response: AnalyticsToolResponse) -> ToolResult:
+def _artifact_failure_result(tool: str, response: AnalyticsToolResponse) -> ToolResult:
+    refusal = RefusedArtifactToolResponse(
+        tool_name=tool,
+        reason_code=response.reason_code or "artifact_delivery_refused",
+        message=response.message or "The proof-bound artifact delivery was refused.",
+        next_action=response.next_action or "Explain the stored analysis before retrying.",
+    )
     return ToolResult(
-        structured_content=response.model_dump(mode="json"),
+        structured_content=refusal.model_dump(mode="json"),
         is_error=False,
     )
+
+
+_CANONICAL_ANALYSIS_TOOLS: Final = frozenset(
+    {
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+    }
+)
+_ARTIFACT_TOOLS: Final = frozenset({"saxo_render_analysis", "saxo_export_analysis"})
+
+
+def analytics_tool_output_schema(tool_id: str) -> dict[str, object] | None:
+    """Return an explicit structured schema where ToolResult inference is insufficient."""
+    if tool_id in _CANONICAL_ANALYSIS_TOOLS:
+        schema = _CANONICAL_ANALYSIS_OUTPUT_ADAPTER.json_schema()
+        schema["type"] = "object"
+        return schema
+    if tool_id in _ARTIFACT_TOOLS:
+        schema = _ARTIFACT_OUTPUT_ADAPTER.json_schema()
+        schema["type"] = "object"
+        return schema
+    return None
 
 
 ANALYTICS_TOOL_FUNCTIONS: Final[tuple[object, ...]] = (

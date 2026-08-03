@@ -44,9 +44,9 @@ from saxo_bank_mcp.agent_skill_install_verify_live import (
 )
 from saxo_bank_mcp.secret_scan import scan_secret_text
 
-EXPECTED_SKILL_COUNT = 8
+EXPECTED_SKILL_COUNT = 9
 EXPECTED_MCP_SERVER_COUNT = 1
-EXPECTED_TOOL_COUNT = 39
+EXPECTED_TOOL_COUNT = 60
 SHA256_HEX_LENGTH = 64
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 PRODUCTION_MODE = "installed_verification"
@@ -565,16 +565,13 @@ def _client_errors(  # noqa: C901, PLR0912
         errors.append(f"{name}_annotations_missing")
     checks = (client.startup.source, client.startup.cache, client.startup.list_tools)
     if any(
-        check.tool_count != EXPECTED_TOOL_COUNT or check.annotations_missing
-        for check in checks
+        check.tool_count != EXPECTED_TOOL_COUNT or check.annotations_missing for check in checks
     ):
         errors.append(f"{name}_startup_invalid")
     # Per-probe fields must match nested StartupCheck annotation lists.
     if (
-        tuple(client.source_annotations_missing)
-        != client.startup.source.annotations_missing
-        or tuple(client.cache_annotations_missing)
-        != client.startup.cache.annotations_missing
+        tuple(client.source_annotations_missing) != client.startup.source.annotations_missing
+        or tuple(client.cache_annotations_missing) != client.startup.cache.annotations_missing
         or tuple(client.list_tools_annotations_missing)
         != client.startup.list_tools.annotations_missing
     ):

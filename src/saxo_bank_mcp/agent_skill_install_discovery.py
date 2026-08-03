@@ -100,7 +100,7 @@ def parse_claude_details_skills(details: CommandResult) -> tuple[int, tuple[str,
     skills: list[str] = []
     for line in text.splitlines():
         if "Skills (" in line and ")" in line:
-            # e.g. Skills (8)  saxo-auth-session, saxo-bank, ...
+            # e.g. Skills (9)  saxo-analytics, saxo-auth-session, saxo-bank, ...
             after = line.split(")", 1)[-1].strip()
             if after:
                 skills = [item.strip() for item in after.split(",") if item.strip()]

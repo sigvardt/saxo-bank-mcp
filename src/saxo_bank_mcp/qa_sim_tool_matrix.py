@@ -1,4 +1,4 @@
-# allow: SIZE_OK - Todo 15 SIM matrix orchestrates all 39 scenarios plus lifecycle coverage.
+# allow: SIZE_OK - bounded SIM matrix orchestrates all 60 scenarios plus lifecycle coverage.
 from __future__ import annotations
 
 import tempfile
@@ -307,10 +307,11 @@ async def _run_trading_write_phase(
         payload: dict[str, JsonValue] = dict(row)
         state.hosts.update(hosts_of(payload))
         state.live_events += live_transport_events(payload)
-        if (
-            payload.get("cleanup_required") is True
-            and payload.get("cleanup_status") not in {"completed", "not_required", None}
-        ):
+        if payload.get("cleanup_required") is True and payload.get("cleanup_status") not in {
+            "completed",
+            "not_required",
+            None,
+        }:
             state.uncleaned += 1
         for tool_name in ("saxo_prepare_trading_write", "saxo_execute_trading_write"):
             if tool_name not in state.receipts:

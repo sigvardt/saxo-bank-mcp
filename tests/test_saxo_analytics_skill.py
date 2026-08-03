@@ -12,7 +12,17 @@ import yaml
 from pydantic import TypeAdapter
 
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.agent_catalog_render import catalog_inputs
 from saxo_bank_mcp.agent_skill_eval_models import SkillEvalCase
+from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
+from saxo_bank_mcp.agent_skill_install_models import EXPECTED_TOOLS
+from saxo_bank_mcp.agent_skill_install_qa import (
+    EXPECTED_SKILL_COUNT as INSTALL_SKILL_COUNT,
+)
+from saxo_bank_mcp.agent_skill_install_qa import (
+    EXPECTED_TOOL_COUNT as INSTALL_TOOL_COUNT,
+)
+from saxo_bank_mcp.agent_skill_matrix import EXPECTED_TOOL_COUNT as MATRIX_TOOL_COUNT
 from saxo_bank_mcp.server_tool_ids import (
     ALL_LOGICAL_TOOL_IDS,
     ANALYTICS_TOOL_IDS,
@@ -24,6 +34,7 @@ MAX_SKILL_LINES: Final = 500
 EXPECTED_SKILL_COUNT: Final = 9
 EXPECTED_RUNTIME_TOOL_COUNT: Final = 60
 EXPECTED_DUAL_RECORD_COUNT: Final = 2
+EXPECTED_EVAL_CASE_COUNT: Final = 33
 SKILL_ROOT: Final = ROOT / "skills/saxo-analytics"
 SKILL_PATH: Final = SKILL_ROOT / "SKILL.md"
 OPENAI_PATH: Final = SKILL_ROOT / "agents/openai.yaml"
@@ -156,6 +167,19 @@ def test_generated_analytics_catalog_matches_the_registered_sixty_tools() -> Non
     assert "skill_count=9" in completed.stdout
     assert "analytics_tool_count=21" in completed.stdout
     assert "analytics_scenarios=10" in completed.stdout
+
+
+def test_shared_release_truth_validates_all_nine_skills_and_sixty_tools() -> None:
+    inputs = catalog_inputs(ROOT)
+    evaluation = validate_eval_suite(root=ROOT, case_root=ROOT / "evals")
+
+    assert len(inputs.tools) == EXPECTED_RUNTIME_TOOL_COUNT
+    assert INSTALL_SKILL_COUNT == EXPECTED_SKILL_COUNT
+    assert INSTALL_TOOL_COUNT == EXPECTED_TOOLS == MATRIX_TOOL_COUNT == EXPECTED_RUNTIME_TOOL_COUNT
+    assert evaluation.status == "passed", evaluation.errors
+    assert evaluation.skill_count == EXPECTED_SKILL_COUNT
+    assert evaluation.tool_count == EXPECTED_RUNTIME_TOOL_COUNT
+    assert evaluation.case_count == EXPECTED_EVAL_CASE_COUNT
 
 
 def test_router_selects_analytics_and_keeps_trade_as_an_explicit_follow_on() -> None:

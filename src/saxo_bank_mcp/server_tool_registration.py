@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Final, cast
+from typing import Any, Final, cast
 
 from mcp.types import AnyFunction
 
 from saxo_bank_mcp.analytics_tool_descriptions import analytics_tool_description
 from saxo_bank_mcp.fastmcp_logging_safety import SafeFastMCP
 from saxo_bank_mcp.live_precheck_tool import create_live_precheck_tool
-from saxo_bank_mcp.mcp_analytics_tools import ANALYTICS_TOOL_FUNCTIONS
+from saxo_bank_mcp.mcp_analytics_tools import (
+    ANALYTICS_TOOL_FUNCTIONS,
+    analytics_tool_output_schema,
+)
 from saxo_bank_mcp.mcp_auth_tools import (
     saxo_exchange_pkce_code,
     saxo_get_session_capabilities,
@@ -284,10 +287,19 @@ def register_saxo_tools(
     for registration in FUNCTION_TOOL_REGISTRATIONS:
         if registration.tool_id not in allowed:
             continue
-        mcp.tool(
-            description=registration.description,
-            annotations=annotation_for_tool(registration.tool_id),
-        )(registration.function)
+        output_schema = analytics_tool_output_schema(registration.tool_id)
+        if output_schema is None:
+            decorator = mcp.tool(
+                description=registration.description,
+                annotations=annotation_for_tool(registration.tool_id),
+            )
+        else:
+            decorator = mcp.tool(
+                description=registration.description,
+                annotations=annotation_for_tool(registration.tool_id),
+                output_schema=cast("dict[str, Any]", output_schema),
+            )
+        decorator(registration.function)
     if "saxo_precheck_live_order" in allowed:
         mcp.add_tool(create_live_precheck_tool(annotation_for_tool("saxo_precheck_live_order")))
 

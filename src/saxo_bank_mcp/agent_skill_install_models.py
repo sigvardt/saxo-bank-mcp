@@ -10,7 +10,7 @@ from saxo_bank_mcp._evidence import JsonValue
 
 SHA256_HEX = r"^[a-f0-9]{64}$"
 COMMIT_HEX = r"^[a-f0-9]{40}$"
-EXPECTED_TOOLS = 39
+EXPECTED_TOOLS = 60
 ALLOWED_PRODUCTION_CACHE_SOURCES: frozenset[str] = frozenset(
     {
         "codex_plugin_add",
@@ -156,7 +156,7 @@ class VersionCacheProof(BaseModel):
     digest: str = Field(pattern=SHA256_HEX)
     source_digest: str = Field(pattern=SHA256_HEX)
     inventory_exact_match: Literal[True]
-    tool_count: Literal[39]
+    tool_count: Literal[60]
     annotations_missing: tuple[str, ...]
     probe_stdout_sha256: str = Field(pattern=SHA256_HEX)
     # Privacy-safe fields captured from actual discovery so random digests cannot pass.
