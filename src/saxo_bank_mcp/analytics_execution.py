@@ -132,7 +132,6 @@ from saxo_bank_mcp.analytics_store import (
 )
 from saxo_bank_mcp.analytics_strategy_schema import (
     StrategyDefinition,
-    strategy_definition_fingerprint,
 )
 from saxo_bank_mcp.analytics_sync import (
     OptionReferenceDatasetRow,
@@ -270,23 +269,6 @@ class BacktestExecutionParameters(_StrictExecutionModel):
     instrument_handle: str
     strategy: StrategyDefinition
     starting_equity: float = Field(gt=0, allow_inf_nan=False)
-
-
-class AuthenticatedBacktestExecutionProof(_StrictExecutionModel):
-    """Sealed lifecycle binding held only by one installed matrix process session."""
-
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    dataset_id: str = Field(pattern=r"^ds_[a-f0-9]{32}$")
-    account_alias: str = Field(
-        pattern=r"^(?:aa_[a-f0-9]{32}|aggregate|selected SIM account)$",
-    )
-    instrument_handle: str = Field(pattern=r"^ih_[a-f0-9]{32}$")
-    strategy_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    fill_model: Literal["next_bar_open"]
-    ledger_provenance_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    lifecycle_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    environment: Literal["SIM"] = "SIM"
-    cleanup_state: Literal["proved_equal"] = "proved_equal"
 
 
 type StoredExecutionParameters = (
@@ -1481,7 +1463,7 @@ def execute_market_comparison(  # noqa: PLR0913
     return result
 
 
-def execute_stored_analysis(  # noqa: PLR0911, PLR0913
+def execute_stored_analysis(  # noqa: PLR0913
     *,
     tool_name: str,
     dataset_id: str,
@@ -1490,7 +1472,6 @@ def execute_stored_analysis(  # noqa: PLR0911, PLR0913
     config: AnalyticsConfig,
     store: AnalyticsStore,
     registry: ProofRegistry,
-    backtest_proof: AuthenticatedBacktestExecutionProof | None = None,
 ) -> AnalysisResult:
     """Dispatch one typed stored-input request to its existing domain engine."""
     if visibility is not VisibilityMode.PRIVATE_USER_RESULT:
@@ -1557,17 +1538,7 @@ def execute_stored_analysis(  # noqa: PLR0911, PLR0913
             registry,
             profile,
         )
-    return _execute_backtest(
-        tool_name,
-        dataset_id,
-        visibility,
-        parameters,
-        config,
-        store,
-        registry,
-        profile,
-        backtest_proof,
-    )
+    raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
 
 
 def execute_pretrade_proposal(  # noqa: C901, PLR0913
@@ -2193,7 +2164,7 @@ def _execute_derivatives(  # noqa: PLR0913
     return result
 
 
-def _execute_backtest(  # noqa: PLR0913
+def _execute_sim_verified_backtest(  # noqa: PLR0913  # pyright: ignore[reportUnusedFunction]
     tool_name: str,
     dataset_id: str,
     visibility: VisibilityMode,
@@ -2202,10 +2173,7 @@ def _execute_backtest(  # noqa: PLR0913
     store: AnalyticsStore,
     registry: ProofRegistry,
     profile: ProofProfile,
-    backtest_proof: AuthenticatedBacktestExecutionProof | None,
 ) -> AnalysisResult:
-    if backtest_proof is None:
-        raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
     snapshot = store.get_authenticated_snapshot_material(dataset_id, _BACKTEST_CONTEXT_KIND)
     context = _parse_context(snapshot, StoredBacktestExecutionContext)
     primary, supporting = _context_materials(
@@ -2218,12 +2186,6 @@ def _execute_backtest(  # noqa: PLR0913
         context.instrument_handle != parameters.instrument_handle
         or series.instrument_handle != parameters.instrument_handle
         or context.account_alias != primary.account_scope
-        or backtest_proof.dataset_id != dataset_id
-        or backtest_proof.account_alias != context.account_alias
-        or backtest_proof.instrument_handle != context.instrument_handle
-        or backtest_proof.strategy_fingerprint_sha256
-        != strategy_definition_fingerprint(parameters.strategy)
-        or backtest_proof.fill_model != parameters.strategy.rebalancing.fill_timing
     ):
         raise StoredAnalysisExecutionError("stored_backtest_context_mismatch")
     dataset = BacktestDataset(
@@ -3015,7 +2977,6 @@ def _market_result(  # noqa: PLR0913
 
 
 __all__ = (
-    "AuthenticatedBacktestExecutionProof",
     "BacktestExecutionParameters",
     "DerivativesExecutionParameters",
     "InstrumentExecutionParameters",

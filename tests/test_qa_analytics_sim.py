@@ -187,10 +187,11 @@ def _analysis_execution_receipts() -> tuple[AnalyticsCaseReceipt, ...]:
         receipts.append(
             AnalyticsCaseReceipt(
                 kind="success",
+                tool_id=call.tool_id,
                 state="passed" if persisted or resolved else "refused",
                 reason_code="success_observed",
                 analysis_kind=call.analysis_kind,
-                returned_analysis_kind=call.analysis_kind,
+                returned_analysis_kind=call.analysis_kind if persisted else None,
                 analysis_id=f"an_{index:032x}" if persisted else None,
                 expected_analysis_outcome=call.expected_analysis_outcome,
                 persisted_result_authenticated=persisted,
@@ -780,6 +781,24 @@ def test_analysis_kind_contracts_name_honest_expected_outcomes() -> None:
     assert calls["fixed_income"].expected_analysis_outcome == "refused"
     assert calls["instrument_price_return"].expected_analysis_outcome == "persisted"
     assert calls["monte_carlo"].expected_analysis_outcome == "refused"
+
+
+def test_margin_fire_drill_preserves_its_exact_analysis_kind_in_runtime_arguments() -> None:
+    call = next(
+        item for item in analytics_case_calls() if item.analysis_kind == "margin_fire_drill"
+    )
+
+    request = cast("dict[str, JsonValue]", call.arguments["request"])
+    assert request["analysis_kind"] == "margin_fire_drill"
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=["ih_00000000000040008000000000000000"],
+        dataset_ids_by_analysis_kind={
+            "scenario_custom": ["ds_00000000000040008000000000000000"],
+        },
+    )
+    materialized = materialize_analytics_case_arguments(call, resources)
+    materialized_request = cast("dict[str, JsonValue]", materialized["request"])
+    assert materialized_request["analysis_kind"] == "margin_fire_drill"
 
 
 def test_queued_long_job_is_not_a_completed_analysis_receipt() -> None:

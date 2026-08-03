@@ -13,7 +13,7 @@ from typing import Final, Literal, Protocol, cast
 
 import anyio
 from anyio.lowlevel import checkpoint
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json
@@ -171,6 +171,7 @@ async def _run_matrix(
     fixtures: MatrixFixtures,
     *,
     proof_recorder: _InstalledProofRecorder | None = None,
+    matrix_server: FastMCP | None = None,
 ) -> SimToolMatrixReceipt:
     state = MatrixRuntimeState(
         errors=[],
@@ -194,7 +195,7 @@ async def _run_matrix(
     with tempfile.TemporaryDirectory(prefix="saxo-mcp-task23-") as runtime_dir:
         runtime_root = Path(runtime_dir)
         with isolated_analytics_state(runtime_root / "state"):
-            async with Client(mcp) as client:
+            async with Client(mcp if matrix_server is None else matrix_server) as client:
                 await _run_auth_preflight(client, state)
                 await _run_mcp_account_and_fixture_preflight(client, state, fixtures)
                 if state.errors:
@@ -1475,6 +1476,7 @@ def analytics_case_receipt(  # noqa: C901, PLR0913
     }
     return AnalyticsCaseReceipt(
         kind=case_call.kind,
+        tool_id=case_call.tool_id if case_call.analysis_kind is not None else None,
         analysis_kind=_analysis_kind_from_case_call(case_call),
         returned_analysis_kind=returned_analysis_kind,
         analysis_id=analysis_id,
@@ -1670,11 +1672,7 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
             return {}
         request["instrument_handle"] = instrument_handle
     if case_call.analysis_kind is not None:
-        request["analysis_kind"] = (
-            "scenario_margin"
-            if case_call.analysis_kind == "margin_fire_drill"
-            else case_call.analysis_kind
-        )
+        request["analysis_kind"] = case_call.analysis_kind
         if case_call.tool_id == "saxo_optimize_portfolio":
             request["objective"] = (
                 "risk_parity"

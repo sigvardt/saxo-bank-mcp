@@ -9,13 +9,14 @@ import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Final, cast
 
 import httpx2
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from pydantic import BaseModel
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
@@ -24,7 +25,6 @@ from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
 from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
 from saxo_bank_mcp.analytics_execution import (
-    BacktestExecutionParameters,
     StoredDerivativesExecutionContext,
     StoredOptimizationExecutionContext,
     StoredPortfolioExecutionContext,
@@ -835,10 +835,49 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
     assert not hasattr(tools_module, "_InstalledMatrixProofRecorder")
     assert not hasattr(tools_module, "_receipt_issuer_authority")
     assert not hasattr(tools_module, "issue_authenticated_ghost_receipt_from_lifecycle")
+    assert not hasattr(tools_module, "_PROCESS_PROOF_LOCK")
+    assert not hasattr(tools_module, "_process_proof_candidate")
+    assert not hasattr(tools_module, "_process_proof_kinds")
+    assert not hasattr(tools_module, "_process_proof_revisions")
+    assert not hasattr(tools_module, "_process_backtest_proofs")
+    assert not hasattr(tools_module, "_request_installed_proof_session")
+    assert not hasattr(tools_module, "_build_installed_proof_boundary")
+    execution_module = import_module("saxo_bank_mcp.analytics_execution")
+    assert not hasattr(execution_module, "AuthenticatedBacktestExecutionProof")
+    assert (
+        "backtest_proof"
+        not in inspect.signature(
+            execution_module.execute_stored_analysis,
+        ).parameters
+    )
     parameters = inspect.signature(
         tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
     ).parameters
     assert tuple(parameters) == ("candidate_commit", "analysis_kinds")
+
+
+def test_forged_lifespan_material_cannot_enter_the_process_proof_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    forged = SimpleNamespace()
+    monkeypatch.setattr(
+        tools_module,
+        "get_context",
+        lambda: SimpleNamespace(
+            lifespan_context={"installed_analytics_proof_session": forged},
+        ),
+    )
+
+    assert (
+        tools_module._current_process_proof_registry(  # noqa: SLF001
+            tools_module._analytics_config(),  # noqa: SLF001
+            analysis_kind="bounded_backtest",
+            source_revision="capture:forged",
+        )
+        is None
+    )
 
 
 @pytest.mark.anyio
@@ -871,13 +910,16 @@ async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
     }
     strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
     observed_inside = False
+    copied_recorder: matrix_module._InstalledProofRecorder | None = None
 
     async def recorded_matrix(
         _fixtures: object,
         *,
         proof_recorder: matrix_module._InstalledProofRecorder,
+        matrix_server: FastMCP,
     ) -> str:
-        nonlocal observed_inside
+        nonlocal copied_recorder, observed_inside
+        copied_recorder = proof_recorder
         account_alias = proof_recorder.controlled_backtest_source_binding(
             dataset_id,
             handle,
@@ -929,28 +971,21 @@ async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
             evidence,
             ledger_provenance_sha256="5" * 64,
         )
-        proof = tools_module._process_backtest_proof(  # noqa: SLF001
-            dataset_id,
-            BacktestExecutionParameters(
-                instrument_handle=handle,
-                strategy=strategy,
-                starting_equity=1000,
-            ),
+        request = tools_module.StoredBacktestToolRequest(
+            dataset_id=dataset_id,
+            instrument_handle=handle,
+            strategy=strategy,
+            starting_equity=1000,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
         )
-        assert proof is not None
-        assert proof.dataset_id == dataset_id
-        assert proof.lifecycle_fingerprint_sha256
-        response = tools_module.saxo_backtest_strategy(
-            tools_module.StoredBacktestToolRequest(
-                dataset_id=dataset_id,
-                instrument_handle=handle,
-                strategy=strategy,
-                starting_equity=1000,
-                visibility=VisibilityMode.PRIVATE_USER_RESULT,
-            ),
-        )
-        assert isinstance(response, tools_module.VerifiedAnalysisToolResponse)
-        assert response.analysis_kind == "bounded_backtest"
+        async with Client(matrix_server) as client:
+            response = await client.call_tool(
+                "saxo_backtest_strategy",
+                {"request": request.model_dump(mode="json")},
+            )
+        assert response.structured_content is not None
+        assert response.structured_content["status"] == "verified"
+        assert response.structured_content["analysis_kind"] == "bounded_backtest"
         observed_inside = True
         return "recorded"
 
@@ -963,17 +998,20 @@ async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
 
     assert result == "recorded"
     assert observed_inside is True
-    assert (
-        tools_module._process_backtest_proof(  # noqa: SLF001
-            dataset_id,
-            BacktestExecutionParameters(
-                instrument_handle=handle,
-                strategy=strategy,
-                starting_equity=1000,
-            ),
-        )
-        is None
+    assert copied_recorder is not None
+    with pytest.raises(ValueError, match="process proof session is unavailable"):
+        copied_recorder.candidate_commit()
+    direct = tools_module.saxo_backtest_strategy(
+        tools_module.StoredBacktestToolRequest(
+            dataset_id=dataset_id,
+            instrument_handle=handle,
+            strategy=strategy,
+            starting_equity=1000,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        ),
     )
+    assert isinstance(direct, tools_module.RefusedAnalysisToolResponse)
+    assert direct.reason_code in {"backtest_sim_proof_unavailable", "missing_proof_profile"}
 
 
 @pytest.mark.anyio

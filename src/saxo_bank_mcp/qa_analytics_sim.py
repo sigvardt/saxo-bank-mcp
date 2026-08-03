@@ -261,6 +261,7 @@ class AnalyticsToolSimContract(_StrictReceipt):
 
 class AnalyticsCaseReceipt(_StrictReceipt):
     kind: AnalyticsCaseKind
+    tool_id: str | None = Field(default=None, pattern=r"^saxo_[a-z0-9_]{1,127}$")
     analysis_kind: str | None = Field(
         default=None,
         pattern=r"^[a-z][a-z0-9_]{0,127}$",
@@ -306,6 +307,8 @@ class AnalyticsCaseReceipt(_StrictReceipt):
             "recovery": frozenset({"reconciled"}),
         }
         analysis_observation = self.analysis_kind is not None
+        if analysis_observation != (self.tool_id is not None):
+            raise ValueError("analysis execution must bind its exact logical tool")
         if (
             self.state != "failed"
             and self.state not in allowed[self.kind]
@@ -370,6 +373,7 @@ class AnalyticsCaseReceipt(_StrictReceipt):
                 raise ValueError("analysis refusal evidence requires a refused terminal result")
         elif any(
             (
+                self.tool_id is not None,
                 self.returned_analysis_kind is not None,
                 self.analysis_id is not None,
                 self.expected_analysis_outcome is not None,
@@ -1015,10 +1019,6 @@ def _analysis_kind_success_calls(
                     else "minimum_variance"
                 )
                 request["objective"] = objective
-            elif tool_id == "saxo_run_scenario":
-                request["analysis_kind"] = (
-                    "scenario_margin" if analysis_kind == "margin_fire_drill" else analysis_kind
-                )
         calls.append(
             AnalyticsCaseCall(
                 tool_id=tool_id,
