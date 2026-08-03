@@ -127,6 +127,10 @@
         "reason": "Internal token refresh state, converted to auth_required before tool response."
       },
       {
+        "module": "src/saxo_bank_mcp/qa_analytics_proof_producer.py",
+        "reason": "Analytics proof producer evidence status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/qa_analytics_source_matrix.py",
         "reason": "Analytics source-matrix evidence status, not production MCP tool response truth."
       },

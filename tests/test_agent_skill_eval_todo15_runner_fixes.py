@@ -1177,14 +1177,6 @@ def test_claude_keychain_seed_writes_owner_only_credentials(
         fake_export,
     )
 
-    def _discover(_path: Path) -> str:
-        return "SIMACCT01"
-
-    monkeypatch.setattr(
-        "saxo_bank_mcp.agent_skill_matrix_env.discover_exactly_one_active_sim_account",
-        _discover,
-    )
-
     runtime = prepare_eval_isolated_runtime(
         evidence,
         source_codex_home=None,
