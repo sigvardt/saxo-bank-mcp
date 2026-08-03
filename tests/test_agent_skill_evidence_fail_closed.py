@@ -44,6 +44,8 @@ from saxo_bank_mcp.agent_skill_matrix_producer import (
 )
 from saxo_bank_mcp.qa_analytics_sim import (
     BROKERAGE_STATE_COMPONENTS,
+    CONTROLLED_SIM_CASES,
+    analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_sim_contracts,
 )
@@ -374,12 +376,99 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
         "analytics_tool_receipt_count": 21,
         "analytics_case_contract_sha256": analytics_case_contract_sha256(),
         "analytics_case_receipts": analytics_cases,
+        "analysis_execution_receipts": _analysis_execution_payloads(),
+        "controlled_sim_lifecycle": _controlled_lifecycle_payload(state),
         "mcp_only_account_fixture_state": True,
         "cleanup_complete": True,
         "account_state_unchanged": True,
         "redacted_publication": True,
         "purchase_occurred": False,
         "errors": [],
+    }
+
+
+def _analysis_execution_payloads() -> list[JsonValue]:
+    receipts: list[JsonValue] = []
+    calls = tuple(
+        call
+        for call in analytics_case_calls()
+        if call.kind == "success" and call.analysis_kind is not None
+    )
+    for index, call in enumerate(calls):
+        outcome = call.expected_analysis_outcome
+        persisted = outcome == "persisted"
+        resolved = outcome == "resolved"
+        reduced = outcome == "reduced"
+        receipts.append(
+            {
+                "kind": "success",
+                "tool_id": call.tool_id,
+                "analysis_kind": call.analysis_kind,
+                "returned_analysis_kind": call.analysis_kind if persisted else None,
+                "analysis_id": f"an_{index:032x}" if persisted else None,
+                "expected_analysis_outcome": outcome,
+                "persisted_result_authenticated": persisted,
+                "state": (
+                    "passed" if persisted or resolved else "degraded" if reduced else "refused"
+                ),
+                "reason_code": "success_observed",
+                "mcp_call_observed": True,
+                "result_parsed": True,
+                "result_state": (
+                    "verified"
+                    if persisted
+                    else "resolved"
+                    if resolved
+                    else "reduced"
+                    if reduced
+                    else "refused"
+                ),
+                "mcp_is_error": outcome == "refused",
+                "network_call_made": False,
+                "broker_write_made": False,
+                "private_values_published": False,
+                "request_sha256": "1" * 64,
+                "response_sha256": "2" * 64,
+                "evidence_sha256": "3" * 64,
+            },
+        )
+    return receipts
+
+
+def _controlled_lifecycle_payload(state: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {
+        "evidence_state": "passed",
+        "environment": "SIM",
+        "cases": [
+            {
+                "case_id": case_id,
+                "state": "passed",
+                "reason_code": "passed",
+                "source_request_count": 0 if case_id == "cleanup" else 1,
+                "mcp_call_count": 1,
+                "sim_mutation_call_count": 0,
+                "cleanup_complete": True,
+                "entitlement_state": (
+                    "available" if case_id == "options_entitlement" else "not_applicable"
+                ),
+                "evidence_sha256": "f" * 64,
+                "blind_retry_attempted": False,
+            }
+            for case_id in CONTROLLED_SIM_CASES
+        ],
+        "before": state,
+        "after": state,
+        "live_events": 0,
+        "live_mutation_calls": 0,
+        "request_ledger_read_last": True,
+        "request_ledger_complete": True,
+        "request_ledger_fingerprint_sha256": "9" * 64,
+        "cleanup_complete": True,
+        "unchanged_account_state": True,
+        "redacted_publication": True,
+        "private_values_published": False,
+        "purchase_occurred": False,
+        "disclaimer_response_made": False,
     }
 
 

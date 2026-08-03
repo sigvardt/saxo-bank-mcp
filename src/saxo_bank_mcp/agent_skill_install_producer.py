@@ -4,6 +4,7 @@ import contextlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
@@ -591,6 +592,9 @@ class _PathPublishRoots:
 
 
 _PRIVATE_ROOT_RE = re.compile(r"(?:/Users/|/private/|/Volumes/)")
+_LIVE_BOUND_UPDATE_PATH_FIELDS: Final = frozenset(
+    {"cache_root", "registration_cache_root"},
+)
 
 
 def _path_publish_roots(
@@ -663,7 +667,14 @@ def _sanitize_text(value: str, roots: _PathPublishRoots) -> str:
 
 def _sanitize_json_paths(value: JsonValue, roots: _PathPublishRoots) -> JsonValue:
     if isinstance(value, dict):
-        return {key: _sanitize_json_paths(item, roots) for key, item in value.items()}
+        return {
+            key: (
+                item
+                if key in _LIVE_BOUND_UPDATE_PATH_FIELDS and isinstance(item, str)
+                else _sanitize_json_paths(item, roots)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_sanitize_json_paths(item, roots) for item in value]
     if isinstance(value, str):

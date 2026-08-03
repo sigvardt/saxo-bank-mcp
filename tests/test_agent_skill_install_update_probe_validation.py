@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Final, cast
 
 from pydantic import ValidationError
 
+import saxo_bank_mcp.agent_skill_install_producer as producer_module
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_models import UpdateProbeEvidence
 from saxo_bank_mcp.agent_skill_install_producer import (
@@ -66,6 +68,34 @@ def test_align_registration_roots_after_path_rewrite() -> None:
     restored = cast("dict[str, JsonValue]", payload["restored_proof"])
     proof = cast("dict[str, JsonValue]", restored["codex"])
     assert proof["registration_cache_root"] == proof["cache_root"]
+
+
+def test_update_probe_sanitizer_preserves_live_bound_cache_roots(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    run_root = tmp_path / "run"
+    cache = run_root / "codex-home" / "plugins" / "cache" / "candidate"
+    repo.mkdir()
+    run_root.mkdir()
+    roots = producer_module._path_publish_roots(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        repo_root=repo,
+        repo_field=".",
+        run_root=run_root,
+    )
+    payload: dict[str, JsonValue] = {
+        "cache_root": str(cache),
+        "registration_cache_root": str(cache),
+        "unrelated_path": str(run_root / "private-output"),
+    }
+
+    sanitized = producer_module._sanitize_json_paths(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        payload,
+        roots,
+    )
+
+    assert isinstance(sanitized, dict)
+    assert sanitized["cache_root"] == str(cache)
+    assert sanitized["registration_cache_root"] == str(cache)
+    assert sanitized["unrelated_path"] != str(run_root / "private-output")
 
 
 def test_sanitized_validation_locations_omit_values() -> None:
