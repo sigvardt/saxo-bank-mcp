@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import Final, Literal, cast
 
 import duckdb
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_market_data import (
@@ -26,6 +26,7 @@ from saxo_bank_mcp.analytics_market_data import (
     normalize_quote,
 )
 from saxo_bank_mcp.analytics_models import (
+    AnalysisId,
     DatasetId,
     HandleKind,
     InstrumentHandle,
@@ -256,6 +257,13 @@ class AnalysisInputSyncSpec(_StrictModel):
     data_kind: Literal["analysis_input"] = "analysis_input"
     analysis_kind: AnalysisInputKind
     source_dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+    origin_analysis_id: AnalysisId | None = None
+
+    @model_validator(mode="after")
+    def _validate_origin_binding(self) -> AnalysisInputSyncSpec:
+        if (self.analysis_kind == "pretrade_impact") != (self.origin_analysis_id is not None):
+            raise ValueError("only pretrade input requires one stored origin analysis")
+        return self
 
 
 type ResearchSyncSpec = (
@@ -994,7 +1002,7 @@ def _price_bar_dataset_page(  # noqa: PLR0913
         instrument_handle,
         interval,
         metadata,
-        source_pages,
+        tuple(page for page in source_pages if page.contract_name == _CHART_CONTRACT_ID),
         source_revision,
     )
     bar_times_us, page_ids = _bar_page_query_values(visible_bar_lineage)

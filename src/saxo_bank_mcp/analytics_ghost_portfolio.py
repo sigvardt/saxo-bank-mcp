@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import secrets
 import threading
@@ -368,11 +369,51 @@ def prepare_ghost_workflow(  # noqa: PLR0911
     )
 
 
-def reconcile_ghost_lifecycle(  # noqa: C901, PLR0911
+def reconcile_ghost_lifecycle(
     request: GhostWorkflowRequest,
     evidence: GhostLifecycleEvidence,
 ) -> GhostPortfolioVerification | ResearchRefusal:
-    """Verify one sanitized lifecycle; never retries, calls Saxo, or performs cleanup."""
+    """Refuse caller-authored evidence even when its claimed lifecycle is internally valid."""
+    validated = _validated_ghost_lifecycle(request, evidence)
+    if isinstance(validated, ResearchRefusal):
+        return validated
+    return _refusal(
+        request,
+        "ghost_authenticated_receipt_required",
+        "caller-supplied lifecycle evidence cannot issue an authenticated MCP ledger receipt",
+        warnings=(
+            "writes_frozen",
+            "blind_retry_forbidden",
+            "synthetic_evidence_cannot_verify",
+        ),
+    )
+
+
+def issue_authenticated_ghost_receipt_from_lifecycle(
+    request: GhostWorkflowRequest,
+    evidence: GhostLifecycleEvidence,
+    *,
+    ledger_provenance_sha256: str,
+    authority: object,
+) -> str:
+    """Issue only after the installed MCP harness supplies one fully reconciled lifecycle."""
+    if authority is not _RECEIPT_AUTHORITY:
+        raise ValueError("ghost receipt issuer authority is unavailable")
+    validated = _validated_ghost_lifecycle(request, evidence)
+    if isinstance(validated, ResearchRefusal):
+        raise ValueError(validated.reason_code)  # noqa: TRY004 - lifecycle validation, not type
+    return issue_authenticated_ghost_receipt(
+        validated,
+        ledger_provenance_sha256=ledger_provenance_sha256,
+        authority=authority,
+    )
+
+
+def _validated_ghost_lifecycle(  # noqa: C901, PLR0911
+    request: GhostWorkflowRequest,
+    evidence: GhostLifecycleEvidence,
+) -> GhostPortfolioVerification | ResearchRefusal:
+    """Validate observed evidence without exposing receipt authority to public callers."""
     if not _evidence_matches_request(request, evidence):
         return _refusal(
             request,
@@ -466,15 +507,17 @@ def reconcile_ghost_lifecycle(  # noqa: C901, PLR0911
             "before and after brokerage fingerprints and counts are not equal",
             warnings=("writes_frozen", "blind_retry_forbidden"),
         )
-    return _refusal(
-        request,
-        "ghost_authenticated_receipt_required",
-        "caller-supplied lifecycle evidence cannot issue an authenticated MCP ledger receipt",
-        warnings=(
-            "writes_frozen",
-            "blind_retry_forbidden",
-            "synthetic_evidence_cannot_verify",
-        ),
+    return GhostPortfolioVerification(
+        candidate_commit=request.candidate_commit,
+        dataset_id=request.dataset_id,
+        account_alias=request.account_alias,
+        instrument_handle=request.instrument_handle,
+        strategy_fingerprint_sha256=request.strategy_fingerprint_sha256,
+        fill_model=request.fill_model,
+        state_equality=GhostStateEquality.model_validate(equality),
+        evidence_fingerprint_sha256=hashlib.sha256(
+            evidence.model_dump_json().encode(),
+        ).hexdigest(),
     )
 
 

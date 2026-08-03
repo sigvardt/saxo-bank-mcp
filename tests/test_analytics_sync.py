@@ -218,11 +218,18 @@ async def test_chart_sync_persists_raw_and_normalized_data_but_returns_a_handle(
             """,
         ).fetchone()
         payload_row = connection.execute(
-            "SELECT payload_json FROM source_pages ORDER BY ingested_at DESC LIMIT 1",
+            """
+            SELECT p.payload_json
+            FROM source_pages AS p
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE c.contract_name = 'chart_v3'
+            ORDER BY p.ingested_at DESC
+            LIMIT 1
+            """,
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (1, 2, 1)
+    assert counts == (2, 2, 1)
     assert payload_row is not None
     sync_metadata = json.loads(str(payload_row[0]))["sync_metadata"]
     assert sync_metadata["fingerprints"] == summary.fingerprints.model_dump()
@@ -332,7 +339,7 @@ async def test_chart_sync_refreshes_a_trailing_window_and_keeps_corrections(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (2, 6, 2)
+    assert counts == (3, 6, 2)
     assert metadata_row is not None
     correction_state = json.loads(str(metadata_row[0]))["sync_metadata"]["correction_state"]
     assert correction_state == {
@@ -1569,7 +1576,7 @@ async def test_instrument_selector_identity_mismatch_fails_before_source_access(
         )
 
     assert executor.calls == []
-    assert _integrity_store_counts(config) == (0, 0, 0, 0)
+    assert _integrity_store_counts(config) == (1, 0, 0, 0)
 
 
 @pytest.mark.anyio
@@ -1619,7 +1626,7 @@ async def test_write_time_page_integrity_mismatch_rolls_back_capture(
         )
 
     assert len(executor.calls) == 1
-    assert _integrity_store_counts(config) == (0, 0, 0, 0)
+    assert _integrity_store_counts(config) == (1, 0, 0, 0)
 
 
 @pytest.mark.anyio
@@ -1762,11 +1769,17 @@ async def test_quote_capture_persists_delay_and_stale_quality(
             """,
         ).fetchone()
         payload_row = connection.execute(
-            "SELECT payload_json FROM source_pages LIMIT 1",
+            """
+            SELECT p.payload_json
+            FROM source_pages AS p
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE c.contract_name = 'info_price_v1'
+            LIMIT 1
+            """,
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (1, 1, 1)
+    assert counts == (2, 1, 1)
     assert payload_row is not None
     payload = json.loads(str(payload_row[0]))
     assert payload["source_quality"]["state"] == "limited"
@@ -1814,7 +1827,13 @@ async def test_quote_capture_keeps_a_missing_value_row_without_inventing_prices(
     connection = duckdb.connect(str(config.paths.store_path), read_only=True)
     try:
         payload_row = connection.execute(
-            "SELECT payload_json FROM source_pages LIMIT 1",
+            """
+            SELECT p.payload_json
+            FROM source_pages AS p
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE c.contract_name = 'info_price_v1'
+            LIMIT 1
+            """,
         ).fetchone()
     finally:
         connection.close()
@@ -1926,7 +1945,7 @@ async def test_market_quota_refusal_happens_before_chart_source_access(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (0, 0, 0)
+    assert counts == (1, 0, 0)
 
 
 @pytest.mark.anyio
@@ -2031,11 +2050,17 @@ async def test_option_chain_entitlement_refusal_is_sanitized_and_persisted(
             """,
         ).fetchone()
         payload_row = connection.execute(
-            "SELECT payload_json FROM source_pages LIMIT 1",
+            """
+            SELECT p.payload_json
+            FROM source_pages AS p
+            JOIN source_contracts AS c ON c.contract_id = p.contract_id
+            WHERE c.contract_name = 'options_chain_reference_v1'
+            LIMIT 1
+            """,
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (1, 0, 1)
+    assert counts == (2, 0, 1)
     assert payload_row is not None
     payload_text = str(payload_row[0])
     assert "private broker explanation" not in payload_text
@@ -2100,7 +2125,7 @@ async def test_entitled_option_chain_persists_safe_normalized_references(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (1, 1, 2, 1)
+    assert counts == (2, 1, 2, 1)
 
 
 @pytest.mark.anyio
@@ -2205,7 +2230,7 @@ async def test_market_capture_rolls_back_raw_dataset_and_rows_together(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (0, 0, 0)
+    assert counts == (1, 0, 0)
 
 
 @pytest.mark.anyio
@@ -2420,7 +2445,7 @@ async def test_batch_preflights_expanded_option_requests_before_calls_or_writes(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (0, 0, 0, 0)
+    assert counts == (1, 0, 0, 0)
 
 
 @pytest.mark.anyio

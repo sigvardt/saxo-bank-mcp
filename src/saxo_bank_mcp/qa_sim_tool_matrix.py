@@ -1,11 +1,13 @@
+# pyright: reportPrivateUsage=false
 # allow: SIZE_OK - bounded SIM matrix orchestrates all 60 scenarios plus lifecycle coverage.
 from __future__ import annotations
 
 import json
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 import anyio
 from fastmcp import Client
@@ -13,6 +15,16 @@ from fastmcp import Client
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp._redaction import redact_json
 from saxo_bank_mcp.agent_skill_matrix import LIFECYCLE_TOOLS, SCENARIO_MANIFEST, manifest_tools
+from saxo_bank_mcp.analytics_ghost_portfolio import (
+    GhostLifecycleEvidence,
+    GhostPlaceStatus,
+    GhostStateFingerprint,
+    GhostStepStatus,
+)
+from saxo_bank_mcp.analytics_strategy_schema import (
+    parse_strategy_definition,
+    strategy_definition_fingerprint,
+)
 from saxo_bank_mcp.config import SaxoEnvironment, SaxoRuntimeConfig
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.order_mutation_models import (
@@ -28,6 +40,8 @@ from saxo_bank_mcp.qa_analytics_sim import (
     AnalyticsToolCaseEvidence,
     BrokerageStateComponent,
     BrokerageStateFingerprint,
+    ControlledSimCaseReceipt,
+    ControlledSimLifecycleReceipt,
     analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_sim_contracts,
@@ -55,6 +69,7 @@ from saxo_bank_mcp.qa_sim_tool_matrix_helpers import (
     state_read_calls,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_models import (
+    FIXTURE_ASSET_TYPE,
     NON_EXECUTABLE_SIM,
     SIM_GATEWAY_HOST,
     MatrixCliFixtures,
@@ -81,6 +96,17 @@ _TERMINAL_JOB_STATES: Final = frozenset(
         "job_interrupted_restart_required",
     },
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlledGhostObservation:
+    reason_code: str
+    evidence: GhostLifecycleEvidence | None
+    ledger_fingerprint_sha256: str | None
+    receipt_bound: bool
+    mcp_call_count: int
+    sim_mutation_call_count: int
+
 
 # Re-export models for producer imports.
 __all__ = [
@@ -147,13 +173,12 @@ async def _run_matrix(fixtures: MatrixFixtures) -> SimToolMatrixReceipt:
                     return _blocked(state)
                 state.before = await mcp_state_fingerprint(client, state)
                 await _run_read_and_refusal_phase(client, state, fixtures)
-                await run_analytics_case_phase(client, state)
                 await run_disclaimer_refusal_phase(client, state)
                 await _run_preview_phase(client, state)
                 await _run_order_mutation_phase(client, state)
                 await _run_trading_write_phase(client, state)
                 await _run_trailing_phase(client, state, fixtures)
-                state.after = await mcp_state_fingerprint(client, state)
+                await run_analytics_case_phase(client, state, controlled_fixtures=fixtures)
 
     return _finalize(state)
 
@@ -378,9 +403,11 @@ async def run_disclaimer_refusal_phase(
     state.lifecycle_seen.add("saxo_register_disclaimer_response")
 
 
-async def run_analytics_case_phase(
+async def run_analytics_case_phase(  # noqa: C901
     client: MatrixClient,
     state: MatrixRuntimeState,
+    *,
+    controlled_fixtures: MatrixFixtures | None = None,
 ) -> None:
     """Exercise every applicable analytics case through the actual FastMCP call path."""
     coverage_errors = assert_analytics_case_coverage(analytics_sim_contracts())
@@ -393,6 +420,7 @@ async def run_analytics_case_phase(
     per_tool: dict[str, dict[str, AnalyticsCaseReceipt]] = {
         tool_id: {} for tool_id in ANALYTICS_TOOL_IDS
     }
+    ghost_observation: _ControlledGhostObservation | None = None
     for case_call in analytics_case_calls():
         if case_call.kind == "success" and case_call.tool_id in {
             "saxo_preview_analytics_deletion",
@@ -404,6 +432,17 @@ async def run_analytics_case_phase(
             state.analytics_resources,
         )
         observed_call = case_call.model_copy(update={"arguments": arguments})
+        if (
+            controlled_fixtures is not None
+            and observed_call.tool_id == "saxo_backtest_strategy"
+            and observed_call.kind == "success"
+        ):
+            ghost_observation = await _run_controlled_sim_ghost_phase(
+                client,
+                state,
+                observed_call,
+                controlled_fixtures,
+            )
         result = await call_tool(
             client,
             observed_call.tool_id,
@@ -427,8 +466,16 @@ async def run_analytics_case_phase(
             result,
             reconciles_request_sha256=reconciles_request,
         )
+        if case_receipt.kind == "success" and case_receipt.analysis_kind is not None:
+            state.analysis_execution_receipts.append(case_receipt)
         per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
         _remember_analytics_handles(state.analytics_resources, observed_call, result)
+        if (
+            observed_call.tool_id == "saxo_analyze_instruments"
+            and observed_call.kind == "success"
+            and case_receipt.state == "passed"
+        ):
+            await _prepare_server_owned_pretrade_input(client, state)
         if (
             observed_call.tool_id == "saxo_sync_research_data"
             and observed_call.kind == "success"
@@ -460,6 +507,20 @@ async def run_analytics_case_phase(
     preview_receipt, delete_receipt = await run_analytics_cleanup_cases(client, state)
     per_tool["saxo_preview_analytics_deletion"]["success"] = preview_receipt
     per_tool["saxo_delete_analytics_data"]["success"] = delete_receipt
+    if controlled_fixtures is not None:
+        if ghost_observation is None:
+            ghost_observation = await _run_controlled_sim_ghost_phase(
+                client,
+                state,
+                None,
+                controlled_fixtures,
+            )
+        await _refresh_post_cleanup_local_state(client, state)
+        state.controlled_sim_lifecycle = _controlled_sim_lifecycle_receipt(
+            state,
+            per_tool,
+            ghost_observation,
+        )
     state.analytics_case_receipts.extend(
         AnalyticsToolCaseEvidence(
             tool_id=contract.tool_id,
@@ -498,7 +559,9 @@ async def _prepare_server_owned_analysis_inputs(
             input_strategy="sync_issued_instrument",
         )
         _remember_analytics_handles(resources, auxiliary_call, account_capture)
-    source_dataset_ids = tuple(resources.dataset_ids)
+    source_dataset_ids = tuple(resources.source_dataset_ids)
+    if not source_dataset_ids:
+        return
     for analysis_kind in (
         "portfolio_performance",
         "position_sizing",
@@ -506,34 +569,570 @@ async def _prepare_server_owned_analysis_inputs(
         "portfolio_minimum_variance",
         "derivatives_model",
         "bounded_backtest",
-        "pretrade_impact",
     ):
-        for dataset_id in source_dataset_ids:
-            routed = await call_tool(
-                client,
-                "saxo_sync_research_data",
-                {
-                    "request": {
-                        "items": [
-                            {
-                                "data_kind": "analysis_input",
-                                "analysis_kind": analysis_kind,
-                                "source_dataset_ids": [dataset_id],
-                            },
-                        ],
-                    },
+        routed = await call_tool(
+            client,
+            "saxo_sync_research_data",
+            {
+                "request": {
+                    "items": [
+                        {
+                            "data_kind": "analysis_input",
+                            "analysis_kind": analysis_kind,
+                            "source_dataset_ids": list(source_dataset_ids),
+                        },
+                    ],
                 },
+            },
+        )
+        _observe_auxiliary(state, routed)
+        auxiliary_call = AnalyticsCaseCall(
+            tool_id="saxo_sync_research_data",
+            kind="success",
+            arguments={},
+            input_strategy="sync_issued_instrument",
+        )
+        _remember_analytics_handles(resources, auxiliary_call, routed)
+
+
+async def _prepare_server_owned_pretrade_input(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+) -> None:
+    """Bind a proposal context to one replayable result and the exact current source set."""
+    resources = state.analytics_resources
+    origins = resources.analysis_ids_by_kind.get("instrument_price_return", [])
+    if len(origins) != 1 or not resources.source_dataset_ids:
+        return
+    routed = await call_tool(
+        client,
+        "saxo_sync_research_data",
+        {
+            "request": {
+                "items": [
+                    {
+                        "data_kind": "analysis_input",
+                        "analysis_kind": "pretrade_impact",
+                        "source_dataset_ids": list(resources.source_dataset_ids),
+                        "origin_analysis_id": origins[0],
+                    },
+                ],
+            },
+        },
+    )
+    _observe_auxiliary(state, routed)
+    _remember_analytics_handles(
+        resources,
+        AnalyticsCaseCall(
+            tool_id="saxo_sync_research_data",
+            kind="success",
+            arguments={},
+            input_strategy="sync_issued_instrument",
+        ),
+        routed,
+    )
+
+
+async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+    backtest_call: AnalyticsCaseCall | None,
+    fixtures: MatrixFixtures,
+) -> _ControlledGhostObservation:
+    """Run at most one exact SIM fixture lifecycle, then reconcile before issuing proof."""
+    from saxo_bank_mcp.mcp_analytics_tools import (  # noqa: PLC0415
+        _bind_observed_sim_ghost_lifecycle,
+        _controlled_backtest_source_binding,
+        _current_process_proof_candidate,
+        _process_proof_session_authority,
+    )
+
+    authority = _process_proof_session_authority()
+    reason = "controlled_ghost_input_unavailable"
+    candidate: str | None = None
+    account_alias: str | None = None
+    dataset_id: str | None = None
+    instrument_handle: str | None = None
+    strategy: dict[str, JsonValue] | None = None
+    request = backtest_call.arguments.get("request") if backtest_call is not None else None
+    if isinstance(request, dict):
+        raw_dataset_id = request.get("dataset_id")
+        raw_instrument_handle = request.get("instrument_handle")
+        raw_strategy = request.get("strategy")
+        if (
+            isinstance(raw_dataset_id, str)
+            and isinstance(raw_instrument_handle, str)
+            and isinstance(raw_strategy, dict)
+            and len(state.analytics_resources.account_selectors) == 1
+            and state.before is not None
+            and state.preflight.fixtures_ok
+            and state.preflight.account_ok
+            and state.preflight.auth_ok
+            and state.preflight.session_ok
+            and SaxoRuntimeConfig.from_env().requested_environment is SaxoEnvironment.SIM
+        ):
+            try:
+                candidate = _current_process_proof_candidate(authority=authority)
+                account_alias = _controlled_backtest_source_binding(
+                    raw_dataset_id,
+                    raw_instrument_handle,
+                    expected_uic=fixtures.stock_uic,
+                    expected_asset_type=FIXTURE_ASSET_TYPE,
+                    authority=authority,
+                )
+            except (OSError, ValueError):
+                reason = "controlled_ghost_source_binding_unavailable"
+            else:
+                dataset_id = raw_dataset_id
+                instrument_handle = raw_instrument_handle
+                strategy = raw_strategy
+
+    calls = 0
+    preview_state = "not_run"
+    place_state = "not_run"
+    cancel_preview_state = "not_run"
+    cancel_state = "not_run"
+    disclaimer_present = False
+    place_attempted = False
+    cancel_attempted = False
+    selector = (
+        state.analytics_resources.account_selectors[0]
+        if len(state.analytics_resources.account_selectors) == 1
+        else None
+    )
+    if all(
+        value is not None
+        for value in (candidate, account_alias, dataset_id, instrument_handle, strategy, selector)
+    ):
+        preview_arguments: dict[str, JsonValue] = {
+            "order_body": {
+                "AccountKey": cast("str", selector),
+                "Uic": fixtures.stock_uic,
+                "AssetType": FIXTURE_ASSET_TYPE,
+                "Amount": fixtures.amount,
+                "BuySell": "Buy",
+                "OrderType": "Limit",
+                "OrderPrice": fixtures.limit_price,
+                "OrderDuration": {"DurationType": "DayOrder"},
+            },
+        }
+        preview = await call_tool(client, "saxo_create_order_preview", preview_arguments)
+        calls += 1
+        _record(state, "saxo_create_order_preview", preview, preview_arguments)
+        state.lifecycle_seen.add("saxo_create_order_preview")
+        disclaimer_present = _disclaimer_detected(preview.payload)
+        preview_state = "completed" if preview.result_state == "preview_created" else "refused"
+        preview_token = preview.payload.get("preview_token")
+        if disclaimer_present:
+            reason = "controlled_ghost_disclaimer_blocked"
+        elif preview_state != "completed" or not isinstance(preview_token, str):
+            reason = "controlled_ghost_preview_unavailable"
+        else:
+            place_arguments: dict[str, JsonValue] = {"preview_token": preview_token}
+            place = await call_tool(client, "saxo_place_sim_order", place_arguments)
+            calls += 1
+            place_attempted = True
+            _record(state, "saxo_place_sim_order", place, place_arguments)
+            state.lifecycle_seen.add("saxo_place_sim_order")
+            place_state = (
+                place.result_state
+                if place.result_state
+                in {
+                    "completed",
+                    "completed_unverified",
+                    "unknown_state",
+                    "partial_success",
+                    "duplicate_or_conflict",
+                    "post_boundary_transport_failure",
+                }
+                else "failed"
             )
-            _observe_auxiliary(state, routed)
-            auxiliary_call = AnalyticsCaseCall(
-                tool_id="saxo_sync_research_data",
-                kind="success",
-                arguments={},
-                input_strategy="sync_issued_instrument",
+            cancel_scope = place.payload.get("safe_cancel_by_instrument")
+            write_arguments = (
+                cancel_scope.get("write_preview_arguments")
+                if isinstance(cancel_scope, dict)
+                else None
             )
-            _remember_analytics_handles(resources, auxiliary_call, routed)
-            if resources.dataset_ids_by_analysis_kind.get(analysis_kind):
-                break
+            if isinstance(write_arguments, dict):
+                cancel_preview = await call_tool(
+                    client,
+                    "saxo_create_write_preview",
+                    write_arguments,
+                )
+                calls += 1
+                _record(
+                    state,
+                    "saxo_create_write_preview",
+                    cancel_preview,
+                    write_arguments,
+                )
+                state.lifecycle_seen.add("saxo_create_write_preview")
+                cancel_preview_state = (
+                    "completed" if cancel_preview.result_state == "preview_created" else "failed"
+                )
+                cancel_token = cancel_preview.payload.get("preview_token")
+                if cancel_preview_state == "completed" and isinstance(cancel_token, str):
+                    cancel_arguments: dict[str, JsonValue] = {"preview_token": cancel_token}
+                    cancel = await call_tool(
+                        client,
+                        "saxo_cancel_sim_orders_by_instrument",
+                        cancel_arguments,
+                    )
+                    calls += 1
+                    cancel_attempted = True
+                    _record(
+                        state,
+                        "saxo_cancel_sim_orders_by_instrument",
+                        cancel,
+                        cancel_arguments,
+                    )
+                    state.lifecycle_seen.add("saxo_cancel_sim_orders_by_instrument")
+                    cancel_state = "completed" if cancel.result_state == "completed" else "failed"
+                else:
+                    reason = "controlled_ghost_cancel_preview_failed"
+            else:
+                reason = "controlled_ghost_cancel_scope_unavailable"
+
+    after = await mcp_state_fingerprint(client, state)
+    state.after = after
+    ledger_arguments: dict[str, JsonValue] = {}
+    ledger = await call_tool(client, "saxo_get_safe_request_ledger", ledger_arguments)
+    calls += 1
+    _record(state, "saxo_get_safe_request_ledger", ledger, ledger_arguments)
+    ledger_complete = _complete_sim_request_ledger(ledger)
+    ledger_sha256 = digest(ledger.payload) if ledger_complete else None
+    before = state.before
+    if (
+        before is None
+        or candidate is None
+        or account_alias is None
+        or dataset_id is None
+        or instrument_handle is None
+        or strategy is None
+    ):
+        return _ControlledGhostObservation(
+            reason_code=reason,
+            evidence=None,
+            ledger_fingerprint_sha256=ledger_sha256,
+            receipt_bound=False,
+            mcp_call_count=calls,
+            sim_mutation_call_count=int(place_attempted) + int(cancel_attempted),
+        )
+    before_ghost = _ghost_state_fingerprint(before)
+    after_ghost = _ghost_state_fingerprint(after)
+    state_equal = before_ghost == after_ghost
+    reconciled_place = place_state in {"completed", "completed_unverified"}
+    if reconciled_place and cancel_state == "completed" and state_equal:
+        place_state = "completed"
+    evidence = GhostLifecycleEvidence(
+        candidate_commit=candidate,
+        dataset_id=dataset_id,
+        account_alias=account_alias,
+        instrument_handle=instrument_handle,
+        strategy_fingerprint_sha256=strategy_definition_fingerprint(
+            parse_strategy_definition(strategy),
+        ),
+        fill_model="next_bar_open",
+        environment="SIM",
+        session_capabilities_current=state.preflight.session_ok,
+        fixture_coverage_proved=state.preflight.fixtures_ok,
+        preview_status=cast("GhostStepStatus", preview_state),
+        place_status=cast("GhostPlaceStatus", place_state),
+        cancel_preview_status=cast("GhostStepStatus", cancel_preview_state),
+        cancel_status=cast("GhostStepStatus", cancel_state),
+        preview_attempt_count=int(preview_state != "not_run"),
+        place_attempt_count=int(place_attempted),
+        cancel_preview_attempt_count=int(cancel_preview_state != "not_run"),
+        cancel_attempt_count=int(cancel_attempted),
+        orders_readback=_component_available(after, "orders"),
+        positions_readback=_component_available(after, "positions"),
+        trade_messages_readback=_component_available(after, "trade_messages"),
+        balances_fingerprint_readback=_component_available(after, "balances"),
+        request_ledger_read_last=ledger_complete,
+        request_ledger_complete=ledger_complete,
+        live_event_count=live_transport_events(ledger.payload),
+        live_mutation_count=live_mutation_calls_in(ledger.payload),
+        non_sim_event_count=_non_sim_ledger_event_count(ledger.payload),
+        disclaimer_present=disclaimer_present,
+        purchase_occurred=not state_equal,
+        before=before_ghost,
+        after=after_ghost,
+    )
+    bound = False
+    if (
+        ledger_sha256 is not None
+        and place_state == "completed"
+        and cancel_preview_state == "completed"
+        and cancel_state == "completed"
+        and state_equal
+        and not disclaimer_present
+    ):
+        try:
+            _bind_observed_sim_ghost_lifecycle(
+                evidence,
+                ledger_provenance_sha256=ledger_sha256,
+                authority=authority,
+            )
+        except (OSError, ValueError):
+            reason = "controlled_ghost_receipt_binding_refused"
+        else:
+            bound = True
+            reason = "passed"
+    elif not ledger_complete:
+        reason = "controlled_ghost_request_ledger_incomplete"
+    elif not state_equal:
+        reason = "controlled_ghost_cleanup_not_equal"
+    elif place_state != "completed":
+        reason = "controlled_ghost_place_not_reconciled"
+    return _ControlledGhostObservation(
+        reason_code=reason,
+        evidence=evidence,
+        ledger_fingerprint_sha256=ledger_sha256,
+        receipt_bound=bound,
+        mcp_call_count=calls,
+        sim_mutation_call_count=int(place_attempted) + int(cancel_attempted),
+    )
+
+
+def _ghost_state_fingerprint(state: BrokerageStateFingerprint) -> GhostStateFingerprint:
+    components = {component.name: component for component in state.components}
+    return GhostStateFingerprint(
+        balance_fingerprint_sha256=components["balances"].fingerprint_sha256,
+        orders_fingerprint_sha256=components["orders"].fingerprint_sha256,
+        positions_fingerprint_sha256=components["positions"].fingerprint_sha256,
+        trade_messages_fingerprint_sha256=components["trade_messages"].fingerprint_sha256,
+        order_count=components["orders"].count,
+        position_count=components["positions"].count,
+        trade_message_count=components["trade_messages"].count,
+    )
+
+
+def _component_available(state: BrokerageStateFingerprint, name: str) -> bool:
+    return next(
+        component.observed_state == "available"
+        for component in state.components
+        if component.name == name
+    )
+
+
+def _disclaimer_detected(value: JsonValue) -> bool:
+    if isinstance(value, list):
+        return any(_disclaimer_detected(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    if value.get("exact_disclaimer_content_present") is True:
+        return True
+    reasons = value.get("denial_reasons")
+    if isinstance(reasons, list) and any(
+        reason in {"blocking_disclaimer", "disclaimer_response_required"} for reason in reasons
+    ):
+        return True
+    return any(_disclaimer_detected(item) for item in value.values())
+
+
+def _complete_sim_request_ledger(result: MatrixToolObservation) -> bool:
+    payload = result.payload
+    events = payload.get("events")
+    return bool(
+        result.result_parsed
+        and result.result_state == "passed"
+        and payload.get("scope") == "current_mcp_session"
+        and payload.get("ledger_complete") is True
+        and payload.get("events_evicted") == 0
+        and isinstance(events, list)
+        and all(
+            isinstance(event, dict) and str(event.get("environment", "")).upper() == "SIM"
+            for event in events
+        )
+    )
+
+
+def _non_sim_ledger_event_count(payload: dict[str, JsonValue]) -> int:
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return 1
+    return sum(
+        1
+        for event in events
+        if not isinstance(event, dict) or str(event.get("environment", "")).upper() != "SIM"
+    )
+
+
+async def _refresh_post_cleanup_local_state(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+) -> None:
+    if state.after is None:
+        return
+    components = list(state.after.components[:4])
+    observed: dict[tuple[str, str], MatrixToolObservation] = {}
+    for name, tool, arguments in state_read_calls()[4:]:
+        key = (tool, digest(arguments))
+        result = observed.get(key)
+        if result is None:
+            result = await call_tool(client, tool, arguments)
+            observed[key] = result
+            _observe_auxiliary(state, result)
+        count, fingerprint, available = _state_component_values(name, result)
+        components.append(
+            BrokerageStateComponent(
+                name=name,
+                count=count,
+                fingerprint_sha256=fingerprint,
+                observed_state="available" if available else "unavailable",
+                mcp_tool_ids=(tool,),
+            ),
+        )
+    state.after = BrokerageStateFingerprint(components=tuple(components))
+
+
+def _controlled_sim_lifecycle_receipt(
+    state: MatrixRuntimeState,
+    per_tool: dict[str, dict[str, AnalyticsCaseReceipt]],
+    ghost: _ControlledGhostObservation,
+) -> ControlledSimLifecycleReceipt | None:
+    resources = state.analytics_resources
+    before = state.before or _unavailable_state_fingerprint()
+    after = state.after or _unavailable_state_fingerprint()
+    successful = {tool: cases.get("success") for tool, cases in per_tool.items()}
+
+    def passed(tool: str) -> bool:
+        receipt = successful.get(tool)
+        return receipt is not None and receipt.state == "passed" and receipt.result_parsed
+
+    exact_contexts = {
+        "portfolio_performance",
+        "position_sizing",
+        "scenario_custom",
+        "portfolio_minimum_variance",
+        "derivatives_model",
+        "bounded_backtest",
+        "pretrade_impact",
+    }
+    transaction_ok = passed("saxo_analyze_portfolio")
+    context_ok = exact_contexts <= set(resources.dataset_ids_by_analysis_kind)
+    options_ok = (
+        passed("saxo_model_derivatives") and resources.option_entitlement_state == "available"
+    )
+    cleanup_ok = resources.cleanup_verified and before == after
+    if not cleanup_ok:
+        state.errors.append("controlled_sim_cleanup_unverified")
+        return None
+    case_specs = (
+        (
+            "transaction_history",
+            transaction_ok,
+            "transaction_history_source_unavailable",
+            resources.source_request_count,
+            resources.source_mcp_call_count,
+            0,
+            "not_applicable",
+        ),
+        (
+            "execution_context",
+            context_ok,
+            "typed_execution_context_incomplete",
+            resources.source_request_count,
+            len(exact_contexts & set(resources.dataset_ids_by_analysis_kind)),
+            0,
+            "not_applicable",
+        ),
+        (
+            "ghost_portfolio",
+            ghost.receipt_bound,
+            ghost.reason_code,
+            1 if ghost.evidence is not None else 0,
+            ghost.mcp_call_count,
+            ghost.sim_mutation_call_count,
+            "not_applicable",
+        ),
+        (
+            "options_entitlement",
+            options_ok,
+            "options_entitlement_unavailable",
+            resources.source_request_count,
+            resources.source_mcp_call_count,
+            0,
+            "available" if options_ok else "denied",
+        ),
+        (
+            "cleanup",
+            cleanup_ok,
+            "controlled_cleanup_unverified",
+            0,
+            1,
+            ghost.sim_mutation_call_count,
+            "not_applicable",
+        ),
+    )
+    case_receipts: list[ControlledSimCaseReceipt] = []
+    analysis_tool_by_case = {
+        "transaction_history": "saxo_analyze_portfolio",
+        "options_entitlement": "saxo_model_derivatives",
+    }
+    for (
+        case_id,
+        ok,
+        reason,
+        source_count,
+        mcp_count,
+        mutation_count,
+        entitlement,
+    ) in case_specs:
+        analysis_tool = analysis_tool_by_case.get(case_id)
+        observed_analysis = successful.get(analysis_tool) if analysis_tool is not None else None
+        case_receipts.append(
+            ControlledSimCaseReceipt(
+                case_id=case_id,
+                state="passed" if ok else "refused",
+                reason_code="passed" if ok else reason,
+                source_request_count=source_count,
+                mcp_call_count=mcp_count,
+                sim_mutation_call_count=mutation_count,
+                cleanup_complete=True,
+                entitlement_state=cast(
+                    "Literal['available', 'denied', 'not_applicable']",
+                    entitlement,
+                ),
+                evidence_sha256=digest(
+                    {
+                        "case_id": case_id,
+                        "ghost_ledger": ghost.ledger_fingerprint_sha256,
+                        "observed_analysis": (
+                            observed_analysis.evidence_sha256
+                            if observed_analysis is not None
+                            else None
+                        ),
+                        "reason": "passed" if ok else reason,
+                        "source_request_count": source_count,
+                    },
+                ),
+            ),
+        )
+    cases = tuple(case_receipts)
+    state_value: Literal["passed", "refused"] = (
+        "passed" if all(case.state == "passed" for case in cases) else "refused"
+    )
+    return ControlledSimLifecycleReceipt(
+        evidence_state=state_value,
+        environment="SIM",
+        cases=cases,
+        before=before,
+        after=after,
+        live_events=state.live_events,
+        live_mutation_calls=state.live_mutation_calls,
+        request_ledger_read_last=ghost.ledger_fingerprint_sha256 is not None,
+        request_ledger_complete=ghost.ledger_fingerprint_sha256 is not None,
+        request_ledger_fingerprint_sha256=ghost.ledger_fingerprint_sha256,
+        cleanup_complete=True,
+        unchanged_account_state=True,
+        redacted_publication=True,
+        private_values_published=False,
+        purchase_occurred=(
+            ghost.evidence.purchase_occurred if ghost.evidence is not None else False
+        ),
+        disclaimer_response_made=False,
+    )
 
 
 def analytics_case_receipt(
@@ -583,6 +1182,7 @@ def analytics_case_receipt(
     }
     return AnalyticsCaseReceipt(
         kind=case_call.kind,
+        analysis_kind=_analysis_kind_from_case_call(case_call),
         state=case_state,
         reason_code="observed" if case_state != "failed" else "unexpected_case_result",
         mcp_call_observed=True,
@@ -602,6 +1202,32 @@ def analytics_case_receipt(
             digest(result.payload) if case_state == "reconciled" else None
         ),
     )
+
+
+def _analysis_kind_from_case_call(case_call: AnalyticsCaseCall) -> str | None:
+    analysis_tools = {
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+    }
+    if case_call.tool_id not in analysis_tools or case_call.kind != "success":
+        return None
+    if case_call.tool_id == "saxo_propose_trade_from_analysis":
+        return "pretrade_impact"
+    request = case_call.arguments.get("request")
+    if isinstance(request, dict):
+        analysis_kind = request.get("analysis_kind")
+        if isinstance(analysis_kind, str):
+            return analysis_kind
+    if case_call.tool_id == "saxo_backtest_strategy":
+        return "bounded_backtest"
+    return None
 
 
 def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - bounded dispatch
@@ -825,6 +1451,13 @@ def _remember_analytics_handles(
 ) -> None:
     if not result.result_parsed or result.mcp_is_error:
         return
+    if case_call.tool_id == "saxo_sync_research_data":
+        sync_result = result.payload.get("result")
+        if isinstance(sync_result, dict):
+            source_count = sync_result.get("source_request_count")
+            if isinstance(source_count, int) and not isinstance(source_count, bool):
+                resources.source_request_count += max(0, source_count)
+                resources.source_mcp_call_count += int(source_count > 0)
     found: dict[str, list[str]] = {kind: [] for kind in ("ih", "ds", "an", "ar", "jb", "dp")}
     _collect_safe_handles(result.payload, found)
     degraded = case_call.kind == "degradation" or result.result_state in {
@@ -852,7 +1485,7 @@ def _remember_analytics_handles(
         resources.deletion_token = found["dp"][0]
 
 
-def _remember_typed_resources(
+def _remember_typed_resources(  # noqa: C901
     resources: AnalyticsRuntimeResources,
     payload: dict[str, JsonValue],
     *,
@@ -868,7 +1501,7 @@ def _remember_typed_resources(
         resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
     )
 
-    def visit(value: JsonValue) -> None:
+    def visit(value: JsonValue) -> None:  # noqa: C901
         if isinstance(value, list):
             for item in value:
                 visit(item)
@@ -879,6 +1512,8 @@ def _remember_typed_resources(
         data_kind = value.get("data_kind")
         analysis_kind = value.get("analysis_kind")
         if isinstance(dataset_id, str):
+            if data_kind != "analysis_input":
+                _extend_unique(resources.source_dataset_ids, [dataset_id])
             route = (
                 analysis_kind
                 if isinstance(analysis_kind, str)
@@ -891,6 +1526,16 @@ def _remember_typed_resources(
         analysis_id = value.get("analysis_id")
         if isinstance(analysis_id, str) and isinstance(analysis_kind, str):
             _extend_unique(analysis_routes.setdefault(analysis_kind, []), [analysis_id])
+        account_alias = value.get("account_alias")
+        if isinstance(account_alias, str) and account_alias.startswith("aa_"):
+            _extend_unique(resources.account_aliases, [account_alias])
+        if data_kind == "option_chain":
+            entitlement = value.get("entitlement_state")
+            if entitlement in {"available", "denied"}:
+                resources.option_entitlement_state = cast(
+                    "Literal['available', 'denied', 'unknown']",
+                    entitlement,
+                )
         for item in value.values():
             visit(item)
 
@@ -1239,7 +1884,7 @@ def _observe_auxiliary(state: MatrixRuntimeState, result: MatrixToolObservation)
     state.live_mutation_calls += live_mutation_calls_in(result.payload)
 
 
-def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
+def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
     expected, _ = manifest_tools(SCENARIO_MANIFEST)
     missing = sorted(expected - set(state.receipts))
     for tool in missing:
@@ -1258,6 +1903,11 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
     if not state.analytics_resources.cleanup_verified:
         state.errors.append("analytics_cleanup_unverified")
         state.uncleaned = max(state.uncleaned, 1)
+    if (
+        state.controlled_sim_lifecycle is None
+        or state.controlled_sim_lifecycle.evidence_state != "passed"
+    ):
+        state.errors.append("controlled_sim_lifecycle_unverified")
     if state.live_events:
         state.errors.append("live_transport_or_ledger_event")
     if state.live_mutation_calls:
@@ -1274,7 +1924,7 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
     )
     status: Literal["passed", "failed", "blocked"] = (
         "blocked"
-        if is_blocker(state.errors)
+        if is_blocker(state.errors) or "controlled_sim_lifecycle_unverified" in state.errors
         else "failed"
         if state.errors or state.uncleaned
         else "passed"
@@ -1300,6 +1950,8 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
         analytics_tool_receipt_count=analytics_count,
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=tuple(state.analytics_case_receipts),
+        analysis_execution_receipts=tuple(state.analysis_execution_receipts),
+        controlled_sim_lifecycle=state.controlled_sim_lifecycle,
         mcp_only_account_fixture_state=state.preflight.mcp_only,
         cleanup_complete=cleanup_complete,
         account_state_unchanged=unchanged,
@@ -1331,6 +1983,8 @@ def _blocked(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
         analytics_tool_receipt_count=len(set(state.receipts) & set(ANALYTICS_TOOL_IDS)),
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=tuple(state.analytics_case_receipts),
+        analysis_execution_receipts=tuple(state.analysis_execution_receipts),
+        controlled_sim_lifecycle=state.controlled_sim_lifecycle,
         mcp_only_account_fixture_state=state.preflight.mcp_only,
         cleanup_complete=False,
         account_state_unchanged=False,

@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import RLock
@@ -26,6 +26,7 @@ from saxo_bank_mcp.analytics_config import (
     load_analytics_config,
 )
 from saxo_bank_mcp.analytics_execution import (
+    AuthenticatedBacktestExecutionProof,
     BacktestExecutionParameters,
     DerivativesExecutionParameters,
     InstrumentExecutionParameters,
@@ -35,6 +36,7 @@ from saxo_bank_mcp.analytics_execution import (
     ScenarioExecutionParameters,
     ScenarioExecutionShock,
     StoredAnalysisExecutionError,
+    StoredBacktestExecutionContext,
     StoredExecutionParameters,
     execute_market_comparison,
     execute_pretrade_proposal,
@@ -45,6 +47,12 @@ from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
     StoredTableExportRequest,
     export_analysis,
+)
+from saxo_bank_mcp.analytics_ghost_portfolio import (
+    GhostLifecycleEvidence,
+    GhostWorkflowRequest,
+    _receipt_issuer_authority,  # pyright: ignore[reportPrivateUsage]
+    issue_authenticated_ghost_receipt_from_lifecycle,
 )
 from saxo_bank_mcp.analytics_jobs import (
     AnalyticsJobManager,
@@ -147,7 +155,10 @@ from saxo_bank_mcp.analytics_store import (
     StoreQuotaError,
     StoreValidationError,
 )
-from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
+from saxo_bank_mcp.analytics_strategy_schema import (
+    StrategyDefinition,
+    strategy_definition_fingerprint,
+)
 from saxo_bank_mcp.analytics_sync import (
     AccountSnapshotDatasetSummary,
     AccountSnapshotSyncSpec,
@@ -198,6 +209,10 @@ _job_runtime: tuple[str, AnalyticsStore, AnalyticsJobManager] | None = None
 _process_proof_candidate: str | None = None
 _process_proof_kinds: frozenset[str] = frozenset()
 _process_proof_revisions: dict[str, str] = {}
+_process_backtest_proofs: dict[
+    tuple[str, str],
+    AuthenticatedBacktestExecutionProof,
+] = {}
 
 
 class _StrictToolModel(BaseModel):
@@ -1024,10 +1039,21 @@ def _route_server_analysis_input(
 ) -> SyncResult:
     store = AnalyticsStore.open(config)
     try:
+        origin = (
+            None
+            if item.origin_analysis_id is None
+            else replay_analysis(
+                item.origin_analysis_id,
+                config=config,
+                registry=_proof_registry(config),
+            )
+        )
         issued = issue_stored_analysis_input(
             analysis_kind=item.analysis_kind,
             source_dataset_ids=item.source_dataset_ids,
+            config=config,
             store=store,
+            origin_analysis=origin,
         )
     finally:
         store.close()
@@ -1776,6 +1802,7 @@ def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0913
                 config=config,
                 store=store,
                 registry=registry,
+                backtest_proof=_process_backtest_proof(dataset_ids[0], parameters),
             )
             return VerifiedAnalysisToolResponse(
                 tool_name=tool,
@@ -2029,6 +2056,18 @@ def _process_proof_session_authority() -> object:  # pyright: ignore[reportUnuse
     return _PROCESS_PROOF_AUTHORITY
 
 
+def _current_process_proof_candidate(  # pyright: ignore[reportUnusedFunction]
+    *, authority: object
+) -> str:
+    """Return the candidate only to the installed in-process proof harness."""
+    if authority is not _PROCESS_PROOF_AUTHORITY:
+        raise ValueError("process proof authority is unavailable")
+    with _PROCESS_PROOF_LOCK:
+        if _process_proof_candidate is None:
+            raise ValueError("process proof session is unavailable")
+        return _process_proof_candidate
+
+
 def _begin_process_proof_session(  # pyright: ignore[reportUnusedFunction]
     candidate_commit: str,
     analysis_kinds: Sequence[str],
@@ -2055,6 +2094,7 @@ def _begin_process_proof_session(  # pyright: ignore[reportUnusedFunction]
         _process_proof_candidate = candidate_commit
         _process_proof_kinds = kinds | {"bounded_backtest"}
         _process_proof_revisions.clear()
+        _process_backtest_proofs.clear()
 
 
 def _end_process_proof_session(  # pyright: ignore[reportUnusedFunction]
@@ -2067,6 +2107,111 @@ def _end_process_proof_session(  # pyright: ignore[reportUnusedFunction]
         _process_proof_candidate = None
         _process_proof_kinds = frozenset()
         _process_proof_revisions.clear()
+        _process_backtest_proofs.clear()
+
+
+def _bind_observed_sim_ghost_lifecycle(  # pyright: ignore[reportUnusedFunction]
+    evidence: GhostLifecycleEvidence,
+    *,
+    ledger_provenance_sha256: str,
+    authority: object,
+) -> None:
+    """Bind one exact installed-matrix lifecycle to its backtest source and strategy."""
+    if authority is not _PROCESS_PROOF_AUTHORITY:
+        raise ValueError("process proof authority is unavailable")
+    with _PROCESS_PROOF_LOCK:
+        candidate = _process_proof_candidate
+        if candidate is None or candidate != evidence.candidate_commit:
+            raise ValueError("process ghost candidate is unavailable")
+    config = _analytics_config()
+    store = AnalyticsStore.open(config)
+    try:
+        material = store.get_authenticated_dataset_material(evidence.dataset_id)
+        snapshot = store.get_authenticated_snapshot_material(
+            evidence.dataset_id,
+            "backtest_input",
+        )
+        context = StoredBacktestExecutionContext.model_validate(snapshot.payload, strict=False)
+    finally:
+        store.close()
+    if (
+        material.account_scope != evidence.account_alias
+        or context.account_alias != evidence.account_alias
+        or context.instrument_handle != evidence.instrument_handle
+    ):
+        raise ValueError("process ghost stored source binding mismatch")
+    request = GhostWorkflowRequest(
+        candidate_commit=evidence.candidate_commit,
+        dataset_id=evidence.dataset_id,
+        account_alias=evidence.account_alias,
+        instrument_handle=evidence.instrument_handle,
+        strategy_fingerprint_sha256=evidence.strategy_fingerprint_sha256,
+        fill_model=evidence.fill_model,
+        controlled_fixture="task_18_controlled_stock",
+    )
+    receipt_id = issue_authenticated_ghost_receipt_from_lifecycle(
+        request,
+        evidence,
+        ledger_provenance_sha256=ledger_provenance_sha256,
+        authority=_receipt_issuer_authority(),
+    )
+    proof = AuthenticatedBacktestExecutionProof(
+        candidate_commit=evidence.candidate_commit,
+        authenticated_ghost_receipt_id=receipt_id,
+    )
+    key = (evidence.dataset_id, evidence.strategy_fingerprint_sha256)
+    with _PROCESS_PROOF_LOCK:
+        if _process_proof_candidate != candidate:
+            raise ValueError("process ghost candidate changed during issuance")
+        _process_backtest_proofs[key] = proof
+
+
+def _controlled_backtest_source_binding(  # pyright: ignore[reportUnusedFunction]
+    dataset_id: str,
+    instrument_handle: str,
+    *,
+    expected_uic: int,
+    expected_asset_type: str,
+    authority: object,
+) -> str:
+    """Authenticate the installed matrix fixture against exact stored Saxo source pages."""
+    _current_process_proof_candidate(authority=authority)
+    store = AnalyticsStore.open(_analytics_config())
+    try:
+        material = store.get_authenticated_dataset_material(dataset_id)
+        snapshot = store.get_authenticated_snapshot_material(dataset_id, "backtest_input")
+        context = StoredBacktestExecutionContext.model_validate(snapshot.payload, strict=False)
+    finally:
+        store.close()
+    identities: set[tuple[object, object]] = set()
+    for page in material.pages:
+        if page.contract_name != "reference_instruments_v1":
+            continue
+        rows = page.payload.get("rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            identities.add(
+                (row.get("AssetType"), row.get("Identifier", row.get("Uic"))),
+            )
+    if context.instrument_handle != instrument_handle or identities != {
+        (expected_asset_type, expected_uic)
+    }:
+        raise ValueError("controlled ghost fixture source binding mismatch")
+    return material.account_scope
+
+
+def _process_backtest_proof(
+    dataset_id: str,
+    parameters: StoredExecutionParameters,
+) -> AuthenticatedBacktestExecutionProof | None:
+    if not isinstance(parameters, BacktestExecutionParameters):
+        return None
+    key = (dataset_id, strategy_definition_fingerprint(parameters.strategy))
+    with _PROCESS_PROOF_LOCK:
+        return _process_backtest_proofs.get(key)
 
 
 def _proof_registry(

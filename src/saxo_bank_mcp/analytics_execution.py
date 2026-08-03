@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
+from statistics import fmean
 from typing import Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -33,6 +34,7 @@ from saxo_bank_mcp.analytics_derivatives import (
     analyze_option_model,
 )
 from saxo_bank_mcp.analytics_fx import FxQuote
+from saxo_bank_mcp.analytics_instrument_identity import instrument_handle_for_saxo_identity
 from saxo_bank_mcp.analytics_instruments import (
     PriceSeriesDataset,
     ResearchRefusal,
@@ -44,6 +46,7 @@ from saxo_bank_mcp.analytics_market import (
     BoundedResearchUniverse,
     analyze_bounded_market,
 )
+from saxo_bank_mcp.analytics_metrics import covariance, simple_returns
 from saxo_bank_mcp.analytics_models import (
     ActiveProofReceipt,
     AnalysisCalendar,
@@ -55,6 +58,7 @@ from saxo_bank_mcp.analytics_models import (
     DataQuality,
     FxConversionMethod,
     FxSource,
+    HandleKind,
     InstrumentAnalysisRequest,
     MarketAnalysisRequest,
     MetricCurrencyBinding,
@@ -68,14 +72,22 @@ from saxo_bank_mcp.analytics_models import (
     QualityState,
     ValueUnitClass,
     VisibilityMode,
+    new_safe_handle,
 )
 from saxo_bank_mcp.analytics_optimization import (
+    CovariancePerturbation,
+    OptimizationAsset,
+    OptimizationDataset,
     OptimizationRequest,
+    SolverSettings,
     optimize_portfolio,
 )
-from saxo_bank_mcp.analytics_options import OptionModelInput
+from saxo_bank_mcp.analytics_options import OptionContract, OptionModelInput
 from saxo_bank_mcp.analytics_portfolio import (
+    LedgerEntry,
+    LedgerKind,
     PortfolioPeriodDataset,
+    SaxoPerformanceTotals,
     SaxoSourceBinding,
     analyze_portfolio_truth,
 )
@@ -99,8 +111,10 @@ from saxo_bank_mcp.analytics_provenance import (
     build_analysis_parameters_sha256,
 )
 from saxo_bank_mcp.analytics_scenarios import (
+    CurrencyShock,
     PortfolioScenarioRequest,
     PrivateScenarioValues,
+    ScenarioComponent,
     ScenarioShock,
     run_portfolio_scenario,
 )
@@ -114,9 +128,16 @@ from saxo_bank_mcp.analytics_store import (
     AuthenticatedSnapshotMaterial,
     AuthenticatedSourceMaterial,
     StoredDataset,
+    StoreNotFoundError,
 )
 from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
-from saxo_bank_mcp.analytics_sync import PriceBarDatasetRow, get_dataset
+from saxo_bank_mcp.analytics_sync import (
+    OptionReferenceDatasetRow,
+    PriceBarDatasetRow,
+    QuoteDatasetRow,
+    SyncError,
+    get_dataset,
+)
 from saxo_bank_mcp.analytics_trade_review import (
     DecisionBarReference,
     DecisionPointQuote,
@@ -127,6 +148,9 @@ _MARKET_COMPARISON_KIND: Final = "market_comparison"
 _PRICE_RETURN_METRIC: Final = "price_return"
 _CHART_CONTRACT: Final = "chart_v3"
 _MINIMUM_PRICE_OBSERVATIONS: Final = 2
+_MINIMUM_PORTFOLIO_VALUATIONS: Final = 2
+_MINIMUM_OPTIMIZATION_ASSETS: Final = 2
+_MINIMUM_OPTIMIZATION_PRICE_OBSERVATIONS: Final = 31
 _PROOF_CHECKS: Final = (
     "golden",
     "property",
@@ -243,6 +267,13 @@ class BacktestExecutionParameters(_StrictExecutionModel):
     starting_equity: float = Field(gt=0, allow_inf_nan=False)
 
 
+class AuthenticatedBacktestExecutionProof(_StrictExecutionModel):
+    """Process-owned candidate and ledger receipt; never part of a public tool request."""
+
+    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    authenticated_ghost_receipt_id: str = Field(pattern=r"^ghost_[a-f0-9]{64}$")
+
+
 type StoredExecutionParameters = (
     InstrumentExecutionParameters
     | PortfolioExecutionParameters
@@ -307,17 +338,6 @@ class StoredBacktestExecutionContext(_StoredContextBase):
     missing_interval_count: int = Field(ge=0)
     missing_fields: tuple[str, ...]
     warnings: tuple[str, ...]
-    candidate_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
-    authenticated_ghost_receipt_id: str | None = Field(
-        default=None,
-        pattern=r"^ghost_[a-f0-9]{64}$",
-    )
-
-    @model_validator(mode="after")
-    def _validate_ghost_binding(self) -> Self:
-        if (self.candidate_commit is None) != (self.authenticated_ghost_receipt_id is None):
-            raise ValueError("backtest candidate and authenticated ghost receipt must be paired")
-        return self
 
 
 class StoredPretradeExecutionContext(_StoredContextBase):
@@ -392,7 +412,9 @@ def issue_stored_analysis_input(
     *,
     analysis_kind: str,
     source_dataset_ids: Sequence[str],
+    config: AnalyticsConfig,
     store: AnalyticsStore,
+    origin_analysis: AnalysisResult | None = None,
 ) -> IssuedStoredAnalysisInput:
     """Authenticate and route one existing typed input without accepting source facts.
 
@@ -407,8 +429,18 @@ def issue_stored_analysis_input(
     dataset_ids = tuple(source_dataset_ids)
     if not dataset_ids or len(dataset_ids) != len(set(dataset_ids)):
         raise StoredAnalysisExecutionError("analysis_input_source_scope_invalid")
-    primary = store.get_authenticated_dataset_material(dataset_ids[0])
-    snapshot = store.get_authenticated_snapshot_material(dataset_ids[0], context_kind)
+    try:
+        primary = store.get_authenticated_dataset_material(dataset_ids[0])
+        snapshot = store.get_authenticated_snapshot_material(dataset_ids[0], context_kind)
+    except StoreNotFoundError:
+        primary, snapshot = _derive_stored_execution_context(
+            analysis_kind=analysis_kind,
+            source_dataset_ids=dataset_ids,
+            config=config,
+            store=store,
+            origin_analysis=origin_analysis,
+        )
+        dataset_ids = (primary.dataset.dataset_id,)
     context = _parse_context(snapshot, model_type)
     supporting = tuple(getattr(context, "supporting_dataset_ids", ()))
     if dataset_ids != (dataset_ids[0], *supporting):
@@ -438,6 +470,944 @@ def issue_stored_analysis_input(
         row_count=primary.dataset.row_count,
         fingerprint_sha256=fingerprint_sha256,
     )
+
+
+def _derive_stored_execution_context(
+    *,
+    analysis_kind: str,
+    source_dataset_ids: tuple[str, ...],
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+    origin_analysis: AnalysisResult | None,
+) -> tuple[AuthenticatedDatasetMaterial, AuthenticatedSnapshotMaterial]:
+    """Create one server-owned typed context from authenticated Saxo pages only."""
+    materials = tuple(
+        store.get_authenticated_dataset_material(dataset_id)
+        for dataset_id in sorted(source_dataset_ids)
+    )
+    account_scopes = {
+        material.account_scope for material in materials if material.account_scope != "aggregate"
+    }
+    if len(account_scopes) > 1:
+        raise StoredAnalysisExecutionError("analysis_input_account_scope_mismatch")
+    account_scope = next(iter(account_scopes), "aggregate")
+    if any(material.dataset.quality_state is not QualityState.COMPLETE for material in materials):
+        raise StoredAnalysisExecutionError("verified_coverage_unavailable")
+    builders = {
+        "portfolio_performance": _build_portfolio_context,
+        "position_sizing": _build_position_sizing_context,
+        "scenario_custom": _build_scenario_context,
+        "portfolio_minimum_variance": _build_optimization_context,
+        "derivatives_model": _build_derivatives_context,
+        "bounded_backtest": _build_backtest_context,
+        "pretrade_impact": _build_pretrade_context,
+    }
+    builder = builders.get(analysis_kind)
+    if builder is None:
+        _ = config
+        raise StoredAnalysisExecutionError("analysis_source_context_unavailable")
+    required_contracts = {
+        "portfolio_performance": frozenset(
+            {
+                "performance_summary_v4",
+                "performance_timeseries_v4",
+                "transactions_v1",
+                "bookings_v1",
+                "balances_v1",
+            },
+        ),
+        "position_sizing": frozenset({"balances_v1", "positions_v1", "costs_v1"}),
+        "scenario_custom": frozenset(
+            {"balances_v1", "positions_v1", "exposure_instruments_v1"},
+        ),
+        "portfolio_minimum_variance": frozenset(
+            {
+                "chart_v3",
+                "positions_v1",
+                "exposure_instruments_v1",
+                "balances_v1",
+                "costs_v1",
+            },
+        ),
+        "derivatives_model": frozenset(
+            {"options_chain_reference_v1", "info_price_v1", "balances_v1"},
+        ),
+        "bounded_backtest": frozenset({"chart_v3", "reference_instruments_v1"}),
+        "pretrade_impact": frozenset(
+            {"balances_v1", "positions_v1", "costs_v1", "info_price_v1"},
+        ),
+    }[analysis_kind]
+    external_pages: tuple[AuthenticatedSourceMaterial, ...] = ()
+    if analysis_kind == "bounded_backtest":
+        chart_handles = {
+            row.instrument_handle
+            for source_dataset_id in source_dataset_ids
+            for row in _dataset_rows_or_empty(source_dataset_id, config=config)
+            if isinstance(row, PriceBarDatasetRow)
+        }
+        if len(chart_handles) != 1:
+            raise StoredAnalysisExecutionError("backtest_chart_scope_ambiguous")
+        reference_pages = store.find_authenticated_source_materials(
+            contract_name="reference_instruments_v1",
+            instrument_handle=next(iter(chart_handles)),
+        )
+        if reference_pages:
+            external_pages = (max(reference_pages, key=lambda page: page.source_timestamp),)
+    pages = (
+        *(page for material in materials for page in material.pages),
+        *external_pages,
+    )
+    contract_ids = {page.contract_name for page in pages}
+    if not required_contracts <= contract_ids:
+        raise StoredAnalysisExecutionError("analysis_source_contracts_incomplete")
+    current = max(
+        materials,
+        key=lambda material: (material.dataset.created_at, material.dataset.dataset_id),
+    )
+    current_page_ids = tuple(page.page_id for page in current.pages)
+    lineage_page_ids = tuple(
+        page.page_id for material in materials if material is not current for page in material.pages
+    ) + tuple(page.page_id for page in external_pages)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    snapshot_id = new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID)
+    created_at = max(
+        tuple(material.dataset.created_at for material in materials)
+        + tuple(page.source_timestamp for page in external_pages),
+    )
+    coverage_start = min(material.coverage_start for material in materials)
+    coverage_end = max(material.coverage_end for material in materials)
+    context = builder(
+        dataset_id=dataset_id,
+        snapshot_id=snapshot_id,
+        account_alias=account_scope,
+        as_of=created_at,
+        pages=pages,
+        bindings=_canonical_source_bindings_from_pages(pages),
+        config=config,
+        source_dataset_ids=source_dataset_ids,
+        origin_analysis=origin_analysis,
+    )
+    context_kind = _CONTEXT_KIND_BY_ANALYSIS[analysis_kind]
+    try:
+        with store.transaction():
+            store.create_dataset(
+                dataset_id=dataset_id,
+                account_scope=account_scope,
+                source_scope="saxo_openapi",
+                source_revision=current.dataset.source_revision,
+                source_page_ids=current_page_ids,
+                lineage_source_page_ids=lineage_page_ids,
+                created_at=created_at,
+                coverage_start=coverage_start,
+                coverage_end=coverage_end,
+                quality_state=QualityState.COMPLETE,
+            )
+            store.create_snapshot(
+                snapshot_id=snapshot_id,
+                dataset_id=dataset_id,
+                snapshot_kind=context_kind,
+                account_scope=account_scope,
+                source_revision=current.dataset.source_revision,
+                as_of=created_at,
+                payload=context.model_dump(mode="json"),
+            )
+    except StoredAnalysisExecutionError:
+        raise
+    except (ArithmeticError, ValueError) as error:
+        raise StoredAnalysisExecutionError("analysis_source_context_invalid") from error
+    return (
+        store.get_authenticated_dataset_material(dataset_id),
+        store.get_authenticated_snapshot_material(dataset_id, context_kind),
+    )
+
+
+def _build_portfolio_context(  # noqa: PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredPortfolioExecutionContext:
+    _ = config, source_dataset_ids, origin_analysis
+    summary = _single_source_row(pages, "performance_summary_v4")
+    balance = _single_source_row(pages, "balances_v1")
+    series = tuple(
+        sorted(
+            _source_rows(pages, "performance_timeseries_v4"),
+            key=lambda row: _utc_value(row, "Date"),
+        ),
+    )
+    if len(series) < _MINIMUM_PORTFOLIO_VALUATIONS:
+        raise StoredAnalysisExecutionError("portfolio_boundary_valuations_unavailable")
+    if _source_rows(pages, "transactions_v1") or _source_rows(pages, "bookings_v1"):
+        raise StoredAnalysisExecutionError("portfolio_flow_boundary_valuations_unavailable")
+    start_at = _utc_value(series[0], "Date")
+    end_at = _utc_value(series[-1], "Date")
+    opening = _decimal_value(series[0], "EndOfDayBalance", positive=True)
+    closing = _decimal_value(series[-1], "EndOfDayBalance", nonnegative=True)
+    summary_closing = _decimal_value(summary, "AccountValue", nonnegative=True)
+    if closing != summary_closing or end_at > as_of:
+        raise StoredAnalysisExecutionError("portfolio_performance_reconciliation_unavailable")
+    profit_loss = closing - opening
+    reported_return = summary.get("TimeWeightedReturn")
+    if reported_return is not None:
+        calculated_return = profit_loss / opening * Decimal(100)
+        if abs(_decimal_value(summary, "TimeWeightedReturn") - calculated_return) > Decimal(
+            "0.00000001"
+        ):
+            raise StoredAnalysisExecutionError("portfolio_performance_reconciliation_unavailable")
+    return StoredPortfolioExecutionContext(
+        dataset=PortfolioPeriodDataset(
+            dataset_id=dataset_id,
+            snapshot_id=snapshot_id,
+            account_alias=account_alias,
+            start_at=start_at,
+            end_at=end_at,
+            reporting_currency=_text_value(balance, "Currency"),
+            opening_value=opening,
+            closing_value=closing,
+            ledger_entries=(
+                LedgerEntry(
+                    account_alias=account_alias,
+                    event_key_sha256=_sha256_json(
+                        {
+                            "analysis_kind": "portfolio_performance",
+                            "source_pages": sorted(page.page_id for page in pages),
+                        },
+                    ),
+                    revision=1,
+                    occurred_at=end_at,
+                    kind=LedgerKind.TRADING_PNL,
+                    amount=profit_loss,
+                    currency=_text_value(balance, "Currency"),
+                ),
+            ),
+            source_bindings=bindings,
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+            benchmark=None,
+            saxo_totals=SaxoPerformanceTotals(
+                closing_value=summary_closing,
+                total_profit_loss=profit_loss,
+                currency=_text_value(balance, "Currency"),
+            ),
+            named_differences=(),
+        ),
+    )
+
+
+def _build_scenario_context(  # noqa: PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredScenarioExecutionContext:
+    _ = config, source_dataset_ids, origin_analysis
+    balance = _single_source_row(pages, "balances_v1")
+    reporting_currency = _text_value(balance, "Currency")
+    exposures = {
+        (_text_value(row, "AssetType"), _integer_value(row, "Uic")): row
+        for row in _source_rows(pages, "exposure_instruments_v1")
+    }
+    components: list[ScenarioComponent] = []
+    shocks: list[ScenarioShock] = []
+    for position in _source_rows(pages, "positions_v1"):
+        base = _mapping_value(position, "PositionBase")
+        view = _mapping_value(position, "PositionView")
+        asset_type = _text_value(base, "AssetType")
+        uic = _integer_value(base, "Uic")
+        exposure_row = exposures.get((asset_type, uic))
+        if exposure_row is None or exposure_row.get("Currency") not in {
+            None,
+            reporting_currency,
+        }:
+            raise StoredAnalysisExecutionError("scenario_exposure_scope_incomplete")
+        handle = instrument_handle_for_saxo_identity(asset_type, uic)
+        current_value = _decimal_value(view, "Exposure")
+        if current_value == 0:
+            raise StoredAnalysisExecutionError("scenario_zero_exposure_unavailable")
+        components.append(
+            ScenarioComponent(
+                account_alias=account_alias,
+                instrument_handle=handle,
+                branch_id="linear",
+                current_value=current_value,
+                currency=reporting_currency,
+                current_margin_requirement=Decimal(0),
+                model_analysis_id=None,
+            ),
+        )
+        shocks.append(
+            ScenarioShock(
+                instrument_handle=handle,
+                price_shock_ratio=Decimal(0),
+                volatility_shock_points=Decimal(0),
+                rate_shock_basis_points=Decimal(0),
+                cash_flow_shock=Decimal(0),
+                repriced_value_at_base_fx=None,
+                stressed_margin_requirement=Decimal(0),
+            ),
+        )
+    if not components:
+        raise StoredAnalysisExecutionError("scenario_exposure_scope_incomplete")
+    return StoredScenarioExecutionContext(
+        analysis_kind="scenario_custom",
+        request=PortfolioScenarioRequest(
+            dataset_id=dataset_id,
+            snapshot_id=snapshot_id,
+            account_alias=account_alias,
+            as_of=as_of,
+            reporting_currency=reporting_currency,
+            scenario_type="equity",
+            input_mode="numeric",
+            narrative_fingerprint_sha256=None,
+            numeric_shocks_echoed_by_caller=False,
+            caller_accepted_numeric_shocks=False,
+            echoed_shock_map_sha256=None,
+            accepted_shock_map_sha256=None,
+            historical_start_at=None,
+            historical_end_at=None,
+            components=tuple(components),
+            component_shocks=tuple(shocks),
+            currency_shocks=(CurrencyShock(currency=reporting_currency, shock_ratio=Decimal(0)),),
+            current_margin_headroom=_decimal_value(
+                balance,
+                "MarginAvailableForTrading",
+                nonnegative=True,
+            ),
+            source_bindings=bindings,
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+        ),
+    )
+
+
+def _build_optimization_context(  # noqa: C901, PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredOptimizationExecutionContext:
+    _ = origin_analysis
+    balance = _single_source_row(pages, "balances_v1")
+    reporting_currency = _text_value(balance, "Currency")
+    positions: dict[str, Decimal] = {}
+    asset_types: dict[str, str] = {}
+    for position in _source_rows(pages, "positions_v1"):
+        base = _mapping_value(position, "PositionBase")
+        view = _mapping_value(position, "PositionView")
+        asset_type = _text_value(base, "AssetType")
+        handle = instrument_handle_for_saxo_identity(asset_type, _integer_value(base, "Uic"))
+        exposure = _decimal_value(view, "Exposure", positive=True)
+        positions[handle] = exposure
+        asset_types[handle] = asset_type
+    if len(positions) < _MINIMUM_OPTIMIZATION_ASSETS:
+        raise StoredAnalysisExecutionError("optimization_minimum_asset_count_unavailable")
+    price_rows: dict[str, dict[datetime, float]] = {}
+    for source_dataset_id in source_dataset_ids:
+        for row in _dataset_rows_or_empty(source_dataset_id, config=config):
+            if isinstance(row, PriceBarDatasetRow) and row.instrument_handle in positions:
+                price_rows.setdefault(row.instrument_handle, {})[row.bar_time] = row.close_value
+    if set(price_rows) != set(positions):
+        raise StoredAnalysisExecutionError("optimization_price_history_incomplete")
+    time_sets: list[set[datetime]] = [set(rows) for rows in price_rows.values()]
+    common_times: list[datetime] = sorted(
+        time_sets[0].intersection(*time_sets[1:]),
+    )
+    if len(common_times) < _MINIMUM_OPTIMIZATION_PRICE_OBSERVATIONS:
+        raise StoredAnalysisExecutionError("optimization_minimum_sample_count_unavailable")
+    handles = tuple(sorted(positions))
+    returns = {
+        handle: simple_returns([price_rows[handle][at] for at in common_times])
+        for handle in handles
+    }
+    covariance_matrix = tuple(
+        tuple(Decimal(str(covariance(returns[left], returns[right]))) for right in handles)
+        for left in handles
+    )
+    gross = sum(positions.values(), Decimal(0))
+    cost_by_handle: dict[str, Decimal] = {}
+    for page in pages:
+        if page.contract_name != "costs_v1" or page.instrument_handle is None:
+            continue
+        rows = _source_rows((page,), "costs_v1")
+        if len(rows) != 1:
+            raise StoredAnalysisExecutionError("optimization_cost_scope_incomplete")
+        cost_by_handle[page.instrument_handle] = _decimal_value(
+            _mapping_value(rows[0], "Cost"),
+            "TotalCost",
+            nonnegative=True,
+        )
+    if set(cost_by_handle) != set(handles):
+        raise StoredAnalysisExecutionError("optimization_cost_scope_incomplete")
+    assets = tuple(
+        OptimizationAsset(
+            account_alias=account_alias,
+            instrument_handle=handle,
+            asset_class="equity" if asset_types[handle] == "Stock" else "other",
+            currency=reporting_currency,
+            current_weight=positions[handle] / gross,
+            expected_return=Decimal(str(fmean(returns[handle]))),
+            lower_bound=Decimal(0),
+            upper_bound=Decimal(1),
+            transaction_cost_rate=cost_by_handle[handle] / positions[handle],
+            margin_requirement_rate=Decimal(1),
+            minimum_trade_weight=Decimal(0),
+            excluded=False,
+        )
+        for handle in handles
+    )
+    dataset = OptimizationDataset(
+        dataset_id=dataset_id,
+        snapshot_id=snapshot_id,
+        account_alias=account_alias,
+        estimation_start_at=common_times[0],
+        estimation_end_at=common_times[-1],
+        as_of=as_of,
+        reporting_currency=reporting_currency,
+        assets=assets,
+        covariance_matrix=covariance_matrix,
+        sample_count=len(common_times) - 1,
+        return_model="historical_arithmetic",
+        covariance_model="sample_covariance",
+        source_bindings=bindings,
+        quality_state=QualityState.COMPLETE,
+        missing_fields=(),
+        warnings=(),
+    )
+    return StoredOptimizationExecutionContext(
+        analysis_kind="portfolio_minimum_variance",
+        request=OptimizationRequest(
+            dataset=dataset,
+            objective="minimum_variance",
+            objective_confirmed_by_caller=False,
+            constraints_confirmed_by_caller=False,
+            short_policy="long_only",
+            asset_class_constraints=(),
+            currency_constraints=(),
+            maximum_turnover=Decimal(2),
+            maximum_transaction_cost_ratio=Decimal(2),
+            maximum_margin_ratio=Decimal(1),
+            perturbations=(
+                CovariancePerturbation(
+                    perturbation_id="observed_covariance",
+                    covariance_matrix=covariance_matrix,
+                ),
+            ),
+            solver_settings=SolverSettings(
+                method="SLSQP",
+                maximum_iterations=1000,
+                objective_tolerance=Decimal("0.00000001"),
+                feasibility_tolerance=Decimal("0.00000001"),
+                kkt_tolerance=Decimal("0.00001"),
+            ),
+            lexicographic_tie_break_rule="asset_order_within_objective_tolerance",
+            concentration_warning_threshold=Decimal("0.95"),
+            condition_number_warning_threshold=Decimal(1000000),
+            stability_warning_threshold=Decimal("0.05"),
+            stability_refusal_threshold=Decimal("0.25"),
+        ),
+    )
+
+
+def _build_derivatives_context(  # noqa: PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredDerivativesExecutionContext:
+    _ = snapshot_id, origin_analysis
+    balance = _single_source_row(pages, "balances_v1")
+    options: list[OptionReferenceDatasetRow] = []
+    quotes: list[QuoteDatasetRow] = []
+    for source_dataset_id in source_dataset_ids:
+        rows = _dataset_rows_or_empty(source_dataset_id, config=config)
+        options.extend(row for row in rows if isinstance(row, OptionReferenceDatasetRow))
+        quotes.extend(row for row in rows if isinstance(row, QuoteDatasetRow))
+    if len(options) != 1 or len(quotes) != 1:
+        raise StoredAnalysisExecutionError("derivatives_source_scope_ambiguous")
+    option = options[0]
+    quote = quotes[0]
+    if option.underlying_handle != quote.instrument_handle or quote.freshness != "fresh":
+        raise StoredAnalysisExecutionError("derivatives_quote_scope_mismatch")
+    reference_price = quote.mid_value
+    if reference_price is None and quote.bid_value is not None and quote.ask_value is not None:
+        reference_price = (quote.bid_value + quote.ask_value) / 2
+    if reference_price is None or reference_price <= 0 or option.strike_value <= 0:
+        raise StoredAnalysisExecutionError("derivatives_reference_price_unavailable")
+    expiry_at = datetime.combine(option.expiry, datetime.min.time(), tzinfo=UTC)
+    seconds = (expiry_at - as_of).total_seconds()
+    if seconds <= 0:
+        raise StoredAnalysisExecutionError("derivatives_expiry_unavailable")
+    currency = option.currency or _text_value(balance, "Currency")
+    contract = OptionContract(
+        dataset_id=dataset_id,
+        option_handle=option.instrument_handle,
+        underlying_handle=option.underlying_handle,
+        contract_currency=currency,
+        pricing_model="black_scholes",
+        reference_kind="spot",
+        option_type=option.put_call,
+        exercise_style="european",
+        payoff_style="vanilla",
+        rate_model="constant",
+        reference_price=reference_price,
+        strike=option.strike_value,
+        time_to_expiry_years=seconds / (365 * 24 * 60 * 60),
+        risk_free_rate=0,
+        dividend_yield=0,
+        days_per_year=365,
+    )
+    return StoredDerivativesExecutionContext(
+        dataset=DerivativeDataset(
+            dataset_id=dataset_id,
+            account_alias=account_alias,
+            as_of=as_of,
+            instrument_handles=(option.instrument_handle, option.underlying_handle),
+            source_bindings=bindings,
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+        ),
+        model_input=OptionModelInput(contract=contract, volatility=0),
+        saxo_greeks=None,
+    )
+
+
+def _build_backtest_context(  # noqa: PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredBacktestExecutionContext:
+    _ = dataset_id, snapshot_id, as_of, bindings, origin_analysis
+    chart_handles = {
+        row.instrument_handle
+        for source_dataset_id in source_dataset_ids
+        for row in _dataset_rows_or_empty(source_dataset_id, config=config)
+        if isinstance(row, PriceBarDatasetRow)
+    }
+    if len(chart_handles) != 1:
+        raise StoredAnalysisExecutionError("backtest_chart_scope_ambiguous")
+    reference_handles = {
+        page.instrument_handle
+        for page in pages
+        if page.contract_name == "reference_instruments_v1" and page.instrument_handle is not None
+    }
+    if reference_handles and reference_handles != chart_handles:
+        raise StoredAnalysisExecutionError("backtest_reference_scope_mismatch")
+    return StoredBacktestExecutionContext(
+        account_alias=account_alias,
+        instrument_handle=next(iter(chart_handles)),
+        missing_interval_count=0,
+        missing_fields=(),
+        warnings=(),
+    )
+
+
+def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredPretradeExecutionContext:
+    _ = snapshot_id
+    if origin_analysis is None or not isinstance(
+        origin_analysis.request,
+        InstrumentAnalysisRequest,
+    ):
+        raise StoredAnalysisExecutionError("pretrade_origin_analysis_required")
+    if origin_analysis.account_scope != account_alias:
+        raise StoredAnalysisExecutionError("pretrade_origin_account_scope_mismatch")
+    if len(origin_analysis.request.instrument_handles) != 1:
+        raise StoredAnalysisExecutionError("pretrade_origin_scope_ambiguous")
+    instrument_handle = origin_analysis.request.instrument_handles[0]
+    quote_rows = [
+        row
+        for source_dataset_id in source_dataset_ids
+        for row in _dataset_rows_or_empty(source_dataset_id, config=config)
+        if isinstance(row, QuoteDatasetRow) and row.instrument_handle == instrument_handle
+    ]
+    if len(quote_rows) != 1 or quote_rows[0].freshness != "fresh":
+        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    quote = quote_rows[0]
+    if quote.bid_value is None or quote.ask_value is None or quote.ask_value < quote.bid_value:
+        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    raw_quote_rows = tuple(
+        row
+        for row in _source_rows(pages, "info_price_v1")
+        if next(
+            (
+                page.instrument_handle
+                for page in pages
+                if page.contract_name == "info_price_v1"
+                and row in _source_rows((page,), "info_price_v1")
+            ),
+            None,
+        )
+        == instrument_handle
+    )
+    if len(raw_quote_rows) != 1:
+        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    raw_quote = _mapping_value(raw_quote_rows[0], "Quote")
+    price_type = _text_value(raw_quote, "PriceType")
+    if price_type.casefold() in {"noaccess", "no_access"}:
+        raise StoredAnalysisExecutionError("pretrade_quote_unavailable")
+    balance = _single_source_row(pages, "balances_v1")
+    reporting_currency = _text_value(balance, "Currency")
+    cost_pages = tuple(
+        page
+        for page in pages
+        if page.contract_name == "costs_v1" and page.instrument_handle == instrument_handle
+    )
+    if len(cost_pages) != 1:
+        raise StoredAnalysisExecutionError("pretrade_cost_scope_ambiguous")
+    cost_row = _single_source_row(cost_pages, "costs_v1")
+    if cost_row.get("Currency") not in {None, reporting_currency}:
+        raise StoredAnalysisExecutionError("pretrade_currency_mismatch")
+    raw_cost = _mapping_value(cost_row, "Cost")
+    commission = _optional_decimal_value(
+        raw_cost,
+        "Commission",
+        default=Decimal(0),
+        nonnegative=True,
+    )
+    stamp = _optional_decimal_value(
+        raw_cost,
+        "StampDuty",
+        default=Decimal(0),
+        nonnegative=True,
+    )
+    total_cost = _decimal_value(raw_cost, "TotalCost", nonnegative=True)
+    residual = total_cost - commission - stamp
+    if residual < 0:
+        raise StoredAnalysisExecutionError("pretrade_cost_reconciliation_unavailable")
+    reference_price = Decimal(
+        str(
+            quote.mid_value
+            if quote.mid_value is not None
+            else (quote.bid_value + quote.ask_value) / 2
+        ),
+    )
+    current_quantity = Decimal(0)
+    current_exposure = Decimal(0)
+    for position in _source_rows(pages, "positions_v1"):
+        base = _mapping_value(position, "PositionBase")
+        asset_type = _text_value(base, "AssetType")
+        handle = instrument_handle_for_saxo_identity(asset_type, _integer_value(base, "Uic"))
+        if handle != instrument_handle:
+            continue
+        current_quantity = _optional_decimal_value(
+            base,
+            "Amount",
+            default=Decimal(0),
+        )
+        view = position.get("PositionView")
+        if isinstance(view, Mapping):
+            current_exposure = _optional_decimal_value(
+                cast("Mapping[str, object]", view),
+                "Exposure",
+                default=Decimal(0),
+            )
+    info_binding = next(binding for binding in bindings if binding.contract_id == "info_price_v1")
+    cost_components = CostComponents(
+        commission=commission,
+        spread=residual,
+        fx_conversion=Decimal(0),
+        financing=Decimal(0),
+        borrow=Decimal(0),
+        custody=Decimal(0),
+        tax=stamp,
+        turnover=reference_price,
+        total_cost=total_cost,
+    )
+    return StoredPretradeExecutionContext(
+        origin_analysis_id=origin_analysis.analysis_id,
+        dataset_id=dataset_id,
+        account_alias=account_alias,
+        instrument_handle=instrument_handle,
+        as_of=as_of,
+        reference_price=reference_price,
+        contract_multiplier=Decimal(1),
+        instrument_currency=reporting_currency,
+        reporting_currency=reporting_currency,
+        current_position_quantity=current_quantity,
+        current_position_exposure=current_exposure,
+        portfolio_value=_decimal_value(balance, "TotalValue", positive=True),
+        current_currency_exposure=current_exposure,
+        buying_power_available=_decimal_value(
+            balance,
+            "CashAvailableForTrading",
+            nonnegative=True,
+        ),
+        margin_available=_decimal_value(
+            balance,
+            "MarginAvailableForTrading",
+            nonnegative=True,
+        ),
+        buy_cash_required_per_unit=reference_price,
+        sell_cash_required_per_unit=Decimal(0),
+        margin_required_per_unit=reference_price,
+        unit_cost_estimate=cost_components,
+        saxo_illustration=SaxoCostIllustration(
+            commission=commission,
+            stamp_duty=stamp,
+            total_cost=total_cost,
+            currency=reporting_currency,
+        ),
+        named_cost_difference=None,
+        decision_quote=DecisionPointQuote(
+            dataset_id=dataset_id,
+            instrument_handle=instrument_handle,
+            captured_at=quote.captured_at,
+            bid=Decimal(str(quote.bid_value)),
+            ask=Decimal(str(quote.ask_value)),
+            price_type=price_type,
+            delayed_by_minutes=(
+                None
+                if raw_quote.get("DelayedByMinutes") is None
+                else _integer_value(raw_quote, "DelayedByMinutes")
+            ),
+            quality_state=QualityState.COMPLETE,
+            entitlement_state="available",
+            source_binding=info_binding,
+            captured_by_mcp=True,
+            warnings=quote.warnings,
+        ),
+        decision_bar=None,
+        fx_quotes=(),
+        cost_holding_period_days=(
+            0
+            if cost_row.get("HoldingPeriodInDays") is None
+            else _integer_value(cost_row, "HoldingPeriodInDays")
+        ),
+        source_bindings=bindings,
+        quality_state=QualityState.COMPLETE,
+        missing_fields=(),
+        warnings=(),
+    )
+
+
+def _build_position_sizing_context(  # noqa: PLR0913
+    *,
+    dataset_id: str,
+    snapshot_id: str,
+    account_alias: str,
+    as_of: datetime,
+    pages: tuple[AuthenticatedSourceMaterial, ...],
+    bindings: tuple[SaxoSourceBinding, ...],
+    config: AnalyticsConfig,
+    source_dataset_ids: tuple[str, ...],
+    origin_analysis: AnalysisResult | None,
+) -> StoredPositionSizingExecutionContext:
+    _ = snapshot_id, as_of, config, source_dataset_ids, origin_analysis
+    balance = _single_source_row(pages, "balances_v1")
+    positions = _source_rows(pages, "positions_v1")
+    costs = _source_rows(pages, "costs_v1")
+    if len(positions) != 1 or len(costs) != 1:
+        raise StoredAnalysisExecutionError("position_sizing_source_scope_ambiguous")
+    base = _mapping_value(positions[0], "PositionBase")
+    view = _mapping_value(positions[0], "PositionView")
+    asset_type = _text_value(base, "AssetType")
+    uic = _integer_value(base, "Uic")
+    if asset_type != "Stock":
+        raise StoredAnalysisExecutionError("position_sizing_asset_constraints_unavailable")
+    instrument_handle = instrument_handle_for_saxo_identity(asset_type, uic)
+    cost_page = next(page for page in pages if page.contract_name == "costs_v1")
+    if cost_page.instrument_handle not in {None, instrument_handle}:
+        raise StoredAnalysisExecutionError("position_sizing_instrument_scope_mismatch")
+    cost = _mapping_value(costs[0], "Cost")
+    reporting_currency = _text_value(balance, "Currency")
+    if costs[0].get("Currency") not in {None, reporting_currency}:
+        raise StoredAnalysisExecutionError("position_sizing_currency_mismatch")
+    return StoredPositionSizingExecutionContext(
+        request=PositionSizingRequest(
+            dataset_id=dataset_id,
+            account_alias=account_alias,
+            instrument_handle=instrument_handle,
+            reporting_currency=reporting_currency,
+            method="stop_distance",
+            maximum_loss=None,
+            risk_budget_confirmed=False,
+            entry_price=_decimal_value(view, "CurrentPrice", positive=True),
+            stop_price=None,
+            volatility_measure=None,
+            volatility_multiplier=None,
+            value_per_price_unit=Decimal(1),
+            lot_size=Decimal(1),
+            portfolio_value=_decimal_value(balance, "TotalValue", positive=True),
+            maximum_weight=Decimal(1),
+            buying_power=_decimal_value(
+                balance,
+                "CashAvailableForTrading",
+                nonnegative=True,
+            ),
+            reserved_buffer=_optional_decimal_value(
+                balance,
+                "CashBlocked",
+                default=Decimal(0),
+                nonnegative=True,
+            ),
+            estimated_transaction_cost=_decimal_value(
+                cost,
+                "TotalCost",
+                nonnegative=True,
+            ),
+            margin_headroom=_decimal_value(
+                balance,
+                "MarginAvailableForTrading",
+                nonnegative=True,
+            ),
+            margin_requirement_per_money_unit=Decimal(1),
+            source_bindings=bindings,
+            quality_state=QualityState.COMPLETE,
+            missing_fields=(),
+            warnings=(),
+        ),
+    )
+
+
+def _source_rows(
+    pages: Sequence[AuthenticatedSourceMaterial],
+    contract_id: str,
+) -> tuple[Mapping[str, object], ...]:
+    rows: list[Mapping[str, object]] = []
+    for page in pages:
+        if page.contract_name != contract_id:
+            continue
+        raw_rows = page.payload.get("rows")
+        if not isinstance(raw_rows, list) or any(not isinstance(row, Mapping) for row in raw_rows):
+            raise StoredAnalysisExecutionError("analysis_source_rows_invalid")
+        rows.extend(cast("list[Mapping[str, object]]", raw_rows))
+    return tuple(rows)
+
+
+def _dataset_rows_or_empty(
+    dataset_id: str,
+    *,
+    config: AnalyticsConfig,
+) -> tuple[PriceBarDatasetRow | QuoteDatasetRow | OptionReferenceDatasetRow, ...]:
+    try:
+        return get_dataset(
+            dataset_id,
+            1,
+            config.limits.response_rows,
+            config=config,
+        ).rows
+    except SyncError:
+        return ()
+
+
+def _single_source_row(
+    pages: Sequence[AuthenticatedSourceMaterial],
+    contract_id: str,
+) -> Mapping[str, object]:
+    rows = _source_rows(pages, contract_id)
+    if len(rows) != 1:
+        raise StoredAnalysisExecutionError("analysis_source_scope_ambiguous")
+    return rows[0]
+
+
+def _mapping_value(row: Mapping[str, object], name: str) -> Mapping[str, object]:
+    value = row.get(name)
+    if not isinstance(value, Mapping):
+        raise StoredAnalysisExecutionError("analysis_source_field_missing")
+    return cast("Mapping[str, object]", value)
+
+
+def _text_value(row: Mapping[str, object], name: str) -> str:
+    value = row.get(name)
+    if not isinstance(value, str) or not value:
+        raise StoredAnalysisExecutionError("analysis_source_field_missing")
+    return value
+
+
+def _utc_value(row: Mapping[str, object], name: str) -> datetime:
+    value = row.get(name)
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise StoredAnalysisExecutionError("analysis_source_field_invalid") from error
+    else:
+        raise StoredAnalysisExecutionError("analysis_source_field_missing")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if parsed.utcoffset() != datetime.now(UTC).utcoffset():
+        raise StoredAnalysisExecutionError("analysis_source_field_invalid")
+    return parsed.astimezone(UTC)
+
+
+def _integer_value(row: Mapping[str, object], name: str) -> int:
+    value = row.get(name)
+    if type(value) is not int:
+        raise StoredAnalysisExecutionError("analysis_source_field_missing")
+    return value
+
+
+def _decimal_value(
+    row: Mapping[str, object],
+    name: str,
+    *,
+    positive: bool = False,
+    nonnegative: bool = False,
+) -> Decimal:
+    value = row.get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float | Decimal):
+        raise StoredAnalysisExecutionError("analysis_source_field_missing")
+    parsed = Decimal(str(value))
+    if not parsed.is_finite() or (positive and parsed <= 0) or (nonnegative and parsed < 0):
+        raise StoredAnalysisExecutionError("analysis_source_field_invalid")
+    return parsed
+
+
+def _optional_decimal_value(
+    row: Mapping[str, object],
+    name: str,
+    *,
+    default: Decimal,
+    nonnegative: bool = False,
+) -> Decimal:
+    return default if row.get(name) is None else _decimal_value(row, name, nonnegative=nonnegative)
 
 
 def execute_market_comparison(  # noqa: PLR0913
@@ -489,6 +1459,7 @@ def execute_stored_analysis(  # noqa: PLR0911, PLR0913
     config: AnalyticsConfig,
     store: AnalyticsStore,
     registry: ProofRegistry,
+    backtest_proof: AuthenticatedBacktestExecutionProof | None = None,
 ) -> AnalysisResult:
     """Dispatch one typed stored-input request to its existing domain engine."""
     if visibility is not VisibilityMode.PRIVATE_USER_RESULT:
@@ -564,6 +1535,7 @@ def execute_stored_analysis(  # noqa: PLR0911, PLR0913
         store,
         registry,
         profile,
+        backtest_proof,
     )
 
 
@@ -1103,6 +2075,8 @@ def _execute_derivatives(  # noqa: PLR0913
     registry: ProofRegistry,
     profile: ProofProfile,
 ) -> AnalysisResult:
+    if parameters.volatility_assumption is None or parameters.rate_assumption is None:
+        raise StoredAnalysisExecutionError("explicit_derivatives_assumptions_required")
     snapshot = store.get_authenticated_snapshot_material(dataset_id, _DERIVATIVES_CONTEXT_KIND)
     context = _parse_context(snapshot, StoredDerivativesExecutionContext)
     primary, supporting = _context_materials(
@@ -1126,8 +2100,7 @@ def _execute_derivatives(  # noqa: PLR0913
         quality_state=primary.dataset.quality_state,
     )
     contract_updates: dict[str, object] = {}
-    if parameters.rate_assumption is not None:
-        contract_updates["risk_free_rate"] = float(parameters.rate_assumption)
+    contract_updates["risk_free_rate"] = float(parameters.rate_assumption)
     updated_contract = _model_with_updates(
         contract,
         type(contract),
@@ -1137,11 +2110,7 @@ def _execute_derivatives(  # noqa: PLR0913
         context.model_input,
         OptionModelInput,
         contract=updated_contract,
-        volatility=(
-            context.model_input.volatility
-            if parameters.volatility_assumption is None
-            else float(parameters.volatility_assumption)
-        ),
+        volatility=float(parameters.volatility_assumption),
     )
     domain_result = analyze_option_model(
         dataset,
@@ -1198,6 +2167,7 @@ def _execute_backtest(  # noqa: PLR0913
     store: AnalyticsStore,
     registry: ProofRegistry,
     profile: ProofProfile,
+    backtest_proof: AuthenticatedBacktestExecutionProof | None,
 ) -> AnalysisResult:
     snapshot = store.get_authenticated_snapshot_material(dataset_id, _BACKTEST_CONTEXT_KIND)
     context = _parse_context(snapshot, StoredBacktestExecutionContext)
@@ -1243,8 +2213,10 @@ def _execute_backtest(  # noqa: PLR0913
         ),
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         trusted_local_host=True,
-        authenticated_ghost_receipt_id=context.authenticated_ghost_receipt_id,
-        candidate_commit=context.candidate_commit,
+        authenticated_ghost_receipt_id=(
+            None if backtest_proof is None else backtest_proof.authenticated_ghost_receipt_id
+        ),
+        candidate_commit=(None if backtest_proof is None else backtest_proof.candidate_commit),
     )
     if isinstance(domain_result, ResearchRefusal):
         raise StoredAnalysisExecutionError(domain_result.reason_code)
@@ -1364,13 +2336,20 @@ def _context_materials(
     return primary, supporting
 
 
-def _canonical_source_bindings(  # noqa: C901
+def _canonical_source_bindings(
     materials: Sequence[AuthenticatedDatasetMaterial],
 ) -> tuple[SaxoSourceBinding, ...]:
+    return _canonical_source_bindings_from_pages(
+        tuple(page for material in materials for page in material.pages),
+    )
+
+
+def _canonical_source_bindings_from_pages(  # noqa: C901
+    pages: Sequence[AuthenticatedSourceMaterial],
+) -> tuple[SaxoSourceBinding, ...]:
     pages_by_contract: dict[str, dict[str, AuthenticatedSourceMaterial]] = {}
-    for material in materials:
-        for page in material.pages:
-            pages_by_contract.setdefault(page.contract_name, {})[page.page_id] = page
+    for page in pages:
+        pages_by_contract.setdefault(page.contract_name, {})[page.page_id] = page
     bindings: list[SaxoSourceBinding] = []
     contracts = source_contracts_by_id()
     for contract_id in sorted(pages_by_contract):
@@ -1988,6 +2967,7 @@ def _market_result(  # noqa: PLR0913
 
 
 __all__ = (
+    "AuthenticatedBacktestExecutionProof",
     "BacktestExecutionParameters",
     "DerivativesExecutionParameters",
     "InstrumentExecutionParameters",

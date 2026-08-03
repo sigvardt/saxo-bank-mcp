@@ -26,6 +26,7 @@ from saxo_bank_mcp.analytics_migrations import store_writer_lock_path
 from saxo_bank_mcp.analytics_models import InstrumentHandle
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_source_contracts import (
+    SourcePage,
     source_contract_fingerprint,
     source_contracts_by_id,
 )
@@ -459,7 +460,7 @@ def _source_request(query: str, asset_types: tuple[str, ...]) -> dict[str, objec
 async def _fetch_instruments(
     source: SaxoAnalyticsProvider,
     request: Mapping[str, object],
-) -> tuple[tuple[_SourceInstrument, ...], str | None, datetime | None]:
+) -> tuple[tuple[_SourceInstrument, ...], tuple[SourcePage, ...]]:
     pages = [
         page
         async for page in source.fetch(
@@ -477,12 +478,67 @@ async def _fetch_instruments(
         raise ResolutionError("Saxo instrument source receipt is invalid")
     rows = _parse_source_rows(tuple(row for page in pages for row in page.rows))
     if not pages:
-        return rows, None, None
+        return rows, ()
     revisions = {page.source_revision for page in pages}
     timestamps = {page.source_timestamp for page in pages}
     if len(revisions) != 1 or len(timestamps) != 1:
         raise ResolutionError("Saxo instrument source pages mix revisions")
-    return rows, next(iter(revisions)), next(iter(timestamps))
+    return rows, tuple(pages)
+
+
+def _persist_reference_pages(
+    config: AnalyticsConfig,
+    pages: Sequence[SourcePage],
+    instruments: Sequence[_SourceInstrument],
+) -> None:
+    """Persist exact resolver rows against their server-issued safe handles."""
+    if not pages or not instruments:
+        return
+    rows_by_identity: dict[tuple[str, int], tuple[SourcePage, Mapping[str, object]]] = {}
+    for page in pages:
+        for row in page.rows:
+            parsed = _SourceInstrument.model_validate(dict(row), strict=True)
+            identity = (parsed.asset_type, parsed.identifier)
+            existing = rows_by_identity.get(identity)
+            if existing is not None and dict(existing[1]) != dict(row):
+                raise ResolutionError("Saxo returned conflicting resolver source rows")
+            rows_by_identity[identity] = (page, row)
+    store = AnalyticsStore.open(config)
+    try:
+        with store.transaction():
+            for instrument in instruments:
+                identity = (instrument.asset_type, instrument.identifier)
+                source = rows_by_identity.get(identity)
+                if source is None:
+                    raise ResolutionError("resolved instrument source row is unavailable")
+                page, row = source
+                handle = instrument_handle_for_saxo_identity(*identity)
+                store.put_source_page(
+                    source_kind=page.source_kind,
+                    page_key=(
+                        f"{page.contract_id}:{page.page_number}:"
+                        f"{page.capture_revision.removeprefix('capture:')}:{handle}"
+                    ),
+                    source_revision=page.capture_revision,
+                    source_native_revision=page.source_revision,
+                    contract_name=page.contract_id,
+                    contract_sha256=page.contract_sha256,
+                    payload={
+                        "contract_id": page.contract_id,
+                        "data_version": page.data_version,
+                        "page_number": page.page_number,
+                        "request_fingerprint_sha256": page.request_fingerprint_sha256,
+                        "rows": [dict(row)],
+                        "source_native_revision": page.source_revision,
+                        "source_quality": page.source_quality.model_dump(mode="json"),
+                    },
+                    row_count=1,
+                    source_timestamp=page.source_timestamp,
+                    account_scope=page.account_scope,
+                    instrument_handle=handle,
+                )
+    finally:
+        store.close()
 
 
 def _resolution_issues(
@@ -552,6 +608,7 @@ class InstrumentResolver:
         if type(source) is not SaxoAnalyticsProvider:
             raise TypeError("instrument resolver requires SaxoAnalyticsProvider")
         self._source = source
+        self._config = config
         self._catalog = _InstrumentCatalog(config)
 
     async def resolve_instruments(
@@ -571,7 +628,7 @@ class InstrumentResolver:
             if (not selected_asset_types or entry.metadata.asset_type in selected_asset_types)
             and (not selected_exchanges or entry.metadata.exchange in selected_exchanges)
         )
-        rows, source_revision, source_timestamp = await _fetch_instruments(
+        rows, source_pages = await _fetch_instruments(
             self._source,
             _source_request(clean_query, selected_asset_types),
         )
@@ -582,12 +639,15 @@ class InstrumentResolver:
             and (not selected_exchanges or instrument.exchange in selected_exchanges)
         )
         selected = _exact_matches(clean_query, filtered)
-        if source_revision is not None and source_timestamp is not None:
+        if source_pages:
+            source_revision = source_pages[0].source_revision
+            source_timestamp = source_pages[0].source_timestamp
             current = self._catalog.upsert(
                 selected,
                 source_revision=source_revision,
                 source_timestamp=source_timestamp,
             )
+            _persist_reference_pages(self._config, source_pages, selected)
         else:
             current = ()
 

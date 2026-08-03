@@ -406,32 +406,6 @@ def _complete_bundle() -> tuple[
         )
         for contract in analytics_sim_contracts()
     )
-    matrix = SimToolMatrixReceipt(
-        status="passed",
-        tool_receipts=matrix_receipts,
-        lifecycle_calls=(),
-        registered_trading_write_ops=(),
-        disclaimer_response_made=False,
-        disclaimer_refusal_observed=True,
-        fixture_reference_validated=True,
-        account_allowlist_resolved=True,
-        auth_status_completed=True,
-        session_capabilities_completed=True,
-        before_state_fingerprint=brokerage_state,
-        after_state_fingerprint=brokerage_state,
-        uncleaned_resources=0,
-        hosts=("gateway.saxobank.com",),
-        live_events=0,
-        live_mutation_calls=0,
-        analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
-        analytics_case_contract_sha256=analytics_case_contract_sha256(),
-        analytics_case_receipts=analytics_case_receipts,
-        mcp_only_account_fixture_state=True,
-        cleanup_complete=True,
-        account_state_unchanged=True,
-        redacted_publication=True,
-        errors=(),
-    )
     lifecycle = ControlledSimLifecycleReceipt(
         environment="SIM",
         cases=tuple(
@@ -454,12 +428,42 @@ def _complete_bundle() -> tuple[
         after=brokerage_state,
         live_events=0,
         live_mutation_calls=0,
+        request_ledger_read_last=True,
+        request_ledger_complete=True,
+        request_ledger_fingerprint_sha256="9" * 64,
         cleanup_complete=True,
         unchanged_account_state=True,
         redacted_publication=True,
         private_values_published=False,
         purchase_occurred=False,
         disclaimer_response_made=False,
+    )
+    matrix = SimToolMatrixReceipt(
+        status="passed",
+        tool_receipts=matrix_receipts,
+        lifecycle_calls=(),
+        registered_trading_write_ops=(),
+        disclaimer_response_made=False,
+        disclaimer_refusal_observed=True,
+        fixture_reference_validated=True,
+        account_allowlist_resolved=True,
+        auth_status_completed=True,
+        session_capabilities_completed=True,
+        before_state_fingerprint=brokerage_state,
+        after_state_fingerprint=brokerage_state,
+        uncleaned_resources=0,
+        hosts=("gateway.saxobank.com",),
+        live_events=0,
+        live_mutation_calls=0,
+        analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
+        analytics_case_contract_sha256=analytics_case_contract_sha256(),
+        analytics_case_receipts=analytics_case_receipts,
+        controlled_sim_lifecycle=lifecycle,
+        mcp_only_account_fixture_state=True,
+        cleanup_complete=True,
+        account_state_unchanged=True,
+        redacted_publication=True,
+        errors=(),
     )
     bundle = AnalyticsProofMatrixBundle(
         candidate_commit=candidate,
@@ -716,23 +720,46 @@ def test_installed_producer_requires_executed_nodes_for_every_proof_category() -
         for category in producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
     )
 
-    evidence = producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
-        nodes,
-        suite_receipt_sha256="e" * 64,
-    )
-
-    assert tuple(receipt.category for receipt in evidence.categories) == (
-        producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
-    )
-    privacy_marker = producer._PROOF_CATEGORY_MARKERS["privacy_safety"][0]  # noqa: SLF001
     with pytest.raises(
         producer.ProofProducerError,
-        match="installed_proof_category_missing:privacy_safety",
+        match="installed_proof_contract_receipts_missing",
     ):
         producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
-            tuple(node for node in nodes if privacy_marker not in node),
+            nodes,
             suite_receipt_sha256="e" * 64,
         )
+
+
+def test_aggregate_marker_nodes_cannot_mint_contract_keyed_proof() -> None:
+    """One passing marker node per category is not evidence for every analysis."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    nodes = tuple(
+        f"synthetic::{producer._PROOF_CATEGORY_MARKERS[category][0]}"  # noqa: SLF001
+        for category in producer._PROOF_SUITE_CATEGORIES  # noqa: SLF001
+    )
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_proof_contract_receipts_missing",
+    ):
+        producer._proof_suite_evidence_from_test_nodes(  # noqa: SLF001
+            nodes,
+            suite_receipt_sha256="e" * 64,
+        )
+
+
+def test_installed_producer_child_requires_an_isolated_sim_auth_lease() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    source = inspect.getsource(producer._execute_installed_child)  # noqa: SLF001
+    command_source = inspect.getsource(producer._producer_command)  # noqa: SLF001
+
+    assert "prepare_matrix_isolated_runtime" in source
+    assert "bind_eval_runtime_account_allowlist" in source
+    assert "require_matrix_runtime_cleanup" in source
+    assert "runtime.env" in source
+    assert "SAXO_MCP_TOKEN_CACHE_PATH" not in command_source
+    assert "SAXO_MCP_SIM_CREDENTIAL_FILE" not in command_source
+    assert "SAXO_MCP_LIVE_TOKEN_CACHE_PATH" not in source
 
 
 def test_public_or_fixture_authored_proof_bundle_cannot_reach_private_validator() -> None:

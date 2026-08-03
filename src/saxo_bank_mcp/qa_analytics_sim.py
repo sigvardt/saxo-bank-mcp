@@ -181,6 +181,10 @@ class AnalyticsToolSimContract(_StrictReceipt):
 
 class AnalyticsCaseReceipt(_StrictReceipt):
     kind: AnalyticsCaseKind
+    analysis_kind: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{0,127}$",
+    )
     state: AnalyticsCaseState
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     mcp_call_observed: Literal[True]
@@ -272,6 +276,7 @@ class AnalyticsRuntimeResources:
     account_selectors: list[str] = field(default_factory=list)
     degraded_instrument_handles: list[str] = field(default_factory=list)
     dataset_ids: list[str] = field(default_factory=list)
+    source_dataset_ids: list[str] = field(default_factory=list)
     degraded_dataset_ids: list[str] = field(default_factory=list)
     dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
     degraded_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
@@ -279,11 +284,15 @@ class AnalyticsRuntimeResources:
     degraded_analysis_ids: list[str] = field(default_factory=list)
     analysis_ids_by_kind: dict[str, list[str]] = field(default_factory=dict)
     degraded_analysis_ids_by_kind: dict[str, list[str]] = field(default_factory=dict)
+    account_aliases: list[str] = field(default_factory=list)
     artifact_ids: list[str] = field(default_factory=list)
     job_ids: list[str] = field(default_factory=list)
     deletion_token: str | None = None
     timed_operation: AnalyticsTimedOperation | None = None
     cleanup_verified: bool = False
+    source_request_count: int = 0
+    source_mcp_call_count: int = 0
+    option_entitlement_state: Literal["available", "denied", "unknown"] = "unknown"
 
     def remember_timeout(
         self,
@@ -386,6 +395,11 @@ class ControlledSimLifecycleReceipt(_StrictReceipt):
     after: BrokerageStateFingerprint
     live_events: int = Field(ge=0)
     live_mutation_calls: int = Field(ge=0)
+    request_ledger_read_last: bool
+    request_ledger_complete: bool
+    request_ledger_fingerprint_sha256: str | None = Field(
+        pattern=r"^[a-f0-9]{64}$",
+    )
     cleanup_complete: bool
     unchanged_account_state: bool
     redacted_publication: bool
@@ -422,6 +436,12 @@ class ControlledSimLifecycleReceipt(_StrictReceipt):
             raise ValueError("controlled analytics proof cannot include a purchase")
         if self.disclaimer_response_made:
             raise ValueError("analytics proof cannot answer a disclaimer")
+        if self.evidence_state == "passed" and (
+            not self.request_ledger_read_last
+            or not self.request_ledger_complete
+            or self.request_ledger_fingerprint_sha256 is None
+        ):
+            raise ValueError("passed controlled analytics proof requires the complete final ledger")
         return self
 
 
@@ -748,6 +768,8 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "analysis_kind": "derivatives_model",
                 "dataset_id": _SAFE_DATASET_HANDLE,
                 "instrument_handles": [_SAFE_INSTRUMENT_HANDLE],
+                "volatility_assumption": "0.2",
+                "rate_assumption": "0.01",
                 "visibility": "private_user_result",
             },
         },

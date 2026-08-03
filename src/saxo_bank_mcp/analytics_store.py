@@ -1942,6 +1942,42 @@ class AnalyticsStore:
         with self._read_connection() as connection:
             return self._authenticate_dataset_material(connection, dataset_id)
 
+    def find_authenticated_source_materials(
+        self,
+        *,
+        contract_name: str,
+        instrument_handle: str,
+    ) -> tuple[AuthenticatedSourceMaterial, ...]:
+        """Authenticate stored source pages bound to one exact safe instrument handle."""
+        if _SAFE_NAME_PATTERN.fullmatch(contract_name) is None:
+            raise StoreValidationError("source contract name is invalid")
+        _validate_handle(instrument_handle, "ih")
+        self._require_open()
+        with self._read_connection() as connection:
+            page_rows = cast(
+                "list[tuple[object, ...]]",
+                connection.execute(
+                    """
+                    SELECT p.page_id
+                    FROM source_pages AS p
+                    JOIN source_contracts AS c ON c.contract_id = p.contract_id
+                    WHERE c.contract_name = ? AND p.instrument_handle = ?
+                    ORDER BY epoch_us(p.source_timestamp) DESC, p.page_id
+                    """,
+                    (contract_name, instrument_handle),
+                ).fetchall(),
+            )
+            page_ids = tuple(_require_str(row[0]) for row in page_rows)
+            if not page_ids:
+                return ()
+            rows = self._validated_dataset_source_rows(
+                connection,
+                page_ids,
+                "aggregate",
+                None,
+            )
+            return tuple(self._authenticated_source_material(row) for row in rows)
+
     @staticmethod
     def _authenticate_dataset_material(
         connection: duckdb.DuckDBPyConnection,
@@ -1980,36 +2016,36 @@ class AnalyticsStore:
             account_scope,
             None,
         )
-        pages: list[AuthenticatedSourceMaterial] = []
-        for row in rows:
-            try:
-                loaded = json.loads(_require_str(row[9]))
-            except (TypeError, ValueError) as error:
-                raise StoreValidationError(
-                    "dataset source page integrity check failed",
-                ) from error
-            if not isinstance(loaded, dict):
-                raise StoreValidationError("dataset source page integrity check failed")
-            pages.append(
-                AuthenticatedSourceMaterial(
-                    page_id=_require_str(row[0]),
-                    contract_name=_require_str(row[10]),
-                    contract_sha256=_require_str(row[6]),
-                    source_kind=_require_str(row[11]),
-                    source_revision=_require_str(row[5]),
-                    source_timestamp=_require_datetime(row[15]),
-                    fingerprint_sha256=_require_str(row[1]),
-                    account_scope=_optional_str(row[4]),
-                    instrument_handle=_optional_str(row[7]),
-                    payload=cast("dict[str, SourceJsonValue]", loaded),
-                ),
-            )
+        pages = [AnalyticsStore._authenticated_source_material(row) for row in rows]
         return AuthenticatedDatasetMaterial(
             dataset=dataset,
             account_scope=account_scope,
             coverage_start=coverage_start,
             coverage_end=coverage_end,
             pages=tuple(pages),
+        )
+
+    @staticmethod
+    def _authenticated_source_material(
+        row: tuple[object, ...],
+    ) -> AuthenticatedSourceMaterial:
+        try:
+            loaded = json.loads(_require_str(row[9]))
+        except (TypeError, ValueError) as error:
+            raise StoreValidationError("dataset source page integrity check failed") from error
+        if not isinstance(loaded, dict):
+            raise StoreValidationError("dataset source page integrity check failed")
+        return AuthenticatedSourceMaterial(
+            page_id=_require_str(row[0]),
+            contract_name=_require_str(row[10]),
+            contract_sha256=_require_str(row[6]),
+            source_kind=_require_str(row[11]),
+            source_revision=_require_str(row[5]),
+            source_timestamp=_require_datetime(row[15]),
+            fingerprint_sha256=_require_str(row[1]),
+            account_scope=_optional_str(row[4]),
+            instrument_handle=_optional_str(row[7]),
+            payload=cast("dict[str, SourceJsonValue]", loaded),
         )
 
     def get_authenticated_snapshot_material(

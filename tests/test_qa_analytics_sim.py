@@ -110,6 +110,28 @@ def _lifecycle_cases() -> tuple[ControlledSimCaseReceipt, ...]:
     )
 
 
+def _lifecycle_receipt(
+    state: BrokerageStateFingerprint,
+) -> ControlledSimLifecycleReceipt:
+    return ControlledSimLifecycleReceipt(
+        environment="SIM",
+        cases=_lifecycle_cases(),
+        before=state,
+        after=state,
+        live_events=0,
+        live_mutation_calls=0,
+        request_ledger_read_last=True,
+        request_ledger_complete=True,
+        request_ledger_fingerprint_sha256="9" * 64,
+        cleanup_complete=True,
+        unchanged_account_state=True,
+        redacted_publication=True,
+        private_values_published=False,
+        purchase_occurred=False,
+        disclaimer_response_made=False,
+    )
+
+
 def _analytics_case_evidence() -> tuple[AnalyticsToolCaseEvidence, ...]:
     state_by_kind: dict[AnalyticsCaseKind, AnalyticsCaseState] = {
         "success": "passed",
@@ -669,6 +691,7 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=case_evidence,
+        controlled_sim_lifecycle=_lifecycle_receipt(state),
         mcp_only_account_fixture_state=True,
         cleanup_complete=True,
         account_state_unchanged=True,
@@ -712,6 +735,9 @@ def test_controlled_lifecycle_requires_sim_zero_live_cleanup_and_state_equality(
         after=before,
         live_events=0,
         live_mutation_calls=0,
+        request_ledger_read_last=True,
+        request_ledger_complete=True,
+        request_ledger_fingerprint_sha256="9" * 64,
         cleanup_complete=True,
         unchanged_account_state=True,
         redacted_publication=True,
@@ -737,6 +763,21 @@ def test_controlled_lifecycle_requires_sim_zero_live_cleanup_and_state_equality(
             ControlledSimLifecycleReceipt.model_validate(
                 {**receipt.model_dump(mode="json"), **update},
             )
+
+
+def test_controlled_lifecycle_pass_requires_last_complete_request_ledger() -> None:
+    receipt = _lifecycle_receipt(_state())
+
+    assert receipt.request_ledger_read_last is True
+    assert receipt.request_ledger_complete is True
+    assert receipt.request_ledger_fingerprint_sha256 == "9" * 64
+    with pytest.raises(ValidationError):
+        ControlledSimLifecycleReceipt.model_validate(
+            {
+                **receipt.model_dump(mode="json"),
+                "request_ledger_read_last": False,
+            },
+        )
 
 
 def test_brokerage_state_requires_each_fingerprint_and_count_exactly_once() -> None:
@@ -766,6 +807,9 @@ def test_controlled_options_entitlement_can_reduce_without_fabricating_success()
         after=state,
         live_events=0,
         live_mutation_calls=0,
+        request_ledger_read_last=True,
+        request_ledger_complete=True,
+        request_ledger_fingerprint_sha256="9" * 64,
         cleanup_complete=True,
         unchanged_account_state=True,
         redacted_publication=True,

@@ -8,9 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.config import SIM_ENDPOINTS
 from saxo_bank_mcp.qa_analytics_sim import (
+    AnalyticsCaseReceipt,
     AnalyticsRuntimeResources,
     AnalyticsToolCaseEvidence,
     BrokerageStateFingerprint,
+    ControlledSimLifecycleReceipt,
     analytics_case_evidence_errors,
 )
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS, EXPECTED_TOOL_COUNT
@@ -102,6 +104,8 @@ class SimToolMatrixReceipt(BaseModel):
     analytics_tool_receipt_count: int = Field(ge=0)
     analytics_case_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     analytics_case_receipts: tuple[AnalyticsToolCaseEvidence, ...]
+    analysis_execution_receipts: tuple[AnalyticsCaseReceipt, ...] = ()
+    controlled_sim_lifecycle: ControlledSimLifecycleReceipt | None = None
     mcp_only_account_fixture_state: bool
     cleanup_complete: bool
     account_state_unchanged: bool
@@ -131,6 +135,8 @@ class SimToolMatrixReceipt(BaseModel):
             or self.uncleaned_resources != 0
             or any(receipt.status == "failed" for receipt in self.tool_receipts)
             or analytics_case_evidence_errors(self.analytics_case_receipts)
+            or self.controlled_sim_lifecycle is None
+            or self.controlled_sim_lifecycle.evidence_state != "passed"
             or any(
                 component.observed_state != "available"
                 for component in self.before_state_fingerprint.components
@@ -185,6 +191,8 @@ class MatrixRuntimeState:
     preflight: PreflightFlags
     before: BrokerageStateFingerprint | None
     after: BrokerageStateFingerprint | None
+    analysis_execution_receipts: list[AnalyticsCaseReceipt] = field(default_factory=list)
+    controlled_sim_lifecycle: ControlledSimLifecycleReceipt | None = None
     analytics_resources: AnalyticsRuntimeResources = field(
         default_factory=AnalyticsRuntimeResources,
     )

@@ -32,6 +32,13 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     publishable_tracked_files,
     tree_digest,
 )
+from saxo_bank_mcp.agent_skill_matrix_env import (
+    MatrixEnvError,
+    bind_eval_runtime_account_allowlist,
+    prepare_matrix_isolated_runtime,
+    promote_rotated_sim_token_cache,
+    require_matrix_runtime_cleanup,
+)
 from saxo_bank_mcp.mcp_analytics_tools import (
     _begin_process_proof_session,
     _end_process_proof_session,
@@ -45,17 +52,16 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     AnalysisEvidenceReceipt,
     AnalysisProofExecutionContract,
     AnalyticsProofMatrixBundle,
+    ProofCaseContract,
     ProofCaseReceipt,
+    ProofExecutionKind,
     SkillScenarioEvidenceReceipt,
     build_proof_execution_contracts,
     load_analysis_kind_catalog,
     validate_proof_matrix_bundle,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
-    CONTROLLED_SIM_CASES,
     AnalyticsCaseReceipt,
-    ControlledSimCaseReceipt,
-    ControlledSimLifecycleReceipt,
     PostSendTimeoutReceipt,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix import _run_matrix
@@ -75,6 +81,7 @@ _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _PRODUCER_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _COMMAND_NAME = "analytics_proof_producer"
 _PROCESS_AUTHORITY = object()
+_JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
 
 type ProofSuiteCategory = Literal[
     "source_contract",
@@ -196,47 +203,101 @@ class _StrictModel(BaseModel):
     )
 
 
-class ExecutedProofCategoryReceipt(_StrictModel):
-    """One category backed by exact passed test nodes from the installed candidate."""
+class _AnalysisProofProperty(_StrictModel):
+    """One observation emitted by the exact installed test that performed it."""
 
-    category: ProofSuiteCategory
-    executed_test_count: int = Field(ge=1)
-    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    receipt_kind: Literal["analysis_case"] = "analysis_case"
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    case_kind: ProofExecutionKind
+    requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    executed_case_count: int = Field(ge=1)
+    failed_case_count: int = Field(ge=0)
     comparison_count: int = Field(ge=0)
+    unexplained_difference_count: int = Field(ge=0)
     mutation_count: int = Field(ge=0)
     mutation_killed_count: int = Field(ge=0)
+    independent_path_observed: bool = False
+    recovery_observed: bool = False
+    publication_scan_passed: bool = False
+
+
+class _ArtifactParityProperty(_StrictModel):
+    receipt_kind: Literal["artifact_parity"] = "artifact_parity"
+    receipt: ArtifactParityReceipt
+
+
+class _ArtifactVisualProperty(_StrictModel):
+    receipt_kind: Literal["artifact_visual"] = "artifact_visual"
+    receipt: ArtifactVisualIntegrityReceipt
+
+
+class MeasuredAnalysisProofObservation(_StrictModel):
+    """Contract-keyed observation bound to one passed installed pytest node."""
+
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    case_kind: ProofExecutionKind
+    requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    test_node_id: str = Field(min_length=1, max_length=512)
+    executed_case_count: int = Field(ge=1)
+    failed_case_count: int = Field(ge=0)
+    comparison_count: int = Field(ge=0)
+    unexplained_difference_count: int = Field(ge=0)
+    mutation_count: int = Field(ge=0)
+    mutation_killed_count: int = Field(ge=0)
+    independent_path_observed: bool
     recovery_observed: bool
     publication_scan_passed: bool
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
-    def _validate_category_claim(self) -> Self:
-        if self.category == "mutation_kill":
+    def _validate_observation(self) -> Self:
+        comparison_kinds = {
+            "known_answer",
+            "numerical_tolerance",
+            "accounting_identity",
+            "saxo_reconciliation",
+        }
+        if self.failed_case_count or self.unexplained_difference_count:
+            raise ValueError("proof observation contains a failed or unexplained case")
+        if self.case_kind in comparison_kinds and self.comparison_count < 1:
+            raise ValueError("comparison observation did not compare values")
+        if self.case_kind == "mutation_kill":
             if self.mutation_count < 1 or self.mutation_killed_count != self.mutation_count:
-                raise ValueError("mutation category must kill every executed mutation")
+                raise ValueError("mutation observation did not kill every mutation")
         elif self.mutation_count or self.mutation_killed_count:
-            raise ValueError("only mutation evidence can claim mutation counts")
-        if self.recovery_observed != (self.category == "schema_drift"):
-            raise ValueError("only schema-drift evidence can claim recovery")
-        if self.publication_scan_passed != (self.category == "privacy_safety"):
-            raise ValueError("only privacy evidence can claim publication scanning")
+            raise ValueError("non-mutation observation cannot claim mutation counts")
+        if self.recovery_observed != (self.case_kind == "schema_drift"):
+            raise ValueError("only schema-drift observations can claim recovery")
+        if self.publication_scan_passed != (self.case_kind == "privacy_safety"):
+            raise ValueError("only privacy observations can claim publication scanning")
         return self
 
 
 class InstalledProofSuiteEvidence(_StrictModel):
-    """Complete typed evidence derived from child-owned JUnit output only."""
+    """Exact typed evidence derived from child-owned JUnit properties only."""
 
-    categories: tuple[ExecutedProofCategoryReceipt, ...]
+    analysis_cases: tuple[MeasuredAnalysisProofObservation, ...]
+    artifact_parity_receipts: tuple[ArtifactParityReceipt, ...]
+    artifact_visual_receipts: tuple[ArtifactVisualIntegrityReceipt, ...]
     executed_test_count: int = Field(ge=1)
     suite_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
-    def _validate_complete_categories(self) -> Self:
-        if tuple(receipt.category for receipt in self.categories) != _PROOF_SUITE_CATEGORIES:
-            raise ValueError("installed proof categories must be complete and ordered")
+    def _validate_unique_receipts(self) -> Self:
+        keys = tuple((item.analysis_kind, item.case_kind) for item in self.analysis_cases)
+        nodes = tuple(item.test_node_id for item in self.analysis_cases)
+        if len(keys) != len(set(keys)) or len(nodes) != len(set(nodes)):
+            raise ValueError("installed proof observations must be exact and node-unique")
+        parity_ids = tuple(item.template_id for item in self.artifact_parity_receipts)
+        visual_ids = tuple(item.template_id for item in self.artifact_visual_receipts)
+        if len(parity_ids) != len(set(parity_ids)) or len(visual_ids) != len(set(visual_ids)):
+            raise ValueError("installed artifact observations must be template-unique")
         return self
 
-    def by_category(self) -> dict[ProofSuiteCategory, ExecutedProofCategoryReceipt]:
-        return {receipt.category: receipt for receipt in self.categories}
+    def by_analysis_case(
+        self,
+    ) -> dict[tuple[str, ProofExecutionKind], MeasuredAnalysisProofObservation]:
+        return {(item.analysis_kind, item.case_kind): item for item in self.analysis_cases}
 
 
 class InstalledProofProducerResult(_StrictModel):
@@ -531,15 +592,14 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
             )
         except (OSError, ValueError, ET.ParseError) as error:
             raise ProofProducerError("installed_proof_suite_receipt_invalid") from error
-        passed_nodes = tuple(
-            sorted(
-                f"{node.attrib.get('classname', '')}::{node.attrib.get('name', '')}".casefold()
-                for node in document.iter("testcase")
-                if not any(
-                    node.find(outcome) is not None for outcome in ("failure", "error", "skipped")
-                )
+        passed_testcases = tuple(
+            node
+            for node in document.iter("testcase")
+            if not any(
+                node.find(outcome) is not None for outcome in ("failure", "error", "skipped")
             )
         )
+        passed_nodes = tuple(sorted(_junit_node_id(node) for node in passed_testcases))
         if not passed_nodes or failures != 0:
             raise ProofProducerError("installed_proof_suite_failed")
         receipt_material = {
@@ -551,57 +611,166 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
             "stdout_sha256": executed.receipt.stdout_sha256,
             "test_count": len(passed_nodes),
         }
-        return _proof_suite_evidence_from_test_nodes(
-            passed_nodes,
+        return _proof_suite_evidence_from_junit(
+            passed_testcases,
+            executed_test_count=len(passed_nodes),
             suite_receipt_sha256=_digest(receipt_material),
         )
 
 
-def _proof_suite_evidence_from_test_nodes(
+def _proof_suite_evidence_from_test_nodes(  # pyright: ignore[reportUnusedFunction]
     passed_nodes: tuple[str, ...],
     *,
     suite_receipt_sha256: str,
 ) -> InstalledProofSuiteEvidence:
-    """Require separately executed installed tests for every typed proof category."""
-    comparison_categories = {
-        "known_answer",
-        "numerical_tolerance",
-        "accounting_identity",
-        "saxo_reconciliation",
-        "artifact_parity",
-    }
-    categories: list[ExecutedProofCategoryReceipt] = []
-    for category in _PROOF_SUITE_CATEGORIES:
-        markers = _PROOF_CATEGORY_MARKERS[category]
-        matched = tuple(
-            node_id for node_id in passed_nodes if any(marker in node_id for marker in markers)
+    """Reject aggregate node-name evidence retained only for adversarial compatibility tests."""
+    _ = passed_nodes, suite_receipt_sha256
+    raise ProofProducerError("installed_proof_contract_receipts_missing")
+
+
+def _junit_node_id(node: ET.Element) -> str:
+    return f"{node.attrib.get('classname', '')}::{node.attrib.get('name', '')}"
+
+
+def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
+    passed_testcases: tuple[ET.Element, ...],
+    *,
+    executed_test_count: int,
+    suite_receipt_sha256: str,
+) -> InstalledProofSuiteEvidence:
+    """Parse one strict measured observation from each explicitly reporting test node."""
+    analysis_cases: list[MeasuredAnalysisProofObservation] = []
+    parity: list[ArtifactParityReceipt] = []
+    visual: list[ArtifactVisualIntegrityReceipt] = []
+    receipt_nodes: set[str] = set()
+    for testcase in passed_testcases:
+        node_id = _junit_node_id(testcase)
+        properties = testcase.find("properties")
+        if properties is None:
+            continue
+        values = tuple(
+            property_node.attrib.get("value", "")
+            for property_node in properties.findall("property")
+            if property_node.attrib.get("name") == _JUNIT_PROOF_PROPERTY
         )
-        if not matched:
-            raise ProofProducerError(f"installed_proof_category_missing:{category}")
-        count = len(matched)
-        categories.append(
-            ExecutedProofCategoryReceipt(
-                category=category,
-                executed_test_count=count,
-                evidence_sha256=_digest(
-                    {
-                        "category": category,
-                        "nodes": matched,
-                        "suite_receipt_sha256": suite_receipt_sha256,
-                    }
-                ),
-                comparison_count=(count if category in comparison_categories else 0),
-                mutation_count=(count if category == "mutation_kill" else 0),
-                mutation_killed_count=(count if category == "mutation_kill" else 0),
-                recovery_observed=category == "schema_drift",
-                publication_scan_passed=category == "privacy_safety",
-            )
-        )
-    return InstalledProofSuiteEvidence(
-        categories=tuple(categories),
-        executed_test_count=len(passed_nodes),
+        if not values:
+            continue
+        if len(values) != 1 or node_id in receipt_nodes:
+            raise ProofProducerError("installed_proof_contract_receipt_ambiguous")
+        receipt_nodes.add(node_id)
+        try:
+            loaded = json.loads(values[0])
+        except (TypeError, ValueError) as error:
+            raise ProofProducerError("installed_proof_contract_receipt_invalid") from error
+        if not isinstance(loaded, dict):
+            raise ProofProducerError("installed_proof_contract_receipt_invalid")
+        payload = cast("dict[str, object]", loaded)
+        receipt_kind = payload.get("receipt_kind")
+        try:
+            if receipt_kind == "analysis_case":
+                observed = _AnalysisProofProperty.model_validate(payload)
+                if node_id != _analysis_proof_node_id(
+                    observed.analysis_kind,
+                    observed.case_kind,
+                ):
+                    raise ProofProducerError("installed_proof_contract_node_mismatch")
+                analysis_cases.append(
+                    MeasuredAnalysisProofObservation(
+                        analysis_kind=observed.analysis_kind,
+                        case_kind=observed.case_kind,
+                        requirement_code=observed.requirement_code,
+                        test_node_id=node_id,
+                        executed_case_count=observed.executed_case_count,
+                        failed_case_count=observed.failed_case_count,
+                        comparison_count=observed.comparison_count,
+                        unexplained_difference_count=observed.unexplained_difference_count,
+                        mutation_count=observed.mutation_count,
+                        mutation_killed_count=observed.mutation_killed_count,
+                        independent_path_observed=observed.independent_path_observed,
+                        recovery_observed=observed.recovery_observed,
+                        publication_scan_passed=observed.publication_scan_passed,
+                        evidence_sha256=_digest(
+                            {
+                                "node_id": node_id,
+                                "observation": observed.model_dump(mode="json"),
+                                "suite_receipt_sha256": suite_receipt_sha256,
+                            },
+                        ),
+                    ),
+                )
+            elif receipt_kind == "artifact_parity":
+                property_receipt = _ArtifactParityProperty.model_validate(payload).receipt
+                if node_id != _artifact_proof_node_id(
+                    "parity",
+                    property_receipt.template_id,
+                ):
+                    raise ProofProducerError("installed_proof_contract_node_mismatch")
+                parity.append(property_receipt)
+            elif receipt_kind == "artifact_visual":
+                property_receipt = _ArtifactVisualProperty.model_validate(payload).receipt
+                if node_id != _artifact_proof_node_id(
+                    "visual",
+                    property_receipt.template_id,
+                ):
+                    raise ProofProducerError("installed_proof_contract_node_mismatch")
+                visual.append(property_receipt)
+            else:
+                raise ProofProducerError("installed_proof_contract_receipt_invalid")
+        except ValidationError as error:
+            raise ProofProducerError("installed_proof_contract_receipt_invalid") from error
+
+    evidence = InstalledProofSuiteEvidence(
+        analysis_cases=tuple(analysis_cases),
+        artifact_parity_receipts=tuple(parity),
+        artifact_visual_receipts=tuple(visual),
+        executed_test_count=executed_test_count,
         suite_receipt_sha256=suite_receipt_sha256,
     )
+    _validate_installed_suite_coverage(evidence)
+    return evidence
+
+
+def _analysis_proof_node_id(analysis_kind: str, case_kind: ProofExecutionKind) -> str:
+    return (
+        "tests.test_analytics_proof_contracts::test_analysis_proof_contract"
+        f"[{analysis_kind}-{case_kind}]"
+    )
+
+
+def _artifact_proof_node_id(kind: Literal["parity", "visual"], template_id: str) -> str:
+    return f"tests.test_qa_analytics_artifacts::test_artifact_{kind}_contract[{template_id}]"
+
+
+def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) -> None:
+    contracts = build_proof_execution_contracts()
+    expected_cases: dict[tuple[str, ProofExecutionKind], ProofCaseContract] = {}
+    for contract in contracts:
+        for case in contract.cases:
+            if case.applicability == "required" and case.kind not in {
+                "executable_sim",
+                "artifact_parity",
+                "visual_integrity",
+            }:
+                expected_cases[(contract.analysis_kind, case.kind)] = case
+    observed_cases = evidence.by_analysis_case()
+    if set(observed_cases) != set(expected_cases):
+        raise ProofProducerError("installed_proof_contract_receipts_missing")
+    for key, contract_case in expected_cases.items():
+        observed = observed_cases[key]
+        if (
+            observed.requirement_code != contract_case.requirement_code
+            or observed.executed_case_count < contract_case.minimum_case_count
+            or (contract_case.independent_path_required and not observed.independent_path_observed)
+        ):
+            raise ProofProducerError("installed_proof_contract_observation_mismatch")
+    expected_templates = set(load_analysis_kind_catalog().artifact_template_ids)
+    if (
+        {item.template_id for item in evidence.artifact_parity_receipts} != expected_templates
+        or {item.template_id for item in evidence.artifact_visual_receipts} != expected_templates
+        or any(item.state != "passed" for item in evidence.artifact_parity_receipts)
+        or any(item.state != "passed" for item in evidence.artifact_visual_receipts)
+    ):
+        raise ProofProducerError("installed_artifact_contract_receipts_missing")
 
 
 def _bundle_from_process_executions(
@@ -616,13 +785,23 @@ def _bundle_from_process_executions(
     typed_matrix = SimToolMatrixReceipt.model_validate(matrix)
     typed_catalog = load_analysis_kind_catalog()
     matrix_sha256 = _digest(typed_matrix.model_dump(mode="json"))
-    suite_by_category = suite_evidence.by_category()
-    success_by_tool: dict[str, AnalyticsCaseReceipt] = {}
-    for tool_receipt in typed_matrix.analytics_case_receipts:
-        success = next((case for case in tool_receipt.cases if case.kind == "success"), None)
-        if success is None or success.state != "passed" or not success.result_parsed:
-            raise ProofProducerError("installed_analytics_success_receipt_missing")
-        success_by_tool[tool_receipt.tool_id] = success
+    suite_by_case = suite_evidence.by_analysis_case()
+    success_by_analysis = {
+        receipt.analysis_kind: receipt
+        for receipt in typed_matrix.analysis_execution_receipts
+        if receipt.analysis_kind is not None
+        and receipt.kind == "success"
+        and receipt.state == "passed"
+        and receipt.result_parsed
+    }
+    expected_sim_kinds = {
+        contract.analysis_kind
+        for contract in contracts
+        for case in contract.cases
+        if case.kind == "executable_sim" and case.applicability == "required"
+    }
+    if set(success_by_analysis) != expected_sim_kinds:
+        raise ProofProducerError("installed_analytics_success_receipt_missing")
     analysis_receipts = tuple(
         AnalysisEvidenceReceipt(
             evidence_receipt_id=contract.evidence_receipt_id,
@@ -634,8 +813,10 @@ def _bundle_from_process_executions(
                 _executed_case_receipt(
                     contract,
                     case_index=index,
-                    suite_by_category=suite_by_category,
-                    matrix_success=success_by_tool[contract.tool_id],
+                    suite_by_case=suite_by_case,
+                    matrix_success=success_by_analysis[contract.analysis_kind],
+                    parity_receipts=suite_evidence.artifact_parity_receipts,
+                    visual_receipts=suite_evidence.artifact_visual_receipts,
                 )
                 for index, _case in enumerate(contract.cases)
             ),
@@ -646,82 +827,11 @@ def _bundle_from_process_executions(
         )
         for contract in contracts
     )
-    owner_by_template = {
-        template_id: contract.analysis_kind
-        for contract in contracts
-        for template_id in contract.artifact_template_ids
-    }
-    parity_receipts = tuple(
-        ArtifactParityReceipt(
-            template_id=template_id,
-            analysis_kind=owner_by_template[template_id],
-            structured_semantics_sha256=_digest(
-                {
-                    "suite": suite_by_category["artifact_parity"].evidence_sha256,
-                    "template": template_id,
-                },
-            ),
-            artifact_semantics_sha256=_digest(
-                {
-                    "suite": suite_by_category["artifact_parity"].evidence_sha256,
-                    "template": template_id,
-                },
-            ),
-            structured_value_count=suite_by_category["artifact_parity"].executed_test_count,
-            rendered_value_count=suite_by_category["artifact_parity"].executed_test_count,
-            sampled_point_count=1,
-            state="passed",
-        )
-        for template_id in typed_catalog.artifact_template_ids
-    )
-    visual_receipts = tuple(
-        ArtifactVisualIntegrityReceipt(
-            template_id=template_id,
-            formats=("png", "html", "pdf"),
-            desktop_width=1280,
-            mobile_width=375,
-            png_pixel_check_passed=True,
-            text_clipping_detected=False,
-            label_overlap_detected=False,
-            html_mobile_readable=True,
-            privacy_footer_present=True,
-            provenance_stamp_present=True,
-            state="passed",
-        )
-        for template_id in typed_catalog.artifact_template_ids
-    )
-    lifecycle = ControlledSimLifecycleReceipt(
-        evidence_state="passed",
-        environment="SIM",
-        cases=tuple(
-            ControlledSimCaseReceipt(
-                case_id=case_id,
-                state="passed",
-                reason_code="passed",
-                source_request_count=0 if case_id == "cleanup" else 1,
-                mcp_call_count=1,
-                sim_mutation_call_count=0,
-                cleanup_complete=True,
-                entitlement_state=(
-                    "available" if case_id == "options_entitlement" else "not_applicable"
-                ),
-                evidence_sha256=_digest(
-                    {"case_id": case_id, "matrix_sha256": matrix_sha256},
-                ),
-            )
-            for case_id in CONTROLLED_SIM_CASES
-        ),
-        before=typed_matrix.before_state_fingerprint,
-        after=typed_matrix.after_state_fingerprint,
-        live_events=typed_matrix.live_events,
-        live_mutation_calls=typed_matrix.live_mutation_calls,
-        cleanup_complete=typed_matrix.cleanup_complete,
-        unchanged_account_state=typed_matrix.account_state_unchanged,
-        redacted_publication=typed_matrix.redacted_publication,
-        private_values_published=False,
-        purchase_occurred=typed_matrix.purchase_occurred,
-        disclaimer_response_made=typed_matrix.disclaimer_response_made,
-    )
+    parity_receipts = suite_evidence.artifact_parity_receipts
+    visual_receipts = suite_evidence.artifact_visual_receipts
+    lifecycle = typed_matrix.controlled_sim_lifecycle
+    if lifecycle is None or lifecycle.evidence_state != "passed":
+        raise ProofProducerError("installed_controlled_sim_lifecycle_missing")
     job_cases = next(
         receipt
         for receipt in typed_matrix.analytics_case_receipts
@@ -780,12 +890,17 @@ def _bundle_from_process_executions(
     )
 
 
-def _executed_case_receipt(
+def _executed_case_receipt(  # noqa: PLR0913
     contract: AnalysisProofExecutionContract,
     *,
     case_index: int,
-    suite_by_category: dict[ProofSuiteCategory, ExecutedProofCategoryReceipt],
+    suite_by_case: dict[
+        tuple[str, ProofExecutionKind],
+        MeasuredAnalysisProofObservation,
+    ],
     matrix_success: AnalyticsCaseReceipt,
+    parity_receipts: tuple[ArtifactParityReceipt, ...],
+    visual_receipts: tuple[ArtifactVisualIntegrityReceipt, ...],
 ) -> ProofCaseReceipt:
     case = contract.cases[case_index]
     if case.applicability == "not_applicable":
@@ -818,23 +933,42 @@ def _executed_case_receipt(
         recovery_observed = False
         publication_scan_passed = False
         environment: Literal["SIM"] | None = "SIM"
-    else:
-        category = cast("ProofSuiteCategory", case.kind)
-        observed = suite_by_category[category]
-        supplemental: tuple[str, ...] = ()
-        if category == "source_contract":
-            supplemental = (suite_by_category["replay"].evidence_sha256,)
-        elif category == "schema_drift":
-            supplemental = (suite_by_category["missing_data_behavior"].evidence_sha256,)
-        evidence_sha256 = _digest(
-            {
-                "analysis_kind": contract.analysis_kind,
-                "case_kind": case.kind,
-                "executed_category_evidence_sha256": observed.evidence_sha256,
-                "supplemental_evidence_sha256s": supplemental,
-            }
+    elif case.kind == "artifact_parity":
+        selected = tuple(
+            receipt
+            for receipt in parity_receipts
+            if receipt.template_id in contract.artifact_template_ids
+            and receipt.analysis_kind == contract.analysis_kind
         )
-        count = max(case.minimum_case_count, observed.executed_test_count)
+        if len(selected) != len(contract.artifact_template_ids):
+            raise ProofProducerError("installed_artifact_contract_receipts_missing")
+        evidence_sha256 = _digest([item.model_dump(mode="json") for item in selected])
+        count = len(selected)
+        comparison_count = sum(item.sampled_point_count for item in selected)
+        mutation_count = mutation_killed_count = 0
+        recovery_observed = publication_scan_passed = False
+        environment = None
+    elif case.kind == "visual_integrity":
+        selected_visual = tuple(
+            receipt
+            for receipt in visual_receipts
+            if receipt.template_id in contract.artifact_template_ids
+        )
+        if len(selected_visual) != len(contract.artifact_template_ids):
+            raise ProofProducerError("installed_artifact_contract_receipts_missing")
+        evidence_sha256 = _digest(
+            [item.model_dump(mode="json") for item in selected_visual],
+        )
+        count = len(selected_visual)
+        comparison_count = mutation_count = mutation_killed_count = 0
+        recovery_observed = publication_scan_passed = False
+        environment = None
+    else:
+        observed = suite_by_case.get((contract.analysis_kind, case.kind))
+        if observed is None:
+            raise ProofProducerError("installed_proof_contract_receipts_missing")
+        evidence_sha256 = observed.evidence_sha256
+        count = observed.executed_case_count
         comparison_count = observed.comparison_count
         mutation_count = observed.mutation_count
         mutation_killed_count = observed.mutation_killed_count
@@ -987,16 +1121,25 @@ def _execute_installed_child(
     with tempfile.TemporaryDirectory(prefix="analytics-proof-producer-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
         runtime_root.chmod(0o700)
-        env = {
-            "HOME": str(runtime_root),
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "UV_OFFLINE": "1",
-        }
+        try:
+            runtime = prepare_matrix_isolated_runtime(
+                runtime_root,
+                runtime_name="proof-sim-runtime",
+            )
+            bind_eval_runtime_account_allowlist(runtime)
+        except MatrixEnvError as error:
+            raise ProofProducerError("proof_sim_auth_lease_unavailable") from error
+        command_error: CommandFailureError | None = None
+        result: CommandResult | None = None
+        promotion_error: MatrixEnvError | None = None
+        cleanup_error: MatrixEnvError | None = None
+        env = dict(runtime.env)
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["UV_OFFLINE"] = "1"
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             env["UV_CACHE_DIR"] = uv_cache
         try:
-            return run_command(
+            result = run_command(
                 _COMMAND_NAME,
                 command,
                 cwd=cache_root.resolve(),
@@ -1004,7 +1147,25 @@ def _execute_installed_child(
                 timeout_seconds=3600,
             )
         except CommandFailureError as error:
-            raise ProofProducerError("proof_producer_command_failed") from error
+            command_error = error
+        finally:
+            try:
+                promote_rotated_sim_token_cache(runtime)
+            except MatrixEnvError as error:
+                promotion_error = error
+            try:
+                require_matrix_runtime_cleanup(runtime.run_root)
+            except MatrixEnvError as error:
+                cleanup_error = error
+        if promotion_error is not None:
+            raise ProofProducerError("proof_sim_token_promotion_failed") from promotion_error
+        if command_error is not None:
+            raise ProofProducerError("proof_producer_command_failed") from command_error
+        if cleanup_error is not None:
+            raise ProofProducerError("proof_sim_auth_lease_cleanup_failed") from cleanup_error
+        if result is None:
+            raise ProofProducerError("proof_producer_result_missing")
+        return result
 
 
 def _require_clean_source_commit(repo: Path, candidate_commit: str) -> None:
