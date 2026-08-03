@@ -112,6 +112,14 @@ _ACCOUNT_ALIAS_PATTERN: Final = re.compile(
 )
 _SAFE_ACCOUNT_SCOPES: Final = frozenset({"aggregate", "selected SIM account"})
 _INFO_PRICE_CONTRACT_ID: Final = "info_price_v1"
+_ACCOUNT_AGGREGATE_LINEAGE_CONTRACT_IDS: Final = frozenset(
+    {
+        "chart_v3",
+        "info_price_v1",
+        "options_chain_reference_v1",
+        "reference_instruments_v1",
+    },
+)
 _SOURCE_KINDS: Final = frozenset(
     {
         "account_snapshots",
@@ -1446,6 +1454,7 @@ class AnalyticsStore:
         page_ids: Sequence[str],
         account_scope: str,
         source_revision: str | None,
+        allowed_aggregate_contract_ids: frozenset[str] = frozenset(),
     ) -> list[tuple[object, ...]]:
         rows = cast(
             "list[tuple[object, ...]]",
@@ -1491,7 +1500,11 @@ class AnalyticsStore:
         if any(
             (page_scope := _optional_str(row[4])) is not None
             and page_scope != account_scope
-            and not (page_scope == "aggregate" and account_scope != "aggregate")
+            and not (
+                page_scope == "aggregate"
+                and account_scope != "aggregate"
+                and _require_str(row[10]) in allowed_aggregate_contract_ids
+            )
             for row in rows
         ):
             raise StoreValidationError(
@@ -1703,6 +1716,7 @@ class AnalyticsStore:
         source_revision: str,
         source_page_ids: Sequence[str],
         lineage_source_page_ids: Sequence[str] = (),
+        aggregate_lineage_contract_ids: Sequence[str] = (),
         created_at: datetime,
         coverage_start: datetime,
         coverage_end: datetime,
@@ -1728,6 +1742,9 @@ class AnalyticsStore:
             raise StoreValidationError("dataset requires at least one source page")
         if any(re.fullmatch(r"sp_[a-f0-9]{64}", page_id) is None for page_id in page_ids):
             raise StoreValidationError("dataset source page identifier is invalid")
+        allowed_aggregate_contract_ids = frozenset(aggregate_lineage_contract_ids)
+        if not allowed_aggregate_contract_ids <= _ACCOUNT_AGGREGATE_LINEAGE_CONTRACT_IDS:
+            raise StoreValidationError("dataset aggregate lineage contract is not allowed")
 
         with self._write_connection() as connection:
             current_rows = self._validated_dataset_source_rows(
@@ -1735,12 +1752,14 @@ class AnalyticsStore:
                 current_page_ids,
                 account_scope,
                 source_revision,
+                allowed_aggregate_contract_ids,
             )
             lineage_rows = self._validated_dataset_source_rows(
                 connection,
                 lineage_page_ids,
                 account_scope,
                 None,
+                allowed_aggregate_contract_ids,
             )
             rows = sorted((*current_rows, *lineage_rows), key=lambda row: _require_str(row[0]))
             bound_quality_state = self._bound_dataset_quality_state(rows, quality_state)
@@ -1887,6 +1906,7 @@ class AnalyticsStore:
             page_ids,
             account_scope,
             None,
+            _ACCOUNT_AGGREGATE_LINEAGE_CONTRACT_IDS,
         )
         if not any(_require_str(page[5]) == source_revision for page in rows):
             raise StoreValidationError("dataset integrity check failed")
@@ -2017,6 +2037,7 @@ class AnalyticsStore:
             page_ids,
             account_scope,
             None,
+            _ACCOUNT_AGGREGATE_LINEAGE_CONTRACT_IDS,
         )
         pages = [AnalyticsStore._authenticated_source_material(row) for row in rows]
         return AuthenticatedDatasetMaterial(

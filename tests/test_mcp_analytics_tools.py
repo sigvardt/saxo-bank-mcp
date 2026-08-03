@@ -19,16 +19,22 @@ from fastmcp import Client
 from pydantic import BaseModel
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
+import saxo_bank_mcp.qa_sim_tool_matrix as matrix_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
 from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
 from saxo_bank_mcp.analytics_execution import (
+    BacktestExecutionParameters,
     StoredDerivativesExecutionContext,
     StoredOptimizationExecutionContext,
     StoredPortfolioExecutionContext,
     StoredPositionSizingExecutionContext,
     StoredPretradeExecutionContext,
     StoredScenarioExecutionContext,
+)
+from saxo_bank_mcp.analytics_ghost_portfolio import (
+    GhostLifecycleEvidence,
+    GhostStateFingerprint,
 )
 from saxo_bank_mcp.analytics_instrument_identity import (
     instrument_handle_for_saxo_identity,
@@ -833,6 +839,141 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
         tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
     ).parameters
     assert tuple(parameters) == ("candidate_commit", "analysis_kinds")
+
+
+@pytest.mark.anyio
+async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    handle, chart_dataset_id, _source_revision, _ = await _synced_chart_fixture(config)
+    issued = await tools_module.saxo_sync_research_data(
+        tools_module.SyncResearchRequest(
+            items=(
+                tools_module.AnalysisInputSyncSpec(
+                    analysis_kind="bounded_backtest",
+                    source_dataset_ids=(chart_dataset_id,),
+                ),
+            ),
+        ),
+    )
+    assert issued.status == "passed"
+    assert issued.result is not None
+    dataset_id = issued.result.datasets[0].dataset_id
+    strategy_payload = _bounded_strategy().model_dump(mode="json")
+    strategy_payload["evaluation_split"] = {
+        "kind": "holdout",
+        "train_end_at": datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+        "holdout_start_at": datetime(2026, 8, 3, 9, 1, tzinfo=UTC),
+    }
+    strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
+    observed_inside = False
+
+    async def recorded_matrix(
+        _fixtures: object,
+        *,
+        proof_recorder: matrix_module._InstalledProofRecorder,
+    ) -> str:
+        nonlocal observed_inside
+        account_alias = proof_recorder.controlled_backtest_source_binding(
+            dataset_id,
+            handle,
+            expected_uic=1,
+            expected_asset_type="Stock",
+        )
+        state = GhostStateFingerprint(
+            balance_fingerprint_sha256="1" * 64,
+            orders_fingerprint_sha256="2" * 64,
+            positions_fingerprint_sha256="3" * 64,
+            trade_messages_fingerprint_sha256="4" * 64,
+            order_count=0,
+            position_count=0,
+            trade_message_count=0,
+        )
+        evidence = GhostLifecycleEvidence(
+            candidate_commit=_CANDIDATE_COMMIT,
+            dataset_id=dataset_id,
+            account_alias=account_alias,
+            instrument_handle=handle,
+            strategy_fingerprint_sha256=tools_module.strategy_definition_fingerprint(strategy),
+            fill_model="next_bar_open",
+            environment="SIM",
+            session_capabilities_current=True,
+            fixture_coverage_proved=True,
+            preview_status="completed",
+            place_status="completed",
+            cancel_preview_status="completed",
+            cancel_status="completed",
+            preview_attempt_count=1,
+            place_attempt_count=1,
+            cancel_preview_attempt_count=1,
+            cancel_attempt_count=1,
+            orders_readback=True,
+            positions_readback=True,
+            trade_messages_readback=True,
+            balances_fingerprint_readback=True,
+            request_ledger_read_last=True,
+            request_ledger_complete=True,
+            live_event_count=0,
+            live_mutation_count=0,
+            non_sim_event_count=0,
+            disclaimer_present=False,
+            purchase_occurred=False,
+            before=state,
+            after=state,
+        )
+        proof_recorder.record_observed_ghost_lifecycle(
+            evidence,
+            ledger_provenance_sha256="5" * 64,
+        )
+        proof = tools_module._process_backtest_proof(  # noqa: SLF001
+            dataset_id,
+            BacktestExecutionParameters(
+                instrument_handle=handle,
+                strategy=strategy,
+                starting_equity=1000,
+            ),
+        )
+        assert proof is not None
+        assert proof.dataset_id == dataset_id
+        assert proof.lifecycle_fingerprint_sha256
+        response = tools_module.saxo_backtest_strategy(
+            tools_module.StoredBacktestToolRequest(
+                dataset_id=dataset_id,
+                instrument_handle=handle,
+                strategy=strategy,
+                starting_equity=1000,
+                visibility=VisibilityMode.PRIVATE_USER_RESULT,
+            ),
+        )
+        assert isinstance(response, tools_module.VerifiedAnalysisToolResponse)
+        assert response.analysis_kind == "bounded_backtest"
+        observed_inside = True
+        return "recorded"
+
+    monkeypatch.setattr(matrix_module, "_run_matrix", recorded_matrix)
+
+    result = await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
+        _CANDIDATE_COMMIT,
+        ("bounded_backtest",),
+    )
+
+    assert result == "recorded"
+    assert observed_inside is True
+    assert (
+        tools_module._process_backtest_proof(  # noqa: SLF001
+            dataset_id,
+            BacktestExecutionParameters(
+                instrument_handle=handle,
+                strategy=strategy,
+                starting_equity=1000,
+            ),
+        )
+        is None
+    )
 
 
 @pytest.mark.anyio

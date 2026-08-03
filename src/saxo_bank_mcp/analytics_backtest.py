@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostPortfolioVerification,
-    GhostWorkflowRequest,
-    authenticate_ghost_receipt,
 )
 from saxo_bank_mcp.analytics_instruments import ResearchRefusal, ResearchStatus
 from saxo_bank_mcp.analytics_models import (
@@ -294,14 +292,12 @@ class _ExecutionRun:
     ending_position_weight: float
 
 
-def run_backtest(  # noqa: PLR0911, PLR0913
+def run_backtest(  # noqa: PLR0911
     request: BacktestRequest,
     *,
     visibility: VisibilityMode,
     trusted_local_host: bool,
     ghost_verification: GhostPortfolioVerification | None = None,
-    authenticated_ghost_receipt_id: str | None = None,
-    candidate_commit: str | None = None,
 ) -> BacktestResult | ResearchRefusal:
     """Run the bounded vectorized signal engine with explicit next-open execution."""
     private_delivery = require_delivery_boundary(
@@ -351,8 +347,6 @@ def run_backtest(  # noqa: PLR0911, PLR0913
     ghost_state = _assess_ghost_verification(
         request,
         ghost_verification,
-        authenticated_ghost_receipt_id=authenticated_ghost_receipt_id,
-        candidate_commit=candidate_commit,
     )
     if isinstance(ghost_state, ResearchRefusal):
         return ghost_state
@@ -461,36 +455,7 @@ def run_backtest(  # noqa: PLR0911, PLR0913
 def _assess_ghost_verification(
     request: BacktestRequest,
     verification: GhostPortfolioVerification | None,
-    *,
-    authenticated_ghost_receipt_id: str | None,
-    candidate_commit: str | None,
 ) -> Literal["not_run", "passed"] | ResearchRefusal:
-    if authenticated_ghost_receipt_id is not None:
-        if candidate_commit is None:
-            return _refusal(
-                request,
-                "ghost_authenticated_receipt_required",
-                "authenticated ghost receipt lacks the exact installed candidate binding",
-            )
-        authenticated = authenticate_ghost_receipt(
-            authenticated_ghost_receipt_id,
-            GhostWorkflowRequest(
-                candidate_commit=candidate_commit,
-                dataset_id=request.dataset.dataset_id,
-                account_alias=request.dataset.account_alias,
-                instrument_handle=request.dataset.instrument_handle,
-                strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
-                fill_model=request.strategy.rebalancing.fill_timing,
-                controlled_fixture="task_18_controlled_stock",
-            ),
-        )
-        if authenticated:
-            return "passed"
-        return _refusal(
-            request,
-            "ghost_authenticated_receipt_required",
-            "authenticated ghost receipt is missing, stale, or bound to another candidate",
-        )
     if verification is None:
         return "not_run"
     dataset = request.dataset

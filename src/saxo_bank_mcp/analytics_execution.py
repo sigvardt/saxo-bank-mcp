@@ -130,7 +130,10 @@ from saxo_bank_mcp.analytics_store import (
     StoredDataset,
     StoreNotFoundError,
 )
-from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
+from saxo_bank_mcp.analytics_strategy_schema import (
+    StrategyDefinition,
+    strategy_definition_fingerprint,
+)
 from saxo_bank_mcp.analytics_sync import (
     OptionReferenceDatasetRow,
     PriceBarDatasetRow,
@@ -270,10 +273,20 @@ class BacktestExecutionParameters(_StrictExecutionModel):
 
 
 class AuthenticatedBacktestExecutionProof(_StrictExecutionModel):
-    """Process-owned candidate and ledger receipt; never part of a public tool request."""
+    """Sealed lifecycle binding held only by one installed matrix process session."""
 
     candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    authenticated_ghost_receipt_id: str = Field(pattern=r"^ghost_[a-f0-9]{64}$")
+    dataset_id: str = Field(pattern=r"^ds_[a-f0-9]{32}$")
+    account_alias: str = Field(
+        pattern=r"^(?:aa_[a-f0-9]{32}|aggregate|selected SIM account)$",
+    )
+    instrument_handle: str = Field(pattern=r"^ih_[a-f0-9]{32}$")
+    strategy_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    fill_model: Literal["next_bar_open"]
+    ledger_provenance_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    lifecycle_fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    environment: Literal["SIM"] = "SIM"
+    cleanup_state: Literal["proved_equal"] = "proved_equal"
 
 
 type StoredExecutionParameters = (
@@ -590,6 +603,11 @@ def _derive_stored_execution_context(
         origin_analysis=origin_analysis,
     )
     context_kind = _CONTEXT_KIND_BY_ANALYSIS[analysis_kind]
+    aggregate_lineage_contract_ids = {
+        "portfolio_minimum_variance": ("chart_v3",),
+        "derivatives_model": ("info_price_v1", "options_chain_reference_v1"),
+        "pretrade_impact": ("info_price_v1",),
+    }.get(analysis_kind, ())
     try:
         with store.transaction():
             store.create_dataset(
@@ -599,6 +617,7 @@ def _derive_stored_execution_context(
                 source_revision=current.dataset.source_revision,
                 source_page_ids=current_page_ids,
                 lineage_source_page_ids=lineage_page_ids,
+                aggregate_lineage_contract_ids=aggregate_lineage_contract_ids,
                 created_at=created_at,
                 coverage_start=coverage_start,
                 coverage_end=coverage_end,
@@ -2199,6 +2218,12 @@ def _execute_backtest(  # noqa: PLR0913
         context.instrument_handle != parameters.instrument_handle
         or series.instrument_handle != parameters.instrument_handle
         or context.account_alias != primary.account_scope
+        or backtest_proof.dataset_id != dataset_id
+        or backtest_proof.account_alias != context.account_alias
+        or backtest_proof.instrument_handle != context.instrument_handle
+        or backtest_proof.strategy_fingerprint_sha256
+        != strategy_definition_fingerprint(parameters.strategy)
+        or backtest_proof.fill_model != parameters.strategy.rebalancing.fill_timing
     ):
         raise StoredAnalysisExecutionError("stored_backtest_context_mismatch")
     dataset = BacktestDataset(
@@ -2231,13 +2256,9 @@ def _execute_backtest(  # noqa: PLR0913
         ),
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         trusted_local_host=True,
-        authenticated_ghost_receipt_id=backtest_proof.authenticated_ghost_receipt_id,
-        candidate_commit=backtest_proof.candidate_commit,
     )
     if isinstance(domain_result, ResearchRefusal):
         raise StoredAnalysisExecutionError(domain_result.reason_code)
-    if domain_result.verification_state != "verified":
-        raise StoredAnalysisExecutionError("ghost_authenticated_receipt_required")
     values = domain_result.private_values
     if values is None:
         raise StoredAnalysisExecutionError("private_result_required")
@@ -2253,7 +2274,14 @@ def _execute_backtest(  # noqa: PLR0913
         end_at=dataset.bars[-1].at,
         reporting_currency=parameters.strategy.transaction_costs.currency,
         metric_claims=(_MetricClaim("total_return", values.total_return_ratio),),
-        warnings=(*domain_result.warnings, *domain_result.overfit_warnings),
+        warnings=(
+            *(
+                warning
+                for warning in domain_result.warnings
+                if warning != "ghost_workflow_not_executed"
+            ),
+            *domain_result.overfit_warnings,
+        ),
         request_material={
             "context_fingerprint_sha256": snapshot.snapshot.fingerprint_sha256,
             "parameters": parameters.model_dump(mode="json"),
@@ -2263,11 +2291,11 @@ def _execute_backtest(  # noqa: PLR0913
         },
         profile=profile,
         registry=registry,
-        verifies=("The deterministic bounded backtest accounting under the declared strategy.",),
-        does_not_verify=(
-            "Controlled SIM ghost equivalence.",
-            "Future returns, advice, or execution authority.",
+        verifies=(
+            "The deterministic bounded backtest accounting under the declared strategy.",
+            "Equivalent controlled SIM ghost lifecycle and cleanup for this exact strategy.",
         ),
+        does_not_verify=("Future returns, advice, or execution authority.",),
         is_not_forecast=True,
     )
     store.put_analysis(result)

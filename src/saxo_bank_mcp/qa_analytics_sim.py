@@ -36,6 +36,7 @@ type AnalyticsCaseState = Literal[
     "reconciled",
     "failed",
 ]
+type ExpectedAnalysisOutcome = Literal["persisted", "reduced", "refused", "resolved"]
 
 ANALYTICS_CASE_KINDS: Final[tuple[AnalyticsCaseKind, ...]] = (
     "success",
@@ -148,6 +149,26 @@ ANALYSIS_KIND_TOOL_IDS: Final[tuple[tuple[str, str], ...]] = (
     ("wrapper_comparison", "saxo_analyze_market"),
 )
 ANALYSIS_KIND_IDS: Final = tuple(item[0] for item in ANALYSIS_KIND_TOOL_IDS)
+_PERSISTED_ANALYSIS_KINDS: Final = frozenset(
+    {
+        "bounded_backtest",
+        "derivatives_model",
+        "instrument_price_return",
+        "margin_fire_drill",
+        "market_comparison",
+        "portfolio_minimum_variance",
+        "portfolio_performance",
+        "portfolio_risk_parity",
+        "portfolio_scenario",
+        "position_sizing",
+        "pretrade_impact",
+        "scenario_combined",
+        "scenario_currency",
+        "scenario_custom",
+        "scenario_rate",
+        "scenario_volatility",
+    },
+)
 
 _SUCCESS_STATES_BY_TOOL: Final[dict[str, tuple[str, ...]]] = {
     "saxo_analytics_capabilities": ("passed",),
@@ -244,6 +265,13 @@ class AnalyticsCaseReceipt(_StrictReceipt):
         default=None,
         pattern=r"^[a-z][a-z0-9_]{0,127}$",
     )
+    returned_analysis_kind: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{0,127}$",
+    )
+    analysis_id: str | None = Field(default=None, pattern=r"^an_[a-f0-9]{32}$")
+    expected_analysis_outcome: ExpectedAnalysisOutcome | None = None
+    persisted_result_authenticated: bool = False
     state: AnalyticsCaseState
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     mcp_call_observed: Literal[True]
@@ -268,7 +296,7 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     call_path: Literal["fastmcp.Client.call_tool"] = "fastmcp.Client.call_tool"
 
     @model_validator(mode="after")
-    def _validate_outcome(self) -> Self:
+    def _validate_outcome(self) -> Self:  # noqa: C901, PLR0912
         allowed: dict[AnalyticsCaseKind, frozenset[AnalyticsCaseState]] = {
             "success": frozenset({"passed"}),
             "degradation": frozenset({"degraded", "refused"}),
@@ -277,13 +305,31 @@ class AnalyticsCaseReceipt(_StrictReceipt):
             "timeout": frozenset({"timed_out"}),
             "recovery": frozenset({"reconciled"}),
         }
-        if self.state != "failed" and self.state not in allowed[self.kind]:
+        analysis_observation = self.analysis_kind is not None
+        if (
+            self.state != "failed"
+            and self.state not in allowed[self.kind]
+            and not (
+                analysis_observation
+                and self.kind == "success"
+                and self.state in {"degraded", "refused"}
+            )
+        ):
             raise ValueError("analytics case state does not match its case kind")
         if self.state not in {"failed", "timed_out"} and not self.result_parsed:
             raise ValueError("analytics case requires a parsed FastMCP result")
         if self.state == "timed_out" and self.result_state != "timed_out":
             raise ValueError("analytics timeout evidence requires a timed-out call")
-        refusal_states = {"refused", "denied", "invalid_arguments", "invalid_request"}
+        refusal_states = {
+            "refused",
+            "denied",
+            "invalid_arguments",
+            "invalid_request",
+            "job_cancelled",
+            "job_expired",
+            "job_failed",
+            "job_interrupted_restart_required",
+        }
         if self.state == "refused" and self.result_state not in refusal_states:
             raise ValueError("analytics refusal evidence requires a refused result")
         if self.state == "reconciled" and (
@@ -297,6 +343,40 @@ class AnalyticsCaseReceipt(_StrictReceipt):
             raise ValueError("only recovery evidence may bind a timed operation")
         if self.state != "failed" and (self.broker_write_made or self.private_values_published):
             raise ValueError("passing analytics case evidence violates safety or privacy")
+        if analysis_observation:
+            if self.expected_analysis_outcome is None:
+                raise ValueError("analysis execution must declare its expected honest outcome")
+            expected_state: dict[ExpectedAnalysisOutcome, AnalyticsCaseState] = {
+                "persisted": "passed",
+                "reduced": "degraded",
+                "refused": "refused",
+                "resolved": "passed",
+            }
+            if (
+                self.state != "failed"
+                and self.state != expected_state[self.expected_analysis_outcome]
+            ):
+                raise ValueError("analysis evidence did not observe its declared honest outcome")
+            if self.state == "passed":
+                if self.expected_analysis_outcome == "persisted" and (
+                    self.returned_analysis_kind != self.analysis_kind
+                    or self.analysis_id is None
+                    or not self.persisted_result_authenticated
+                ):
+                    raise ValueError("persisted analysis evidence is not replay-authenticated")
+                if self.expected_analysis_outcome == "resolved" and self.result_state != "resolved":
+                    raise ValueError("resolution evidence did not observe an exact resolved result")
+            if self.state == "refused" and self.result_state not in refusal_states:
+                raise ValueError("analysis refusal evidence requires a refused terminal result")
+        elif any(
+            (
+                self.returned_analysis_kind is not None,
+                self.analysis_id is not None,
+                self.expected_analysis_outcome is not None,
+                self.persisted_result_authenticated,
+            ),
+        ):
+            raise ValueError("non-analysis cases cannot carry analysis-result evidence")
         return self
 
 
@@ -311,6 +391,7 @@ class AnalyticsCaseCall(_StrictReceipt):
         default=None,
         pattern=r"^[a-z][a-z0-9_]{0,127}$",
     )
+    expected_analysis_outcome: ExpectedAnalysisOutcome | None = None
 
     @model_validator(mode="after")
     def _validate_recovery_strategy(self) -> Self:
@@ -323,6 +404,8 @@ class AnalyticsCaseCall(_StrictReceipt):
             raise ValueError("only recovery calls may name a reconciled case")
         if self.analysis_kind is not None and self.kind != "success":
             raise ValueError("analysis-kind execution applies only to success calls")
+        if (self.analysis_kind is None) != (self.expected_analysis_outcome is None):
+            raise ValueError("analysis-kind execution requires one honest expected outcome")
         return self
 
 
@@ -943,6 +1026,13 @@ def _analysis_kind_success_calls(
                 arguments=arguments,
                 input_strategy=f"analyze_kind_{analysis_kind}",
                 analysis_kind=analysis_kind,
+                expected_analysis_outcome=(
+                    "resolved"
+                    if analysis_kind == "instrument_resolution"
+                    else "persisted"
+                    if analysis_kind in _PERSISTED_ANALYSIS_KINDS
+                    else "refused"
+                ),
             ),
         )
     return tuple(calls)

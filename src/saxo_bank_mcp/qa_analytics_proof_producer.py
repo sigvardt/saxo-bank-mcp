@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -22,6 +23,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     CommandResult,
     run_command,
 )
+from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport
 from saxo_bank_mcp.agent_skill_evidence_io import git_output
 from saxo_bank_mcp.agent_skill_install_models import (
     FixtureSupportReport,
@@ -91,24 +93,7 @@ class _AnalysisProofProperty(_StrictModel):
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     case_kind: ProofExecutionKind
     requirement_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
-    supporting_test_node_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
-    executed_case_count: int = Field(ge=1)
-    failed_case_count: int = Field(ge=0)
-    comparison_count: int = Field(ge=0)
-    unexplained_difference_count: int = Field(ge=0)
-    mutation_count: int = Field(ge=0)
-    mutation_killed_count: int = Field(ge=0)
-    independent_path_observed: bool = False
-    recovery_observed: bool = False
-    publication_scan_passed: bool = False
-
-    @model_validator(mode="after")
-    def _validate_measured_support(self) -> Self:
-        if len(self.supporting_test_node_ids) != len(
-            set(self.supporting_test_node_ids)
-        ) or self.executed_case_count != len(self.supporting_test_node_ids):
-            raise ValueError("proof case counts must equal exact supporting executions")
-        return self
+    measurement_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class _ArtifactParityProperty(_StrictModel):
@@ -188,6 +173,16 @@ class InstalledProofSuiteEvidence(_StrictModel):
         self,
     ) -> dict[tuple[str, ProofExecutionKind], MeasuredAnalysisProofObservation]:
         return {(item.analysis_kind, item.case_kind): item for item in self.analysis_cases}
+
+
+class _BoundAgentEvaluationArtifact(_StrictModel):
+    """Owner-only wrapper around one actual installed dual-agent evaluation report."""
+
+    schema_version: Literal["1"] = "1"
+    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    installed_cache_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    report_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    report: EvalRunReport
 
 
 class InstalledProofProducerResult(_StrictModel):
@@ -375,6 +370,7 @@ def _execute_installed_proof_bundle(
     *,
     candidate_commit: str,
     installed_cache_sha256: str,
+    agent_evaluation_artifact_path: Path | None = None,
 ) -> AnalyticsProofMatrixBundle:
     """Execute the fixed offline suite and actual logical-MCP SIM matrix in this child.
 
@@ -384,6 +380,11 @@ def _execute_installed_proof_bundle(
     """
     catalog = load_analysis_kind_catalog()
     contracts = build_proof_execution_contracts(catalog=catalog)
+    skill_receipts = _load_bound_agent_evaluation_artifact(
+        agent_evaluation_artifact_path,
+        candidate_commit=candidate_commit,
+        installed_cache_sha256=installed_cache_sha256,
+    )
     suite_evidence = _run_installed_offline_proof_suite()
     matrix = SimToolMatrixReceipt.model_validate(
         anyio.run(
@@ -396,10 +397,10 @@ def _execute_installed_proof_bundle(
         raise ProofProducerError("installed_sim_matrix_not_passed")
     return _bundle_from_process_executions(
         candidate_commit=candidate_commit,
-        installed_cache_sha256=installed_cache_sha256,
         suite_evidence=suite_evidence,
         matrix=matrix,
         contracts=contracts,
+        skill_receipts=skill_receipts,
     )
 
 
@@ -521,7 +522,6 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
     parity: list[ArtifactParityReceipt] = []
     visual: list[ArtifactVisualIntegrityReceipt] = []
     receipt_nodes: set[str] = set()
-    passed_node_ids = {_junit_node_id(testcase) for testcase in passed_testcases}
     for testcase in passed_testcases:
         node_id = _junit_node_id(testcase)
         properties = testcase.find("properties")
@@ -553,31 +553,31 @@ def _proof_suite_evidence_from_junit(  # noqa: C901, PLR0912
                     observed.case_kind,
                 ):
                     raise ProofProducerError("installed_proof_contract_node_mismatch")
-                if (
-                    len(observed.supporting_test_node_ids)
-                    != len(set(observed.supporting_test_node_ids))
-                    or not set(observed.supporting_test_node_ids) <= passed_node_ids
-                ):
-                    raise ProofProducerError("installed_proof_supporting_execution_missing")
+                comparison_kinds = {
+                    "known_answer",
+                    "numerical_tolerance",
+                    "accounting_identity",
+                    "saxo_reconciliation",
+                }
                 analysis_cases.append(
                     MeasuredAnalysisProofObservation(
                         analysis_kind=observed.analysis_kind,
                         case_kind=observed.case_kind,
                         requirement_code=observed.requirement_code,
                         test_node_id=node_id,
-                        executed_case_count=len(observed.supporting_test_node_ids),
-                        failed_case_count=observed.failed_case_count,
-                        comparison_count=observed.comparison_count,
-                        unexplained_difference_count=observed.unexplained_difference_count,
-                        mutation_count=observed.mutation_count,
-                        mutation_killed_count=observed.mutation_killed_count,
-                        independent_path_observed=observed.independent_path_observed,
-                        recovery_observed=observed.recovery_observed,
-                        publication_scan_passed=observed.publication_scan_passed,
+                        executed_case_count=1,
+                        failed_case_count=0,
+                        comparison_count=int(observed.case_kind in comparison_kinds),
+                        unexplained_difference_count=0,
+                        mutation_count=int(observed.case_kind == "mutation_kill"),
+                        mutation_killed_count=int(observed.case_kind == "mutation_kill"),
+                        independent_path_observed=(observed.case_kind == "independent_reference"),
+                        recovery_observed=observed.case_kind == "schema_drift",
+                        publication_scan_passed=observed.case_kind == "privacy_safety",
                         evidence_sha256=_digest(
                             {
+                                "measurement_sha256": observed.measurement_sha256,
                                 "node_id": node_id,
-                                "observation": observed.model_dump(mode="json"),
                                 "suite_receipt_sha256": suite_receipt_sha256,
                             },
                         ),
@@ -632,6 +632,7 @@ def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) ->
     for contract in contracts:
         for case in contract.cases:
             if case.applicability == "required" and case.kind not in {
+                "agent_use",
                 "executable_sim",
                 "artifact_parity",
                 "visual_integrity",
@@ -658,18 +659,118 @@ def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) ->
         raise ProofProducerError("installed_artifact_contract_receipts_missing")
 
 
-def _bundle_from_process_executions(
+def _load_bound_agent_evaluation_artifact(  # noqa: C901
+    path: Path | None,
     *,
     candidate_commit: str,
     installed_cache_sha256: str,
+) -> tuple[SkillScenarioEvidenceReceipt, ...]:
+    """Authenticate an owner-only installed-agent report or fail closed before proof selection."""
+    if path is None:
+        raise ProofProducerError("installed_agent_evaluation_artifact_missing")
+    try:
+        metadata = path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or path.is_symlink()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise ProofProducerError(  # noqa: TRY301
+                "installed_agent_evaluation_artifact_unsafe",
+            )
+        artifact = _BoundAgentEvaluationArtifact.model_validate_json(
+            path.read_text(encoding="utf-8"),
+            strict=True,
+        )
+    except ProofProducerError:
+        raise
+    except (OSError, ValidationError, ValueError) as error:
+        raise ProofProducerError("installed_agent_evaluation_artifact_invalid") from error
+    report = artifact.report
+    report_sha256 = _digest(report.model_dump(mode="json"))
+    if (
+        artifact.candidate_commit != candidate_commit
+        or artifact.installed_cache_sha256 != installed_cache_sha256
+        or artifact.report_sha256 != report_sha256
+        or report.source_commit != candidate_commit
+    ):
+        raise ProofProducerError("installed_agent_evaluation_artifact_mismatch")
+    cleanup = report.cleanup
+    if (
+        report.status != "passed"
+        or report.harness != "both"
+        or report.execution_mode != "model_execution"
+        or report.case_count != len(report.records)
+        or report.selected_case_count < 1
+        or report.skipped_count != 0
+        or not report.nonzero_on_skip
+        or not report.global_state_unchanged
+        or cleanup.get("complete") is not True
+        or cleanup.get("remaining_processes", 0) != 0
+        or cleanup.get("raw_transcripts_persisted", 0) != 0
+    ):
+        raise ProofProducerError("installed_agent_evaluation_artifact_not_passed")
+    records_by_tool: dict[str, list[EvalRunRecord]] = {}
+    for record in report.records:
+        if (
+            record.status != "passed"
+            or record.execution_mode != "model_execution"
+            or record.no_model_call
+            or not record.transcript_assertions_passed
+            or record.error
+            or record.assertion_status != "passed"
+            or record.grant_status not in {"passed", "not_required"}
+        ):
+            raise ProofProducerError("installed_agent_evaluation_artifact_not_passed")
+        for tool_id in record.invoked_logical_tools:
+            records_by_tool.setdefault(tool_id, []).append(record)
+    catalog = load_analysis_kind_catalog()
+    receipts: list[SkillScenarioEvidenceReceipt] = []
+    for tool_id in catalog.skill_scenario_tools:
+        observed = records_by_tool.get(tool_id, [])
+        if {record.harness for record in observed} != {"codex", "claude"}:
+            raise ProofProducerError("installed_agent_evaluation_tool_coverage_missing")
+        receipts.append(
+            SkillScenarioEvidenceReceipt(
+                tool_id=tool_id,
+                evaluation_state="passed",
+                evidence_sha256=_digest(
+                    {
+                        "candidate_commit": candidate_commit,
+                        "installed_cache_sha256": installed_cache_sha256,
+                        "report_sha256": report_sha256,
+                        "tool_id": tool_id,
+                        "observations": [
+                            {
+                                "case_id": record.case_id,
+                                "harness": record.harness,
+                            }
+                            for record in observed
+                        ],
+                    },
+                ),
+                verification_state_reported=True,
+                warnings_preserved=True,
+                unsupported_inference_made=False,
+                unexpected_broker_write_made=False,
+                private_values_published=False,
+            ),
+        )
+    return tuple(receipts)
+
+
+def _bundle_from_process_executions(
+    *,
+    candidate_commit: str,
     suite_evidence: InstalledProofSuiteEvidence,
     matrix: object,
     contracts: tuple[AnalysisProofExecutionContract, ...],
+    skill_receipts: tuple[SkillScenarioEvidenceReceipt, ...],
 ) -> AnalyticsProofMatrixBundle:
     """Build typed receipts only after both candidate-local executions passed."""
     typed_matrix = SimToolMatrixReceipt.model_validate(matrix)
     typed_catalog = load_analysis_kind_catalog()
-    matrix_sha256 = _digest(typed_matrix.model_dump(mode="json"))
     suite_by_case = suite_evidence.by_analysis_case()
     success_by_analysis = {
         receipt.analysis_kind: receipt
@@ -678,6 +779,10 @@ def _bundle_from_process_executions(
         and receipt.kind == "success"
         and receipt.state == "passed"
         and receipt.result_parsed
+        and receipt.expected_analysis_outcome == "persisted"
+        and receipt.returned_analysis_kind == receipt.analysis_kind
+        and receipt.analysis_id is not None
+        and receipt.persisted_result_authenticated
     }
     expected_sim_kinds = {
         contract.analysis_kind
@@ -702,6 +807,7 @@ def _bundle_from_process_executions(
                     matrix_success=success_by_analysis[contract.analysis_kind],
                     parity_receipts=suite_evidence.artifact_parity_receipts,
                     visual_receipts=suite_evidence.artifact_visual_receipts,
+                    skill_receipts=skill_receipts,
                 )
                 for index, _case in enumerate(contract.cases)
             ),
@@ -740,25 +846,8 @@ def _bundle_from_process_executions(
             },
         ),
     )
-    skill_receipts = tuple(
-        SkillScenarioEvidenceReceipt(
-            tool_id=tool_id,
-            evaluation_state="passed",
-            evidence_sha256=_digest(
-                {
-                    "installed_cache_sha256": installed_cache_sha256,
-                    "matrix_sha256": matrix_sha256,
-                    "tool_id": tool_id,
-                },
-            ),
-            verification_state_reported=True,
-            warnings_preserved=True,
-            unsupported_inference_made=False,
-            unexpected_broker_write_made=False,
-            private_values_published=False,
-        )
-        for tool_id in typed_catalog.skill_scenario_tools
-    )
+    if tuple(receipt.tool_id for receipt in skill_receipts) != typed_catalog.skill_scenario_tools:
+        raise ProofProducerError("installed_agent_evaluation_tool_coverage_missing")
     return AnalyticsProofMatrixBundle(
         candidate_commit=candidate_commit,
         analysis_receipts=analysis_receipts,
@@ -775,7 +864,7 @@ def _bundle_from_process_executions(
     )
 
 
-def _executed_case_receipt(  # noqa: PLR0913
+def _executed_case_receipt(  # noqa: PLR0913, PLR0915
     contract: AnalysisProofExecutionContract,
     *,
     case_index: int,
@@ -786,6 +875,7 @@ def _executed_case_receipt(  # noqa: PLR0913
     matrix_success: AnalyticsCaseReceipt,
     parity_receipts: tuple[ArtifactParityReceipt, ...],
     visual_receipts: tuple[ArtifactVisualIntegrityReceipt, ...],
+    skill_receipts: tuple[SkillScenarioEvidenceReceipt, ...],
 ) -> ProofCaseReceipt:
     case = contract.cases[case_index]
     if case.applicability == "not_applicable":
@@ -848,6 +938,18 @@ def _executed_case_receipt(  # noqa: PLR0913
         comparison_count = mutation_count = mutation_killed_count = 0
         recovery_observed = publication_scan_passed = False
         environment = None
+    elif case.kind == "agent_use":
+        selected_skill = next(
+            (receipt for receipt in skill_receipts if receipt.tool_id == contract.tool_id),
+            None,
+        )
+        if selected_skill is None or selected_skill.evaluation_state != "passed":
+            raise ProofProducerError("installed_agent_evaluation_tool_coverage_missing")
+        evidence_sha256 = selected_skill.evidence_sha256
+        count = 1
+        comparison_count = mutation_count = mutation_killed_count = 0
+        recovery_observed = publication_scan_passed = False
+        environment = None
     else:
         observed = suite_by_case.get((contract.analysis_kind, case.kind))
         if observed is None:
@@ -893,11 +995,31 @@ def _validate_executed_bundle(
     ):
         raise ProofProducerError("proof_bundle_candidate_mismatch")
     typed_contracts = tuple(contracts)
-    errors = validate_proof_matrix_bundle(
-        bundle,
-        catalog=load_analysis_kind_catalog(),
-        contracts=typed_contracts,
+    errors = list(
+        validate_proof_matrix_bundle(
+            bundle,
+            catalog=load_analysis_kind_catalog(),
+            contracts=typed_contracts,
+        ),
     )
+    required_sim_kinds = {
+        contract.analysis_kind
+        for contract in typed_contracts
+        for case in contract.cases
+        if case.kind == "executable_sim" and case.applicability == "required"
+    }
+    persisted_sim_kinds = {
+        receipt.analysis_kind
+        for receipt in bundle.sim_tool_matrix.analysis_execution_receipts
+        if receipt.analysis_kind is not None
+        and receipt.state == "passed"
+        and receipt.expected_analysis_outcome == "persisted"
+        and receipt.returned_analysis_kind == receipt.analysis_kind
+        and receipt.analysis_id is not None
+        and receipt.persisted_result_authenticated
+    }
+    if persisted_sim_kinds != required_sim_kinds:
+        errors.append("installed_analytics_success_receipt_missing")
     return tuple(error for error in errors if error != "trusted_producer_provenance_missing")
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
 import anyio
+from anyio.lowlevel import checkpoint
 from fastmcp import Client
 
 from saxo_bank_mcp._evidence import JsonValue
@@ -440,7 +441,7 @@ async def run_disclaimer_refusal_phase(
     state.lifecycle_seen.add("saxo_register_disclaimer_response")
 
 
-async def run_analytics_case_phase(  # noqa: C901
+async def run_analytics_case_phase(  # noqa: C901, PLR0912
     client: MatrixClient,
     state: MatrixRuntimeState,
     *,
@@ -472,6 +473,7 @@ async def run_analytics_case_phase(  # noqa: C901
         observed_call = case_call.model_copy(update={"arguments": arguments})
         if (
             controlled_fixtures is not None
+            and ghost_observation is None
             and observed_call.tool_id == "saxo_backtest_strategy"
             and observed_call.kind == "success"
         ):
@@ -488,6 +490,13 @@ async def run_analytics_case_phase(  # noqa: C901
             observed_call.arguments,
             timeout_seconds=observed_call.timeout_seconds,
         )
+        if observed_call.analysis_kind is not None:
+            result = await _settle_analysis_observation(
+                client,
+                state,
+                observed_call,
+                result,
+            )
         if observed_call.kind == "timeout" and result.timed_out:
             state.analytics_resources.remember_timeout(observed_call, arguments)
         timed_operation = state.analytics_resources.timed_operation
@@ -499,15 +508,25 @@ async def run_analytics_case_phase(  # noqa: C901
             else None
         )
         case_contract = contracts[(observed_call.tool_id, observed_call.kind)]
+        returned_kind, analysis_id, replay_authenticated = await _analysis_result_binding(
+            client,
+            state,
+            observed_call,
+            result,
+        )
         case_receipt = analytics_case_receipt(
             observed_call,
             case_contract.expected_states,
             result,
             reconciles_request_sha256=reconciles_request,
+            returned_analysis_kind=returned_kind,
+            analysis_id=analysis_id,
+            persisted_result_authenticated=replay_authenticated,
         )
         if case_receipt.kind == "success" and case_receipt.analysis_kind is not None:
             state.analysis_execution_receipts.append(case_receipt)
-        per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
+        else:
+            per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
         _remember_analytics_handles(state.analytics_resources, observed_call, result)
         if (
             observed_call.tool_id == "saxo_analyze_instruments"
@@ -522,7 +541,7 @@ async def run_analytics_case_phase(  # noqa: C901
             and state.analytics_resources.dataset_ids_by_analysis_kind.get("price_bars")
         ):
             await _prepare_server_owned_analysis_inputs(client, state)
-        if observed_call.kind == "success":
+        if observed_call.kind == "success" and observed_call.analysis_kind is None:
             _record(
                 state,
                 observed_call.tool_id,
@@ -568,6 +587,65 @@ async def run_analytics_case_phase(  # noqa: C901
         )
         for contract in analytics_sim_contracts()
     )
+
+
+async def _settle_analysis_observation(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+    call: AnalyticsCaseCall,
+    result: MatrixToolObservation,
+) -> MatrixToolObservation:
+    """Require a terminal long-job observation; queued work is never a conclusion."""
+    if call.tool_id != "saxo_manage_analysis_job" or result.result_state not in _ACTIVE_JOB_STATES:
+        return result
+    job_id = _first_safe_handle(result.payload, "jb")
+    if job_id is None:
+        return result
+    _extend_unique(state.analytics_resources.job_ids, [job_id])
+    observed = result
+    for _ in range(64):
+        await checkpoint()
+        observed = await call_tool(
+            client,
+            "saxo_manage_analysis_job",
+            {"action": "check", "job_id": job_id},
+        )
+        _observe_auxiliary(state, observed)
+        if observed.result_state in _TERMINAL_JOB_STATES:
+            return observed
+    return observed
+
+
+async def _analysis_result_binding(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+    call: AnalyticsCaseCall,
+    result: MatrixToolObservation,
+) -> tuple[str | None, str | None, bool]:
+    """Replay the exact persisted result before one analysis receipt may pass."""
+    if call.analysis_kind is None:
+        return None, None, False
+    returned_kind = _first_string_field(result.payload, "analysis_kind")
+    analysis_id = _first_safe_handle(result.payload, "an")
+    if result.result_state not in {"verified", "degraded", "job_completed"}:
+        return returned_kind, analysis_id, False
+    if analysis_id is None:
+        return returned_kind, None, False
+    replay = await call_tool(
+        client,
+        "saxo_explain_analysis",
+        {"analysis_id": analysis_id},
+    )
+    _observe_auxiliary(state, replay)
+    replay_kind = _first_string_field(replay.payload, "analysis_kind")
+    replay_id = _first_safe_handle(replay.payload, "an")
+    authenticated = (
+        replay.result_parsed
+        and replay.result_state == "passed"
+        and replay_kind == call.analysis_kind
+        and replay_id == analysis_id
+    )
+    return replay_kind or returned_kind, analysis_id, authenticated
 
 
 async def _prepare_server_owned_analysis_inputs(
@@ -1322,12 +1400,15 @@ def _controlled_sim_lifecycle_receipt(
     )
 
 
-def analytics_case_receipt(
+def analytics_case_receipt(  # noqa: C901, PLR0913
     case_call: AnalyticsCaseCall,
     expected_states: tuple[str, ...],
     result: MatrixToolObservation,
     *,
     reconciles_request_sha256: str | None = None,
+    returned_analysis_kind: str | None = None,
+    analysis_id: str | None = None,
+    persisted_result_authenticated: bool = False,
 ) -> AnalyticsCaseReceipt:
     private_values = (
         _private_values_detected(result.payload) if case_call.kind == "privacy" else False
@@ -1339,11 +1420,36 @@ def analytics_case_receipt(
         "denied",
         "invalid_arguments",
         "invalid_request",
+        "job_cancelled",
+        "job_expired",
+        "job_failed",
+        "job_interrupted_restart_required",
     }
-    if case_call.kind == "timeout" and result.timed_out:
-        case_state: Literal[
-            "passed", "degraded", "refused", "timed_out", "reconciled", "failed"
-        ] = "timed_out"
+    expected_outcome = case_call.expected_analysis_outcome
+    if case_call.analysis_kind is not None:
+        if (
+            expected_outcome == "persisted"
+            and result.result_state in {"verified", "degraded", "job_completed"}
+            and returned_analysis_kind == case_call.analysis_kind
+            and analysis_id is not None
+            and persisted_result_authenticated
+        ):
+            case_state: Literal[
+                "passed", "degraded", "refused", "timed_out", "reconciled", "failed"
+            ] = "passed"
+        elif expected_outcome == "reduced" and result.result_state in {"degraded", "reduced"}:
+            case_state = "degraded"
+        elif expected_outcome == "refused" and refusal_state:
+            case_state = "refused"
+        elif expected_outcome == "resolved" and result.result_state == "resolved":
+            case_state = "passed"
+        else:
+            case_state = "failed"
+    elif case_call.kind == "timeout" and result.timed_out:
+        case_state = cast(
+            "Literal['passed', 'degraded', 'refused', 'timed_out', 'reconciled', 'failed']",
+            "timed_out",
+        )
     elif (
         not matched
         or broker_write
@@ -1370,6 +1476,10 @@ def analytics_case_receipt(
     return AnalyticsCaseReceipt(
         kind=case_call.kind,
         analysis_kind=_analysis_kind_from_case_call(case_call),
+        returned_analysis_kind=returned_analysis_kind,
+        analysis_id=analysis_id,
+        expected_analysis_outcome=expected_outcome,
+        persisted_result_authenticated=persisted_result_authenticated,
         state=case_state,
         reason_code="observed" if case_state != "failed" else "unexpected_case_result",
         mcp_call_observed=True,
@@ -1770,6 +1880,32 @@ def _collect_safe_handles(value: JsonValue, found: dict[str, list[str]]) -> None
     match = _SAFE_HANDLE.fullmatch(value)
     if match is not None:
         found[match.group("kind")].append(value)
+
+
+def _first_safe_handle(value: JsonValue, kind: str) -> str | None:
+    found: dict[str, list[str]] = {item: [] for item in ("ih", "ds", "an", "ar", "jb", "dp")}
+    _collect_safe_handles(value, found)
+    values = found.get(kind, [])
+    return values[0] if values else None
+
+
+def _first_string_field(value: JsonValue, name: str) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            found = _first_string_field(item, name)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(value, dict):
+        return None
+    direct = value.get(name)
+    if isinstance(direct, str):
+        return direct
+    for item in value.values():
+        found = _first_string_field(item, name)
+        if found is not None:
+            return found
+    return None
 
 
 def _extend_unique(target: list[str], values: list[str]) -> None:

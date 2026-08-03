@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import inspect
 import json
 import xml.etree.ElementTree as ET
@@ -409,12 +408,31 @@ def _complete_bundle() -> tuple[
         )
         for contract in analytics_sim_contracts()
     )
-    analysis_execution_receipts = tuple(
-        _analytics_case_receipt("success", "verified").model_copy(
-            update={"analysis_kind": analysis_kind},
+    analysis_execution_receipts_list: list[AnalyticsCaseReceipt] = []
+    for index, analysis_kind in enumerate(catalog.analysis_kinds):
+        analysis_execution_receipts_list.append(
+            AnalyticsCaseReceipt(
+                kind="success",
+                analysis_kind=analysis_kind,
+                returned_analysis_kind=analysis_kind,
+                analysis_id=f"an_{index:032x}",
+                expected_analysis_outcome="persisted",
+                persisted_result_authenticated=True,
+                state="passed",
+                reason_code="success_observed",
+                mcp_call_observed=True,
+                result_parsed=True,
+                result_state="verified",
+                mcp_is_error=False,
+                network_call_made=False,
+                broker_write_made=False,
+                private_values_published=False,
+                request_sha256="9" * 64,
+                response_sha256="a" * 64,
+                evidence_sha256="8" * 64,
+            ),
         )
-        for analysis_kind in catalog.analysis_kinds
-    )
+    analysis_execution_receipts = tuple(analysis_execution_receipts_list)
     lifecycle = ControlledSimLifecycleReceipt(
         environment="SIM",
         cases=tuple(
@@ -723,6 +741,40 @@ def test_installed_producer_privately_validates_a_complete_executed_typed_bundle
     )
 
 
+def test_private_proof_selection_rejects_an_honest_nonpersisted_sim_kind() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, contracts, bundle = _complete_bundle()
+    first = bundle.sim_tool_matrix.analysis_execution_receipts[0]
+    refused = first.model_copy(
+        update={
+            "analysis_id": None,
+            "expected_analysis_outcome": "refused",
+            "mcp_is_error": True,
+            "persisted_result_authenticated": False,
+            "result_state": "refused",
+            "state": "refused",
+        },
+    )
+    matrix = bundle.sim_tool_matrix.model_copy(
+        update={
+            "analysis_execution_receipts": (
+                refused,
+                *bundle.sim_tool_matrix.analysis_execution_receipts[1:],
+            ),
+        },
+    )
+    observed = bundle.model_copy(update={"sim_tool_matrix": matrix})
+
+    errors = producer._validate_executed_bundle(  # noqa: SLF001
+        observed,
+        contracts=contracts,
+        candidate_commit=bundle.candidate_commit,
+        authority=producer._PROCESS_AUTHORITY,  # noqa: SLF001
+    )
+
+    assert "installed_analytics_success_receipt_missing" in errors
+
+
 def test_installed_producer_requires_executed_nodes_for_every_proof_category() -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
 
@@ -748,7 +800,7 @@ def test_installed_proof_contract_receipt_modules_exist_and_cover_exact_catalog(
         for contract in contracts
         for case in contract.cases
         if case.applicability == "required"
-        and case.kind not in {"executable_sim", "artifact_parity", "visual_integrity"}
+        and case.kind not in {"agent_use", "executable_sim", "artifact_parity", "visual_integrity"}
     }
     assert set(analysis_tests["ANALYSIS_PROOF_CASES"]) == expected_analysis_cases
     assert set(artifact_tests["ARTIFACT_TEMPLATE_IDS"]) == set(
@@ -757,19 +809,9 @@ def test_installed_proof_contract_receipt_modules_exist_and_cover_exact_catalog(
     assert callable(analysis_tests["test_analysis_proof_contract"])
     assert callable(artifact_tests["test_artifact_parity_contract"])
     assert callable(artifact_tests["test_artifact_visual_contract"])
-    supporting_nodes = {
-        *analysis_tests["_DOMAIN_SUPPORT"].values(),
-        *analysis_tests["_CASE_SUPPORT"].values(),
-    }
-    for node_id in supporting_nodes - {""}:
-        module_name, test_name = node_id.split("::", maxsplit=1)
-        test_path = tests_root / f"{module_name.removeprefix('tests.').replace('.', '/')}.py"
-        tree = ast.parse(test_path.read_text(encoding="utf-8"))
-        assert test_name in {
-            item.name
-            for item in tree.body
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+    assert callable(analysis_tests["_execute_exact_proof_measurement"])
+    assert "_DOMAIN_SUPPORT" not in analysis_tests
+    assert "_CASE_SUPPORT" not in analysis_tests
     assert "test_qa_analytics_artifacts.py" in inspect.getsource(
         producer._run_installed_offline_proof_suite,  # noqa: SLF001
     )
@@ -834,13 +876,185 @@ def test_contract_receipt_cannot_claim_an_unexecuted_supporting_node() -> None:
 
     with pytest.raises(
         producer.ProofProducerError,
-        match="installed_proof_supporting_execution_missing",
+        match="installed_proof_contract_receipt_invalid",
     ):
         producer._proof_suite_evidence_from_junit(  # noqa: SLF001
             (testcase,),
             executed_test_count=1,
             suite_receipt_sha256="e" * 64,
         )
+
+
+def test_legacy_declared_support_and_flags_are_not_a_measured_proof_receipt() -> None:
+    """A receipt cannot substitute node names and self-declared outcome flags for execution."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    with pytest.raises(ValidationError):
+        producer._AnalysisProofProperty.model_validate(  # noqa: SLF001
+            {
+                "analysis_kind": "fixed_income",
+                "case_kind": "mutation_kill",
+                "requirement_code": "representative_mutation_kills",
+                "supporting_test_node_ids": (
+                    "tests.test_analytics_fixed_income::test_golden_par_bond_yield_duration_convexity_carry_and_roll_down",
+                ),
+                "executed_case_count": 1,
+                "failed_case_count": 0,
+                "comparison_count": 0,
+                "unexplained_difference_count": 0,
+                "mutation_count": 1,
+                "mutation_killed_count": 1,
+                "independent_path_observed": False,
+                "recovery_observed": False,
+                "publication_scan_passed": False,
+            },
+        )
+
+
+def test_contract_emitter_runs_measurements_instead_of_listing_cartesian_nodes() -> None:
+    analysis_tests = import_module("test_analytics_proof_contracts")
+    source = inspect.getsource(analysis_tests.test_analysis_proof_contract)
+
+    assert "_execute_exact_proof_measurement" in source
+    assert "supporting_test_node_ids" not in source
+    assert not hasattr(analysis_tests, "_DOMAIN_SUPPORT")
+    assert not hasattr(analysis_tests, "_CASE_SUPPORT")
+
+
+def test_agent_evaluation_artifact_is_required_and_cannot_be_synthesized() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    loader = producer._load_bound_agent_evaluation_artifact  # noqa: SLF001
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_agent_evaluation_artifact_missing",
+    ):
+        loader(
+            None,
+            candidate_commit="1" * 40,
+            installed_cache_sha256="2" * 64,
+        )
+
+
+def _write_agent_evaluation_artifact(
+    path: Path,
+    *,
+    candidate_commit: str,
+    installed_cache_sha256: str,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    eval_models = import_module("saxo_bank_mcp.agent_skill_eval_models")
+    records = tuple(
+        eval_models.EvalRunRecord(
+            case_id=f"analytics-{index}-{harness}",
+            harness=harness,
+            status="passed",
+            execution_mode="model_execution",
+            expected_skill="saxo-analytics",
+            required_logical_tools=(tool_id,),
+            forbidden_logical_tools=(),
+            resolved_tool_grants=(tool_id,),
+            transcript_assertions_passed=True,
+            no_model_call=False,
+            no_mcp_call=False,
+            no_saxo_call=True,
+            invoked_logical_tools=(tool_id,),
+            invoked_logical_tool_count=1,
+            grant_status="passed",
+            assertion_status="passed",
+            model_tool_event_count=1,
+            model_command_event_count=0,
+            model_mcp_event_count=1,
+            model_saxo_event_count=0,
+        )
+        for index, tool_id in enumerate(load_analysis_kind_catalog().skill_scenario_tools)
+        for harness in ("codex", "claude")
+    )
+    report = eval_models.EvalRunReport(
+        status="passed",
+        harness="both",
+        environment="LOCAL",
+        execution_mode="model_execution",
+        selected_case_count=len(records),
+        case_count=len(records),
+        records=records,
+        cleanup={
+            "complete": True,
+            "remaining_processes": 0,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={"state": "safe"},
+        after_global_state={"state": "safe"},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=candidate_commit,
+    )
+    artifact = producer._BoundAgentEvaluationArtifact(  # noqa: SLF001
+        candidate_commit=candidate_commit,
+        installed_cache_sha256=installed_cache_sha256,
+        report_sha256=producer._digest(report.model_dump(mode="json")),  # noqa: SLF001
+        report=report,
+    )
+    path.write_text(artifact.model_dump_json(), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def test_agent_evaluation_artifact_rejects_malformed_and_mismatched_files(
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    malformed = tmp_path / "malformed.json"
+    malformed.write_text("{}", encoding="utf-8")
+    malformed.chmod(0o600)
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_agent_evaluation_artifact_invalid",
+    ):
+        producer._load_bound_agent_evaluation_artifact(  # noqa: SLF001
+            malformed,
+            candidate_commit="1" * 40,
+            installed_cache_sha256="2" * 64,
+        )
+
+    mismatched = tmp_path / "mismatched.json"
+    _write_agent_evaluation_artifact(
+        mismatched,
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+    )
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_agent_evaluation_artifact_mismatch",
+    ):
+        producer._load_bound_agent_evaluation_artifact(  # noqa: SLF001
+            mismatched,
+            candidate_commit="3" * 40,
+            installed_cache_sha256="2" * 64,
+        )
+
+
+def test_bound_dual_agent_evaluation_artifact_issues_exact_tool_receipts(
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    artifact = tmp_path / "agent-evaluations.json"
+    _write_agent_evaluation_artifact(
+        artifact,
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+    )
+
+    receipts = producer._load_bound_agent_evaluation_artifact(  # noqa: SLF001
+        artifact,
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+    )
+
+    assert tuple(receipt.tool_id for receipt in receipts) == (
+        load_analysis_kind_catalog().skill_scenario_tools
+    )
+    assert all(receipt.evaluation_state == "passed" for receipt in receipts)
 
 
 def test_installed_producer_child_requires_an_isolated_sim_auth_lease() -> None:

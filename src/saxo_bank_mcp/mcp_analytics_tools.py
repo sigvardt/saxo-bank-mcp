@@ -55,6 +55,7 @@ from saxo_bank_mcp.analytics_export import (
 )
 from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostLifecycleEvidence,
+    GhostPortfolioVerification,
     GhostWorkflowRequest,
 )
 from saxo_bank_mcp.analytics_jobs import (
@@ -2324,8 +2325,7 @@ async def _run_installed_matrix_proof_session(  # noqa: C901  # pyright: ignore[
             ledger_provenance_sha256: str,
         ) -> None:
             from saxo_bank_mcp.analytics_ghost_portfolio import (  # noqa: PLC0415
-                _receipt_issuer_authority,  # pyright: ignore[reportPrivateUsage]
-                issue_authenticated_ghost_receipt_from_lifecycle,
+                _validated_ghost_lifecycle,  # pyright: ignore[reportPrivateUsage]
             )
 
             candidate = self.candidate_commit()
@@ -2359,15 +2359,30 @@ async def _run_installed_matrix_proof_session(  # noqa: C901  # pyright: ignore[
                 fill_model=evidence.fill_model,
                 controlled_fixture="task_18_controlled_stock",
             )
-            receipt_id = issue_authenticated_ghost_receipt_from_lifecycle(
-                request,
-                evidence,
-                ledger_provenance_sha256=ledger_provenance_sha256,
-                authority=_receipt_issuer_authority(),
-            )
+            validated = _validated_ghost_lifecycle(request, evidence)
+            if not isinstance(validated, GhostPortfolioVerification):
+                raise TypeError(validated.reason_code)
+            if not re.fullmatch(r"[a-f0-9]{64}", ledger_provenance_sha256):
+                raise ValueError("controlled ghost request ledger is invalid")
+            lifecycle_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "ledger_provenance_sha256": ledger_provenance_sha256,
+                        "verification": validated.model_dump(mode="json"),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+            ).hexdigest()
             proof = AuthenticatedBacktestExecutionProof(
                 candidate_commit=evidence.candidate_commit,
-                authenticated_ghost_receipt_id=receipt_id,
+                dataset_id=evidence.dataset_id,
+                account_alias=evidence.account_alias,
+                instrument_handle=evidence.instrument_handle,
+                strategy_fingerprint_sha256=evidence.strategy_fingerprint_sha256,
+                fill_model=evidence.fill_model,
+                ledger_provenance_sha256=ledger_provenance_sha256,
+                lifecycle_fingerprint_sha256=lifecycle_fingerprint,
             )
             key = (evidence.dataset_id, evidence.strategy_fingerprint_sha256)
             with _PROCESS_PROOF_LOCK:
@@ -2417,7 +2432,10 @@ def _process_backtest_proof(
         return None
     key = (dataset_id, strategy_definition_fingerprint(parameters.strategy))
     with _PROCESS_PROOF_LOCK:
-        return _process_backtest_proofs.get(key)
+        proof = _process_backtest_proofs.get(key)
+        if proof is None or proof.candidate_commit != _process_proof_candidate:
+            return None
+        return proof
 
 
 def _proof_registry(

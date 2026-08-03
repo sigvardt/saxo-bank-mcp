@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+import saxo_bank_mcp.analytics_ghost_portfolio as ghost_module
 from saxo_bank_mcp.analytics_backtest import (
     BacktestDataset,
     BacktestRequest,
@@ -22,8 +23,6 @@ from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostStateFingerprint,
     GhostWorkflowPlan,
     GhostWorkflowRequest,
-    _receipt_issuer_authority,
-    issue_authenticated_ghost_receipt,
     prepare_ghost_workflow,
     reconcile_ghost_lifecycle,
 )
@@ -440,37 +439,11 @@ def test_forged_caller_receipt_cannot_verify_any_candidate(
 
 
 def test_process_issued_candidate_bound_ghost_receipt_verifies_exact_backtest() -> None:
-    request = _backtest_request()
-    verification = _caller_constructed_verification(
-        dataset_id=request.dataset.dataset_id,
-        account_alias=request.dataset.account_alias,
-        instrument_handle=request.dataset.instrument_handle,
-        strategy_fingerprint_sha256=strategy_definition_fingerprint(request.strategy),
-        candidate_commit=_COMMIT,
-    )
-    with pytest.raises(ValueError, match="issuer authority"):
-        issue_authenticated_ghost_receipt(
-            verification,
-            ledger_provenance_sha256="9" * 64,
-            authority=object(),
-        )
-    receipt_id = issue_authenticated_ghost_receipt(
-        verification,
-        ledger_provenance_sha256="9" * 64,
-        authority=_receipt_issuer_authority(),
-    )
-
-    result = run_backtest(
-        request,
-        visibility=VisibilityMode.FINGERPRINT_ONLY,
-        trusted_local_host=True,
-        authenticated_ghost_receipt_id=receipt_id,
-        candidate_commit=_COMMIT,
-    )
-
-    assert isinstance(result, BacktestResult)
-    assert result.verification_state == "verified"
-    assert result.ghost_validation_state == "passed"
+    assert not hasattr(ghost_module, "_receipt_issuer_authority")
+    assert not hasattr(ghost_module, "issue_authenticated_ghost_receipt")
+    assert not hasattr(ghost_module, "issue_authenticated_ghost_receipt_from_lifecycle")
+    assert not hasattr(ghost_module, "_RECEIPT_AUTHORITY")
+    assert not hasattr(ghost_module, "_AUTHENTICATED_RECEIPTS")
 
 
 def test_non_equivalent_ghost_receipt_refuses_backtest_promotion() -> None:

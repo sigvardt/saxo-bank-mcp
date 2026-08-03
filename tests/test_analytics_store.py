@@ -57,6 +57,10 @@ from saxo_bank_mcp.analytics_models import (
     VisibilityMode,
     new_safe_handle,
 )
+from saxo_bank_mcp.analytics_source_contracts import (
+    source_contract_fingerprint,
+    source_contracts_by_id,
+)
 from saxo_bank_mcp.analytics_store import (
     AnalyticsStore,
     DeletionReceipt,
@@ -1089,18 +1093,87 @@ def test_account_dataset_can_bind_aggregate_source_but_not_another_account(
             account_scope="aa_11111111111141118111111111111111",
         )
 
-        bound = _dataset_from_pages(
-            store,
-            (selected.page_id, aggregate.page_id),
-            account_scope=selected_scope,
-        )
-        assert store.get_authenticated_dataset(bound.dataset_id) == bound
+        with pytest.raises(StoreValidationError, match="account scope"):
+            _dataset_from_pages(
+                store,
+                (selected.page_id, aggregate.page_id),
+                account_scope=selected_scope,
+            )
         with pytest.raises(StoreValidationError, match="account scope"):
             _dataset_from_pages(
                 store,
                 (selected.page_id, foreign.page_id),
                 account_scope=selected_scope,
             )
+    finally:
+        store.close()
+
+
+def test_account_dataset_allows_only_explicit_server_owned_quote_lineage(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    selected_scope = "aa_00000000000040008000000000000000"
+    try:
+        selected = _source_page(
+            store,
+            page_key="selected-pretrade-account-page",
+            account_scope=selected_scope,
+        )
+        contract = source_contracts_by_id()["info_price_v1"]
+        quote = store.put_source_page(
+            source_kind=contract.source_kind,
+            page_key="bound-pretrade-quote",
+            source_revision="rev-1",
+            contract_name=contract.contract_id,
+            contract_sha256=source_contract_fingerprint(contract),
+            payload={
+                "contract_id": contract.contract_id,
+                "rows": [
+                    {
+                        "AssetType": "Stock",
+                        "PriceTypeAsk": "RealTime",
+                        "PriceTypeBid": "RealTime",
+                        "Quote": {
+                            "Ask": 101,
+                            "Bid": 99,
+                            "DelayedByMinutes": 0,
+                            "Mid": 100,
+                            "PriceType": "RealTime",
+                        },
+                        "Uic": 1,
+                    },
+                ],
+                "source_quality": {
+                    "delayed_fields": [],
+                    "entitlement_limited_fields": [],
+                    "missing_fields": [],
+                    "state": "complete",
+                },
+            },
+            row_count=1,
+            source_timestamp=_SOURCE_AT,
+            account_scope="aggregate",
+            instrument_handle=None,
+        )
+
+        dataset = store.create_dataset(
+            dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+            account_scope=selected_scope,
+            source_scope="saxo_openapi",
+            source_revision="rev-1",
+            source_page_ids=(selected.page_id, quote.page_id),
+            aggregate_lineage_contract_ids=("info_price_v1",),
+            created_at=_SOURCE_AT + timedelta(minutes=1),
+            coverage_start=_SOURCE_AT,
+            coverage_end=_SOURCE_AT,
+            quality_state=QualityState.COMPLETE,
+        )
+
+        assert (
+            store.get_authenticated_dataset_material(dataset.dataset_id).account_scope
+            == selected_scope
+        )
     finally:
         store.close()
 

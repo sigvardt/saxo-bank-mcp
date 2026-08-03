@@ -175,28 +175,38 @@ def _analytics_case_evidence() -> tuple[AnalyticsToolCaseEvidence, ...]:
 
 
 def _analysis_execution_receipts() -> tuple[AnalyticsCaseReceipt, ...]:
-    return tuple(
-        AnalyticsCaseReceipt(
-            kind="success",
-            state="passed",
-            reason_code="success_observed",
-            analysis_kind=call.analysis_kind,
-            mcp_call_observed=True,
-            result_parsed=True,
-            result_state=(
-                "resolved" if call.tool_id == "saxo_resolve_research_universe" else "verified"
-            ),
-            mcp_is_error=False,
-            network_call_made=False,
-            broker_write_made=False,
-            private_values_published=False,
-            request_sha256="1" * 64,
-            response_sha256="2" * 64,
-            evidence_sha256="3" * 64,
-        )
+    receipts: list[AnalyticsCaseReceipt] = []
+    calls = tuple(
+        call
         for call in analytics_case_calls()
         if call.kind == "success" and call.analysis_kind is not None
     )
+    for index, call in enumerate(calls):
+        persisted = call.expected_analysis_outcome == "persisted"
+        resolved = call.expected_analysis_outcome == "resolved"
+        receipts.append(
+            AnalyticsCaseReceipt(
+                kind="success",
+                state="passed" if persisted or resolved else "refused",
+                reason_code="success_observed",
+                analysis_kind=call.analysis_kind,
+                returned_analysis_kind=call.analysis_kind,
+                analysis_id=f"an_{index:032x}" if persisted else None,
+                expected_analysis_outcome=call.expected_analysis_outcome,
+                persisted_result_authenticated=persisted,
+                mcp_call_observed=True,
+                result_parsed=True,
+                result_state="verified" if persisted else "resolved" if resolved else "refused",
+                mcp_is_error=not (persisted or resolved),
+                network_call_made=False,
+                broker_write_made=False,
+                private_values_published=False,
+                request_sha256="1" * 64,
+                response_sha256="2" * 64,
+                evidence_sha256="3" * 64,
+            ),
+        )
+    return tuple(receipts)
 
 
 def _runtime_state() -> MatrixRuntimeState:
@@ -759,6 +769,68 @@ def test_matrix_executes_one_distinct_success_call_for_every_analysis_kind() -> 
     assert len(observed) == len(set(observed))
 
 
+def test_analysis_kind_contracts_name_honest_expected_outcomes() -> None:
+    calls = {
+        call.analysis_kind: call
+        for call in analytics_case_calls()
+        if call.analysis_kind is not None
+    }
+
+    assert calls["scenario_historical"].expected_analysis_outcome == "refused"
+    assert calls["fixed_income"].expected_analysis_outcome == "refused"
+    assert calls["instrument_price_return"].expected_analysis_outcome == "persisted"
+    assert calls["monte_carlo"].expected_analysis_outcome == "refused"
+
+
+def test_queued_long_job_is_not_a_completed_analysis_receipt() -> None:
+    call = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_manage_analysis_job",
+        kind="success",
+        arguments={},
+        input_strategy="analyze_kind_monte_carlo",
+        analysis_kind="monte_carlo",
+        expected_analysis_outcome="refused",
+    )
+    queued = MatrixToolObservation(
+        payload={"status": "job_queued", "result": {"job_id": "jb_0" * 0}},
+        result_parsed=True,
+        result_state="job_queued",
+        mcp_is_error=False,
+    )
+
+    receipt = analytics_case_receipt(call, ("job_queued",), queued)
+
+    assert receipt.state == "failed"
+    assert receipt.analysis_id is None
+    assert receipt.persisted_result_authenticated is False
+
+
+def test_verified_analysis_receipt_requires_exact_kind_and_persisted_handle() -> None:
+    call = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_analyze_instruments",
+        kind="success",
+        arguments={},
+        input_strategy="analyze_kind_instrument_price_return",
+        analysis_kind="instrument_price_return",
+        expected_analysis_outcome="persisted",
+    )
+    mismatched = MatrixToolObservation(
+        payload={
+            "status": "verified",
+            "analysis_kind": "instrument_quote",
+            "analysis_id": "an_00000000000040008000000000000000",
+        },
+        result_parsed=True,
+        result_state="verified",
+        mcp_is_error=False,
+    )
+
+    receipt = analytics_case_receipt(call, ("verified",), mismatched)
+
+    assert receipt.state == "failed"
+    assert receipt.persisted_result_authenticated is False
+
+
 def test_passed_matrix_requires_one_distinct_success_receipt_per_analysis_kind() -> None:
     source = inspect.getsource(SimToolMatrixReceipt)
     assert "analysis_execution_receipts" in source
@@ -1111,7 +1183,7 @@ def test_passed_matrix_requires_every_applicable_analytics_case_receipt() -> Non
     )
 
 
-def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # noqa: C901
+def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # noqa: C901, PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected_calls = tuple(
@@ -1129,6 +1201,7 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
     }
     observed: list[tuple[str, dict[str, object], float | None]] = []
     case_index = 0
+    replay_kind: str | None = None
     dataset_id = "ds_11111111111141118111111111111111"
     degraded_dataset_id = "ds_22222222222242228222222222222222"
     analysis_id = "an_33333333333343338333333333333333"
@@ -1139,15 +1212,34 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
     artifact_id = "ar_88888888888848888888888888888888"
     deletion_handle = "dp_99999999999949998999999999999999"
 
-    async def result_for_case(
+    async def result_for_case(  # noqa: C901, PLR0912
         _client: object,
         tool: str,
         arguments: dict[str, object],
         *,
         timeout_seconds: float | None = None,
     ) -> MatrixToolObservation:
-        nonlocal case_index
+        nonlocal case_index, replay_kind
         observed.append((tool, arguments, timeout_seconds))
+        if tool == "saxo_explain_analysis" and (
+            case_index >= len(expected_calls)
+            or expected_calls[case_index].tool_id != "saxo_explain_analysis"
+        ):
+            assert replay_kind is not None
+            return MatrixToolObservation(
+                payload={
+                    "status": "passed",
+                    "result": {
+                        "analysis": {
+                            "analysis_kind": replay_kind,
+                            "analysis_id": analysis_id,
+                        },
+                    },
+                },
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
         if case_index >= len(expected_calls):
             if tool == "saxo_manage_analysis_job":
                 return MatrixToolObservation(
@@ -1206,7 +1298,20 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
         assert (tool, timeout_seconds) == (call.tool_id, call.timeout_seconds)
         contract = contracts[(call.tool_id, call.kind)]
         state = contract.expected_states[0]
+        if call.analysis_kind is not None:
+            state = (
+                "verified"
+                if call.expected_analysis_outcome == "persisted"
+                else "resolved"
+                if call.expected_analysis_outcome == "resolved"
+                else "refused"
+            )
         payload: dict[str, JsonValue] = {"status": state}
+        if call.analysis_kind is not None:
+            payload["analysis_kind"] = call.analysis_kind
+            if call.expected_analysis_outcome == "persisted":
+                payload["analysis_id"] = analysis_id
+                replay_kind = call.analysis_kind
         if call.tool_id == "saxo_resolve_research_universe":
             payload["result"] = {
                 "instrument_handle": (
@@ -1226,16 +1331,25 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
                     },
                 ],
             }
-        elif call.tool_id.startswith("saxo_analyze_") and call.kind in {
-            "success",
-            "degradation",
-        }:
+        elif (
+            call.tool_id.startswith("saxo_analyze_")
+            and call.kind
+            in {
+                "success",
+                "degradation",
+            }
+            and call.analysis_kind is None
+        ):
             payload["analysis_id"] = analysis_id if call.kind == "success" else degraded_analysis_id
         elif call.tool_id in {"saxo_render_analysis", "saxo_export_analysis"} and (
             call.kind == "success"
         ):
             payload["artifact_id"] = artifact_id
-        elif call.tool_id == "saxo_manage_analysis_job" and call.kind == "success":
+        elif (
+            call.tool_id == "saxo_manage_analysis_job"
+            and call.kind == "success"
+            and call.analysis_kind is None
+        ):
             payload["result"] = {"job_id": job_id}
         return MatrixToolObservation(
             payload=payload,
