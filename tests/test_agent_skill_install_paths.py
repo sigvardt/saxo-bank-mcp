@@ -52,6 +52,19 @@ def test_publishable_tree_excludes_omo_and_forbidden() -> None:
     assert "src/saxo_bank_mcp/token_cache.py" in relatives
 
 
+def test_publishable_tree_includes_every_analytics_wheel_source() -> None:
+    relatives = set(publishable_tracked_files(ROOT))
+
+    assert "data/analytics/metric_definitions.json" in relatives
+    assert "data/analytics/proof_profiles.json" in relatives
+    assert "data/analytics/source_contracts.json" in relatives
+    assert "data/analytics/vision_coverage_requirements.json" in relatives
+    assert "data/analytics/source_matrix_candidate.json" in relatives
+    assert {
+        str(path.relative_to(ROOT)) for path in (ROOT / "data/analytics/migrations").glob("*.sql")
+    } <= relatives
+
+
 def test_unsafe_relative_rejects_secret_data_not_product_modules() -> None:
     assert is_unsafe_relative("src/saxo_bank_mcp/credentials.py") is False
     assert is_unsafe_relative("src/saxo_bank_mcp/secret_scan_patterns.py") is False

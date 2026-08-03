@@ -395,7 +395,7 @@ def _is_publishable_relative(relative: str) -> bool:
         }
     if any(relative.startswith(f"{directory}/") for directory in public_dirs):
         return True
-    return relative.startswith("data/saxo/")
+    return relative.startswith(("data/saxo/", "data/analytics/"))
 
 
 def _is_runtime_artifact(relative: str) -> bool:
