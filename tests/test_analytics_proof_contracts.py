@@ -23,6 +23,7 @@ import pytest
 from pydantic import BaseModel
 
 from saxo_bank_mcp.qa_analytics_evidence import (
+    EXACT_OFFLINE_PROOF_SUPPORT,
     ProofExecutionKind,
     build_proof_execution_contracts,
     exact_analysis_measurement_node_id,
@@ -38,223 +39,16 @@ ANALYSIS_PROOF_CASES = tuple(
 )
 
 
-def _analysis_measurement_target(  # noqa: C901, PLR0911, PLR0912
+def _analysis_measurement_target(
     analysis_kind: str,
+    case_kind: ProofExecutionKind,
 ) -> tuple[str, str]:
-    """Route each analysis kind to the domain test that checks its own observed output."""
-    match analysis_kind:
-        case "cash_and_settlement":
-            return (
-                "test_analytics_liquidity",
-                "test_cash_settlement_and_multi_currency_identities_reconcile",
-            )
-        case "corporate_action_center":
-            return (
-                "test_analytics_income",
-                "test_authoritative_corporate_action_claim_refuses_missing_basis_or_entitlement",
-            )
-        case "cost_xray":
-            return (
-                "test_analytics_costs",
-                "test_cost_components_sum_with_positive_fee_signs_partial_fills_and_correction",
-            )
-        case "derivatives_model" | "derivatives_scenario":
-            return (
-                "test_analytics_derivatives",
-                "test_option_model_and_strategy_are_owner_only_reduced_proposals",
-            )
-        case "execution_quality":
-            return (
-                "test_analytics_trade_review",
-                "test_mcp_decision_quote_allows_exact_arrival_midpoint_and_spread_claims",
-            )
-        case "fixed_income":
-            return (
-                "test_analytics_fixed_income",
-                "test_golden_par_bond_yield_duration_convexity_carry_and_roll_down",
-            )
-        case "futures_curve":
-            return (
-                "test_analytics_derivatives",
-                "test_futures_basis_carry_term_structure_and_roll_follow_frozen_formulas",
-            )
-        case "fx_forward_carry":
-            return (
-                "test_analytics_derivatives",
-                "test_fx_forward_and_carry_follow_covered_interest_parity",
-            )
-        case "goal_model":
-            return (
-                "test_analytics_monte_carlo",
-                "test_zero_return_limit_has_exact_goal_ruin_and_sequence_results",
-            )
-        case "income_calendar":
-            return (
-                "test_analytics_income",
-                "test_income_corrections_dividends_and_multi_currency_reconcile_gross_to_net",
-            )
-        case "instrument_dossier" | "instrument_price_return":
-            return (
-                "test_analytics_instruments",
-                "test_golden_price_risk_drawdown_and_rolling_values_use_task11_metrics",
-            )
-        case "instrument_price_volume":
-            return (
-                "test_analytics_indicators",
-                "test_golden_indicator_formulas_match_independent_scalar_calculations",
-            )
-        case "instrument_quote":
-            return (
-                "test_analytics_instruments",
-                "test_noaccess_price_type_never_becomes_a_complete_quote",
-            )
-        case "instrument_resolution":
-            return (
-                "test_analytics_resolver",
-                "test_exchange_filter_selects_one_listing_explicitly",
-            )
-        case "instrument_risk" | "portfolio_risk":
-            return (
-                "test_analytics_metrics",
-                "test_risk_metrics_match_hand_checked_golden_and_reference",
-            )
-        case "iv_surface":
-            return (
-                "test_analytics_derivatives",
-                "test_smile_skew_and_exact_term_structure_are_deterministic",
-            )
-        case "margin_fire_drill" | "portfolio_scenario" | "scenario_combined" | "scenario_margin":
-            return (
-                "test_analytics_scenarios",
-                "test_combined_shocks_apply_simultaneously_and_reconcile_contributions",
-            )
-        case "market_comparison" | "multi_instrument_comparison":
-            return (
-                "test_analytics_market",
-                "test_bounded_movers_breadth_comparison_and_correlation_never_claim_the_market",
-            )
-        case "market_correlation_regime":
-            return (
-                "test_analytics_market",
-                "test_correlation_aligns_both_period_endpoints_before_enforcing_minimum",
-            )
-        case "market_microstructure":
-            return (
-                "test_analytics_market",
-                "test_entitled_depth_computes_spread_depth_and_imbalance",
-            )
-        case "market_volatility_dispersion":
-            return (
-                "test_analytics_market",
-                "test_missing_regime_inputs_are_unavailable_instead_of_low",
-            )
-        case "monte_carlo":
-            return (
-                "test_analytics_monte_carlo",
-                "test_same_seed_is_byte_stable_and_probability_outputs_are_not_predictions",
-            )
-        case "option_chain":
-            return (
-                "test_analytics_market_data",
-                "test_option_chain_keeps_only_complete_references_and_marks_missing_currency",
-            )
-        case "option_greeks":
-            return (
-                "test_analytics_options",
-                "test_analytic_greeks_match_independent_finite_differences",
-            )
-        case "option_payoff":
-            return (
-                "test_analytics_options",
-                "test_multi_leg_payoff_and_aggregate_greeks_reconcile_to_leg_sums",
-            )
-        case "portfolio_attribution":
-            return (
-                "test_analytics_attribution",
-                "test_attribution_contributions_currency_and_cost_components_reconcile",
-            )
-        case "portfolio_comparison":
-            return (
-                "test_analytics_optimization",
-                "test_correlated_golden_case_matches_independent_reference",
-            )
-        case "portfolio_exposure" | "portfolio_margin":
-            return (
-                "test_analytics_exposure",
-                "test_exposure_handles_shorts_derivatives_fx_and_allocation_identities",
-            )
-        case "portfolio_minimum_variance":
-            return (
-                "test_analytics_optimization",
-                "test_minimum_variance_known_answer_reference_and_kkt_residuals",
-            )
-        case "portfolio_overview":
-            return (
-                "test_analytics_portfolio",
-                "test_portfolio_accounting_identity_flows_corrections_and_costs",
-            )
-        case "portfolio_performance":
-            return (
-                "test_analytics_portfolio",
-                "test_flow_free_period_keeps_exact_single_period_return",
-            )
-        case "portfolio_risk_parity":
-            return (
-                "test_analytics_optimization",
-                "test_risk_parity_known_answer_and_normalized_contributions",
-            )
-        case "portfolio_time_machine":
-            return (
-                "test_analytics_portfolio",
-                "test_partial_history_reduces_and_account_aliases_remain_isolated",
-            )
-        case "position_sizing":
-            return (
-                "test_analytics_position_sizing",
-                "test_stop_sizing_uses_explicit_loss_budget_and_exact_constraints",
-            )
-        case "pretrade_impact":
-            return (
-                "test_analytics_pretrade",
-                "test_pretrade_cost_illustration_mismatch_requires_an_exact_named_difference",
-            )
-        case "regulatory_cost_report" | "trading_conditions":
-            return (
-                "test_analytics_costs",
-                "test_saxo_cost_illustration_requires_exact_or_named_reconciliation",
-            )
-        case "scenario_currency" | "scenario_custom" | "scenario_rate" | "scenario_volatility":
-            return (
-                "test_analytics_scenarios",
-                "test_zero_shock_is_identity_and_preserves_margin_headroom",
-            )
-        case "scenario_historical":
-            return (
-                "test_analytics_scenarios",
-                "test_historical_replay_refuses_without_bound_endpoint_observations",
-            )
-        case "session_cockpit":
-            return (
-                "test_analytics_market",
-                "test_session_preparation_is_bounded_and_reports_quote_quality",
-            )
-        case "technical_indicators":
-            return (
-                "test_analytics_indicators",
-                "test_snapshot_covers_trend_momentum_volume_and_realized_volatility",
-            )
-        case "trading_mirror":
-            return (
-                "test_analytics_trade_review",
-                "test_trading_mirror_handles_partial_fills_corrections_and_behavior_metrics",
-            )
-        case "wrapper_comparison":
-            return (
-                "test_analytics_market",
-                "test_wrapper_comparison_uses_only_same_exposure_horizon_and_currency",
-            )
-        case _:
-            raise AssertionError(f"unrouted analysis measurement: {analysis_kind}")
+    """Route one exact supported proof pair to its measured domain assertion."""
+    if (analysis_kind, case_kind) not in EXACT_OFFLINE_PROOF_SUPPORT:
+        raise AssertionError("unsupported exact proof measurement")
+    node_id = exact_analysis_measurement_node_id(analysis_kind, case_kind)
+    module_id, function_name = node_id.split("::", maxsplit=1)
+    return module_id.removeprefix("tests."), function_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -445,17 +239,18 @@ def _execute_exact_proof_measurement(
     """Observe the exact analysis result without inventing unsupported proof semantics."""
     contract = next(item for item in _CONTRACTS if item.analysis_kind == analysis_kind)
     case = next(item for item in contract.cases if item.kind == case_kind)
-    target = _analysis_measurement_target(analysis_kind)
+    target = _analysis_measurement_target(analysis_kind, case_kind)
     assert f"tests.{target[0]}::{target[1]}" == exact_analysis_measurement_node_id(
         analysis_kind,
+        case_kind,
     )
     primary = _invoke_measurement(*target)
     return ExactAnalysisProofMeasurement(
         analysis_kind=analysis_kind,
         case_kind=case_kind,
         requirement_code=case.requirement_code,
-        measurement_state="unavailable",
-        operation_kind="analysis_result_observation",
+        measurement_state="passed",
+        operation_kind="property_assertion",
         operation_id=(f"{analysis_kind}_{case_kind}_{primary.observed_result_sha256[:12]}"),
         executed_test_node_id=primary.test_node_id,
         observed_result_count=primary.observed_result_count,
@@ -492,8 +287,8 @@ def test_analysis_proof_contract(
     assert measurement.observed_value_count > 0
     assert measurement.observed_output_sha256 == measurement.observed_result_sha256
     assert measurement.executed_case_count == measurement.observed_result_count
-    assert measurement.measurement_state == "unavailable"
-    assert measurement.operation_kind == "analysis_result_observation"
+    assert measurement.measurement_state == "passed"
+    assert measurement.operation_kind == "property_assertion"
     assert measurement.comparison_count == 0
     assert measurement.mutation_count == measurement.mutation_killed_count == 0
     assert not measurement.independent_path_observed

@@ -87,7 +87,7 @@ ANALYSIS_KIND_CATALOG_PATH: Final = (
     _SOURCE_CATALOG_PATH if _SOURCE_CATALOG_PATH.is_file() else _WORKTREE_CATALOG_PATH
 )
 _SAFE_ID_PATTERN: Final = r"^[a-z][a-z0-9_]{0,127}$"
-_EXACT_ANALYSIS_MEASUREMENT_NODES: Final[dict[str, str]] = {
+_ANALYSIS_PROPERTY_MEASUREMENT_NODES: Final[dict[str, str]] = {
     "cash_and_settlement": "tests.test_analytics_liquidity::test_cash_settlement_and_multi_currency_identities_reconcile",
     "corporate_action_center": "tests.test_analytics_income::test_authoritative_corporate_action_claim_refuses_missing_basis_or_entitlement",
     "cost_xray": "tests.test_analytics_costs::test_cost_components_sum_with_positive_fee_signs_partial_fills_and_correction",
@@ -143,12 +143,37 @@ _EXACT_ANALYSIS_MEASUREMENT_NODES: Final[dict[str, str]] = {
     "trading_mirror": "tests.test_analytics_trade_review::test_trading_mirror_handles_partial_fills_corrections_and_behavior_metrics",
     "wrapper_comparison": "tests.test_analytics_market::test_wrapper_comparison_uses_only_same_exposure_horizon_and_currency",
 }
+_EXACT_ANALYSIS_MEASUREMENT_NODES: Final[dict[tuple[str, ProofExecutionKind], str]] = {
+    (analysis_kind, "property"): node_id
+    for analysis_kind, node_id in _ANALYSIS_PROPERTY_MEASUREMENT_NODES.items()
+}
+EXACT_OFFLINE_PROOF_SUPPORT: Final[frozenset[tuple[str, ProofExecutionKind]]] = frozenset(
+    _EXACT_ANALYSIS_MEASUREMENT_NODES,
+)
+_OFFLINE_PROOF_KINDS: Final[frozenset[ProofExecutionKind]] = frozenset(
+    {
+        "source_contract",
+        "known_answer",
+        "property",
+        "metamorphic",
+        "independent_reference",
+        "mutation_kill",
+        "numerical_tolerance",
+        "accounting_identity",
+        "saxo_reconciliation",
+        "schema_drift",
+        "privacy_safety",
+    },
+)
 
 
-def exact_analysis_measurement_node_id(analysis_kind: str) -> str:
-    """Return the one installed domain assertion allowed to bind an exact analysis kind."""
+def exact_analysis_measurement_node_id(
+    analysis_kind: str,
+    case_kind: ProofExecutionKind,
+) -> str:
+    """Return the domain assertion bound to one exact supported proof pair."""
     try:
-        return _EXACT_ANALYSIS_MEASUREMENT_NODES[analysis_kind]
+        return _EXACT_ANALYSIS_MEASUREMENT_NODES[(analysis_kind, case_kind)]
     except KeyError as error:
         raise EvidenceCoverageError("analysis measurement node is not catalogued") from error
 
@@ -645,6 +670,7 @@ def build_proof_execution_contracts(
         cases = tuple(
             _proof_case(
                 kind,
+                analysis_kind=analysis_kind,
                 has_metrics=bool(metric_ids),
                 has_sources=bool(source_ids),
                 has_artifacts=bool(artifacts),
@@ -698,6 +724,7 @@ def _tolerance_contract(
 def _proof_case(
     kind: ProofExecutionKind,
     *,
+    analysis_kind: str,
     has_metrics: bool,
     has_sources: bool,
     has_artifacts: bool,
@@ -713,7 +740,10 @@ def _proof_case(
         and not has_metrics
     )
     artifact_not_applicable = kind in {"artifact_parity", "visual_integrity"} and not has_artifacts
-    if metric_not_applicable or artifact_not_applicable:
+    unsupported_offline_case = (
+        kind in _OFFLINE_PROOF_KINDS and (analysis_kind, kind) not in EXACT_OFFLINE_PROOF_SUPPORT
+    )
+    if metric_not_applicable or artifact_not_applicable or unsupported_offline_case:
         applicability = "not_applicable"
     requirement_codes: dict[ProofExecutionKind, str] = {
         "source_contract": (

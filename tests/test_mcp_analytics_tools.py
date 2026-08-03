@@ -16,11 +16,13 @@ from typing import Final, cast
 
 import httpx2
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client
 from pydantic import BaseModel
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
-import saxo_bank_mcp.qa_sim_tool_matrix as matrix_module
+import saxo_bank_mcp.qa_installed_matrix_child as matrix_child_module
+from saxo_bank_mcp.agent_skill_command_runner import CommandResult
+from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
 from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
@@ -31,10 +33,6 @@ from saxo_bank_mcp.analytics_execution import (
     StoredPositionSizingExecutionContext,
     StoredPretradeExecutionContext,
     StoredScenarioExecutionContext,
-)
-from saxo_bank_mcp.analytics_ghost_portfolio import (
-    GhostLifecycleEvidence,
-    GhostStateFingerprint,
 )
 from saxo_bank_mcp.analytics_instrument_identity import (
     instrument_handle_for_saxo_identity,
@@ -149,6 +147,7 @@ _EXPECTED_TOOL_COUNT: Final = 60
 _NOW = datetime(2026, 8, 3, 10, tzinfo=UTC)
 _ACCOUNT_ALIAS = "aa_00000000000040008000000000000099"
 _CANDIDATE_COMMIT = "a" * 40
+_MATRIX_CHILD_TIMEOUT_SECONDS = 1800
 
 
 class _ChartFixtureExecutor:
@@ -799,7 +798,7 @@ def test_exact_analytics_catalog_moves_server_from_39_to_60() -> None:
     assert set(ANALYTICS_TOOL_DESCRIPTIONS) == set(ANALYTICS_TOOL_IDS)
 
 
-def test_installed_process_proof_overlay_is_candidate_bound_and_ephemeral(
+def test_installed_process_proof_overlay_is_unavailable_on_normal_import(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -810,21 +809,8 @@ def test_installed_process_proof_overlay_is_candidate_bound_and_ephemeral(
         profile for profile in checked.profiles if profile.analysis_kind == "market_comparison"
     )
     assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
-    active_catalog = tools_module._process_active_catalog(  # noqa: SLF001
-        checked,
-        definitions=definitions,
-        candidate_commit=_CANDIDATE_COMMIT,
-        allowed_kinds=frozenset({"market_comparison"}),
-        source_revisions={"market_comparison": "capture:installed-proof"},
-    )
-    active = next(
-        profile
-        for profile in active_catalog.profiles
-        if profile.analysis_kind == "market_comparison"
-    )
-    assert active.activation_state is ProfileActivationState.ACTIVE
-    assert active.source_revision == "capture:installed-proof"
-    assert active.engines[0].code_commit == _CANDIDATE_COMMIT
+    assert not hasattr(tools_module, "_process_active_catalog")
+    assert not hasattr(matrix_child_module, "_process_active_catalog")
     assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
 
 
@@ -843,6 +829,8 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
     assert not hasattr(tools_module, "_process_backtest_proofs")
     assert not hasattr(tools_module, "_request_installed_proof_session")
     assert not hasattr(tools_module, "_build_installed_proof_boundary")
+    assert not hasattr(matrix_child_module, "_run_child_matrix")
+    assert not hasattr(matrix_child_module, "InstalledMatrixSession")
     execution_module = import_module("saxo_bank_mcp.analytics_execution")
     assert not hasattr(execution_module, "AuthenticatedBacktestExecutionProof")
     assert (
@@ -855,46 +843,101 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
         tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
     ).parameters
     assert tuple(parameters) == ("candidate_commit", "analysis_kinds")
-    runner_source = inspect.getsource(
-        tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
+    runner = tools_module._run_installed_matrix_proof_session  # noqa: SLF001
+    assert runner.__closure__ is None
+    assert not any(
+        value
+        for value in vars(tools_module).values()
+        if callable(value)
+        and getattr(value, "__name__", "")
+        in {"invoke", "current_session", "execute_backtest", "proof_registry"}
     )
-    assert "active_sessions" not in runner_source
-    assert "WeakSet" not in runner_source
 
 
 @pytest.mark.anyio
-async def test_installed_session_is_absent_from_module_before_during_and_after_run(
+async def test_installed_session_is_absent_from_module_before_during_and_after_run(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    logging_safety = import_module("saxo_bank_mcp.fastmcp_logging_safety")
+    def recoverable_capabilities() -> tuple[str, ...]:
+        found: set[str] = set()
+        seen: set[int] = set()
 
-    def exposed_capabilities() -> tuple[object, ...]:
-        return tuple(
-            value
-            for value in vars(tools_module).values()
-            if hasattr(value, "record_observed_ghost_lifecycle")
-        )
+        def visit(value: object) -> None:
+            if id(value) in seen:
+                return
+            seen.add(id(value))
+            name = getattr(value, "__name__", "")
+            if name in {
+                "InstalledMatrixSession",
+                "_run_installed_matrix_proof_session_impl",
+                "bind_session_type",
+                "current_session",
+                "invoke",
+                "record_observed_ghost_lifecycle",
+            } or hasattr(value, "record_observed_ghost_lifecycle"):
+                found.add(str(name or type(value).__qualname__))
+            if inspect.isfunction(value):
+                for cell in value.__closure__ or ():
+                    visit(cell.cell_contents)
+                for item in value.__defaults__ or ():
+                    visit(item)
+                for item in (value.__kwdefaults__ or {}).values():
+                    visit(item)
 
-    observed_during: tuple[object, ...] | None = None
+        for module in (tools_module, matrix_child_module):
+            for module_value in vars(module).values():
+                visit(module_value)
+        return tuple(sorted(found))
 
-    def stop_inside_boundary() -> None:
+    evidence_tests = import_module("test_qa_analytics_evidence")
+    _catalog, _contracts, bundle = evidence_tests._complete_bundle()  # noqa: SLF001
+    stdout = bundle.sim_tool_matrix.model_dump_json()
+    observed_during: tuple[str, ...] | None = None
+
+    def serialized_child(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
         nonlocal observed_during
-        observed_during = exposed_capabilities()
-        raise RuntimeError("stop before installed matrix execution")
-
-    assert exposed_capabilities() == ()
-    monkeypatch.setattr(
-        logging_safety,
-        "install_fastmcp_argument_log_filter",
-        stop_inside_boundary,
-    )
-    with pytest.raises(RuntimeError, match="stop before installed matrix execution"):
-        await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
-            _CANDIDATE_COMMIT,
-            ("bounded_backtest",),
+        observed_during = recoverable_capabilities()
+        assert name == "analytics_installed_matrix_child"
+        assert argv[1:4] == ("-I", "-m", "saxo_bank_mcp.qa_installed_matrix_child")
+        assert timeout_seconds == _MATRIX_CHILD_TIMEOUT_SECONDS
+        assert env is not None
+        assert env["SAXO_MCP_ENVIRONMENT"] == "SIM"
+        assert env["SAXO_MCP_ENABLE_LIVE_READS"] == "0"
+        assert env["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
+        assert "SAXO_MCP_LIVE_TOKEN_CACHE_PATH" not in env
+        return CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=123,
+                pgid=123,
+                exit_code=0,
+                stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout=stdout,
+            stderr="",
         )
+
+    assert recoverable_capabilities() == ()
+    monkeypatch.setattr(tools_module, "run_command", serialized_child)
+    result = await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
+        _CANDIDATE_COMMIT,
+        ("market_comparison",),
+    )
+    assert result == bundle.sim_tool_matrix
     assert observed_during == ()
-    assert exposed_capabilities() == ()
+    assert recoverable_capabilities() == ()
 
 
 def test_forged_lifespan_material_cannot_enter_the_process_proof_boundary(
@@ -902,14 +945,7 @@ def test_forged_lifespan_material_cannot_enter_the_process_proof_boundary(
     tmp_path: Path,
 ) -> None:
     _state_env(monkeypatch, tmp_path)
-    forged = SimpleNamespace()
-    monkeypatch.setattr(
-        tools_module,
-        "get_context",
-        lambda: SimpleNamespace(
-            lifespan_context={"installed_analytics_proof_session": forged},
-        ),
-    )
+    assert not hasattr(tools_module, "get_context")
 
     assert (
         tools_module._current_process_proof_registry(  # noqa: SLF001
@@ -922,7 +958,7 @@ def test_forged_lifespan_material_cannot_enter_the_process_proof_boundary(
 
 
 @pytest.mark.anyio
-async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
+async def test_parent_process_cannot_activate_backtest_ghost_proof(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -950,98 +986,6 @@ async def test_installed_lifecycle_recorder_seals_exact_backtest_proof_locally(
         "holdout_start_at": datetime(2026, 8, 3, 9, 1, tzinfo=UTC),
     }
     strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
-    observed_inside = False
-    copied_recorder: matrix_module._InstalledProofRecorder | None = None
-
-    async def recorded_matrix(
-        _fixtures: object,
-        *,
-        proof_recorder: matrix_module._InstalledProofRecorder,
-        matrix_server: FastMCP,
-    ) -> str:
-        nonlocal copied_recorder, observed_inside
-        copied_recorder = proof_recorder
-        account_alias = proof_recorder.controlled_backtest_source_binding(
-            dataset_id,
-            handle,
-            expected_uic=1,
-            expected_asset_type="Stock",
-        )
-        state = GhostStateFingerprint(
-            balance_fingerprint_sha256="1" * 64,
-            orders_fingerprint_sha256="2" * 64,
-            positions_fingerprint_sha256="3" * 64,
-            trade_messages_fingerprint_sha256="4" * 64,
-            order_count=0,
-            position_count=0,
-            trade_message_count=0,
-        )
-        evidence = GhostLifecycleEvidence(
-            candidate_commit=_CANDIDATE_COMMIT,
-            dataset_id=dataset_id,
-            account_alias=account_alias,
-            instrument_handle=handle,
-            strategy_fingerprint_sha256=tools_module.strategy_definition_fingerprint(strategy),
-            fill_model="next_bar_open",
-            environment="SIM",
-            session_capabilities_current=True,
-            fixture_coverage_proved=True,
-            preview_status="completed",
-            place_status="completed",
-            cancel_preview_status="completed",
-            cancel_status="completed",
-            preview_attempt_count=1,
-            place_attempt_count=1,
-            cancel_preview_attempt_count=1,
-            cancel_attempt_count=1,
-            orders_readback=True,
-            positions_readback=True,
-            trade_messages_readback=True,
-            balances_fingerprint_readback=True,
-            request_ledger_read_last=True,
-            request_ledger_complete=True,
-            live_event_count=0,
-            live_mutation_count=0,
-            non_sim_event_count=0,
-            disclaimer_present=False,
-            purchase_occurred=False,
-            before=state,
-            after=state,
-        )
-        proof_recorder.record_observed_ghost_lifecycle(
-            evidence,
-            ledger_provenance_sha256="5" * 64,
-        )
-        request = tools_module.StoredBacktestToolRequest(
-            dataset_id=dataset_id,
-            instrument_handle=handle,
-            strategy=strategy,
-            starting_equity=1000,
-            visibility=VisibilityMode.PRIVATE_USER_RESULT,
-        )
-        async with Client(matrix_server) as client:
-            response = await client.call_tool(
-                "saxo_backtest_strategy",
-                {"request": request.model_dump(mode="json")},
-            )
-        assert response.structured_content is not None
-        assert response.structured_content["status"] == "verified"
-        assert response.structured_content["analysis_kind"] == "bounded_backtest"
-        observed_inside = True
-        return "recorded"
-
-    monkeypatch.setattr(matrix_module, "_run_matrix", recorded_matrix)
-
-    result = await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
-        _CANDIDATE_COMMIT,
-        ("bounded_backtest",),
-    )
-
-    assert result == "recorded"
-    assert observed_inside is True
-    assert copied_recorder is not None
-    with pytest.raises(ValueError, match="process proof session is unavailable"):
-        copied_recorder.candidate_commit()
     direct = tools_module.saxo_backtest_strategy(
         tools_module.StoredBacktestToolRequest(
             dataset_id=dataset_id,

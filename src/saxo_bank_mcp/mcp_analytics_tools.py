@@ -9,17 +9,19 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from threading import RLock
-from typing import Annotated, Final, Literal, Protocol, cast
+from typing import Annotated, Final, Literal, cast
 
 import mcp.types as mt
-from fastmcp.server.dependencies import get_context
 from fastmcp.tools import ToolResult
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
 
+from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.analytics_account_data import (
     AccountScope,
     sync_account_analysis_sources,
@@ -42,9 +44,7 @@ from saxo_bank_mcp.analytics_execution import (
     ScenarioExecutionParameters,
     ScenarioExecutionShock,
     StoredAnalysisExecutionError,
-    StoredBacktestExecutionContext,
     StoredExecutionParameters,
-    _execute_sim_verified_backtest,
     execute_market_comparison,
     execute_pretrade_proposal,
     execute_stored_analysis,
@@ -54,11 +54,6 @@ from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
     StoredTableExportRequest,
     export_analysis,
-)
-from saxo_bank_mcp.analytics_ghost_portfolio import (
-    GhostLifecycleEvidence,
-    GhostPortfolioVerification,
-    GhostWorkflowRequest,
 )
 from saxo_bank_mcp.analytics_jobs import (
     AnalyticsJobManager,
@@ -80,8 +75,6 @@ from saxo_bank_mcp.analytics_market import (
 )
 from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinition,
-    MetricDefinitionBinding,
-    MetricDefinitionCatalog,
     load_metric_definition_catalog,
 )
 from saxo_bank_mcp.analytics_models import (
@@ -103,13 +96,9 @@ from saxo_bank_mcp.analytics_portfolio_snapshots import (
     capture_portfolio_snapshot,
 )
 from saxo_bank_mcp.analytics_proof_profiles import (
-    EngineProofBinding,
-    ProfileActivationState,
     ProofProfile,
-    ProofProfileCatalog,
     ProofProfileError,
     ProofRegistry,
-    SourceContractProofBinding,
     load_proof_profile_catalog,
 )
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
@@ -141,11 +130,6 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionResult,
     ResolutionStatus,
 )
-from saxo_bank_mcp.analytics_source_contracts import (
-    source_contract_catalog_sha256,
-    source_contract_fingerprint,
-    source_contracts_by_id,
-)
 from saxo_bank_mcp.analytics_storage_tools import (
     DeletionPreviewResult,
     DeletionResult,
@@ -167,7 +151,6 @@ from saxo_bank_mcp.analytics_store import (
 )
 from saxo_bank_mcp.analytics_strategy_schema import (
     StrategyDefinition,
-    strategy_definition_fingerprint,
 )
 from saxo_bank_mcp.analytics_sync import (
     AccountAnalysisSourceDatasetSummary,
@@ -199,6 +182,7 @@ from saxo_bank_mcp.analytics_universes import (
 from saxo_bank_mcp.config import SaxoRuntimeConfig, resolve_sim_auth_settings
 from saxo_bank_mcp.mcp_token_state import CachedTokenBlocked, cached_token_for_tool
 from saxo_bank_mcp.process_scoped_selectors import resolve_bound_account_selector
+from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 
 type AnalysisVisibility = Literal[
@@ -217,31 +201,6 @@ _JOB_RUNTIME_LOCK: Final = RLock()
 _MIN_REPORT_VIEWPORT_WIDTH: Final = 320
 _MAX_REPORT_VIEWPORT_WIDTH: Final = 2560
 _job_runtime: tuple[str, AnalyticsStore, AnalyticsJobManager] | None = None
-
-
-class _InstalledProofRequestSession(Protocol):
-    """Request-local closure capability issued only by the installed matrix lifespan."""
-
-    def proof_registry(
-        self,
-        config: AnalyticsConfig,
-        *,
-        analysis_kind: str | None,
-        source_revision: str | None,
-    ) -> ProofRegistry: ...
-
-    def execute_backtest(  # noqa: PLR0913
-        self,
-        *,
-        tool_name: str,
-        dataset_id: str,
-        visibility: VisibilityMode,
-        parameters: BacktestExecutionParameters,
-        config: AnalyticsConfig,
-        store: AnalyticsStore,
-        registry: ProofRegistry,
-        profile: ProofProfile,
-    ) -> AnalysisResult: ...
 
 
 class _StrictToolModel(BaseModel):
@@ -2280,369 +2239,106 @@ def _server_environment() -> str:
     return os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
 
 
-async def _run_installed_matrix_proof_session_impl(  # noqa: C901
+_MATRIX_CHILD_ENV_KEYS: Final = (
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "UV_CACHE_DIR",
+    "UV_PROJECT_ENVIRONMENT",
+    "XDG_STATE_HOME",
+    "SAXO_MCP_SIM_CREDENTIAL_FILE",
+    "SAXO_MCP_SIM_REDIRECT_URI",
+    "SAXO_MCP_TOKEN_CACHE_PATH",
+    "SAXO_MCP_SIM_AUTH_URL",
+    "SAXO_MCP_SIM_TOKEN_URL",
+    "SAXO_MCP_ACCOUNT_ALLOWLIST",
+    "SAXO_MCP_INSTRUMENT_ALLOWLIST",
+)
+
+
+async def _run_installed_matrix_proof_session(  # pyright: ignore[reportUnusedFunction]
     candidate_commit: str,
     analysis_kinds: Sequence[str],
-    bind_session_type: Callable[[type[object]], None],
-    release_session_type: Callable[[type[object]], None],
-) -> object:
-    """Run the exact installed matrix; accept no caller lifecycle or recorder callback."""
+) -> SimToolMatrixReceipt:
+    """Run the authority-bearing matrix only in a cleaned isolated child process."""
     if re.fullmatch(r"[a-f0-9]{40}", candidate_commit) is None:
         raise ValueError("process proof candidate is invalid")
-    kinds = frozenset((*analysis_kinds, "bounded_backtest"))
-    if not kinds:
-        raise ValueError("process proof session requires bounded analysis kinds")
-    session_seal = object()
-
-    class InstalledMatrixSession:
-        """Function-local capability available only to this exact matrix invocation."""
-
-        def __init__(self, seal: object) -> None:
-            if seal is not session_seal:
-                raise ValueError("process proof session construction refused")
-            self._active = True
-            self._source_revisions: dict[str, str] = {}
-            self._backtest_lifecycles: dict[
-                tuple[str, str],
-                tuple[GhostLifecycleEvidence, str],
-            ] = {}
-
-        def clear(self) -> None:
-            self._active = False
-            self._source_revisions.clear()
-            self._backtest_lifecycles.clear()
-
-        def _require_active(self) -> None:
-            if not self._active:
-                raise ValueError("process proof session is unavailable")
-
-        def candidate_commit(self) -> str:
-            self._require_active()
-            return candidate_commit
-
-        def proof_registry(
-            self,
-            config: AnalyticsConfig,
-            *,
-            analysis_kind: str | None,
-            source_revision: str | None,
-        ) -> ProofRegistry:
-            self._require_active()
-            definitions = load_metric_definition_catalog()
-            catalog = load_proof_profile_catalog(definitions=definitions)
-            if analysis_kind in kinds and source_revision is not None:
-                prior = self._source_revisions.setdefault(analysis_kind, source_revision)
-                if prior != source_revision:
-                    raise ProofProfileError("process proof source revision changed")
-            catalog = _process_active_catalog(
-                catalog,
-                definitions=definitions,
-                candidate_commit=candidate_commit,
-                allowed_kinds=kinds,
-                source_revisions=dict(self._source_revisions),
-            )
-            return ProofRegistry(definitions=definitions, catalog=catalog, config=config)
-
-        def controlled_backtest_source_binding(
-            self,
-            dataset_id: str,
-            instrument_handle: str,
-            *,
-            expected_uic: int,
-            expected_asset_type: str,
-        ) -> str:
-            self.candidate_commit()
-            store = AnalyticsStore.open(_analytics_config())
-            try:
-                material = store.get_authenticated_dataset_material(dataset_id)
-                snapshot = store.get_authenticated_snapshot_material(
-                    dataset_id,
-                    "backtest_input",
-                )
-                context = StoredBacktestExecutionContext.model_validate(
-                    snapshot.payload,
-                    strict=False,
-                )
-            finally:
-                store.close()
-            identities: set[tuple[object | None, object | None]] = set()
-            for page in material.pages:
-                if page.contract_name != "reference_instruments_v1":
-                    continue
-                rows = page.payload.get("rows")
-                if not isinstance(rows, list):
-                    continue
-                for row in rows:
-                    if isinstance(row, Mapping):
-                        identities.add(
-                            (row.get("AssetType"), row.get("Identifier", row.get("Uic"))),
-                        )
-            if context.instrument_handle != instrument_handle or identities != {
-                (expected_asset_type, expected_uic)
-            }:
-                raise ValueError("controlled ghost fixture source binding mismatch")
-            return material.account_scope
-
-        def record_observed_ghost_lifecycle(
-            self,
-            evidence: GhostLifecycleEvidence,
-            *,
-            ledger_provenance_sha256: str,
-        ) -> None:
-            from saxo_bank_mcp.analytics_ghost_portfolio import (  # noqa: PLC0415
-                _validated_ghost_lifecycle,  # pyright: ignore[reportPrivateUsage]
-            )
-
-            if self.candidate_commit() != evidence.candidate_commit:
-                raise ValueError("process ghost candidate is unavailable")
-            store = AnalyticsStore.open(_analytics_config())
-            try:
-                material = store.get_authenticated_dataset_material(evidence.dataset_id)
-                snapshot = store.get_authenticated_snapshot_material(
-                    evidence.dataset_id,
-                    "backtest_input",
-                )
-                context = StoredBacktestExecutionContext.model_validate(
-                    snapshot.payload,
-                    strict=False,
-                )
-            finally:
-                store.close()
-            if (
-                material.account_scope != evidence.account_alias
-                or context.account_alias != evidence.account_alias
-                or context.instrument_handle != evidence.instrument_handle
-            ):
-                raise ValueError("process ghost stored source binding mismatch")
-            request = GhostWorkflowRequest(
-                candidate_commit=evidence.candidate_commit,
-                dataset_id=evidence.dataset_id,
-                account_alias=evidence.account_alias,
-                instrument_handle=evidence.instrument_handle,
-                strategy_fingerprint_sha256=evidence.strategy_fingerprint_sha256,
-                fill_model=evidence.fill_model,
-                controlled_fixture="task_18_controlled_stock",
-            )
-            validated = _validated_ghost_lifecycle(request, evidence)
-            if not isinstance(validated, GhostPortfolioVerification):
-                raise TypeError(validated.reason_code)
-            if not re.fullmatch(r"[a-f0-9]{64}", ledger_provenance_sha256):
-                raise ValueError("controlled ghost request ledger is invalid")
-            key = (evidence.dataset_id, evidence.strategy_fingerprint_sha256)
-            self._backtest_lifecycles[key] = (evidence, ledger_provenance_sha256)
-
-        def execute_backtest(  # noqa: PLR0913
-            self,
-            *,
-            tool_name: str,
-            dataset_id: str,
-            visibility: VisibilityMode,
-            parameters: BacktestExecutionParameters,
-            config: AnalyticsConfig,
-            store: AnalyticsStore,
-            registry: ProofRegistry,
-            profile: ProofProfile,
-        ) -> AnalysisResult:
-            self._require_active()
-            strategy_fingerprint = strategy_definition_fingerprint(parameters.strategy)
-            observed = self._backtest_lifecycles.get((dataset_id, strategy_fingerprint))
-            if observed is None:
-                raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
-            evidence, ledger_provenance_sha256 = observed
-            snapshot = store.get_authenticated_snapshot_material(dataset_id, "backtest_input")
-            context = StoredBacktestExecutionContext.model_validate(snapshot.payload, strict=False)
-            if (
-                evidence.candidate_commit != candidate_commit
-                or evidence.dataset_id != dataset_id
-                or evidence.account_alias != context.account_alias
-                or evidence.instrument_handle != parameters.instrument_handle
-                or evidence.instrument_handle != context.instrument_handle
-                or evidence.strategy_fingerprint_sha256 != strategy_fingerprint
-                or evidence.fill_model != parameters.strategy.rebalancing.fill_timing
-                or evidence.environment != "SIM"
-                or evidence.before != evidence.after
-                or not evidence.request_ledger_complete
-                or not evidence.request_ledger_read_last
-                or evidence.disclaimer_present
-                or evidence.purchase_occurred
-                or evidence.live_event_count != 0
-                or evidence.live_mutation_count != 0
-                or re.fullmatch(r"[a-f0-9]{64}", ledger_provenance_sha256) is None
-            ):
-                raise StoredAnalysisExecutionError("backtest_sim_proof_mismatch")
-            return _execute_sim_verified_backtest(
-                tool_name,
-                dataset_id,
-                visibility,
-                parameters,
-                config,
-                store,
-                registry,
-                profile,
-            )
-
-    session = InstalledMatrixSession(session_seal)
-    session_type = type(session)
-    type_bound = False
-
+    if not analysis_kinds or any(
+        re.fullmatch(r"[a-z][a-z0-9_]{0,127}", kind) is None for kind in analysis_kinds
+    ):
+        raise ValueError("process proof analysis kinds are invalid")
+    if _server_environment() != "SIM":
+        raise ValueError("installed matrix child requires SIM")
+    environment = {
+        key: value for key in _MATRIX_CHILD_ENV_KEYS if (value := os.environ.get(key)) is not None
+    }
+    environment.update(
+        {
+            "PATH": environment.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "SAXO_MCP_ENABLE_LIVE_READS": "0",
+            "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+            "SAXO_MCP_ENVIRONMENT": "SIM",
+        },
+    )
+    command = (
+        sys.executable,
+        "-I",
+        "-m",
+        "saxo_bank_mcp.qa_installed_matrix_child",
+        "--candidate",
+        candidate_commit,
+        *(part for kind in analysis_kinds for part in ("--analysis-kind", kind)),
+    )
+    await asyncio.sleep(0)
     try:
-        bind_session_type(session_type)
-        type_bound = True
-        from contextlib import asynccontextmanager  # noqa: PLC0415
-
-        from saxo_bank_mcp.fastmcp_logging_safety import (  # noqa: PLC0415
-            FASTMCP_VALIDATION_SAFETY_TRANSFORM,
-            SafeFastMCP,
-            install_fastmcp_argument_log_filter,
+        result = run_command(
+            "analytics_installed_matrix_child",
+            command,
+            cwd=Path.cwd().resolve(),
+            env=environment,
+            timeout_seconds=1800,
         )
-        from saxo_bank_mcp.mcp_request_ledger_tools import (  # noqa: PLC0415
-            SAFE_REQUEST_LEDGER_MIDDLEWARE,
-        )
-        from saxo_bank_mcp.qa_sim_tool_matrix import (  # noqa: PLC0415
-            _run_matrix,  # pyright: ignore[reportPrivateUsage]
-        )
-        from saxo_bank_mcp.qa_sim_tool_matrix_models import (  # noqa: PLC0415
-            FIXTURE_INSTRUMENT,
-            FIXTURE_LIMIT_PRICE,
-            FIXTURE_MODIFIED_LIMIT_PRICE,
-            FIXTURE_ORDER_AMOUNT,
-            FIXTURE_STREAM_UIC,
-            MULTILEG_FIXTURE_UICS,
-            MatrixFixtures,
-        )
-        from saxo_bank_mcp.server_core_tools import SERVICE_NAME  # noqa: PLC0415
-        from saxo_bank_mcp.server_tool_registration import (  # noqa: PLC0415
-            register_saxo_tools,
-        )
-
-        @asynccontextmanager
-        async def installed_lifespan(
-            _server: object,
-        ) -> AsyncGenerator[dict[str, object]]:
-            try:
-                yield {
-                    "analytics_runtime_owned": True,
-                    "installed_analytics_proof_session": session,
-                }
-            finally:
-                session.clear()
-                await shutdown_analytics_runtime()
-
-        install_fastmcp_argument_log_filter()
-        proof_server = SafeFastMCP(
-            SERVICE_NAME,
-            strict_input_validation=False,
-            lifespan=installed_lifespan,
-        )
-        proof_server.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
-        proof_server.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
-        register_saxo_tools(proof_server)
-
-        fixtures = MatrixFixtures(
-            stock_uic=FIXTURE_INSTRUMENT,
-            amount=float(FIXTURE_ORDER_AMOUNT),
-            limit_price=float(FIXTURE_LIMIT_PRICE),
-            modified_limit_price=float(FIXTURE_MODIFIED_LIMIT_PRICE),
-            option_uics=MULTILEG_FIXTURE_UICS,
-            stream_uic=FIXTURE_STREAM_UIC,
-        )
-        return await _run_matrix(  # pyright: ignore[reportPrivateUsage]
-            fixtures,
-            proof_recorder=session,
-            matrix_server=proof_server,
-        )
-    finally:
-        session.clear()
-        if type_bound:
-            release_session_type(session_type)
+        receipt = SimToolMatrixReceipt.model_validate_json(result.stdout)
+    except (CommandFailureError, ValidationError) as error:
+        raise ValueError("installed matrix child result unavailable") from error
+    if (
+        result.receipt.exit_code != 0
+        or result.receipt.timed_out
+        or not result.receipt.cleanup_attempted
+        or receipt.environment != "SIM"
+        or not receipt.redacted_publication
+    ):
+        raise ValueError("installed matrix child result unavailable")
+    return receipt
 
 
-def _build_installed_proof_boundary():  # noqa: ANN202, C901
-    """Keep proof-session identity inside one non-exported process closure."""
-    active_session_type: type[object] | None = None
-    implementation = _run_installed_matrix_proof_session_impl  # noqa: F821
-
-    def bind_session_type(session_type: type[object]) -> None:
-        nonlocal active_session_type
-        if active_session_type is not None:
-            raise RuntimeError("installed proof session is already active")
-        active_session_type = session_type
-
-    def release_session_type(session_type: type[object]) -> None:
-        nonlocal active_session_type
-        if active_session_type is session_type:
-            active_session_type = None
-
-    async def invoke(candidate_commit: str, analysis_kinds: Sequence[str]) -> object:
-        return await implementation(
-            candidate_commit,
-            analysis_kinds,
-            bind_session_type,
-            release_session_type,
-        )
-
-    def current_session() -> _InstalledProofRequestSession | None:
-        try:
-            candidate = get_context().lifespan_context.get("installed_analytics_proof_session")
-        except RuntimeError:
-            return None
-        if active_session_type is None or type(candidate) is not active_session_type:
-            return None
-        return cast("_InstalledProofRequestSession", candidate)
-
-    async def run(candidate_commit: str, analysis_kinds: Sequence[str]) -> object:
-        return await invoke(candidate_commit, analysis_kinds)
-
-    def registry(
-        config: AnalyticsConfig,
-        *,
-        analysis_kind: str | None,
-        source_revision: str | None,
-    ) -> ProofRegistry | None:
-        session = current_session()
-        if session is None:
-            return None
-        return session.proof_registry(
-            config,
-            analysis_kind=analysis_kind,
-            source_revision=source_revision,
-        )
-
-    def execute_backtest(  # noqa: PLR0913
-        *,
-        tool_name: str,
-        dataset_id: str,
-        visibility: VisibilityMode,
-        parameters: BacktestExecutionParameters,
-        config: AnalyticsConfig,
-        store: AnalyticsStore,
-        registry: ProofRegistry,
-        profile: ProofProfile,
-    ) -> AnalysisResult:
-        session = current_session()
-        if session is None:
-            raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
-        return session.execute_backtest(
-            tool_name=tool_name,
-            dataset_id=dataset_id,
-            visibility=visibility,
-            parameters=parameters,
-            config=config,
-            store=store,
-            registry=registry,
-            profile=profile,
-        )
-
-    return run, registry, execute_backtest
+def _current_process_proof_registry(
+    _config: AnalyticsConfig,
+    *,
+    analysis_kind: str | None,
+    source_revision: str | None,
+) -> None:
+    """Keep the parent process without an active proof registry."""
+    _ = analysis_kind, source_revision
 
 
-(
-    _run_installed_matrix_proof_session,
-    _current_process_proof_registry,
-    _execute_current_proof_backtest,
-) = _build_installed_proof_boundary()
-del _build_installed_proof_boundary
-del _run_installed_matrix_proof_session_impl
+def _execute_current_proof_backtest(  # noqa: PLR0913
+    *,
+    tool_name: str,
+    dataset_id: str,
+    visibility: VisibilityMode,
+    parameters: BacktestExecutionParameters,
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+    registry: ProofRegistry,
+    profile: ProofProfile,
+) -> AnalysisResult:
+    """Refuse parent-process ghost proof; the isolated child installs its own callback."""
+    _ = tool_name, dataset_id, visibility, parameters, config, store, registry, profile
+    raise StoredAnalysisExecutionError("backtest_sim_proof_unavailable")
 
 
 def _proof_registry(
@@ -2664,102 +2360,6 @@ def _proof_registry(
         definitions=definitions,
         catalog=catalog,
         config=config,
-    )
-
-
-def _process_active_catalog(
-    catalog: ProofProfileCatalog,
-    *,
-    definitions: MetricDefinitionCatalog,
-    candidate_commit: str,
-    allowed_kinds: frozenset[str],
-    source_revisions: dict[str, str],
-) -> ProofProfileCatalog:
-    profiles = list(catalog.profiles)
-    if "bounded_backtest" in allowed_kinds and not any(
-        profile.analysis_kind == "bounded_backtest" for profile in profiles
-    ):
-        metric = definitions.by_id()["total_return"]
-        fields: dict[str, set[str]] = {}
-        for binding in metric.input_bindings:
-            if binding.source_contract_id is not None:
-                fields.setdefault(binding.source_contract_id, set()).update(binding.field_paths)
-        profiles.append(
-            ProofProfile(
-                proof_profile_id="vp_bounded_backtest_runtime_v1",
-                profile_version="1",
-                activation_state=ProfileActivationState.QUARANTINED,
-                quarantine_reason="authenticated_ghost_required",
-                analysis_kind="bounded_backtest",
-                schema_version="1",
-                metric_definitions=(
-                    MetricDefinitionBinding(
-                        metric_id=metric.metric_id,
-                        definition_version=metric.definition_version,
-                    ),
-                ),
-                source_contracts=tuple(
-                    SourceContractProofBinding(
-                        contract_id=contract_id,
-                        contract_sha256=source_contract_fingerprint(
-                            source_contracts_by_id()[contract_id]
-                        ),
-                        field_paths=tuple(sorted(field_paths)),
-                    )
-                    for contract_id, field_paths in sorted(fields.items())
-                ),
-                source_revision=None,
-                engines=(),
-                artifact_template_ids=(),
-                definition_catalog_sha256=definitions.fingerprint_sha256,
-                source_catalog_sha256=source_contract_catalog_sha256(),
-                valid_until=None,
-            ),
-        )
-    active_profiles: list[ProofProfile] = []
-    for profile in profiles:
-        revision = source_revisions.get(profile.analysis_kind)
-        if profile.analysis_kind not in allowed_kinds or revision is None:
-            active_profiles.append(profile)
-            continue
-        active_profiles.append(
-            profile.model_copy(
-                update={
-                    "activation_state": ProfileActivationState.ACTIVE,
-                    "quarantine_reason": None,
-                    "source_revision": revision,
-                    "engines": (
-                        EngineProofBinding(
-                            engine_name="saxo_analytics",
-                            engine_version="task23-installed-proof",
-                            code_commit=candidate_commit,
-                        ),
-                    ),
-                    "valid_until": datetime.now(UTC) + timedelta(hours=1),
-                }
-            )
-        )
-    production_kinds = tuple(
-        dict.fromkeys((*catalog.production_analysis_kinds, *(p.analysis_kind for p in profiles)))
-    )
-    production_metrics = tuple(
-        dict.fromkeys(
-            (
-                *catalog.production_metric_ids,
-                *(
-                    binding.metric_id
-                    for profile in profiles
-                    for binding in profile.metric_definitions
-                ),
-            ),
-        )
-    )
-    return catalog.model_copy(
-        update={
-            "production_analysis_kinds": production_kinds,
-            "production_metric_ids": production_metrics,
-            "profiles": tuple(active_profiles),
-        }
     )
 
 

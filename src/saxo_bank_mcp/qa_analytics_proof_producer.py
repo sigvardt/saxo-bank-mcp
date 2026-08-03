@@ -556,6 +556,8 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
             str(launcher),
             *(str(path.relative_to(root)) for path in test_paths),
             "-q",
+            "-o",
+            "junit_family=legacy",
             f"--junitxml={junit}",
         )
         env = {
@@ -765,7 +767,7 @@ def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) ->
             observed.measurement_state != "passed"
             or observed.requirement_code != contract_case.requirement_code
             or observed.operation_kind != _MEASURED_OPERATION_BY_CASE[contract_case.kind]
-            or observed.executed_test_node_id != exact_analysis_measurement_node_id(key[0])
+            or observed.executed_test_node_id != exact_analysis_measurement_node_id(*key)
             or observed.executed_case_count < contract_case.minimum_case_count
             or (contract_case.independent_path_required and not observed.independent_path_observed)
         ):

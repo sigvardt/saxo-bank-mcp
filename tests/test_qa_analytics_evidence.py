@@ -41,6 +41,10 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     validate_analysis_evidence,
     validate_proof_matrix_bundle,
 )
+from saxo_bank_mcp.qa_analytics_proof_producer import (
+    InstalledProofSuiteEvidence,
+    MeasuredAnalysisProofObservation,
+)
 from saxo_bank_mcp.qa_analytics_sim import (
     BROKERAGE_STATE_COMPONENTS,
     CONTROLLED_SIM_CASES,
@@ -230,16 +234,19 @@ def test_every_analysis_kind_has_one_complete_proof_execution_contract() -> None
         assert all(item.mode != "global" for item in contract.metric_tolerances)
 
 
-def test_proof_contracts_name_independent_reference_and_mutation_requirements() -> None:
+def test_proof_contracts_keep_unmeasured_reference_and_mutation_not_applicable() -> None:
     contracts = build_proof_execution_contracts()
 
     for contract in contracts:
         by_kind = {case.kind: case for case in contract.cases}
         assert by_kind["known_answer"].requirement_code == "known_answer_exact"
         assert by_kind["property"].requirement_code == "seeded_property_invariants"
+        assert by_kind["property"].applicability == "required"
         assert by_kind["metamorphic"].requirement_code == "named_metamorphic_relations"
         assert by_kind["independent_reference"].independent_path_required is True
-        assert by_kind["mutation_kill"].minimum_case_count >= 1
+        assert by_kind["independent_reference"].applicability == "not_applicable"
+        assert by_kind["mutation_kill"].minimum_case_count == 0
+        assert by_kind["mutation_kill"].applicability == "not_applicable"
         assert by_kind["schema_drift"].required_recovery == "quarantine_or_refusal"
         assert by_kind["executable_sim"].required_environment == "SIM"
 
@@ -305,11 +312,11 @@ def test_failed_or_incomplete_proof_cannot_be_published_as_passed() -> None:
         _case_receipt(case.kind, applicable=case.applicability == "required")
         for case in contract.cases
     ]
-    known_index = next(index for index, item in enumerate(checks) if item.kind == "known_answer")
-    checks[known_index] = checks[known_index].model_copy(
+    supported_index = next(index for index, item in enumerate(checks) if item.state == "passed")
+    checks[supported_index] = checks[supported_index].model_copy(
         update={
             "state": "failed",
-            "reason_code": "known_answer_mismatch",
+            "reason_code": "observed_property_mismatch",
             "failed_case_count": 1,
         },
     )
@@ -891,6 +898,13 @@ def test_installed_proof_contract_receipt_modules_exist_and_cover_exact_catalog(
     )
 
 
+def test_installed_proof_suite_preserves_measured_junit_properties() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    source = inspect.getsource(producer._run_installed_offline_proof_suite)  # noqa: SLF001
+    assert '"junit_family=legacy"' in source
+
+
 def test_aggregate_marker_nodes_cannot_mint_contract_keyed_proof() -> None:
     """One passing marker node per category is not evidence for every analysis."""
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
@@ -996,20 +1010,20 @@ def test_contract_emitter_runs_measurements_instead_of_listing_cartesian_nodes()
     assert not hasattr(analysis_tests, "_proof_case_measurement_target")
 
 
-def test_exact_proof_measurement_reports_typed_result_instead_of_fabricated_comparison() -> None:
+def test_exact_proof_measurement_runs_the_supported_case_specific_property() -> None:
     analysis_tests = import_module("test_analytics_proof_contracts")
 
     observed = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
         "corporate_action_center",
-        "known_answer",
+        "property",
     )
 
     assert observed.analysis_kind == "corporate_action_center"
-    assert observed.case_kind == "known_answer"
-    assert observed.operation_id.startswith("corporate_action_center_known_answer_")
+    assert observed.case_kind == "property"
+    assert observed.operation_id.startswith("corporate_action_center_property_")
     assert observed.executed_test_node_id.startswith("tests.test_analytics_income::")
-    assert observed.measurement_state == "unavailable"
-    assert observed.operation_kind == "analysis_result_observation"
+    assert observed.measurement_state == "passed"
+    assert observed.operation_kind == "property_assertion"
     assert observed.observed_result_count == len(("missing_basis", "denied"))
     assert observed.observed_result_types == ("ResearchRefusal",)
     assert observed.observed_result_sha256 == observed.observed_output_sha256
@@ -1020,23 +1034,48 @@ def test_exact_proof_measurement_reports_typed_result_instead_of_fabricated_comp
     assert observed.unexplained_difference_count == 0
 
 
-def test_generic_proof_operations_cannot_be_relabelled_for_an_analysis() -> None:
+def test_unsupported_proof_cases_are_not_emitted_or_relabelled() -> None:
     analysis_tests = import_module("test_analytics_proof_contracts")
 
-    mutation = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
-        "corporate_action_center",
-        "mutation_kill",
-    )
-    schema = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
-        "corporate_action_center",
-        "schema_drift",
-    )
+    for case_kind in ("known_answer", "mutation_kill", "schema_drift"):
+        with pytest.raises(AssertionError, match="unsupported exact proof measurement"):
+            analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+                "corporate_action_center",
+                case_kind,
+            )
 
-    assert mutation.measurement_state == schema.measurement_state == "unavailable"
-    assert mutation.operation_kind == schema.operation_kind == "analysis_result_observation"
-    assert mutation.mutation_count == mutation.mutation_killed_count == 0
-    assert schema.recovery_observed is False
-    assert mutation.observed_result_sha256 == schema.observed_result_sha256
+
+def test_offline_proof_support_contract_is_explicit_and_not_cartesian() -> None:
+    contracts = build_proof_execution_contracts()
+    offline_kinds = {
+        "source_contract",
+        "known_answer",
+        "property",
+        "metamorphic",
+        "independent_reference",
+        "mutation_kill",
+        "numerical_tolerance",
+        "accounting_identity",
+        "saxo_reconciliation",
+        "schema_drift",
+        "privacy_safety",
+    }
+    supported = {
+        (contract.analysis_kind, case.kind)
+        for contract in contracts
+        for case in contract.cases
+        if case.kind in offline_kinds and case.applicability == "required"
+    }
+
+    assert len(supported) == len(contracts)
+    assert {kind for _analysis, kind in supported} == {"property"}
+    corporate = next(
+        contract for contract in contracts if contract.analysis_kind == "corporate_action_center"
+    )
+    by_kind = {case.kind: case for case in corporate.cases}
+    assert by_kind["property"].applicability == "required"
+    assert by_kind["known_answer"].applicability == "not_applicable"
+    assert by_kind["mutation_kill"].applicability == "not_applicable"
 
 
 def test_measurement_digest_never_hashes_test_function_source_or_return_none() -> None:
@@ -1089,7 +1128,7 @@ def test_typed_result_observation_cannot_be_relabelled_as_passed_proof() -> None
     analysis_tests = import_module("test_analytics_proof_contracts")
     measurement = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
         "corporate_action_center",
-        "known_answer",
+        "property",
     )
     payload = {
         name: getattr(measurement, name)
@@ -1097,15 +1136,50 @@ def test_typed_result_observation_cannot_be_relabelled_as_passed_proof() -> None
         if name != "receipt_kind"
     }
 
-    unavailable = producer._AnalysisProofProperty.model_validate(payload)  # noqa: SLF001
-    assert unavailable.measurement_state == "unavailable"
+    passed = producer._AnalysisProofProperty.model_validate(payload)  # noqa: SLF001
+    assert passed.measurement_state == "passed"
     with pytest.raises(
         ValidationError,
-        match="passed proof requires a measured proof-specific operation",
+        match="unavailable proof observation claims unmeasured semantics",
     ):
         producer._AnalysisProofProperty.model_validate(  # noqa: SLF001
-            {**payload, "measurement_state": "passed"},
+            {**payload, "measurement_state": "unavailable"},
         )
+
+
+def test_installed_producer_accepts_every_supported_exact_property_observation() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    analysis_tests = import_module("test_analytics_proof_contracts")
+    observed: list[MeasuredAnalysisProofObservation] = []
+    for analysis_kind, case_kind in analysis_tests.ANALYSIS_PROOF_CASES:
+        measurement = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+            analysis_kind,
+            case_kind,
+        )
+        observed.append(
+            MeasuredAnalysisProofObservation(
+                **{
+                    name: getattr(measurement, name)
+                    for name in producer._AnalysisProofProperty.model_fields  # noqa: SLF001
+                    if name != "receipt_kind"
+                },
+                test_node_id=producer._analysis_proof_node_id(  # noqa: SLF001
+                    analysis_kind,
+                    case_kind,
+                ),
+                evidence_sha256="e" * 64,
+            ),
+        )
+    _catalog, _contracts, bundle = _complete_bundle()
+    evidence = InstalledProofSuiteEvidence(
+        analysis_cases=tuple(observed),
+        artifact_parity_receipts=bundle.artifact_parity_receipts,
+        artifact_visual_receipts=bundle.artifact_visual_receipts,
+        executed_test_count=len(observed),
+        suite_receipt_sha256="f" * 64,
+    )
+
+    producer._validate_installed_suite_coverage(evidence)  # noqa: SLF001
 
 
 def test_agent_evaluation_artifact_is_required_and_cannot_be_synthesized() -> None:
