@@ -81,7 +81,8 @@ class MatrixPreflight(BaseModel):
     session_capabilities_completed: Literal[True]
     fixture_reference_validated: Literal[True]
     account_allowlist_resolved: Literal[True]
-    disclaimer_response_completed: Literal[True]
+    disclaimer_response_made: Literal[False]
+    disclaimer_refusal_observed: Literal[True]
 
 
 class MatrixTransportLedger(BaseModel):

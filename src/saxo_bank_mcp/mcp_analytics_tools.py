@@ -1297,8 +1297,13 @@ def saxo_list_analytics_storage(scope: StorageScope) -> StorageListResponse:
     tool = "saxo_list_analytics_storage"
     store: AnalyticsStore | None = None
     try:
-        store = AnalyticsStore.open(_analytics_config())
-        result = list_storage(scope, store=store)
+        config = _analytics_config()
+        store = AnalyticsStore.open(config)
+        result = list_storage(
+            scope,
+            store=store,
+            analytics_root=config.paths.analytics_root,
+        )
     except (
         AnalyticsConfigError,
         StorageBoundaryError,

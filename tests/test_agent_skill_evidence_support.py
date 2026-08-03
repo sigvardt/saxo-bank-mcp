@@ -148,7 +148,8 @@ def build_release_evidence(
                 "session_capabilities_completed": True,
                 "fixture_reference_validated": True,
                 "account_allowlist_resolved": True,
-                "disclaimer_response_completed": True,
+                "disclaimer_response_made": False,
+                "disclaimer_refusal_observed": True,
             },
             "transport_ledger": {
                 "sim_only": True,

@@ -8,13 +8,15 @@ import os
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Final, Literal, Self
+from typing import TYPE_CHECKING, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.qa_sim_tool_matrix_models import MatrixScenarioReceipt
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS, ANALYTICS_TOOL_IDS
+
+if TYPE_CHECKING:
+    from saxo_bank_mcp.qa_sim_tool_matrix_models import MatrixScenarioReceipt
 
 type AnalyticsCaseKind = Literal[
     "success",
@@ -30,6 +32,7 @@ type AnalyticsCaseState = Literal[
     "refused",
     "timed_out",
     "reconciled",
+    "failed",
 ]
 
 ANALYTICS_CASE_KINDS: Final[tuple[AnalyticsCaseKind, ...]] = (
@@ -46,6 +49,7 @@ BROKERAGE_STATE_COMPONENTS: Final[tuple[str, ...]] = (
     "orders",
     "trade_messages",
     "subscriptions",
+    "previews_write_state",
     "jobs",
     "caches",
     "temporary_files",
@@ -135,10 +139,17 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     kind: AnalyticsCaseKind
     state: AnalyticsCaseState
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    mcp_call_observed: Literal[True]
+    result_parsed: bool
+    result_state: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    mcp_is_error: bool
     network_call_made: bool
-    broker_write_made: Literal[False]
-    private_values_published: Literal[False]
+    broker_write_made: bool
+    private_values_published: bool
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    response_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    call_path: Literal["fastmcp.Client.call_tool"] = "fastmcp.Client.call_tool"
 
     @model_validator(mode="after")
     def _validate_outcome(self) -> Self:
@@ -150,9 +161,27 @@ class AnalyticsCaseReceipt(_StrictReceipt):
             "timeout": frozenset({"timed_out"}),
             "recovery": frozenset({"reconciled", "refused"}),
         }
-        if self.state not in allowed[self.kind]:
+        if self.state != "failed" and self.state not in allowed[self.kind]:
             raise ValueError("analytics case state does not match its case kind")
+        if self.state not in {"failed", "timed_out"} and not self.result_parsed:
+            raise ValueError("analytics case requires a parsed FastMCP result")
+        if self.state == "timed_out" and self.result_state != "timed_out":
+            raise ValueError("analytics timeout evidence requires a timed-out call")
+        refusal_states = {"refused", "denied", "invalid_arguments", "invalid_request"}
+        if self.state == "refused" and self.result_state not in refusal_states:
+            raise ValueError("analytics refusal evidence requires a refused result")
+        if self.state == "reconciled" and self.result_state != "reconciled":
+            raise ValueError("analytics recovery evidence requires a reconciled result")
+        if self.state != "failed" and (self.broker_write_made or self.private_values_published):
+            raise ValueError("passing analytics case evidence violates safety or privacy")
         return self
+
+
+class AnalyticsCaseCall(_StrictReceipt):
+    tool_id: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    kind: AnalyticsCaseKind
+    arguments: dict[str, JsonValue]
+    timeout_seconds: float | None = Field(default=None, gt=0, le=30)
 
 
 class AnalyticsToolCaseEvidence(_StrictReceipt):
@@ -171,6 +200,16 @@ class BrokerageStateComponent(_StrictReceipt):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     count: int = Field(ge=0)
     fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    observed_state: Literal["available", "unavailable"]
+    mcp_tool_ids: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_mcp_tools(self) -> Self:
+        if len(self.mcp_tool_ids) != len(set(self.mcp_tool_ids)) or any(
+            not tool_id.startswith("saxo_") for tool_id in self.mcp_tool_ids
+        ):
+            raise ValueError("state component MCP tools must be unique logical tool IDs")
+        return self
 
 
 class BrokerageStateFingerprint(_StrictReceipt):
@@ -189,6 +228,7 @@ class ControlledSimCaseReceipt(_StrictReceipt):
     state: Literal["passed", "degraded", "refused"]
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     source_request_count: int = Field(ge=0)
+    mcp_call_count: int = Field(ge=0)
     sim_mutation_call_count: int = Field(ge=0)
     cleanup_complete: bool
     entitlement_state: Literal["available", "denied", "not_applicable"]
@@ -210,6 +250,10 @@ class ControlledSimCaseReceipt(_StrictReceipt):
             raise ValueError("entitlement state applies only to the options lifecycle")
         if not self.cleanup_complete:
             raise ValueError("controlled SIM case cleanup is incomplete")
+        if self.state == "passed" and self.mcp_call_count < 1:
+            raise ValueError("passed controlled SIM case requires an observed MCP call")
+        if self.state == "passed" and self.case_id != "cleanup" and self.source_request_count < 1:
+            raise ValueError("passed controlled SIM source case requires an observed source call")
         return self
 
 
@@ -247,6 +291,10 @@ class ControlledSimLifecycleReceipt(_StrictReceipt):
             raise ValueError("controlled analytics cleanup is incomplete")
         if self.before != self.after or not self.unchanged_account_state:
             raise ValueError("controlled analytics brokerage state changed")
+        if self.evidence_state == "passed" and any(
+            component.observed_state != "available" for component in self.before.components
+        ):
+            raise ValueError("passed controlled analytics state contains unavailable components")
         if not self.redacted_publication or self.private_values_published:
             raise ValueError("controlled analytics publication is not redacted")
         if self.purchase_occurred:
@@ -301,18 +349,29 @@ def analytics_sim_contracts() -> tuple[AnalyticsToolSimContract, ...]:
             _case("success", ("passed", "verified", "completed", "inline", "resource_link")),
         ]
         if tool_id in _DEGRADATION_TOOLS:
-            cases.append(_case("degradation", ("degraded", "ambiguous", "unavailable")))
+            cases.append(
+                _case(
+                    "degradation",
+                    ("degraded", "reduced", "ambiguous", "unavailable"),
+                ),
+            )
         cases.extend(
             (
-                _case("refusal", ("refused",)),
-                _case("privacy", ("passed", "refused")),
+                _case(
+                    "refusal",
+                    ("refused", "denied", "invalid_arguments", "invalid_request"),
+                ),
+                _case(
+                    "privacy",
+                    ("refused", "denied", "invalid_arguments", "invalid_request"),
+                ),
             ),
         )
         if tool_id in _TIMEOUT_RECOVERY_TOOLS:
             cases.extend(
                 (
                     _case("timeout", ("timed_out", "unknown_state")),
-                    _case("recovery", ("reconciled", "refused")),
+                    _case("recovery", ("refused", "invalid_arguments", "invalid_request")),
                 ),
             )
         contracts.append(
@@ -384,12 +443,26 @@ def analytics_case_evidence_errors(
             case.kind for case in contract.cases
         ):
             errors.append(f"analytics_case_receipt_coverage_mismatch:{contract.tool_id}")
+            continue
+        for case_contract, case_receipt in zip(contract.cases, receipt.cases, strict=True):
+            if case_receipt.state == "failed":
+                errors.append(
+                    f"analytics_case_failed:{contract.tool_id}:{case_contract.kind}",
+                )
+                continue
+            if case_receipt.result_state not in case_contract.expected_states:
+                errors.append(
+                    f"analytics_case_state_mismatch:{contract.tool_id}:{case_contract.kind}",
+                )
     return tuple(errors)
 
 
 def analytics_case_contract_sha256() -> str:
     """Fingerprint the exact checked execution-case contract without runtime values."""
-    material = [contract.model_dump(mode="json") for contract in analytics_sim_contracts()]
+    material = {
+        "contracts": [contract.model_dump(mode="json") for contract in analytics_sim_contracts()],
+        "calls": [call.model_dump(mode="json") for call in analytics_case_calls()],
+    }
     return hashlib.sha256(
         json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
     ).hexdigest()
@@ -583,6 +656,33 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
         "saxo_delete_analytics_data": {"token": _SAFE_DELETION_TOKEN},
     }
     return tuple((tool_id, calls[tool_id]) for tool_id in ANALYTICS_TOOL_IDS)
+
+
+def analytics_case_calls() -> tuple[AnalyticsCaseCall, ...]:
+    """Return every applicable case as a real FastMCP call contract.
+
+    Success, degradation, timeout, and recovery use the bounded typed request. Refusal and
+    privacy use a guaranteed schema-extra rejection, so the privacy probe cannot enter a domain
+    service or publish owner values. A runtime result must still match its declared case contract.
+    """
+    primary = dict(analytics_primary_calls())
+    calls: list[AnalyticsCaseCall] = []
+    for contract in analytics_sim_contracts():
+        for case in contract.cases:
+            arguments: dict[str, JsonValue]
+            if case.kind in {"refusal", "privacy", "recovery"}:
+                arguments = {"__qa_schema_extra_rejection__": True}
+            else:
+                arguments = dict(primary[contract.tool_id])
+            calls.append(
+                AnalyticsCaseCall(
+                    tool_id=contract.tool_id,
+                    kind=case.kind,
+                    arguments=arguments,
+                    timeout_seconds=0.001 if case.kind == "timeout" else None,
+                ),
+            )
+    return tuple(calls)
 
 
 def merge_matrix_receipts(

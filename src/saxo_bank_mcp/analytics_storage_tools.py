@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from saxo_bank_mcp.analytics_store import (
     AnalyticsStore,
     DeletionPreview,
     DeletionReceipt,
+    StorageDataType,
     StorageEntry,
     StorageScope,
 )
@@ -39,7 +44,18 @@ class StorageListing:
 
     visibility: Literal["owner_only"]
     entries: tuple[StorageEntry, ...]
+    runtime_state: LocalAnalyticsRuntimeState
     evidence: LocalStorageEvidence
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAnalyticsRuntimeState:
+    """Value-free counts for jobs, persistent caches, and temporary owner state."""
+
+    job_count: int
+    cache_entry_count: int
+    temporary_entry_count: int
+    fingerprint_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,14 +86,74 @@ def list_storage(
     scope: StorageScope,
     *,
     store: AnalyticsStore,
+    analytics_root: Path | None = None,
 ) -> StorageListing:
     """List retained local data through the existing typed store operation."""
     local = _run_local_only("list_storage", lambda: store.list_storage(scope))
     return StorageListing(
         visibility="owner_only",
         entries=local.value,
+        runtime_state=_runtime_state(local.value, analytics_root=analytics_root),
         evidence=local.evidence,
     )
+
+
+def _runtime_state(
+    entries: tuple[StorageEntry, ...],
+    *,
+    analytics_root: Path | None,
+) -> LocalAnalyticsRuntimeState:
+    job_count = sum(entry.data_type is StorageDataType.JOBS for entry in entries)
+    cache_types = {
+        StorageDataType.SOURCE_PAGES,
+        StorageDataType.DATASETS,
+        StorageDataType.ACCOUNT_SNAPSHOTS,
+        StorageDataType.ANALYSES,
+        StorageDataType.ARTIFACTS,
+    }
+    cache_entries = tuple(entry for entry in entries if entry.data_type in cache_types)
+    temporary_entry_count = 0 if analytics_root is None else _temporary_entry_count(analytics_root)
+    material = {
+        "jobs": sorted(
+            entry.fingerprint_sha256 for entry in entries if entry.data_type is StorageDataType.JOBS
+        ),
+        "caches": sorted(entry.fingerprint_sha256 for entry in cache_entries),
+        "temporary_entry_count": temporary_entry_count,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(material, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    return LocalAnalyticsRuntimeState(
+        job_count=job_count,
+        cache_entry_count=len(cache_entries),
+        temporary_entry_count=temporary_entry_count,
+        fingerprint_sha256=fingerprint,
+    )
+
+
+def _temporary_entry_count(analytics_root: Path) -> int:
+    if not analytics_root.is_absolute() or analytics_root.is_symlink():
+        raise StorageBoundaryError("analytics runtime root is not owner-contained")
+    try:
+        root = analytics_root.resolve(strict=True)
+    except OSError as error:
+        raise StorageBoundaryError("analytics runtime root is unavailable") from error
+    count = 0
+    for directory in (root / "job-workspaces", root / "artifacts"):
+        if not directory.exists():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise StorageBoundaryError("analytics temporary directory is unsafe")
+        try:
+            with os.scandir(directory) as children:
+                for child in children:
+                    if child.is_symlink():
+                        raise StorageBoundaryError("analytics temporary entry is unsafe")
+                    if directory.name == "job-workspaces" or child.name.startswith("."):
+                        count += 1
+        except OSError as error:
+            raise StorageBoundaryError("analytics temporary state is unavailable") from error
+    return count
 
 
 def preview_deletion(

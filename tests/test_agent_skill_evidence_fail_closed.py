@@ -42,6 +42,11 @@ from saxo_bank_mcp.agent_skill_matrix_producer import (
     run_real_matrix_report,
     validated_exact_tool_receipt,
 )
+from saxo_bank_mcp.qa_analytics_sim import (
+    BROKERAGE_STATE_COMPONENTS,
+    analytics_case_contract_sha256,
+    analytics_sim_contracts,
+)
 
 INSTALL_QA = ROOT / "scripts/qa_dual_plugin_install.py"
 MATRIX_RUNNER = ROOT / "scripts/run_mcp_tool_matrix.py"
@@ -327,13 +332,9 @@ def _scenario_tool_names() -> list[str]:
 
 
 def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
-    state = {
-        "open_orders": {"count": 0, "ids_digest": "a" * 64},
-        "positions_money": {"fingerprint": "account_bound"},
-        "subscriptions": {"local": "empty"},
-        "preview_write_state": {"fingerprint": "reset"},
-    }
+    state = _matrix_state_payload("available")
     non_exec = {"saxo_list_live_accounts", "saxo_precheck_live_order"}
+    analytics_cases = _analytics_case_payloads()
     return {
         "status": "passed",
         "environment": "SIM",
@@ -344,6 +345,8 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
                 "status": "expected_refusal" if tool in non_exec else "completed",
                 "mcp_call_observed": True,
                 "result_parsed": True,
+                "result_state": "refused" if tool in non_exec else "completed",
+                "mcp_is_error": tool in non_exec,
                 "skipped": False,
                 "requested_tool_covered": True,
                 "network_call_made": False,
@@ -356,7 +359,8 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
         ],
         "lifecycle_calls": list(LIFECYCLE_TOOLS),
         "registered_trading_write_ops": ["post.trade.v2.orders"],
-        "disclaimer_response_completed": True,
+        "disclaimer_response_made": False,
+        "disclaimer_refusal_observed": True,
         "fixture_reference_validated": True,
         "account_allowlist_resolved": True,
         "auth_status_completed": True,
@@ -366,8 +370,68 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
         "uncleaned_resources": 0,
         "hosts": ["gateway.saxobank.com"],
         "live_events": 0,
+        "live_mutation_calls": 0,
+        "analytics_tool_receipt_count": 21,
+        "analytics_case_contract_sha256": analytics_case_contract_sha256(),
+        "analytics_case_receipts": analytics_cases,
+        "mcp_only_account_fixture_state": True,
+        "cleanup_complete": True,
+        "account_state_unchanged": True,
+        "redacted_publication": True,
+        "purchase_occurred": False,
         "errors": [],
     }
+
+
+def _matrix_state_payload(observed_state: str) -> dict[str, JsonValue]:
+    return {
+        "components": [
+            {
+                "name": name,
+                "count": 0,
+                "fingerprint_sha256": "a" * 64,
+                "observed_state": observed_state,
+                "mcp_tool_ids": ["saxo_health"],
+            }
+            for name in BROKERAGE_STATE_COMPONENTS
+        ],
+    }
+
+
+def _analytics_case_payloads() -> list[JsonValue]:
+    state_by_kind = {
+        "success": "passed",
+        "degradation": "degraded",
+        "refusal": "refused",
+        "privacy": "passed",
+        "timeout": "timed_out",
+        "recovery": "refused",
+    }
+    return [
+        {
+            "tool_id": contract.tool_id,
+            "cases": [
+                {
+                    "kind": case.kind,
+                    "state": state_by_kind[case.kind],
+                    "reason_code": f"{case.kind}_observed",
+                    "mcp_call_observed": True,
+                    "result_parsed": case.kind != "timeout",
+                    "result_state": case.expected_states[0],
+                    "mcp_is_error": case.kind in {"refusal", "privacy", "timeout", "recovery"},
+                    "network_call_made": False,
+                    "broker_write_made": False,
+                    "private_values_published": False,
+                    "request_sha256": "b" * 64,
+                    "response_sha256": "c" * 64,
+                    "evidence_sha256": "d" * 64,
+                    "call_path": "fastmcp.Client.call_tool",
+                }
+                for case in contract.cases
+            ],
+        }
+        for contract in analytics_sim_contracts()
+    ]
 
 
 def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
@@ -558,24 +622,35 @@ def test_matrix_rejects_missing_tool_receipt_without_fill(
 
 
 def _blocked_matrix_payload() -> dict[str, JsonValue]:
+    unavailable = _matrix_state_payload("unavailable")
     return {
         "status": "blocked",
         "environment": "SIM",
-        "reason": "disclaimer_context_unavailable",
+        "reason": "sim_session_auth_required",
         "tool_receipts": [],
         "lifecycle_calls": [],
         "registered_trading_write_ops": [],
-        "disclaimer_response_completed": False,
+        "disclaimer_response_made": False,
+        "disclaimer_refusal_observed": False,
         "fixture_reference_validated": True,
         "account_allowlist_resolved": True,
         "auth_status_completed": True,
         "session_capabilities_completed": True,
-        "before_state_fingerprint": {},
-        "after_state_fingerprint": {},
+        "before_state_fingerprint": unavailable,
+        "after_state_fingerprint": unavailable,
         "uncleaned_resources": 0,
         "hosts": ["gateway.saxobank.com"],
         "live_events": 0,
-        "errors": ["disclaimer_context_unavailable"],
+        "live_mutation_calls": 0,
+        "analytics_tool_receipt_count": 0,
+        "analytics_case_contract_sha256": analytics_case_contract_sha256(),
+        "analytics_case_receipts": [],
+        "mcp_only_account_fixture_state": True,
+        "cleanup_complete": False,
+        "account_state_unchanged": False,
+        "redacted_publication": True,
+        "purchase_occurred": False,
+        "errors": ["sim_session_auth_required"],
     }
 
 
@@ -642,9 +717,9 @@ def test_matrix_consumes_valid_blocked_receipt_on_command_failure(
 
     assert result != 0
     assert payload["status"] == "failed"
-    assert payload["reason"] == "disclaimer_context_unavailable"
+    assert payload["reason"] == "sim_session_auth_required"
     assert payload["matrix_status"] == "blocked"
-    assert payload["errors"] == ["disclaimer_context_unavailable"]
+    assert payload["errors"] == ["sim_session_auth_required"]
     assert payload["command"]["name"] == "probe_sim_tool_matrix"
     assert payload["command"]["exit_code"] == 1
     assert "stdout" not in payload

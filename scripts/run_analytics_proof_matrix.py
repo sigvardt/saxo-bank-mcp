@@ -12,11 +12,14 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_evidence import (
     ANALYSIS_KIND_CATALOG_PATH,
     AnalyticsProofMatrixBundle,
     EvidenceCoverageError,
+    EvidenceProvenanceError,
+    authenticate_proof_producer_artifacts,
     build_proof_execution_contracts,
     load_analysis_kind_catalog,
     validate_proof_matrix_bundle,
@@ -42,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     )
     parser.add_argument("--candidate-commit", default=None)
     parser.add_argument("--receipts", type=Path, default=None)
+    parser.add_argument("--install-report", type=Path, default=None)
+    parser.add_argument("--producer-command-evidence", type=Path, default=None)
+    parser.add_argument("--producer-session-evidence", type=Path, default=None)
+    parser.add_argument("--producer-probe-evidence", type=Path, default=None)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -70,12 +77,27 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
         )
     if (
         args.receipts is None
+        or args.install_report is None
+        or args.producer_command_evidence is None
+        or args.producer_session_evidence is None
+        or args.producer_probe_evidence is None
         or not isinstance(args.candidate_commit, str)
         or _COMMIT_PATTERN.fullmatch(args.candidate_commit) is None
     ):
         return _publish(
             args.out,
-            {"status": "refused", "reason": "proof_receipts_or_candidate_missing"},
+            {"status": "refused", "reason": "proof_producer_evidence_missing"},
+            success=False,
+        )
+    install, install_errors = load_install_report_for_consumers(args.install_report)
+    if install is None:
+        return _publish(
+            args.out,
+            {
+                "status": "refused",
+                "reason": "proof_installed_candidate_unverified",
+                "errors": list(install_errors),
+            },
             success=False,
         )
     try:
@@ -100,8 +122,29 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             {"status": "failed", "reason": "proof_receipts_invalid"},
             success=False,
         )
+    try:
+        trusted_provenance = authenticate_proof_producer_artifacts(
+            bundle=bundle,
+            catalog=catalog,
+            contracts=contracts,
+            installed_candidate_commit=install.candidate_commit,
+            command_evidence_path=args.producer_command_evidence,
+            session_evidence_path=args.producer_session_evidence,
+            probe_evidence_path=args.producer_probe_evidence,
+        )
+    except EvidenceProvenanceError:
+        return _publish(
+            args.out,
+            {"status": "failed", "reason": "proof_producer_evidence_invalid"},
+            success=False,
+        )
     errors = list(
-        validate_proof_matrix_bundle(bundle, catalog=catalog, contracts=contracts),
+        validate_proof_matrix_bundle(
+            bundle,
+            catalog=catalog,
+            contracts=contracts,
+            trusted_provenance=trusted_provenance,
+        ),
     )
     if bundle.candidate_commit != args.candidate_commit:
         errors.append("candidate_commit_mismatch")

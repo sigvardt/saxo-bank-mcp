@@ -39,6 +39,7 @@ from saxo_bank_mcp.safety_state import (
     reset_safety_state,
     store_preview,
 )
+from saxo_bank_mcp.streaming import local_subscription_count
 
 __all__ = (
     "TEST_APPROVAL_FACTOR",
@@ -73,6 +74,7 @@ class SafetyKernel:
             "max_notional": self.config.max_notional,
             "pending_preview_count": pending_preview_count(),
             "committed_fingerprint_count": committed_fingerprint_count(),
+            "local_subscription_count": local_subscription_count(),
             "verifies": ["local safety configuration and in-memory preview state"],
             "does_not_verify": list(SAFETY_TOOL_DOES_NOT_VERIFY),
         }
@@ -264,10 +266,7 @@ class SafetyKernel:
             expected = stored.expected_approval_statement
             if approval_factor is None or not approval_factor.strip():
                 reasons.append("chat_approval_missing")
-            elif (
-                expected is None
-                or not secrets.compare_digest(approval_factor, expected)
-            ):
+            elif expected is None or not secrets.compare_digest(approval_factor, expected):
                 reasons.append("chat_approval_mismatch")
         if is_preview_token_committed(token_fingerprint(preview_token)) or is_committed(
             stored.request_fingerprint,

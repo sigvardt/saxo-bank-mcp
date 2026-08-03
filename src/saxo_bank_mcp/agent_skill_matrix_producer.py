@@ -12,7 +12,6 @@ from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
-    load_json_object,
     run_command,
 )
 from saxo_bank_mcp.agent_skill_install_models import (
@@ -44,7 +43,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     resolve_matrix_child_evidence_path,
 )
 from saxo_bank_mcp.qa_exact_tool_probe import ExactToolProbeReceipt
-from saxo_bank_mcp.qa_sim_tool_matrix import SimToolMatrixReceipt
+from saxo_bank_mcp.qa_sim_tool_matrix import MatrixScenarioReceipt, SimToolMatrixReceipt
 
 
 class MatrixProducerEvidenceError(ValueError):
@@ -187,10 +186,10 @@ def _try_read_fresh_matrix_receipt(path: Path) -> SimToolMatrixReceipt | None:
             return None
         if not stat.S_ISREG(path.lstat().st_mode):
             return None
-        payload = load_json_object(path)
-        if not payload:
+        payload_text = path.read_text(encoding="utf-8")
+        if not payload_text:
             return None
-        return SimToolMatrixReceipt.model_validate(payload)
+        return SimToolMatrixReceipt.model_validate_json(payload_text)
     except (ValidationError, OSError, TypeError, json.JSONDecodeError):
         return None
 
@@ -234,8 +233,7 @@ def _prepare_matrix_inputs(
 
 def _load_matrix_receipt(path: Path, out: Path) -> SimToolMatrixReceipt | int:
     try:
-        payload = load_json_object(path)
-        return SimToolMatrixReceipt.model_validate(payload)
+        return SimToolMatrixReceipt.model_validate_json(path.read_text(encoding="utf-8"))
     except (ValidationError, OSError, json.JSONDecodeError, TypeError) as exc:
         return _write_failure(
             out,
@@ -380,19 +378,7 @@ def _build_executed_report(
         raise MatrixProducerEvidenceError("scenario_tool_coverage_mismatch")
     if any(item.call_path != "fastmcp.Client.call_tool" for item in matrix.tool_receipts):
         raise MatrixProducerEvidenceError("tool_call_path_invalid")
-    tool_calls = tuple(
-        ToolCallEvidence(
-            tool=item.tool,
-            status=item.status,
-            mcp_call_observed=True,
-            result_parsed=True,
-            skipped=False,
-            requested_tool_covered=True,
-            request_digest=item.request_digest,
-            response_digest=item.response_digest,
-        )
-        for item in matrix.tool_receipts
-    )
+    tool_calls = tuple(_tool_call_evidence(item) for item in matrix.tool_receipts)
     return ExecutedMatrixReport(
         status="passed",
         execution_mode="sim_execution",
@@ -413,15 +399,16 @@ def _build_executed_report(
             session_capabilities_completed=True,
             fixture_reference_validated=True,
             account_allowlist_resolved=True,
-            disclaimer_response_completed=True,
+            disclaimer_response_made=False,
+            disclaimer_refusal_observed=True,
         ),
         transport_ledger=MatrixTransportLedger(
             sim_only=True,
             live_events=0,
             hosts=matrix.hosts or ("gateway.saxobank.com",),
         ),
-        before_state_fingerprint=matrix.before_state_fingerprint,
-        after_state_fingerprint=matrix.after_state_fingerprint,
+        before_state_fingerprint=matrix.before_state_fingerprint.model_dump(mode="json"),
+        after_state_fingerprint=matrix.after_state_fingerprint.model_dump(mode="json"),
         cleanup=MatrixCleanup(
             complete=True,
             uncleaned_resources=0,
@@ -445,11 +432,28 @@ def _require_preflight(matrix: SimToolMatrixReceipt) -> None:
         (matrix.session_capabilities_completed, "session_capabilities_preflight_missing"),
         (matrix.fixture_reference_validated, "fixture_preflight_invalid"),
         (matrix.account_allowlist_resolved, "account_allowlist_preflight_missing"),
-        (matrix.disclaimer_response_completed, "disclaimer_response_missing"),
+        (not matrix.disclaimer_response_made, "disclaimer_response_forbidden"),
+        (matrix.disclaimer_refusal_observed, "disclaimer_safe_refusal_missing"),
+        (matrix.mcp_only_account_fixture_state, "matrix_non_mcp_state_probe"),
     )
     for ok, reason in checks:
         if not ok:
             raise MatrixProducerEvidenceError(reason)
+
+
+def _tool_call_evidence(item: MatrixScenarioReceipt) -> ToolCallEvidence:
+    if item.status == "failed" or not item.result_parsed:
+        raise MatrixProducerEvidenceError("tool_result_not_successfully_parsed")
+    return ToolCallEvidence(
+        tool=item.tool,
+        status=item.status,
+        mcp_call_observed=True,
+        result_parsed=True,
+        skipped=False,
+        requested_tool_covered=True,
+        request_digest=item.request_digest,
+        response_digest=item.response_digest,
+    )
 
 
 def _git_head(repo: Path) -> str:

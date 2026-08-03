@@ -7,7 +7,6 @@ from typing import Final
 import pytest
 from pydantic import ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_chart_semantics import core_template_bindings
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_proof_profiles import load_proof_profile_catalog
@@ -19,14 +18,23 @@ from saxo_bank_mcp.qa_analytics_artifacts import (
 from saxo_bank_mcp.qa_analytics_evidence import (
     PROOF_EXECUTION_KINDS,
     AnalysisEvidenceReceipt,
+    AnalysisKindCatalog,
+    AnalysisProofExecutionContract,
     AnalyticsProofMatrixBundle,
     EvidenceCoverageError,
+    EvidenceProvenanceError,
     ProofCaseReceipt,
     ProofExecutionKind,
     SkillScenarioEvidenceReceipt,
+    authenticate_proof_producer_artifacts,
     build_proof_execution_contracts,
+    canonical_evidence_sha256,
     catalog_coverage_errors,
+    coverage_catalog_sha256,
     load_analysis_kind_catalog,
+    producer_command_receipt_sha256,
+    proof_bundle_sha256,
+    proof_contract_sha256,
     validate_analysis_evidence,
     validate_proof_matrix_bundle,
 )
@@ -42,6 +50,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     ControlledSimCaseReceipt,
     ControlledSimLifecycleReceipt,
     PostSendTimeoutReceipt,
+    analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_sim_contracts,
 )
@@ -101,15 +110,28 @@ def _analytics_case_receipt(kind: AnalyticsCaseKind) -> AnalyticsCaseReceipt:
         "refusal": "refused",
         "privacy": "passed",
         "timeout": "timed_out",
-        "recovery": "reconciled",
+        "recovery": "refused",
     }
     return AnalyticsCaseReceipt(
         kind=kind,
         state=states[kind],
         reason_code=f"{kind}_observed",
+        mcp_call_observed=True,
+        result_parsed=kind != "timeout",
+        result_state={
+            "success": "passed",
+            "degradation": "degraded",
+            "refusal": "refused",
+            "privacy": "refused",
+            "timeout": "timed_out",
+            "recovery": "refused",
+        }[kind],
+        mcp_is_error=kind in {"refusal", "privacy", "timeout", "recovery"},
         network_call_made=False,
         broker_write_made=False,
         private_values_published=False,
+        request_sha256="9" * 64,
+        response_sha256="a" * 64,
         evidence_sha256="8" * 64,
     )
 
@@ -305,7 +327,11 @@ def test_failed_or_incomplete_proof_cannot_be_published_as_passed() -> None:
         )
 
 
-def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
+def _complete_bundle() -> tuple[
+    AnalysisKindCatalog,
+    tuple[AnalysisProofExecutionContract, ...],
+    AnalyticsProofMatrixBundle,
+]:
     catalog = load_analysis_kind_catalog()
     contracts = build_proof_execution_contracts(catalog=catalog)
     candidate = "1" * 40
@@ -364,37 +390,50 @@ def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
     matrix_receipts = tuple(
         receipt_for(tool, {"status": "completed"}, {}) for tool in sorted(catalog.tool_ids)
     )
-    state_payload: dict[str, JsonValue] = {
-        "state": {"count": 0, "fingerprint": "3" * 64},
-    }
+    brokerage_state = BrokerageStateFingerprint(
+        components=tuple(
+            BrokerageStateComponent(
+                name=name,
+                count=0,
+                fingerprint_sha256="4" * 64,
+                observed_state="available",
+                mcp_tool_ids=("saxo_health",),
+            )
+            for name in BROKERAGE_STATE_COMPONENTS
+        ),
+    )
+    analytics_case_receipts = tuple(
+        AnalyticsToolCaseEvidence(
+            tool_id=contract.tool_id,
+            cases=tuple(_analytics_case_receipt(case.kind) for case in contract.cases),
+        )
+        for contract in analytics_sim_contracts()
+    )
     matrix = SimToolMatrixReceipt(
         status="passed",
         tool_receipts=matrix_receipts,
         lifecycle_calls=(),
         registered_trading_write_ops=(),
-        disclaimer_response_completed=True,
+        disclaimer_response_made=False,
+        disclaimer_refusal_observed=True,
         fixture_reference_validated=True,
         account_allowlist_resolved=True,
         auth_status_completed=True,
         session_capabilities_completed=True,
-        before_state_fingerprint=state_payload,
-        after_state_fingerprint=state_payload,
+        before_state_fingerprint=brokerage_state,
+        after_state_fingerprint=brokerage_state,
         uncleaned_resources=0,
         hosts=("gateway.saxobank.com",),
         live_events=0,
         live_mutation_calls=0,
         analytics_tool_receipt_count=len(ANALYTICS_TOOL_IDS),
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
+        analytics_case_receipts=analytics_case_receipts,
+        mcp_only_account_fixture_state=True,
         cleanup_complete=True,
         account_state_unchanged=True,
         redacted_publication=True,
         errors=(),
-    )
-    brokerage_state = BrokerageStateFingerprint(
-        components=tuple(
-            BrokerageStateComponent(name=name, count=0, fingerprint_sha256="4" * 64)
-            for name in BROKERAGE_STATE_COMPONENTS
-        ),
     )
     lifecycle = ControlledSimLifecycleReceipt(
         environment="SIM",
@@ -403,7 +442,8 @@ def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
                 case_id=case_id,
                 state="passed",
                 reason_code="passed",
-                source_request_count=0,
+                source_request_count=0 if case_id == "cleanup" else 1,
+                mcp_call_count=1,
                 sim_mutation_call_count=0,
                 cleanup_complete=True,
                 entitlement_state=(
@@ -430,13 +470,7 @@ def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
         artifact_parity_receipts=parity,
         artifact_visual_receipts=visual,
         sim_tool_matrix=matrix,
-        analytics_tool_case_receipts=tuple(
-            AnalyticsToolCaseEvidence(
-                tool_id=contract.tool_id,
-                cases=tuple(_analytics_case_receipt(case.kind) for case in contract.cases),
-            )
-            for contract in analytics_sim_contracts()
-        ),
+        analytics_tool_case_receipts=analytics_case_receipts,
         controlled_sim_lifecycle=lifecycle,
         post_send_timeout=PostSendTimeoutReceipt(
             operation_kind="controlled_sim_fixture",
@@ -467,37 +501,129 @@ def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
         private_values_published=False,
     )
 
+    return catalog, contracts, bundle
+
+
+def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
+    catalog, contracts, bundle = _complete_bundle()
+
     assert validate_proof_matrix_bundle(bundle, catalog=catalog, contracts=contracts) == (
+        "trusted_producer_provenance_missing",
         "proof_profiles_not_active",
     )
 
-    legacy_matrix_payload = matrix.model_dump(mode="json")
-    for field_name in (
-        "live_mutation_calls",
-        "analytics_tool_receipt_count",
-        "analytics_case_contract_sha256",
-        "cleanup_complete",
-        "account_state_unchanged",
-        "redacted_publication",
+    missing_required = bundle.sim_tool_matrix.model_dump(mode="json")
+    missing_required.pop("analytics_case_receipts")
+    with pytest.raises(ValidationError):
+        SimToolMatrixReceipt.model_validate(missing_required)
+
+    active_contracts = tuple(
+        contract.model_copy(
+            update={
+                "proof_activation_state": "active",
+                "quarantine_reason": None,
+            },
+        )
+        for contract in contracts
+    )
+    assert validate_proof_matrix_bundle(
+        bundle,
+        catalog=catalog,
+        contracts=active_contracts,
+    ) == ("trusted_producer_provenance_missing",)
+
+
+def test_only_owner_bound_candidate_producer_evidence_issues_trusted_provenance(
+    tmp_path: Path,
+) -> None:
+    catalog, contracts, bundle = _complete_bundle()
+    evidence_root = tmp_path / "producer-evidence"
+    evidence_root.mkdir(mode=0o700)
+    evidence_root.chmod(0o700)
+    session_payload = {
+        "candidate_commit": bundle.candidate_commit,
+        "environment": "SIM",
+        "fastmcp_session_sha256": canonical_evidence_sha256(
+            bundle.sim_tool_matrix.model_dump(mode="json"),
+        ),
+        "fastmcp_call_count": len(catalog.tool_ids) + len(analytics_case_calls()),
+        "matrix_tool_receipt_count": 60,
+        "analytics_case_receipt_count": len(analytics_case_calls()),
+        "mcp_transport_observed": True,
+        "live_events": 0,
+        "live_mutation_calls": 0,
+        "disclaimer_response_made": False,
+        "purchase_occurred": False,
+    }
+    probe_payload = {
+        "candidate_commit": bundle.candidate_commit,
+        "bundle_sha256": proof_bundle_sha256(bundle),
+        "coverage_catalog_sha256": coverage_catalog_sha256(catalog),
+        "proof_contract_sha256": proof_contract_sha256(contracts),
+        "analysis_receipt_count": len(contracts),
+        "proof_case_receipt_count": sum(len(contract.cases) for contract in contracts),
+        "artifact_parity_receipt_count": len(catalog.artifact_template_ids),
+        "artifact_visual_receipt_count": len(catalog.artifact_template_ids),
+        "skill_scenario_receipt_count": len(catalog.skill_scenario_tools),
+    }
+    session_sha = canonical_evidence_sha256(session_payload)
+    probe_sha = canonical_evidence_sha256(probe_payload)
+    command_payload = {
+        "producer": "run_analytics_proof_matrix",
+        "candidate_commit": bundle.candidate_commit,
+        "installed_candidate_commit": bundle.candidate_commit,
+        "command_name": "analytics_proof_matrix",
+        "command_exit_code": 0,
+        "command_timed_out": False,
+        "command_cleanup_complete": True,
+        "command_receipt_sha256": producer_command_receipt_sha256(
+            candidate_commit=bundle.candidate_commit,
+            installed_candidate_commit=bundle.candidate_commit,
+            session_receipt_sha256=session_sha,
+            probe_receipt_sha256=probe_sha,
+        ),
+    }
+    paths = tuple(evidence_root / name for name in ("command.json", "session.json", "probe.json"))
+    for path, payload in zip(
+        paths,
+        (command_payload, session_payload, probe_payload),
+        strict=True,
     ):
-        legacy_matrix_payload.pop(field_name)
-    legacy_bundle = bundle.model_copy(
-        update={
-            "sim_tool_matrix": SimToolMatrixReceipt.model_validate(legacy_matrix_payload),
-        },
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        path.chmod(0o600)
+
+    provenance = authenticate_proof_producer_artifacts(
+        bundle=bundle,
+        catalog=catalog,
+        contracts=contracts,
+        installed_candidate_commit=bundle.candidate_commit,
+        command_evidence_path=paths[0],
+        session_evidence_path=paths[1],
+        probe_evidence_path=paths[2],
+    )
+    assert validate_proof_matrix_bundle(
+        bundle,
+        catalog=catalog,
+        contracts=contracts,
+        trusted_provenance=provenance,
+    ) == ("proof_profiles_not_active",)
+
+    changed_bundle = bundle.model_copy(update={"candidate_commit": "2" * 40})
+    assert "trusted_producer_provenance_invalid" in validate_proof_matrix_bundle(
+        changed_bundle,
+        catalog=catalog,
+        contracts=contracts,
+        trusted_provenance=provenance,
     )
 
-    assert {
-        "sim_tool_matrix_live_mutation",
-        "analytics_sim_tool_receipt_count_mismatch",
-        "analytics_sim_case_contract_mismatch",
-        "sim_tool_matrix_cleanup_incomplete",
-        "sim_tool_matrix_account_state_changed",
-        "sim_tool_matrix_publication_not_redacted",
-    } <= set(
-        validate_proof_matrix_bundle(
-            legacy_bundle,
+    paths[0].chmod(0o644)
+    with pytest.raises(EvidenceProvenanceError, match="owner-only"):
+        authenticate_proof_producer_artifacts(
+            bundle=bundle,
             catalog=catalog,
             contracts=contracts,
-        ),
-    )
+            installed_candidate_commit=bundle.candidate_commit,
+            command_evidence_path=paths[0],
+            session_evidence_path=paths[1],
+            probe_evidence_path=paths[2],
+        )
