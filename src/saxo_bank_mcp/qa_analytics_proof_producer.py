@@ -15,7 +15,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Final, Literal, Self, cast
 
-import anyio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from saxo_bank_mcp.agent_skill_command_runner import (
@@ -40,9 +39,6 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
-from saxo_bank_mcp.mcp_analytics_tools import (
-    _run_installed_matrix_proof_session,
-)
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
     ArtifactVisualIntegrityReceipt,
@@ -65,6 +61,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     PostSendTimeoutReceipt,
     analytics_case_calls,
 )
+from saxo_bank_mcp.qa_installed_matrix_envelope import InstalledMatrixEnvelope
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -74,6 +71,25 @@ _COMMAND_NAME = "analytics_proof_producer"
 _AGENT_EVAL_COMMAND_NAME = "analytics_installed_dual_evaluation"
 _PROCESS_AUTHORITY = object()
 _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
+_MATRIX_CHILD_COMMAND_NAME = "analytics_installed_matrix_child"
+_MATRIX_CHILD_TIMEOUT_SECONDS = 1800
+_MATRIX_CHILD_ENV_KEYS: Final = (
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "UV_CACHE_DIR",
+    "UV_PROJECT_ENVIRONMENT",
+    "XDG_STATE_HOME",
+    "SAXO_MCP_SIM_CREDENTIAL_FILE",
+    "SAXO_MCP_SIM_REDIRECT_URI",
+    "SAXO_MCP_TOKEN_CACHE_PATH",
+    "SAXO_MCP_SIM_AUTH_URL",
+    "SAXO_MCP_SIM_TOKEN_URL",
+    "SAXO_MCP_ACCOUNT_ALLOWLIST",
+    "SAXO_MCP_INSTRUMENT_ALLOWLIST",
+)
 
 type MeasuredProofOperationKind = Literal[
     "analysis_result_observation",
@@ -483,6 +499,95 @@ def produce_installed_result(
     )
 
 
+def _run_installed_matrix_proof_session(
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+) -> SimToolMatrixReceipt:
+    """Launch the installed SIM child and authenticate its exact serialized envelope."""
+    if _COMMIT_PATTERN.fullmatch(candidate_commit) is None:
+        raise ProofProducerError("installed_matrix_candidate_invalid")
+    if (
+        not analysis_kinds
+        or len(analysis_kinds) != len(set(analysis_kinds))
+        or any(re.fullmatch(r"[a-z][a-z0-9_]{0,127}", kind) is None for kind in analysis_kinds)
+    ):
+        raise ProofProducerError("installed_matrix_analysis_kinds_invalid")
+    if os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper() != "SIM":
+        raise ProofProducerError("installed_matrix_environment_invalid")
+    environment = {
+        key: value for key in _MATRIX_CHILD_ENV_KEYS if (value := os.environ.get(key)) is not None
+    }
+    environment.update(
+        {
+            "PATH": environment.get("PATH", "/usr/bin:/bin"),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "SAXO_MCP_ENABLE_LIVE_READS": "0",
+            "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+            "SAXO_MCP_ENVIRONMENT": "SIM",
+        },
+    )
+    command = (
+        sys.executable,
+        "-I",
+        "-m",
+        "saxo_bank_mcp.qa_installed_matrix_child",
+        "--candidate",
+        candidate_commit,
+        *(part for kind in analysis_kinds for part in ("--analysis-kind", kind)),
+    )
+    cwd = Path.cwd().resolve()
+    try:
+        result = run_command(
+            _MATRIX_CHILD_COMMAND_NAME,
+            command,
+            cwd=cwd,
+            env=environment,
+            timeout_seconds=_MATRIX_CHILD_TIMEOUT_SECONDS,
+        )
+    except (CommandFailureError, OSError, ValueError) as error:
+        raise ProofProducerError("installed_matrix_child_result_invalid") from error
+    receipt = result.receipt
+    if (
+        receipt.name != _MATRIX_CHILD_COMMAND_NAME
+        or receipt.argv != command
+        or receipt.cwd != str(cwd)
+        or receipt.pid is None
+        or receipt.pid <= 0
+        or receipt.pgid is None
+        or receipt.pgid <= 0
+        or receipt.exit_code != 0
+        or receipt.timed_out
+        or not receipt.cleanup_attempted
+        or receipt.stdout_sha256 != hashlib.sha256(result.stdout.encode()).hexdigest()
+        or receipt.stderr_sha256 != hashlib.sha256(result.stderr.encode()).hexdigest()
+        or result.stderr != ""
+    ):
+        raise ProofProducerError("installed_matrix_child_result_invalid")
+    try:
+        envelope = InstalledMatrixEnvelope.model_validate_json(result.stdout)
+    except ValidationError as error:
+        raise ProofProducerError("installed_matrix_child_result_invalid") from error
+    if envelope.candidate_commit != candidate_commit or envelope.analysis_kinds != analysis_kinds:
+        raise ProofProducerError("installed_matrix_child_result_invalid")
+    matrix = envelope.matrix
+    if (
+        matrix.status != "passed"
+        or matrix.environment != "SIM"
+        or not matrix.redacted_publication
+        or matrix.live_events != 0
+        or matrix.live_mutation_calls != 0
+        or not matrix.cleanup_complete
+        or not matrix.account_state_unchanged
+        or matrix.before_state_fingerprint != matrix.after_state_fingerprint
+        or matrix.uncleaned_resources != 0
+        or matrix.errors
+        or matrix.purchase_occurred
+        or matrix.disclaimer_response_made
+    ):
+        raise ProofProducerError("installed_matrix_child_result_invalid")
+    return matrix
+
+
 def _execute_installed_proof_bundle(
     *,
     candidate_commit: str,
@@ -502,8 +607,7 @@ def _execute_installed_proof_bundle(
     )
     suite_evidence = _run_installed_offline_proof_suite()
     matrix = SimToolMatrixReceipt.model_validate(
-        anyio.run(
-            _run_installed_matrix_proof_session,
+        _run_installed_matrix_proof_session(
             candidate_commit,
             catalog.analysis_kinds,
         ),

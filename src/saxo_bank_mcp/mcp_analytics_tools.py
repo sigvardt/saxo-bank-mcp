@@ -9,19 +9,16 @@ import hashlib
 import json
 import os
 import re
-import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from pathlib import Path
 from threading import RLock
 from typing import Annotated, Final, Literal, cast
 
 import mcp.types as mt
 from fastmcp.tools import ToolResult
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
 
-from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.analytics_account_data import (
     AccountScope,
     sync_account_analysis_sources,
@@ -182,7 +179,6 @@ from saxo_bank_mcp.analytics_universes import (
 from saxo_bank_mcp.config import SaxoRuntimeConfig, resolve_sim_auth_settings
 from saxo_bank_mcp.mcp_token_state import CachedTokenBlocked, cached_token_for_tool
 from saxo_bank_mcp.process_scoped_selectors import resolve_bound_account_selector
-from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 
 type AnalysisVisibility = Literal[
@@ -2237,82 +2233,6 @@ def _known_failure_details(error: Exception) -> tuple[str, str]:
 
 def _server_environment() -> str:
     return os.environ.get("SAXO_MCP_ENVIRONMENT", "SIM").strip().upper()
-
-
-_MATRIX_CHILD_ENV_KEYS: Final = (
-    "HOME",
-    "PATH",
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "UV_CACHE_DIR",
-    "UV_PROJECT_ENVIRONMENT",
-    "XDG_STATE_HOME",
-    "SAXO_MCP_SIM_CREDENTIAL_FILE",
-    "SAXO_MCP_SIM_REDIRECT_URI",
-    "SAXO_MCP_TOKEN_CACHE_PATH",
-    "SAXO_MCP_SIM_AUTH_URL",
-    "SAXO_MCP_SIM_TOKEN_URL",
-    "SAXO_MCP_ACCOUNT_ALLOWLIST",
-    "SAXO_MCP_INSTRUMENT_ALLOWLIST",
-)
-
-
-async def _run_installed_matrix_proof_session(  # pyright: ignore[reportUnusedFunction]
-    candidate_commit: str,
-    analysis_kinds: Sequence[str],
-) -> SimToolMatrixReceipt:
-    """Run the authority-bearing matrix only in a cleaned isolated child process."""
-    if re.fullmatch(r"[a-f0-9]{40}", candidate_commit) is None:
-        raise ValueError("process proof candidate is invalid")
-    if not analysis_kinds or any(
-        re.fullmatch(r"[a-z][a-z0-9_]{0,127}", kind) is None for kind in analysis_kinds
-    ):
-        raise ValueError("process proof analysis kinds are invalid")
-    if _server_environment() != "SIM":
-        raise ValueError("installed matrix child requires SIM")
-    environment = {
-        key: value for key in _MATRIX_CHILD_ENV_KEYS if (value := os.environ.get(key)) is not None
-    }
-    environment.update(
-        {
-            "PATH": environment.get("PATH", "/usr/bin:/bin"),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "SAXO_MCP_ENABLE_LIVE_READS": "0",
-            "SAXO_MCP_ENABLE_LIVE_WRITES": "",
-            "SAXO_MCP_ENVIRONMENT": "SIM",
-        },
-    )
-    command = (
-        sys.executable,
-        "-I",
-        "-m",
-        "saxo_bank_mcp.qa_installed_matrix_child",
-        "--candidate",
-        candidate_commit,
-        *(part for kind in analysis_kinds for part in ("--analysis-kind", kind)),
-    )
-    await asyncio.sleep(0)
-    try:
-        result = run_command(
-            "analytics_installed_matrix_child",
-            command,
-            cwd=Path.cwd().resolve(),
-            env=environment,
-            timeout_seconds=1800,
-        )
-        receipt = SimToolMatrixReceipt.model_validate_json(result.stdout)
-    except (CommandFailureError, ValidationError) as error:
-        raise ValueError("installed matrix child result unavailable") from error
-    if (
-        result.receipt.exit_code != 0
-        or result.receipt.timed_out
-        or not result.receipt.cleanup_attempted
-        or receipt.environment != "SIM"
-        or not receipt.redacted_publication
-    ):
-        raise ValueError("installed matrix child result unavailable")
-    return receipt
 
 
 def _current_process_proof_registry(

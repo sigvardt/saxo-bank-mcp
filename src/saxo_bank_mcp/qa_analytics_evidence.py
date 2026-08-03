@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 """Generated coverage and strict proof contracts for all production analytics kinds."""
 
 from __future__ import annotations
@@ -6,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Self
 
@@ -87,69 +87,71 @@ ANALYSIS_KIND_CATALOG_PATH: Final = (
     _SOURCE_CATALOG_PATH if _SOURCE_CATALOG_PATH.is_file() else _WORKTREE_CATALOG_PATH
 )
 _SAFE_ID_PATTERN: Final = r"^[a-z][a-z0-9_]{0,127}$"
-_ANALYSIS_PROPERTY_MEASUREMENT_NODES: Final[dict[str, str]] = {
-    "cash_and_settlement": "tests.test_analytics_liquidity::test_cash_settlement_and_multi_currency_identities_reconcile",
-    "corporate_action_center": "tests.test_analytics_income::test_authoritative_corporate_action_claim_refuses_missing_basis_or_entitlement",
-    "cost_xray": "tests.test_analytics_costs::test_cost_components_sum_with_positive_fee_signs_partial_fills_and_correction",
-    "derivatives_model": "tests.test_analytics_derivatives::test_option_model_and_strategy_are_owner_only_reduced_proposals",
-    "derivatives_scenario": "tests.test_analytics_derivatives::test_option_model_and_strategy_are_owner_only_reduced_proposals",
-    "execution_quality": "tests.test_analytics_trade_review::test_mcp_decision_quote_allows_exact_arrival_midpoint_and_spread_claims",
-    "fixed_income": "tests.test_analytics_fixed_income::test_golden_par_bond_yield_duration_convexity_carry_and_roll_down",
-    "futures_curve": "tests.test_analytics_derivatives::test_futures_basis_carry_term_structure_and_roll_follow_frozen_formulas",
-    "fx_forward_carry": "tests.test_analytics_derivatives::test_fx_forward_and_carry_follow_covered_interest_parity",
-    "goal_model": "tests.test_analytics_monte_carlo::test_zero_return_limit_has_exact_goal_ruin_and_sequence_results",
-    "income_calendar": "tests.test_analytics_income::test_income_corrections_dividends_and_multi_currency_reconcile_gross_to_net",
-    "instrument_dossier": "tests.test_analytics_instruments::test_golden_price_risk_drawdown_and_rolling_values_use_task11_metrics",
-    "instrument_price_return": "tests.test_analytics_instruments::test_golden_price_risk_drawdown_and_rolling_values_use_task11_metrics",
-    "instrument_price_volume": "tests.test_analytics_indicators::test_golden_indicator_formulas_match_independent_scalar_calculations",
-    "instrument_quote": "tests.test_analytics_instruments::test_noaccess_price_type_never_becomes_a_complete_quote",
-    "instrument_resolution": "tests.test_analytics_resolver::test_exchange_filter_selects_one_listing_explicitly",
-    "instrument_risk": "tests.test_analytics_metrics::test_risk_metrics_match_hand_checked_golden_and_reference",
-    "portfolio_risk": "tests.test_analytics_metrics::test_risk_metrics_match_hand_checked_golden_and_reference",
-    "iv_surface": "tests.test_analytics_derivatives::test_smile_skew_and_exact_term_structure_are_deterministic",
-    "margin_fire_drill": "tests.test_analytics_scenarios::test_combined_shocks_apply_simultaneously_and_reconcile_contributions",
-    "portfolio_scenario": "tests.test_analytics_scenarios::test_combined_shocks_apply_simultaneously_and_reconcile_contributions",
-    "scenario_combined": "tests.test_analytics_scenarios::test_combined_shocks_apply_simultaneously_and_reconcile_contributions",
-    "scenario_margin": "tests.test_analytics_scenarios::test_combined_shocks_apply_simultaneously_and_reconcile_contributions",
-    "market_comparison": "tests.test_analytics_market::test_bounded_movers_breadth_comparison_and_correlation_never_claim_the_market",
-    "multi_instrument_comparison": "tests.test_analytics_market::test_bounded_movers_breadth_comparison_and_correlation_never_claim_the_market",
-    "market_correlation_regime": "tests.test_analytics_market::test_correlation_aligns_both_period_endpoints_before_enforcing_minimum",
-    "market_microstructure": "tests.test_analytics_market::test_entitled_depth_computes_spread_depth_and_imbalance",
-    "market_volatility_dispersion": "tests.test_analytics_market::test_missing_regime_inputs_are_unavailable_instead_of_low",
-    "monte_carlo": "tests.test_analytics_monte_carlo::test_same_seed_is_byte_stable_and_probability_outputs_are_not_predictions",
-    "option_chain": "tests.test_analytics_market_data::test_option_chain_keeps_only_complete_references_and_marks_missing_currency",
-    "option_greeks": "tests.test_analytics_options::test_analytic_greeks_match_independent_finite_differences",
-    "option_payoff": "tests.test_analytics_options::test_multi_leg_payoff_and_aggregate_greeks_reconcile_to_leg_sums",
-    "portfolio_attribution": "tests.test_analytics_attribution::test_attribution_contributions_currency_and_cost_components_reconcile",
-    "portfolio_comparison": "tests.test_analytics_optimization::test_correlated_golden_case_matches_independent_reference",
-    "portfolio_exposure": "tests.test_analytics_exposure::test_exposure_handles_shorts_derivatives_fx_and_allocation_identities",
-    "portfolio_margin": "tests.test_analytics_exposure::test_exposure_handles_shorts_derivatives_fx_and_allocation_identities",
-    "portfolio_minimum_variance": "tests.test_analytics_optimization::test_minimum_variance_known_answer_reference_and_kkt_residuals",
-    "portfolio_overview": "tests.test_analytics_portfolio::test_portfolio_accounting_identity_flows_corrections_and_costs",
-    "portfolio_performance": "tests.test_analytics_portfolio::test_flow_free_period_keeps_exact_single_period_return",
-    "portfolio_risk_parity": "tests.test_analytics_optimization::test_risk_parity_known_answer_and_normalized_contributions",
-    "portfolio_time_machine": "tests.test_analytics_portfolio::test_partial_history_reduces_and_account_aliases_remain_isolated",
-    "position_sizing": "tests.test_analytics_position_sizing::test_stop_sizing_uses_explicit_loss_budget_and_exact_constraints",
-    "pretrade_impact": "tests.test_analytics_pretrade::test_pretrade_cost_illustration_mismatch_requires_an_exact_named_difference",
-    "regulatory_cost_report": "tests.test_analytics_costs::test_saxo_cost_illustration_requires_exact_or_named_reconciliation",
-    "trading_conditions": "tests.test_analytics_costs::test_saxo_cost_illustration_requires_exact_or_named_reconciliation",
-    "scenario_currency": "tests.test_analytics_scenarios::test_zero_shock_is_identity_and_preserves_margin_headroom",
-    "scenario_custom": "tests.test_analytics_scenarios::test_zero_shock_is_identity_and_preserves_margin_headroom",
-    "scenario_rate": "tests.test_analytics_scenarios::test_zero_shock_is_identity_and_preserves_margin_headroom",
-    "scenario_volatility": "tests.test_analytics_scenarios::test_zero_shock_is_identity_and_preserves_margin_headroom",
-    "scenario_historical": "tests.test_analytics_scenarios::test_historical_replay_refuses_without_bound_endpoint_observations",
-    "session_cockpit": "tests.test_analytics_market::test_session_preparation_is_bounded_and_reports_quote_quality",
-    "technical_indicators": "tests.test_analytics_indicators::test_snapshot_covers_trend_momentum_volume_and_realized_volatility",
-    "trading_mirror": "tests.test_analytics_trade_review::test_trading_mirror_handles_partial_fills_corrections_and_behavior_metrics",
-    "wrapper_comparison": "tests.test_analytics_market::test_wrapper_comparison_uses_only_same_exposure_horizon_and_currency",
+type ExactOfflineOperationKind = Literal[
+    "known_answer_comparison",
+    "property_assertion",
+    "independent_reference_comparison",
+    "accounting_identity_comparison",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ExactOfflineProofBinding:
+    """One exact installed assertion and its measured call semantics."""
+
+    test_node_id: str
+    operation_kind: ExactOfflineOperationKind
+    observed_calls_per_case: int
+    comparisons_per_case: int = 0
+    reference_calls_per_case: int = 0
+
+
+EXACT_OFFLINE_PROOF_SUPPORT: Final[
+    dict[tuple[str, ProofExecutionKind], ExactOfflineProofBinding]
+] = {
+    ("cash_and_settlement", "accounting_identity"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_liquidity::test_cash_settlement_and_multi_currency_identities_reconcile",
+        operation_kind="accounting_identity_comparison",
+        observed_calls_per_case=1,
+        comparisons_per_case=1,
+    ),
+    ("fixed_income", "known_answer"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_fixed_income::test_golden_par_bond_yield_duration_convexity_carry_and_roll_down",
+        operation_kind="known_answer_comparison",
+        observed_calls_per_case=1,
+        comparisons_per_case=1,
+    ),
+    ("fixed_income", "property"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_fixed_income::test_property_positive_cash_flow_price_falls_as_yield_rises",
+        operation_kind="property_assertion",
+        observed_calls_per_case=2,
+    ),
+    ("instrument_price_return", "independent_reference"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_properties::test_property_price_scale_does_not_change_returns",
+        operation_kind="independent_reference_comparison",
+        observed_calls_per_case=4,
+        comparisons_per_case=1,
+        reference_calls_per_case=1,
+    ),
+    ("instrument_price_return", "property"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_properties::test_property_price_scale_does_not_change_returns",
+        operation_kind="property_assertion",
+        observed_calls_per_case=4,
+    ),
+    ("portfolio_minimum_variance", "independent_reference"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_optimization::test_minimum_variance_known_answer_reference_and_kkt_residuals",
+        operation_kind="independent_reference_comparison",
+        observed_calls_per_case=2,
+        comparisons_per_case=1,
+        reference_calls_per_case=1,
+    ),
+    ("portfolio_minimum_variance", "known_answer"): ExactOfflineProofBinding(
+        test_node_id="tests.test_analytics_optimization::test_minimum_variance_known_answer_reference_and_kkt_residuals",
+        operation_kind="known_answer_comparison",
+        observed_calls_per_case=2,
+        comparisons_per_case=1,
+    ),
 }
-_EXACT_ANALYSIS_MEASUREMENT_NODES: Final[dict[tuple[str, ProofExecutionKind], str]] = {
-    (analysis_kind, "property"): node_id
-    for analysis_kind, node_id in _ANALYSIS_PROPERTY_MEASUREMENT_NODES.items()
-}
-EXACT_OFFLINE_PROOF_SUPPORT: Final[frozenset[tuple[str, ProofExecutionKind]]] = frozenset(
-    _EXACT_ANALYSIS_MEASUREMENT_NODES,
-)
 _OFFLINE_PROOF_KINDS: Final[frozenset[ProofExecutionKind]] = frozenset(
     {
         "source_contract",
@@ -173,9 +175,20 @@ def exact_analysis_measurement_node_id(
 ) -> str:
     """Return the domain assertion bound to one exact supported proof pair."""
     try:
-        return _EXACT_ANALYSIS_MEASUREMENT_NODES[(analysis_kind, case_kind)]
+        return EXACT_OFFLINE_PROOF_SUPPORT[(analysis_kind, case_kind)].test_node_id
     except KeyError as error:
         raise EvidenceCoverageError("analysis measurement node is not catalogued") from error
+
+
+def exact_offline_proof_binding(
+    analysis_kind: str,
+    case_kind: ProofExecutionKind,
+) -> ExactOfflineProofBinding:
+    """Return measured semantics for one exact supported proof pair."""
+    try:
+        return EXACT_OFFLINE_PROOF_SUPPORT[(analysis_kind, case_kind)]
+    except KeyError as error:
+        raise EvidenceCoverageError("analysis proof binding is not catalogued") from error
 
 
 class EvidenceCoverageError(ValueError):

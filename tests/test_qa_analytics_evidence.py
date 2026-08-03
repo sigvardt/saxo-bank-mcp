@@ -71,6 +71,9 @@ EXPECTED_ANALYSIS_KIND_COUNT: Final = 54
 EXPECTED_TOOL_COUNT: Final = 60
 EXPECTED_ARTIFACT_TEMPLATE_COUNT: Final = 20
 SHA256_HEX_LENGTH: Final = 64
+FIXED_INCOME_PROPERTY_CASES: Final = 40
+RETURN_PROPERTY_CASES: Final = 60
+MATRIX_CHILD_TIMEOUT_SECONDS: Final = 1800
 
 
 def _case_receipt(kind: ProofExecutionKind, *, applicable: bool = True) -> ProofCaseReceipt:
@@ -234,18 +237,15 @@ def test_every_analysis_kind_has_one_complete_proof_execution_contract() -> None
         assert all(item.mode != "global" for item in contract.metric_tolerances)
 
 
-def test_proof_contracts_keep_unmeasured_reference_and_mutation_not_applicable() -> None:
+def test_proof_contracts_keep_unmeasured_cases_not_applicable() -> None:
     contracts = build_proof_execution_contracts()
 
     for contract in contracts:
         by_kind = {case.kind: case for case in contract.cases}
         assert by_kind["known_answer"].requirement_code == "known_answer_exact"
         assert by_kind["property"].requirement_code == "seeded_property_invariants"
-        assert by_kind["property"].applicability == "required"
         assert by_kind["metamorphic"].requirement_code == "named_metamorphic_relations"
         assert by_kind["independent_reference"].independent_path_required is True
-        assert by_kind["independent_reference"].applicability == "not_applicable"
-        assert by_kind["mutation_kill"].minimum_case_count == 0
         assert by_kind["mutation_kill"].applicability == "not_applicable"
         assert by_kind["schema_drift"].required_recovery == "quarantine_or_refusal"
         assert by_kind["executable_sim"].required_environment == "SIM"
@@ -1010,34 +1010,78 @@ def test_contract_emitter_runs_measurements_instead_of_listing_cartesian_nodes()
     assert not hasattr(analysis_tests, "_proof_case_measurement_target")
 
 
-def test_exact_proof_measurement_runs_the_supported_case_specific_property() -> None:
+def test_fixed_income_golden_and_property_measurements_keep_distinct_semantics() -> None:
     analysis_tests = import_module("test_analytics_proof_contracts")
 
-    observed = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
-        "corporate_action_center",
+    golden = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "fixed_income",
+        "known_answer",
+    )
+    invariant = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "fixed_income",
         "property",
     )
 
-    assert observed.analysis_kind == "corporate_action_center"
-    assert observed.case_kind == "property"
-    assert observed.operation_id.startswith("corporate_action_center_property_")
-    assert observed.executed_test_node_id.startswith("tests.test_analytics_income::")
-    assert observed.measurement_state == "passed"
-    assert observed.operation_kind == "property_assertion"
-    assert observed.observed_result_count == len(("missing_basis", "denied"))
-    assert observed.observed_result_types == ("ResearchRefusal",)
-    assert observed.observed_result_sha256 == observed.observed_output_sha256
-    assert observed.observed_value_count > 0
-    assert observed.executed_case_count == observed.observed_result_count
-    assert observed.failed_case_count == 0
-    assert observed.comparison_count == 0
-    assert observed.unexplained_difference_count == 0
+    assert golden.operation_kind == "known_answer_comparison"
+    assert golden.executed_test_node_id.endswith(
+        "::test_golden_par_bond_yield_duration_convexity_carry_and_roll_down",
+    )
+    assert golden.executed_case_count == golden.comparison_count == 1
+    assert golden.independent_path_observed is False
+    assert invariant.operation_kind == "property_assertion"
+    assert invariant.executed_test_node_id.endswith(
+        "::test_property_positive_cash_flow_price_falls_as_yield_rises",
+    )
+    assert invariant.executed_case_count == FIXED_INCOME_PROPERTY_CASES
+    assert invariant.observed_result_count == FIXED_INCOME_PROPERTY_CASES * 2
+    assert invariant.comparison_count == 0
+
+
+def test_minimum_variance_measurements_prove_known_answer_and_reference_separately() -> None:
+    analysis_tests = import_module("test_analytics_proof_contracts")
+
+    known = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "portfolio_minimum_variance",
+        "known_answer",
+    )
+    reference = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "portfolio_minimum_variance",
+        "independent_reference",
+    )
+
+    assert known.executed_test_node_id == reference.executed_test_node_id
+    assert known.operation_kind == "known_answer_comparison"
+    assert known.comparison_count == 1
+    assert known.independent_path_observed is False
+    assert reference.operation_kind == "independent_reference_comparison"
+    assert reference.comparison_count == 1
+    assert reference.independent_path_observed is True
+
+
+def test_accounting_identity_and_seeded_property_use_observed_case_counts() -> None:
+    analysis_tests = import_module("test_analytics_proof_contracts")
+
+    identity = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "cash_and_settlement",
+        "accounting_identity",
+    )
+    invariant = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
+        "instrument_price_return",
+        "property",
+    )
+
+    assert identity.operation_kind == "accounting_identity_comparison"
+    assert identity.executed_case_count == identity.comparison_count == 1
+    assert invariant.operation_kind == "property_assertion"
+    assert invariant.executed_case_count == RETURN_PROPERTY_CASES
+    assert invariant.observed_result_count == RETURN_PROPERTY_CASES * 4
+    assert invariant.comparison_count == 0
 
 
 def test_unsupported_proof_cases_are_not_emitted_or_relabelled() -> None:
     analysis_tests = import_module("test_analytics_proof_contracts")
 
-    for case_kind in ("known_answer", "mutation_kill", "schema_drift"):
+    for case_kind in ("known_answer", "property", "source_contract"):
         with pytest.raises(AssertionError, match="unsupported exact proof measurement"):
             analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
                 "corporate_action_center",
@@ -1067,15 +1111,26 @@ def test_offline_proof_support_contract_is_explicit_and_not_cartesian() -> None:
         if case.kind in offline_kinds and case.applicability == "required"
     }
 
-    assert len(supported) == len(contracts)
-    assert {kind for _analysis, kind in supported} == {"property"}
+    assert supported == {
+        ("cash_and_settlement", "accounting_identity"),
+        ("fixed_income", "known_answer"),
+        ("fixed_income", "property"),
+        ("instrument_price_return", "independent_reference"),
+        ("instrument_price_return", "property"),
+        ("portfolio_minimum_variance", "independent_reference"),
+        ("portfolio_minimum_variance", "known_answer"),
+    }
     corporate = next(
         contract for contract in contracts if contract.analysis_kind == "corporate_action_center"
     )
     by_kind = {case.kind: case for case in corporate.cases}
-    assert by_kind["property"].applicability == "required"
+    assert by_kind["property"].applicability == "not_applicable"
     assert by_kind["known_answer"].applicability == "not_applicable"
-    assert by_kind["mutation_kill"].applicability == "not_applicable"
+    assert all(
+        case.applicability == "not_applicable"
+        for case in corporate.cases
+        if case.kind not in {"agent_use", "artifact_parity", "executable_sim", "visual_integrity"}
+    )
 
 
 def test_measurement_digest_never_hashes_test_function_source_or_return_none() -> None:
@@ -1127,8 +1182,8 @@ def test_typed_result_observation_cannot_be_relabelled_as_passed_proof() -> None
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     analysis_tests = import_module("test_analytics_proof_contracts")
     measurement = analysis_tests._execute_exact_proof_measurement(  # noqa: SLF001
-        "corporate_action_center",
-        "property",
+        "fixed_income",
+        "known_answer",
     )
     payload = {
         name: getattr(measurement, name)
@@ -1147,7 +1202,7 @@ def test_typed_result_observation_cannot_be_relabelled_as_passed_proof() -> None
         )
 
 
-def test_installed_producer_accepts_every_supported_exact_property_observation() -> None:
+def test_installed_producer_accepts_every_supported_exact_observation() -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     analysis_tests = import_module("test_analytics_proof_contracts")
     observed: list[MeasuredAnalysisProofObservation] = []
@@ -1180,6 +1235,282 @@ def test_installed_producer_accepts_every_supported_exact_property_observation()
     )
 
     producer._validate_installed_suite_coverage(evidence)  # noqa: SLF001
+
+
+def _server_proof_launch_authority() -> tuple[str, ...]:
+    server = import_module("saxo_bank_mcp.mcp_analytics_tools")
+    forbidden_names = {
+        "CommandFailureError",
+        "SimToolMatrixReceipt",
+        "_MATRIX_CHILD_ENV_KEYS",
+        "_run_installed_matrix_proof_session",
+        "run_command",
+    }
+    found: set[str] = set()
+    seen: set[int] = set()
+
+    def visit(value: object) -> None:
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        name = getattr(value, "__name__", "")
+        module_name = getattr(value, "__module__", "")
+        if name in forbidden_names or module_name in {
+            "saxo_bank_mcp.agent_skill_command_runner",
+            "saxo_bank_mcp.qa_installed_matrix_child",
+        }:
+            found.add(str(name or module_name))
+        if inspect.isfunction(value):
+            found.update(forbidden_names & set(value.__globals__))
+            for cell in value.__closure__ or ():
+                visit(cell.cell_contents)
+            for item in value.__defaults__ or ():
+                visit(item)
+            for item in (value.__kwdefaults__ or {}).values():
+                visit(item)
+
+    for module_value in vars(server).values():
+        visit(module_value)
+    return tuple(sorted(found))
+
+
+def _installed_matrix_envelope_json(
+    matrix: SimToolMatrixReceipt,
+    *,
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+) -> str:
+    envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
+    envelope = envelope_module.InstalledMatrixEnvelope(
+        candidate_commit=candidate_commit,
+        analysis_kinds=analysis_kinds,
+        matrix_sha256=envelope_module.matrix_receipt_sha256(matrix),
+        matrix=matrix,
+    )
+    return envelope.model_dump_json()
+
+
+def _matrix_command_result(  # noqa: PLR0913
+    *,
+    name: str,
+    argv: tuple[str, ...],
+    cwd: Path,
+    stdout: str,
+    stderr: str = "",
+    receipt_updates: dict[str, object] | None = None,
+) -> CommandResult:
+    receipt = CommandReceipt(
+        name=name,
+        argv=argv,
+        cwd=str(cwd),
+        pid=321,
+        pgid=321,
+        exit_code=0,
+        stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(),
+        stderr_sha256=hashlib.sha256(stderr.encode()).hexdigest(),
+        timed_out=False,
+        cleanup_attempted=True,
+    )
+    if receipt_updates:
+        receipt = receipt.model_copy(update=receipt_updates)
+    return CommandResult(receipt=receipt, stdout=stdout, stderr=stderr)
+
+
+def test_producer_only_launcher_accepts_exact_strict_child_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    candidate = bundle.candidate_commit
+    kinds = ("market_comparison", "bounded_backtest")
+    stdout = _installed_matrix_envelope_json(
+        bundle.sim_tool_matrix,
+        candidate_commit=candidate,
+        analysis_kinds=kinds,
+    )
+    observed_during: tuple[str, ...] | None = None
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        nonlocal observed_during
+        observed_during = _server_proof_launch_authority()
+        assert name == "analytics_installed_matrix_child"
+        assert argv[1:4] == ("-I", "-m", "saxo_bank_mcp.qa_installed_matrix_child")
+        assert cwd == Path.cwd().resolve()
+        assert env is not None
+        assert env["SAXO_MCP_ENVIRONMENT"] == "SIM"
+        assert env["SAXO_MCP_ENABLE_LIVE_READS"] == "0"
+        assert env["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
+        assert timeout_seconds == MATRIX_CHILD_TIMEOUT_SECONDS
+        return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
+
+    assert _server_proof_launch_authority() == ()
+    assert not inspect.iscoroutinefunction(producer._run_installed_matrix_proof_session)  # noqa: SLF001
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+    result = producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
+
+    assert result == bundle.sim_tool_matrix
+    assert observed_during == ()
+    assert _server_proof_launch_authority() == ()
+
+
+def test_normal_child_import_exposes_no_ghost_authority_and_declares_envelope() -> None:
+    child = import_module("saxo_bank_mcp.qa_installed_matrix_child")
+
+    assert not hasattr(child, "_run_child_matrix")
+    assert not hasattr(child, "_process_active_catalog")
+    assert not hasattr(child, "InstalledMatrixSession")
+    assert child.main.__closure__ is None
+    source = inspect.getsource(child.main)
+    assert "InstalledMatrixEnvelope" in source
+    assert "matrix_receipt_sha256" in source
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "raw_matrix",
+        "wrong_candidate",
+        "changed_kinds",
+        "reordered_kinds",
+        "mismatched_digest",
+        "extra_field",
+        "failed_matrix",
+    ],
+)
+def test_producer_launcher_refuses_unbound_or_fabricated_child_output(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    candidate = bundle.candidate_commit
+    kinds = ("market_comparison", "bounded_backtest")
+    matrix = bundle.sim_tool_matrix
+    envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
+    payload = json.loads(
+        _installed_matrix_envelope_json(
+            matrix,
+            candidate_commit=candidate,
+            analysis_kinds=kinds,
+        ),
+    )
+    if mutation == "raw_matrix":
+        stdout = matrix.model_dump_json()
+    else:
+        if mutation == "wrong_candidate":
+            payload["candidate_commit"] = "2" * 40
+        elif mutation == "changed_kinds":
+            payload["analysis_kinds"] = ["market_comparison", "fixed_income"]
+        elif mutation == "reordered_kinds":
+            payload["analysis_kinds"] = list(reversed(kinds))
+        elif mutation == "mismatched_digest":
+            payload["matrix_sha256"] = "f" * 64
+        elif mutation == "extra_field":
+            payload["caller_trust"] = True
+        elif mutation == "failed_matrix":
+            failed = matrix.model_copy(
+                update={"status": "failed", "reason": "matrix_failed", "errors": ("failed",)},
+            )
+            payload["matrix"] = failed.model_dump(mode="json")
+            payload["matrix_sha256"] = envelope_module.matrix_receipt_sha256(failed)
+        stdout = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        _ = env, timeout_seconds
+        return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
+
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+        producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("receipt_updates", "stderr"),
+    [
+        ({"name": "wrong_command"}, ""),
+        ({"argv": ("wrong",)}, ""),
+        ({"cwd": "/wrong"}, ""),
+        ({"pid": None}, ""),
+        ({"pid": 0}, ""),
+        ({"pgid": None}, ""),
+        ({"pgid": 0}, ""),
+        ({"exit_code": 1}, ""),
+        ({"timed_out": True}, ""),
+        ({"cleanup_attempted": False}, ""),
+        ({"stdout_sha256": "0" * 64}, ""),
+        ({"stderr_sha256": "0" * 64}, "child_error"),
+    ],
+)
+def test_producer_launcher_refuses_command_receipt_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_updates: dict[str, object],
+    stderr: str,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    candidate = bundle.candidate_commit
+    kinds = ("market_comparison",)
+    stdout = _installed_matrix_envelope_json(
+        bundle.sim_tool_matrix,
+        candidate_commit=candidate,
+        analysis_kinds=kinds,
+    )
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        _ = env, timeout_seconds
+        return _matrix_command_result(
+            name=name,
+            argv=argv,
+            cwd=cwd,
+            stdout=stdout,
+            stderr=stderr,
+            receipt_updates=receipt_updates,
+        )
+
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+        producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
+
+
+def test_producer_launcher_rejects_duplicate_requested_analysis_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    called = False
+
+    def forbidden_run(*_args: object, **_kwargs: object) -> NoReturn:
+        nonlocal called
+        called = True
+        raise AssertionError("child launch must not occur")
+
+    monkeypatch.setattr(producer, "run_command", forbidden_run)
+    with pytest.raises(producer.ProofProducerError, match="analysis_kinds_invalid"):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            "1" * 40,
+            ("market_comparison", "market_comparison"),
+        )
+    assert called is False
 
 
 def test_agent_evaluation_artifact_is_required_and_cannot_be_synthesized() -> None:

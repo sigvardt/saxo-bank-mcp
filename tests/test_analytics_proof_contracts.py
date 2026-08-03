@@ -27,6 +27,7 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     ProofExecutionKind,
     build_proof_execution_contracts,
     exact_analysis_measurement_node_id,
+    exact_offline_proof_binding,
 )
 
 _CONTRACTS = build_proof_execution_contracts()
@@ -83,6 +84,7 @@ class _ExecutedAnalysisAssertion:
     observed_result_types: tuple[str, ...]
     observed_result_sha256: str
     observed_value_count: int
+    observed_reference_result_count: int
 
 
 def _golden_fixture() -> object:
@@ -148,14 +150,14 @@ def _observed_value_count(value: object) -> int:
     return 1
 
 
-def _invoke_measurement(  # noqa: C901
+def _invoke_measurement(  # noqa: C901, PLR0912
     module_name: str,
     function_name: str,
 ) -> _ExecutedAnalysisAssertion:
     module = import_module(module_name)
     function = getattr(module, function_name)
     signature = inspect.signature(function)
-    observed_results: list[object] = []
+    observed_results: list[tuple[object, str]] = []
     with ExitStack() as stack:
         patcher = stack.enter_context(pytest.MonkeyPatch.context())
         for name, candidate in tuple(vars(module).items()):
@@ -174,10 +176,11 @@ def _invoke_measurement(  # noqa: C901
                 async def async_capture(
                     *args: object,
                     __candidate: Callable[..., Awaitable[object]] = async_candidate,
+                    __origin: str = origin,
                     **kwargs: object,
                 ) -> object:
                     result = await __candidate(*args, **kwargs)
-                    observed_results.append(result)
+                    observed_results.append((result, __origin))
                     return result
 
                 patcher.setattr(module, name, async_capture)
@@ -187,44 +190,53 @@ def _invoke_measurement(  # noqa: C901
                 def capture(
                     *args: object,
                     __candidate: Callable[..., object] = candidate,
+                    __origin: str = origin,
                     **kwargs: object,
                 ) -> object:
                     result = __candidate(*args, **kwargs)
-                    observed_results.append(result)
+                    observed_results.append((result, __origin))
                     return result
 
                 patcher.setattr(module, name, capture)
-        arguments: dict[str, object] = {}
-        for name in signature.parameters:
-            if name == "golden":
-                arguments[name] = _golden_fixture()
-            elif name == "monkeypatch":
-                arguments[name] = patcher
-            elif name == "tmp_path":
-                temporary = stack.enter_context(
-                    tempfile.TemporaryDirectory(
-                        prefix="proof-measurement-",
-                        dir=Path(os.environ["TMPDIR"]),
-                    ),
-                )
-                arguments[name] = Path(temporary)
-            else:
-                raise AssertionError(f"unsupported proof measurement fixture: {name}")
-        observed = function(**arguments)
+        if getattr(function, "is_hypothesis_test", False):
+            observed = function()
+        else:
+            arguments: dict[str, object] = {}
+            for name in signature.parameters:
+                if name == "golden":
+                    arguments[name] = _golden_fixture()
+                elif name == "monkeypatch":
+                    arguments[name] = patcher
+                elif name == "tmp_path":
+                    temporary = stack.enter_context(
+                        tempfile.TemporaryDirectory(
+                            prefix="proof-measurement-",
+                            dir=Path(os.environ["TMPDIR"]),
+                        ),
+                    )
+                    arguments[name] = Path(temporary)
+                else:
+                    raise AssertionError(f"unsupported proof measurement fixture: {name}")
+            observed = function(**arguments)
         if inspect.isawaitable(observed):
             asyncio.run(_await_measurement(observed))
     if not observed_results:
         raise AssertionError("analysis proof measurement observed no typed domain result")
-    result_values = tuple(_observed_json_value(item) for item in observed_results)
+    result_values = tuple(_observed_json_value(item) for item, _origin in observed_results)
     observed_result_sha256 = hashlib.sha256(
         json.dumps(result_values, separators=(",", ":"), sort_keys=True).encode(),
     ).hexdigest()
     return _ExecutedAnalysisAssertion(
         test_node_id=f"tests.{module_name}::{function_name}",
         observed_result_count=len(observed_results),
-        observed_result_types=tuple(sorted({type(item).__qualname__ for item in observed_results})),
+        observed_result_types=tuple(
+            sorted({type(item).__qualname__ for item, _origin in observed_results}),
+        ),
         observed_result_sha256=observed_result_sha256,
         observed_value_count=_observed_value_count(result_values),
+        observed_reference_result_count=sum(
+            "_reference" in origin for _item, origin in observed_results
+        ),
     )
 
 
@@ -240,17 +252,27 @@ def _execute_exact_proof_measurement(
     contract = next(item for item in _CONTRACTS if item.analysis_kind == analysis_kind)
     case = next(item for item in contract.cases if item.kind == case_kind)
     target = _analysis_measurement_target(analysis_kind, case_kind)
+    binding = exact_offline_proof_binding(analysis_kind, case_kind)
     assert f"tests.{target[0]}::{target[1]}" == exact_analysis_measurement_node_id(
         analysis_kind,
         case_kind,
     )
     primary = _invoke_measurement(*target)
+    if primary.observed_result_count % binding.observed_calls_per_case != 0:
+        raise AssertionError("proof measurement call count is inconsistent")
+    executed_case_count = primary.observed_result_count // binding.observed_calls_per_case
+    expected_reference_count = executed_case_count * binding.reference_calls_per_case
+    if (
+        binding.reference_calls_per_case
+        and primary.observed_reference_result_count != expected_reference_count
+    ):
+        raise AssertionError("proof measurement reference count is inconsistent")
     return ExactAnalysisProofMeasurement(
         analysis_kind=analysis_kind,
         case_kind=case_kind,
         requirement_code=case.requirement_code,
         measurement_state="passed",
-        operation_kind="property_assertion",
+        operation_kind=binding.operation_kind,
         operation_id=(f"{analysis_kind}_{case_kind}_{primary.observed_result_sha256[:12]}"),
         executed_test_node_id=primary.test_node_id,
         observed_result_count=primary.observed_result_count,
@@ -258,13 +280,13 @@ def _execute_exact_proof_measurement(
         observed_result_sha256=primary.observed_result_sha256,
         observed_value_count=primary.observed_value_count,
         observed_output_sha256=primary.observed_result_sha256,
-        executed_case_count=primary.observed_result_count,
+        executed_case_count=executed_case_count,
         failed_case_count=0,
-        comparison_count=0,
+        comparison_count=executed_case_count * binding.comparisons_per_case,
         unexplained_difference_count=0,
         mutation_count=0,
         mutation_killed_count=0,
-        independent_path_observed=False,
+        independent_path_observed=binding.reference_calls_per_case > 0,
         recovery_observed=False,
         publication_scan_passed=False,
     )
@@ -286,12 +308,18 @@ def test_analysis_proof_contract(
     assert measurement.observed_result_types
     assert measurement.observed_value_count > 0
     assert measurement.observed_output_sha256 == measurement.observed_result_sha256
-    assert measurement.executed_case_count == measurement.observed_result_count
+    assert 0 < measurement.executed_case_count <= measurement.observed_result_count
     assert measurement.measurement_state == "passed"
-    assert measurement.operation_kind == "property_assertion"
-    assert measurement.comparison_count == 0
+    expected_operation = {
+        "accounting_identity": "accounting_identity_comparison",
+        "independent_reference": "independent_reference_comparison",
+        "known_answer": "known_answer_comparison",
+        "property": "property_assertion",
+    }[case_kind]
+    assert measurement.operation_kind == expected_operation
+    assert (measurement.comparison_count > 0) == expected_operation.endswith("_comparison")
     assert measurement.mutation_count == measurement.mutation_killed_count == 0
-    assert not measurement.independent_path_observed
+    assert measurement.independent_path_observed == (case_kind == "independent_reference")
     assert not measurement.recovery_observed
     assert not measurement.publication_scan_passed
     record_property(

@@ -20,9 +20,6 @@ from fastmcp import Client
 from pydantic import BaseModel
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
-import saxo_bank_mcp.qa_installed_matrix_child as matrix_child_module
-from saxo_bank_mcp.agent_skill_command_runner import CommandResult
-from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
 from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
@@ -146,8 +143,6 @@ EXACT_ANALYTICS_TOOL_IDS: Final[tuple[str, ...]] = (
 _EXPECTED_TOOL_COUNT: Final = 60
 _NOW = datetime(2026, 8, 3, 10, tzinfo=UTC)
 _ACCOUNT_ALIAS = "aa_00000000000040008000000000000099"
-_CANDIDATE_COMMIT = "a" * 40
-_MATRIX_CHILD_TIMEOUT_SECONDS = 1800
 
 
 class _ChartFixtureExecutor:
@@ -810,7 +805,6 @@ def test_installed_process_proof_overlay_is_unavailable_on_normal_import(
     )
     assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
     assert not hasattr(tools_module, "_process_active_catalog")
-    assert not hasattr(matrix_child_module, "_process_active_catalog")
     assert checked_profile.activation_state is ProfileActivationState.QUARANTINED
 
 
@@ -829,8 +823,13 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
     assert not hasattr(tools_module, "_process_backtest_proofs")
     assert not hasattr(tools_module, "_request_installed_proof_session")
     assert not hasattr(tools_module, "_build_installed_proof_boundary")
-    assert not hasattr(matrix_child_module, "_run_child_matrix")
-    assert not hasattr(matrix_child_module, "InstalledMatrixSession")
+    assert not hasattr(tools_module, "_run_installed_matrix_proof_session")
+    assert not hasattr(tools_module, "run_command")
+    assert not hasattr(tools_module, "CommandFailureError")
+    assert not hasattr(tools_module, "SimToolMatrixReceipt")
+    assert not hasattr(tools_module, "sys")
+    assert not hasattr(tools_module, "Path")
+    assert not hasattr(tools_module, "_MATRIX_CHILD_ENV_KEYS")
     execution_module = import_module("saxo_bank_mcp.analytics_execution")
     assert not hasattr(execution_module, "AuthenticatedBacktestExecutionProof")
     assert (
@@ -839,12 +838,6 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
             execution_module.execute_stored_analysis,
         ).parameters
     )
-    parameters = inspect.signature(
-        tools_module._run_installed_matrix_proof_session,  # noqa: SLF001
-    ).parameters
-    assert tuple(parameters) == ("candidate_commit", "analysis_kinds")
-    runner = tools_module._run_installed_matrix_proof_session  # noqa: SLF001
-    assert runner.__closure__ is None
     assert not any(
         value
         for value in vars(tools_module).values()
@@ -854,10 +847,7 @@ def test_process_proof_authority_is_not_retrievable_or_publicly_mintable() -> No
     )
 
 
-@pytest.mark.anyio
-async def test_installed_session_is_absent_from_module_before_during_and_after_run(  # noqa: C901
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_server_module_graph_has_no_proof_launcher_or_ghost_capability() -> None:
     def recoverable_capabilities() -> tuple[str, ...]:
         found: set[str] = set()
         seen: set[int] = set()
@@ -874,6 +864,8 @@ async def test_installed_session_is_absent_from_module_before_during_and_after_r
                 "current_session",
                 "invoke",
                 "record_observed_ghost_lifecycle",
+                "run_command",
+                "_run_installed_matrix_proof_session",
             } or hasattr(value, "record_observed_ghost_lifecycle"):
                 found.add(str(name or type(value).__qualname__))
             if inspect.isfunction(value):
@@ -884,59 +876,12 @@ async def test_installed_session_is_absent_from_module_before_during_and_after_r
                 for item in (value.__kwdefaults__ or {}).values():
                     visit(item)
 
-        for module in (tools_module, matrix_child_module):
-            for module_value in vars(module).values():
-                visit(module_value)
+        for module_value in vars(tools_module).values():
+            visit(module_value)
         return tuple(sorted(found))
 
-    evidence_tests = import_module("test_qa_analytics_evidence")
-    _catalog, _contracts, bundle = evidence_tests._complete_bundle()  # noqa: SLF001
-    stdout = bundle.sim_tool_matrix.model_dump_json()
-    observed_during: tuple[str, ...] | None = None
-
-    def serialized_child(
-        name: str,
-        argv: tuple[str, ...],
-        *,
-        cwd: Path,
-        env: dict[str, str] | None,
-        timeout_seconds: int,
-    ) -> CommandResult:
-        nonlocal observed_during
-        observed_during = recoverable_capabilities()
-        assert name == "analytics_installed_matrix_child"
-        assert argv[1:4] == ("-I", "-m", "saxo_bank_mcp.qa_installed_matrix_child")
-        assert timeout_seconds == _MATRIX_CHILD_TIMEOUT_SECONDS
-        assert env is not None
-        assert env["SAXO_MCP_ENVIRONMENT"] == "SIM"
-        assert env["SAXO_MCP_ENABLE_LIVE_READS"] == "0"
-        assert env["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
-        assert "SAXO_MCP_LIVE_TOKEN_CACHE_PATH" not in env
-        return CommandResult(
-            receipt=CommandReceipt(
-                name=name,
-                argv=argv,
-                cwd=str(cwd),
-                pid=123,
-                pgid=123,
-                exit_code=0,
-                stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(),
-                stderr_sha256=hashlib.sha256(b"").hexdigest(),
-                timed_out=False,
-                cleanup_attempted=True,
-            ),
-            stdout=stdout,
-            stderr="",
-        )
-
     assert recoverable_capabilities() == ()
-    monkeypatch.setattr(tools_module, "run_command", serialized_child)
-    result = await tools_module._run_installed_matrix_proof_session(  # noqa: SLF001
-        _CANDIDATE_COMMIT,
-        ("market_comparison",),
-    )
-    assert result == bundle.sim_tool_matrix
-    assert observed_during == ()
+    import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     assert recoverable_capabilities() == ()
 
 

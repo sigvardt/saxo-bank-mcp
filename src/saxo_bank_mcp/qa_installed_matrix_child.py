@@ -56,6 +56,10 @@ from saxo_bank_mcp.fastmcp_logging_safety import (
     install_fastmcp_argument_log_filter,
 )
 from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
+from saxo_bank_mcp.qa_installed_matrix_envelope import (
+    InstalledMatrixEnvelope,
+    matrix_receipt_sha256,
+)
 from saxo_bank_mcp.qa_sim_tool_matrix import (
     _run_matrix,  # pyright: ignore[reportPrivateUsage]
 )
@@ -184,8 +188,10 @@ async def _run_child_matrix(  # noqa: C901
     """Own all live ghost authority inside this process and return only a strict receipt."""
     if _COMMIT_PATTERN.fullmatch(candidate_commit) is None:
         raise ValueError("process proof candidate is invalid")
-    if not analysis_kinds or any(
-        _ANALYSIS_KIND_PATTERN.fullmatch(kind) is None for kind in analysis_kinds
+    if (
+        not analysis_kinds
+        or any(_ANALYSIS_KIND_PATTERN.fullmatch(kind) is None for kind in analysis_kinds)
+        or len(analysis_kinds) != len(set(analysis_kinds))
     ):
         raise ValueError("process proof analysis kinds are invalid")
     if os.environ.get("SAXO_MCP_ENVIRONMENT", "").strip().upper() != "SIM":
@@ -434,9 +440,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(arguments.candidate),
             tuple(str(kind) for kind in arguments.analysis_kind),
         )
+        envelope = InstalledMatrixEnvelope(
+            candidate_commit=str(arguments.candidate),
+            analysis_kinds=tuple(str(kind) for kind in arguments.analysis_kind),
+            matrix_sha256=matrix_receipt_sha256(receipt),
+            matrix=receipt,
+        )
     except (OSError, RuntimeError, TypeError, ValueError):
         return 2
-    sys.stdout.write(receipt.model_dump_json())
+    sys.stdout.write(envelope.model_dump_json())
     return 0
 
 
