@@ -13,6 +13,7 @@ LOCAL_STATE_ANALYTICS_TOOLS: Final[frozenset[str]] = frozenset(
         "saxo_resolve_research_universe",
         "saxo_manage_research_universe",
         "saxo_sync_research_data",
+        "saxo_analyze_market",
         "saxo_render_analysis",
         "saxo_export_analysis",
         "saxo_manage_analysis_job",

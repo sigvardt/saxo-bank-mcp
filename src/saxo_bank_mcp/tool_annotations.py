@@ -96,7 +96,7 @@ TOOL_ANNOTATIONS: Final[Mapping[str, ToolAnnotations]] = MappingProxyType(
         "saxo_manage_research_universe": MUTATE_LOCAL,
         "saxo_sync_research_data": PREVIEW_SAXO,
         "saxo_get_research_dataset": READ_LOCAL,
-        "saxo_analyze_market": READ_LOCAL,
+        "saxo_analyze_market": PREVIEW_LOCAL,
         "saxo_analyze_instruments": READ_LOCAL,
         "saxo_analyze_portfolio": READ_LOCAL,
         "saxo_size_position": READ_LOCAL,

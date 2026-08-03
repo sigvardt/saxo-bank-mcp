@@ -3,29 +3,52 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import hashlib
+import json
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Final, cast
 
+import httpx2
 import pytest
 from fastmcp import Client
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_instrument_identity import (
+    instrument_handle_for_saxo_identity,
+    put_saxo_instrument_identity,
+)
 from saxo_bank_mcp.analytics_jobs import (
     AnalyticsJobManager,
     JobProgress,
     JobRequest,
     JobStatus,
 )
+from saxo_bank_mcp.analytics_market_data import ChartInterval
+from saxo_bank_mcp.analytics_metric_definitions import (
+    MetricDefinitionBinding,
+    load_metric_definition_catalog,
+)
 from saxo_bank_mcp.analytics_models import (
     HandleKind,
     VisibilityMode,
     new_safe_handle,
 )
+from saxo_bank_mcp.analytics_proof_profiles import (
+    ArtifactOwnerBinding,
+    EngineProofBinding,
+    ProfileActivationState,
+    ProofProfile,
+    ProofProfileCatalog,
+    ProofRegistry,
+    SourceContractProofBinding,
+)
+from saxo_bank_mcp.analytics_provenance import replay_analysis
+from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
 from saxo_bank_mcp.analytics_resolver import (
     InstrumentState,
     ResolutionError,
@@ -35,9 +58,15 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionStatus,
     ResolvedInstrument,
 )
+from saxo_bank_mcp.analytics_source_contracts import (
+    source_contract_catalog_sha256,
+    source_contract_fingerprint,
+    source_contracts_by_id,
+)
 from saxo_bank_mcp.analytics_store import AnalyticsStore
-from saxo_bank_mcp.analytics_sync import DatasetPage
+from saxo_bank_mcp.analytics_sync import DatasetPage, sync_price_bars
 from saxo_bank_mcp.analytics_tool_descriptions import ANALYTICS_TOOL_DESCRIPTIONS
+from saxo_bank_mcp.endpoint_registry import EndpointOperation
 from saxo_bank_mcp.server import create_mcp_server
 from saxo_bank_mcp.server_tool_ids import (
     ALL_LOGICAL_TOOL_IDS,
@@ -70,6 +99,136 @@ EXACT_ANALYTICS_TOOL_IDS: Final[tuple[str, ...]] = (
 )
 _EXPECTED_TOOL_COUNT: Final = 60
 _NOW = datetime(2026, 8, 3, 10, tzinfo=UTC)
+
+
+class _ChartFixtureExecutor:
+    """Return one local synthetic chart response without opening a socket."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def __call__(
+        self,
+        operation: EndpointOperation,
+        request_target: str,
+        params: Mapping[str, str],
+    ) -> httpx2.Response:
+        del operation, request_target, params
+        self.call_count += 1
+        return httpx2.Response(
+            200,
+            content=json.dumps(
+                {
+                    "Data": [
+                        {
+                            "CloseBid": 100.0,
+                            "PriceType": "RealTime",
+                            "Time": "2026-08-03T09:00:00Z",
+                            "Volume": 10,
+                        },
+                        {
+                            "CloseBid": 110.0,
+                            "PriceType": "RealTime",
+                            "Time": "2026-08-03T09:01:00Z",
+                            "Volume": 11,
+                        },
+                    ],
+                    "DataVersion": 1,
+                }
+            ).encode(),
+            request=httpx2.Request("GET", "https://unit.test/registered"),
+        )
+
+
+def _seed_chart_instrument(config: AnalyticsConfig) -> str:
+    handle = instrument_handle_for_saxo_identity("Stock", 1)
+    metadata: dict[str, object] = {
+        "aliases": [],
+        "asset_type": "Stock",
+        "display_label": "Synthetic instrument",
+        "exchange": None,
+        "identifier": 1,
+        "symbol": None,
+    }
+    metadata_json = json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+    store = AnalyticsStore.open(config)
+    try:
+        with store.market_ingestion_transaction(0) as connection:
+            write = put_saxo_instrument_identity(
+                connection,
+                asset_type="Stock",
+                uic=1,
+                safe_label="Synthetic instrument",
+                source_revision="fixture:instrument",
+                source_timestamp=_NOW,
+                fingerprint_sha256=hashlib.sha256(metadata_json.encode()).hexdigest(),
+                metadata_json=metadata_json,
+                update_existing=False,
+            )
+    finally:
+        store.close()
+    assert write.instrument_handle == handle
+    return handle
+
+
+def _active_market_registry(
+    config: AnalyticsConfig,
+    *,
+    source_revision: str,
+) -> ProofRegistry:
+    definitions = load_metric_definition_catalog()
+    definition = definitions.by_id()["price_return"]
+    contract = source_contracts_by_id()["chart_v3"]
+    source = SourceContractProofBinding(
+        contract_id="chart_v3",
+        contract_sha256=source_contract_fingerprint(contract),
+        field_paths=("CloseBid", "Time"),
+    )
+    profile = ProofProfile(
+        proof_profile_id="vp_market_comparison_test_v1",
+        profile_version="1",
+        activation_state=ProfileActivationState.ACTIVE,
+        quarantine_reason=None,
+        analysis_kind="market_comparison",
+        schema_version="1",
+        metric_definitions=(
+            MetricDefinitionBinding(
+                metric_id=definition.metric_id,
+                definition_version=definition.definition_version,
+            ),
+        ),
+        source_contracts=(source,),
+        source_revision=source_revision,
+        engines=(
+            EngineProofBinding(
+                engine_name="saxo_analytics",
+                engine_version="1",
+                code_commit="abcdef0",
+            ),
+        ),
+        artifact_template_ids=("relative_performance",),
+        definition_catalog_sha256=definitions.fingerprint_sha256,
+        source_catalog_sha256=source_contract_catalog_sha256(),
+        valid_until=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+    catalog = ProofProfileCatalog(
+        schema_version="1",
+        catalog_version="area-f-test-1",
+        definition_catalog_sha256=definitions.fingerprint_sha256,
+        source_catalog_sha256=source_contract_catalog_sha256(),
+        production_metric_ids=("price_return",),
+        production_analysis_kinds=("market_comparison",),
+        production_artifact_template_ids=("relative_performance",),
+        artifact_owners=(
+            ArtifactOwnerBinding(
+                template_id="relative_performance",
+                analysis_kind="market_comparison",
+            ),
+        ),
+        source_field_coverage=(source,),
+        profiles=(profile,),
+    )
+    return ProofRegistry(definitions=definitions, catalog=catalog, config=config)
 
 
 @pytest.fixture
@@ -200,10 +359,12 @@ async def test_analysis_and_artifact_tools_publish_discriminated_output_schemas(
         "saxo_optimize_portfolio",
         "saxo_model_derivatives",
         "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
     ):
         schema = listed[tool_id].outputSchema
         assert schema is not None, tool_id
         assert {"verified", "degraded", "refused"} <= set(_schema_literal_values(schema))
+        assert not _contains_open_object_schema(schema), tool_id
         for field in (
             "network_call_made",
             "local_state_changed",
@@ -216,7 +377,58 @@ async def test_analysis_and_artifact_tools_publish_discriminated_output_schemas(
         schema = listed[tool_id].outputSchema
         assert schema is not None, tool_id
         assert {"inline", "resource_link", "refused"} <= set(_schema_literal_values(schema))
+        assert not _contains_open_object_schema(schema), tool_id
         assert "broker_write_made" in _schema_property_names(schema)
+
+
+@pytest.mark.anyio
+async def test_all_analytics_tools_publish_explicit_state_discriminated_output_schemas() -> None:
+    server = create_mcp_server(allowed_tools=frozenset(ANALYTICS_TOOL_IDS))
+    async with Client(server) as client:
+        listed = {tool.name: tool for tool in await client.list_tools()}
+
+    expected_states = {
+        "saxo_analytics_capabilities": {"passed", "refused"},
+        "saxo_resolve_research_universe": {
+            "resolved",
+            "ambiguous",
+            "unavailable",
+            "refused",
+        },
+        "saxo_manage_research_universe": {"passed", "refused"},
+        "saxo_sync_research_data": {"passed", "degraded", "refused"},
+        "saxo_get_research_dataset": {"passed", "refused"},
+        "saxo_explain_analysis": {"passed", "refused"},
+        "saxo_manage_analysis_job": {
+            "job_queued",
+            "job_running",
+            "job_completed",
+            "job_failed",
+            "job_cancelled",
+            "job_expired",
+            "job_interrupted_restart_required",
+            "refused",
+        },
+        "saxo_list_analytics_storage": {"passed", "refused"},
+        "saxo_preview_analytics_deletion": {"preview_ready", "refused"},
+        "saxo_delete_analytics_data": {"deleted", "refused"},
+    }
+    for tool_id, states in expected_states.items():
+        schema = listed[tool_id].outputSchema
+        assert schema is not None, tool_id
+        assert states <= set(_schema_literal_values(schema)), tool_id
+        assert "pattern" not in _status_schema_keywords(schema), tool_id
+        assert not _contains_open_object_schema(schema), tool_id
+        for field in (
+            "network_call_made",
+            "local_state_changed",
+            "broker_write_made",
+            "approval_authority",
+            "execution_authority",
+            "disclaimer_response_available",
+            "next_action",
+        ):
+            assert field in _schema_property_names(schema), (tool_id, field)
 
 
 @pytest.mark.anyio
@@ -447,6 +659,118 @@ def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
 
 
 @pytest.mark.anyio
+async def test_active_proof_market_adapter_persists_replays_renders_and_explains(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    handle = _seed_chart_instrument(config)
+    executor = _ChartFixtureExecutor()
+    sync = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        _NOW - timedelta(hours=1),
+        _NOW - timedelta(minutes=59),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _NOW,
+    )
+    dataset_id = sync.datasets[0].dataset_id
+    store = AnalyticsStore.open(config)
+    try:
+        dataset = store.get_authenticated_dataset(dataset_id)
+    finally:
+        store.close()
+    registry = _active_market_registry(
+        config,
+        source_revision=dataset.source_revision,
+    )
+
+    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+        return registry
+
+    monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
+
+    calculated = tools_module.saxo_analyze_market(
+        tools_module.StoredMarketToolRequest(
+            analysis_kind="market_comparison",
+            dataset_ids=(dataset_id,),
+            periods_per_year=252,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        )
+    )
+
+    assert executor.call_count == 1
+    assert isinstance(calculated, tools_module.VerifiedAnalysisToolResponse)
+    assert calculated.status == "verified"
+    assert calculated.analysis_id == calculated.result.analysis_id
+    assert calculated.result.metrics[0].metric_id == "price_return"
+    assert calculated.result.metrics[0].value == pytest.approx(0.1)
+    assert calculated.result.provenance.dataset_id == dataset_id
+    replayed = replay_analysis(
+        calculated.analysis_id,
+        config=config,
+        registry=registry,
+    )
+    assert replayed == calculated.result
+
+    explained = tools_module.saxo_explain_analysis(calculated.analysis_id)
+    assert explained.status == "passed"
+    assert explained.result is not None
+    rendered = tools_module.saxo_render_analysis(
+        calculated.analysis_id,
+        "relative_performance",
+        output_format="html",
+        width=1200,
+        height=675,
+    )
+    assert rendered.structured_content is not None
+    assert rendered.structured_content["status"] == "inline", rendered.structured_content
+    assert rendered.structured_content["broker_write_made"] is False
+
+    started = await tools_module.saxo_manage_analysis_job(
+        action="start",
+        request=tools_module.AnalyticsJobToolRequest(
+            job_kind="report_generation",
+            analysis_ids=(calculated.analysis_id,),
+            parameters=(
+                tools_module.AnalyticsJobParameter(
+                    name="template_id",
+                    value="relative_performance",
+                ),
+                tools_module.AnalyticsJobParameter(
+                    name="output_format",
+                    value="html",
+                ),
+                tools_module.AnalyticsJobParameter(
+                    name="viewport_width",
+                    value=800,
+                ),
+            ),
+            total_work_units=1,
+        ),
+    )
+    checked = started
+    try:
+        for _ in range(100):
+            if checked.status not in {"job_queued", "job_running"}:
+                break
+            await asyncio.sleep(0)
+            checked = await tools_module.saxo_manage_analysis_job(
+                action="check",
+                job_id=checked.result.job_id if checked.result is not None else None,
+            )
+        assert checked.status == "job_completed"
+        assert checked.result is not None
+        assert checked.result.conclusion_available is True
+        assert len(checked.result.artifact_ids) == 1
+    finally:
+        await tools_module.shutdown_analytics_runtime()
+
+
+@pytest.mark.anyio
 async def test_job_adapter_preserves_bounded_transitions_and_no_partial_conclusion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -484,10 +808,10 @@ async def test_job_adapter_preserves_bounded_transitions_and_no_partial_conclusi
     response = await tools_module.saxo_manage_analysis_job(action="check", job_id=job_id)
     missing = await tools_module.saxo_manage_analysis_job(action="cancel")
 
-    assert response.status == "running"
+    assert response.status == "job_running"
     assert response.result is not None
-    assert response.result["analysis_id"] is None
-    assert response.result["artifact_ids"] == []
+    assert response.result.analysis_id is None
+    assert response.result.artifact_ids == ()
     assert response.next_tool == "saxo_manage_analysis_job"
     assert missing.status == "refused"
     assert missing.reason_code == "job_id_required"
@@ -552,7 +876,7 @@ async def test_fastmcp_lifespan_owns_job_runtime_cleanup(
             },
         )
         assert response.structured_content is not None
-        assert response.structured_content["status"] in {"queued", "running"}
+        assert response.structured_content["status"] in {"job_queued", "job_running"}
         assert tools_module._job_runtime is not None  # noqa: SLF001
 
     assert tools_module._job_runtime is None  # noqa: SLF001
@@ -724,3 +1048,35 @@ def _schema_literal_values(schema: object) -> tuple[str, ...]:
             for nested in _schema_literal_values(value)
         )
     return ()
+
+
+def _status_schema_keywords(schema: object) -> tuple[str, ...]:
+    if isinstance(schema, dict):
+        mapping = cast("dict[object, object]", schema)
+        keywords: list[str] = []
+        properties = mapping.get("properties")
+        if isinstance(properties, dict):
+            status = cast("dict[object, object]", properties).get("status")
+            if isinstance(status, dict):
+                keywords.extend(str(key) for key in cast("dict[object, object]", status))
+        return tuple(keywords) + tuple(
+            nested for value in mapping.values() for nested in _status_schema_keywords(value)
+        )
+    if isinstance(schema, list):
+        return tuple(
+            nested
+            for value in cast("list[object]", schema)
+            for nested in _status_schema_keywords(value)
+        )
+    return ()
+
+
+def _contains_open_object_schema(schema: object) -> bool:
+    if isinstance(schema, dict):
+        mapping = cast("dict[object, object]", schema)
+        if mapping.get("additionalProperties") is True:
+            return True
+        return any(_contains_open_object_schema(value) for value in mapping.values())
+    if isinstance(schema, list):
+        return any(_contains_open_object_schema(value) for value in cast("list[object]", schema))
+    return False

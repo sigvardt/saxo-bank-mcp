@@ -5,7 +5,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,8 +19,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_metric_definitions import MetricDefinition
 from saxo_bank_mcp.analytics_models import (
+    AnalysisRequest,
     AnalysisResult,
     MetricValue,
+    NamedModelAssumption,
     ValueUnitClass,
 )
 from saxo_bank_mcp.analytics_proof_profiles import ProofProfile, ProofRegistry, ProofState
@@ -179,17 +181,35 @@ def _normalized_identity_inputs(inputs: Mapping[str, object]) -> dict[str, str]:
 
 def analysis_parameters_sha256(result: AnalysisResult) -> str:
     """Fingerprint the complete canonical safe request and analysis parameters."""
+    return build_analysis_parameters_sha256(
+        account_scope=result.account_scope,
+        analysis_kind=result.analysis_kind,
+        assumptions=result.assumptions,
+        as_of=result.as_of,
+        request=result.request,
+        schema_version=result.schema_version,
+    )
+
+
+def build_analysis_parameters_sha256(  # noqa: PLR0913
+    *,
+    account_scope: str,
+    analysis_kind: str,
+    assumptions: Sequence[NamedModelAssumption],
+    as_of: datetime,
+    request: AnalysisRequest,
+    schema_version: str = "1",
+) -> str:
+    """Fingerprint a validated request before its deterministic result identity exists."""
     return _canonical_component_sha256(
         _ANALYSIS_PARAMETERS_DOMAIN,
         {
-            "account_scope": result.account_scope,
-            "analysis_kind": result.analysis_kind,
-            "assumptions": [
-                assumption.model_dump(mode="json") for assumption in result.assumptions
-            ],
-            "as_of": result.as_of.isoformat(),
-            "request": result.request.model_dump(mode="json"),
-            "schema_version": result.schema_version,
+            "account_scope": account_scope,
+            "analysis_kind": analysis_kind,
+            "assumptions": [assumption.model_dump(mode="json") for assumption in assumptions],
+            "as_of": as_of.isoformat(),
+            "request": request.model_dump(mode="json"),
+            "schema_version": schema_version,
         },
     )
 

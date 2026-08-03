@@ -6,7 +6,7 @@ import asyncio
 import base64
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from threading import RLock
@@ -15,13 +15,16 @@ from typing import Annotated, Final, Literal, cast
 import mcp.types as mt
 from fastmcp.tools import ToolResult
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, TypeAdapter
-from pydantic_core import to_jsonable_python
 
-from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
     AnalyticsConfigError,
+    AnalyticsLimits,
     load_analytics_config,
+)
+from saxo_bank_mcp.analytics_execution import (
+    StoredAnalysisExecutionError,
+    execute_market_comparison,
 )
 from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
@@ -40,11 +43,16 @@ from saxo_bank_mcp.analytics_jobs import (
     JobParameter,
     JobRequest,
     JobStateError,
+    JobStatus,
+    JobStatusCode,
 )
 from saxo_bank_mcp.analytics_market import (
     SavedCondition,
 )
-from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
+from saxo_bank_mcp.analytics_metric_definitions import (
+    MetricDefinition,
+    load_metric_definition_catalog,
+)
 from saxo_bank_mcp.analytics_models import (
     AnalysisId,
     AnalysisResult,
@@ -59,6 +67,7 @@ from saxo_bank_mcp.analytics_portfolio import (
     PortfolioAnalyticsError,
 )
 from saxo_bank_mcp.analytics_proof_profiles import (
+    ProofProfile,
     ProofProfileError,
     ProofRegistry,
     load_proof_profile_catalog,
@@ -85,10 +94,14 @@ from saxo_bank_mcp.analytics_render import (
 from saxo_bank_mcp.analytics_resolver import (
     InstrumentResolver,
     ResolutionError,
+    ResolutionResult,
     ResolutionStatus,
 )
 from saxo_bank_mcp.analytics_storage_tools import (
+    DeletionPreviewResult,
+    DeletionResult,
     StorageBoundaryError,
+    StorageListing,
     delete_analytics_data,
     list_storage,
     preview_deletion,
@@ -106,9 +119,11 @@ from saxo_bank_mcp.analytics_store import (
 from saxo_bank_mcp.analytics_strategy_schema import StrategyDefinition
 from saxo_bank_mcp.analytics_sync import (
     DatasetNotFoundError,
+    DatasetPage,
     SyncError,
     SyncLimitError,
     SyncResearchRequest,
+    SyncResult,
     get_dataset,
     sync_research_data,
 )
@@ -117,6 +132,7 @@ from saxo_bank_mcp.analytics_universes import (
     UniverseConflictError,
     UniverseError,
     UniverseNotFoundError,
+    UniverseSummary,
     UniverseValidationError,
 )
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
@@ -133,9 +149,6 @@ type ExportKind = Literal["table", "report"]
 type AnalyticsExportFormat = Literal["csv", "parquet", "json", "html", "pdf"]
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
-_RESULT_ADAPTER: Final[TypeAdapter[dict[str, JsonValue]]] = TypeAdapter(
-    dict[str, JsonValue],
-)
 _JOB_RUNTIME_LOCK: Final = RLock()
 _MIN_REPORT_VIEWPORT_WIDTH: Final = 320
 _MAX_REPORT_VIEWPORT_WIDTH: Final = 2560
@@ -152,23 +165,174 @@ class _StrictToolModel(BaseModel):
     )
 
 
-class AnalyticsToolResponse(_StrictToolModel):
-    """Common value-bounded tool envelope with explicit recovery and no write authority."""
+class _OperationalToolResponse(_StrictToolModel):
+    """Shared server-issued safety fields for typed operational results."""
 
-    status: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
-    result: dict[str, JsonValue] | None = None
-    reason_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,127}$")
-    message: str | None = Field(default=None, min_length=1, max_length=500)
     warnings: tuple[str, ...] = ()
-    next_tool: str | None = Field(default=None, pattern=r"^saxo_[a-z0-9_]{1,127}$")
-    next_action: str | None = Field(default=None, min_length=1, max_length=500)
+    next_tool: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
+    next_action: str = Field(min_length=1, max_length=500)
     network_call_made: bool | None = None
     local_state_changed: bool
     broker_write_made: Literal[False] = False
     approval_authority: Literal[False] = False
     execution_authority: Literal[False] = False
     disclaimer_response_available: Literal[False] = False
+
+
+class OperationalRefusalToolResponse(_OperationalToolResponse):
+    status: Literal["refused"] = "refused"
+    result: None = None
+    reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    message: str = Field(min_length=1, max_length=500)
+
+
+class ProofCapabilitySummary(_StrictToolModel):
+    analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    proof_profile_id: str = Field(pattern=r"^vp_[A-Za-z0-9][A-Za-z0-9._-]{2,127}$")
+    activation_state: Literal["active", "quarantined"]
+    reason_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,127}$")
+
+
+class AnalyticsCapabilitiesResult(_StrictToolModel):
+    source_scope: Literal["saxo_openapi"] = "saxo_openapi"
+    analytics_tool_ids: tuple[str, ...]
+    installed_modules: tuple[str, ...]
+    source_data_groups: tuple[str, ...]
+    entitlement_state: Literal["not_checked"] = "not_checked"
+    dataset_coverage_next_tool: Literal["saxo_list_analytics_storage"] = (
+        "saxo_list_analytics_storage"
+    )
+    render_formats: tuple[Literal["png", "html"], ...]
+    export_formats: tuple[Literal["csv", "parquet", "json", "html", "pdf"], ...]
+    limits: AnalyticsLimits
+    proof_catalog_version: str
+    proof_profiles: tuple[ProofCapabilitySummary, ...]
+    quarantined_analysis_kinds: tuple[str, ...]
+    background_collector: Literal[False] = False
+    broker_write_authority: Literal[False] = False
+    disclaimer_response_available: Literal[False] = False
+
+
+class CapabilitiesToolResponse(_OperationalToolResponse):
+    status: Literal["passed"] = "passed"
+    result: AnalyticsCapabilitiesResult
+
+
+class ResolutionToolResponse(_OperationalToolResponse):
+    status: Literal["resolved", "ambiguous", "unavailable"]
+    result: ResolutionResult
+
+
+class UniverseSummaryResult(_StrictToolModel):
+    action: Literal["create", "update"]
+    universe: UniverseSummary
+
+
+class UniverseListResult(_StrictToolModel):
+    action: Literal["list"] = "list"
+    universes: tuple[UniverseSummary, ...]
+
+
+class UniverseDeleteResult(_StrictToolModel):
+    action: Literal["delete"] = "delete"
+    universe_id: str = Field(pattern=r"^un_[0-9a-f]{32}$")
+    deleted: Literal[True] = True
+
+
+type UniverseToolResult = Annotated[
+    UniverseSummaryResult | UniverseListResult | UniverseDeleteResult,
+    Field(discriminator="action"),
+]
+
+
+class UniverseToolResponse(_OperationalToolResponse):
+    status: Literal["passed"] = "passed"
+    result: UniverseToolResult
+
+
+class SyncToolResponse(_OperationalToolResponse):
+    status: Literal["passed", "degraded"]
+    result: SyncResult
+
+
+class DatasetToolResponse(_OperationalToolResponse):
+    status: Literal["passed"] = "passed"
+    result: DatasetPage
+
+
+class AnalysisExplanation(_StrictToolModel):
+    analysis: AnalysisResult
+    metric_definitions: tuple[MetricDefinition, ...]
+    proof_profile: ProofProfile
+    replay_verified: Literal[True] = True
+
+
+class ExplainToolResponse(_OperationalToolResponse):
+    status: Literal["passed"] = "passed"
+    result: AnalysisExplanation
+
+
+class JobToolResponse(_OperationalToolResponse):
+    status: JobStatusCode
+    result: JobStatus
+
+
+class StorageListToolResponse(_OperationalToolResponse):
+    status: Literal["passed"] = "passed"
+    result: StorageListing
+
+
+class DeletionPreviewToolResponse(_OperationalToolResponse):
+    status: Literal["preview_ready"] = "preview_ready"
+    result: DeletionPreviewResult
+
+
+class DeletionToolResponse(_OperationalToolResponse):
+    status: Literal["deleted"] = "deleted"
+    result: DeletionResult
+
+
+type CapabilitiesResponse = Annotated[
+    CapabilitiesToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type ResolutionResponse = Annotated[
+    ResolutionToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type UniverseResponse = Annotated[
+    UniverseToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type SyncResponse = Annotated[
+    SyncToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type DatasetResponse = Annotated[
+    DatasetToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type ExplainResponse = Annotated[
+    ExplainToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type JobResponse = Annotated[
+    JobToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type StorageListResponse = Annotated[
+    StorageListToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type DeletionPreviewResponse = Annotated[
+    DeletionPreviewToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
+type DeletionResponse = Annotated[
+    DeletionToolResponse | OperationalRefusalToolResponse,
+    Field(discriminator="status"),
+]
 
 
 class VerifiedAnalysisToolResponse(_StrictToolModel):
@@ -298,6 +462,18 @@ _CANONICAL_ANALYSIS_OUTPUT_ADAPTER: Final[TypeAdapter[CanonicalAnalysisToolRespo
 _ARTIFACT_OUTPUT_ADAPTER: Final[TypeAdapter[ArtifactToolResponse]] = TypeAdapter(
     ArtifactToolResponse
 )
+_OPERATIONAL_OUTPUT_ADAPTERS: Final[dict[str, TypeAdapter[object]]] = {
+    "saxo_analytics_capabilities": TypeAdapter(CapabilitiesResponse),
+    "saxo_resolve_research_universe": TypeAdapter(ResolutionResponse),
+    "saxo_manage_research_universe": TypeAdapter(UniverseResponse),
+    "saxo_sync_research_data": TypeAdapter(SyncResponse),
+    "saxo_get_research_dataset": TypeAdapter(DatasetResponse),
+    "saxo_explain_analysis": TypeAdapter(ExplainResponse),
+    "saxo_manage_analysis_job": TypeAdapter(JobResponse),
+    "saxo_list_analytics_storage": TypeAdapter(StorageListResponse),
+    "saxo_preview_analytics_deletion": TypeAdapter(DeletionPreviewResponse),
+    "saxo_delete_analytics_data": TypeAdapter(DeletionResponse),
+}
 
 
 class StoredMarketToolRequest(_StrictToolModel):
@@ -489,7 +665,7 @@ class AnalyticsJobToolRequest(_StrictToolModel):
         )
 
 
-def saxo_analytics_capabilities() -> AnalyticsToolResponse:
+def saxo_analytics_capabilities() -> CapabilitiesResponse:
     """Return local installed capabilities and proof maturity without source access."""
     tool = "saxo_analytics_capabilities"
     try:
@@ -499,55 +675,49 @@ def saxo_analytics_capabilities() -> AnalyticsToolResponse:
     except (AnalyticsConfigError, OSError, ProofProfileError, ValueError) as error:
         return _known_failure(tool, error, next_tool=tool)
     profiles = tuple(
-        {
-            "analysis_kind": profile.analysis_kind,
-            "proof_profile_id": profile.proof_profile_id,
-            "activation_state": profile.activation_state.value,
-            "reason_code": profile.quarantine_reason,
-        }
+        ProofCapabilitySummary(
+            analysis_kind=profile.analysis_kind,
+            proof_profile_id=profile.proof_profile_id,
+            activation_state=profile.activation_state.value,
+            reason_code=profile.quarantine_reason,
+        )
         for profile in catalog.profiles
     )
-    return _response(
-        tool,
-        {
-            "source_scope": "saxo_openapi",
-            "analytics_tool_ids": ANALYTICS_TOOL_IDS,
-            "installed_modules": (
-                "discovery_and_data",
-                "market_and_instrument_research",
-                "portfolio_research",
-                "decision_models",
-                "derivatives_and_strategy_research",
-                "artifacts_and_explanation",
-                "bounded_jobs_and_storage",
-            ),
-            "source_data_groups": (
-                "instrument_reference",
-                "price_bars",
-                "quotes",
-                "portfolio_snapshots",
-                "transactions_and_closed_positions",
-                "costs",
-                "corporate_actions",
-                "options_and_derivatives",
-            ),
-            "entitlement_state": "not_checked",
-            "dataset_coverage_next_tool": "saxo_list_analytics_storage",
-            "render_formats": ("png", "html"),
-            "export_formats": ("csv", "parquet", "json", "html", "pdf"),
-            "limits": config.limits.model_dump(mode="json"),
-            "proof_catalog_version": catalog.catalog_version,
-            "proof_profiles": profiles,
-            "quarantined_analysis_kinds": tuple(
-                profile.analysis_kind
-                for profile in catalog.profiles
-                if profile.activation_state.value == "quarantined"
-            ),
-            "background_collector": False,
-            "broker_write_authority": False,
-            "disclaimer_response_available": False,
-        },
-        status="passed",
+    result = AnalyticsCapabilitiesResult(
+        analytics_tool_ids=ANALYTICS_TOOL_IDS,
+        installed_modules=(
+            "discovery_and_data",
+            "market_and_instrument_research",
+            "portfolio_research",
+            "decision_models",
+            "derivatives_and_strategy_research",
+            "artifacts_and_explanation",
+            "bounded_jobs_and_storage",
+        ),
+        source_data_groups=(
+            "instrument_reference",
+            "price_bars",
+            "quotes",
+            "portfolio_snapshots",
+            "transactions_and_closed_positions",
+            "costs",
+            "corporate_actions",
+            "options_and_derivatives",
+        ),
+        render_formats=("png", "html"),
+        export_formats=("csv", "parquet", "json", "html", "pdf"),
+        limits=config.limits,
+        proof_catalog_version=catalog.catalog_version,
+        proof_profiles=profiles,
+        quarantined_analysis_kinds=tuple(
+            profile.analysis_kind
+            for profile in catalog.profiles
+            if profile.activation_state.value == "quarantined"
+        ),
+    )
+    return CapabilitiesToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_resolve_research_universe",
         next_action="Resolve a bounded Saxo research universe before source synchronization.",
         network_call_made=False,
@@ -559,7 +729,7 @@ async def saxo_resolve_research_universe(
     query: str,
     asset_types: tuple[str, ...] = (),
     exchanges: tuple[str, ...] = (),
-) -> AnalyticsToolResponse:
+) -> ResolutionResponse:
     """Resolve a natural-language query into safe handles and explicit ambiguity."""
     tool = "saxo_resolve_research_universe"
     try:
@@ -574,29 +744,29 @@ async def saxo_resolve_research_universe(
     ) as error:
         return _known_failure(tool, error, next_tool="saxo_analytics_capabilities")
     if result.status is ResolutionStatus.AMBIGUOUS:
-        return _response(
-            tool,
-            result,
+        return ResolutionToolResponse(
             status="ambiguous",
+            tool_name=tool,
+            result=result,
             next_tool=tool,
             next_action="Retry with an explicit asset type or exchange from the returned matches.",
             network_call_made=True,
             local_state_changed=True,
         )
     if result.status is ResolutionStatus.UNAVAILABLE:
-        return _response(
-            tool,
-            result,
+        return ResolutionToolResponse(
             status="unavailable",
+            tool_name=tool,
+            result=result,
             next_tool=tool,
             next_action="Refine the Saxo instrument query; do not substitute another provider.",
             network_call_made=True,
             local_state_changed=False,
         )
-    return _response(
-        tool,
-        result,
+    return ResolutionToolResponse(
         status="resolved",
+        tool_name=tool,
+        result=result,
         next_tool="saxo_manage_research_universe",
         next_action="Save the selected safe handles or synchronize them directly.",
         network_call_made=True,
@@ -612,7 +782,7 @@ def saxo_manage_research_universe(  # noqa: PLR0913 - exact bounded transition f
     additions: tuple[InstrumentHandle, ...] = (),
     removals: tuple[InstrumentHandle, ...] = (),
     expected_revision: str | None = None,
-) -> AnalyticsToolResponse:
+) -> UniverseResponse:
     """Apply one exact owner-local universe transition."""
     tool = "saxo_manage_research_universe"
     missing = _universe_missing_field(action, name, universe_id, expected_revision)
@@ -627,22 +797,28 @@ def saxo_manage_research_universe(  # noqa: PLR0913 - exact bounded transition f
     try:
         universes = ResearchUniverseStore(_analytics_config())
         if action == "create":
-            result: object = universes.create_universe(cast("str", name), handles)
+            result: UniverseToolResult = UniverseSummaryResult(
+                action="create",
+                universe=universes.create_universe(cast("str", name), handles),
+            )
         elif action == "list":
-            result = {"universes": universes.list_universes()}
+            result = UniverseListResult(universes=universes.list_universes())
         elif action == "update":
-            result = universes.update_universe(
-                cast("str", universe_id),
-                additions,
-                removals,
-                cast("str", expected_revision),
+            result = UniverseSummaryResult(
+                action="update",
+                universe=universes.update_universe(
+                    cast("str", universe_id),
+                    additions,
+                    removals,
+                    cast("str", expected_revision),
+                ),
             )
         else:
             universes.delete_universe(
                 cast("str", universe_id),
                 cast("str", expected_revision),
             )
-            result = {"deleted": True, "universe_id": universe_id}
+            result = UniverseDeleteResult(universe_id=cast("str", universe_id))
     except (
         AnalyticsConfigError,
         UniverseConflictError,
@@ -654,10 +830,9 @@ def saxo_manage_research_universe(  # noqa: PLR0913 - exact bounded transition f
         ValueError,
     ) as error:
         return _known_failure(tool, error, next_tool=tool)
-    return _response(
-        tool,
-        result,
-        status="passed",
+    return UniverseToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_sync_research_data",
         next_action="Synchronize the selected safe handles when current Saxo data is required.",
         network_call_made=False,
@@ -665,7 +840,7 @@ def saxo_manage_research_universe(  # noqa: PLR0913 - exact bounded transition f
     )
 
 
-async def saxo_sync_research_data(request: SyncResearchRequest) -> AnalyticsToolResponse:
+async def saxo_sync_research_data(request: SyncResearchRequest) -> SyncResponse:
     """Run one bounded source sync through the existing Saxo-only provider."""
     tool = "saxo_sync_research_data"
     try:
@@ -677,9 +852,18 @@ async def saxo_sync_research_data(request: SyncResearchRequest) -> AnalyticsTool
     except (AnalyticsConfigError, SourceProviderError, SyncError, StoreError, OSError) as error:
         next_tool = "saxo_manage_analysis_job" if isinstance(error, SyncLimitError) else tool
         return _known_failure(tool, error, next_tool=next_tool)
-    return _response(
-        tool,
-        result,
+    if result.status.value == "refused":
+        return _refusal(
+            tool,
+            "source_sync_refused",
+            "The bounded Saxo source synchronization produced no usable stored dataset.",
+            next_tool=tool,
+            next_action="Review the typed source scope and retry without substituting data.",
+        )
+    return SyncToolResponse(
+        status="passed" if result.status.value == "complete" else "degraded",
+        tool_name=tool,
+        result=result,
         next_tool="saxo_get_research_dataset",
         next_action="Inspect dataset lineage and quality before calculation.",
         network_call_made=result.source_request_count > 0,
@@ -691,17 +875,16 @@ def saxo_get_research_dataset(
     dataset_id: DatasetId,
     page: int = 1,
     limit: int = 100,
-) -> AnalyticsToolResponse:
+) -> DatasetResponse:
     """Read one bounded local dataset page by opaque handle."""
     tool = "saxo_get_research_dataset"
     try:
         result = get_dataset(dataset_id, page, limit, config=_analytics_config())
     except (AnalyticsConfigError, DatasetNotFoundError, SyncError, StoreError, OSError) as error:
         return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _response(
-        tool,
-        result,
-        status="passed",
+    return DatasetToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_analyze_instruments",
         next_action="Use a typed analysis tool that matches this dataset kind.",
         network_call_made=False,
@@ -718,6 +901,7 @@ def saxo_analyze_market(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        periods_per_year=request.periods_per_year,
     )
 
 
@@ -1018,29 +1202,32 @@ def saxo_export_analysis(
             store.close()
 
 
-def saxo_explain_analysis(analysis_id: AnalysisId) -> AnalyticsToolResponse:
+def saxo_explain_analysis(analysis_id: AnalysisId) -> ExplainResponse:
     """Replay one verified result and attach its checked-in metric definitions."""
     tool = "saxo_explain_analysis"
     try:
         config = _analytics_config()
-        definitions = load_metric_definition_catalog()
-        registry = ProofRegistry(
-            definitions=definitions,
-            catalog=load_proof_profile_catalog(definitions=definitions),
-            config=config,
-        )
+        registry = _proof_registry(config)
+        definitions = registry.definitions
         result = replay_analysis(analysis_id, config=config, registry=registry)
         by_id = definitions.by_id()
         metric_definitions = tuple(
             by_id[metric.metric_id] for metric in result.metrics if metric.metric_id in by_id
         )
         profile = registry.profile(result.analysis_kind)
-        explanation = {
-            "analysis": result,
-            "metric_definitions": metric_definitions,
-            "proof_profile": profile,
-            "replay_verified": True,
-        }
+        if profile is None:
+            return _refusal(
+                tool,
+                "proof_profile_unavailable",
+                "The stored analysis proof profile is unavailable.",
+                next_tool="saxo_sync_research_data",
+                next_action="Refresh the exact stored analysis before explaining it.",
+            )
+        explanation = AnalysisExplanation(
+            analysis=result,
+            metric_definitions=metric_definitions,
+            proof_profile=profile,
+        )
     except (
         AnalysisReplayRefused,
         AnalyticsConfigError,
@@ -1050,10 +1237,9 @@ def saxo_explain_analysis(analysis_id: AnalysisId) -> AnalyticsToolResponse:
         ValueError,
     ) as error:
         return _known_failure(tool, error, next_tool="saxo_sync_research_data")
-    return _response(
-        tool,
-        explanation,
-        status="passed",
+    return ExplainToolResponse(
+        tool_name=tool,
+        result=explanation,
         next_tool="saxo_render_analysis",
         next_action="Render or export only if the stored visibility permits owner delivery.",
         network_call_made=False,
@@ -1065,7 +1251,7 @@ async def saxo_manage_analysis_job(
     action: ManageJobAction,
     request: AnalyticsJobToolRequest | None = None,
     job_id: JobId | None = None,
-) -> AnalyticsToolResponse:
+) -> JobResponse:
     """Apply one bounded in-process job transition."""
     tool = "saxo_manage_analysis_job"
     if action == "start" and request is None:
@@ -1095,10 +1281,10 @@ async def saxo_manage_analysis_job(
         status.state,
         restart_allowed=status.restart_allowed,
     )
-    return _response(
-        tool,
-        status,
-        status=status.state,
+    return JobToolResponse(
+        status=status.status_code,
+        tool_name=tool,
+        result=status,
         next_tool=next_tool,
         next_action=next_action,
         network_call_made=False,
@@ -1106,7 +1292,7 @@ async def saxo_manage_analysis_job(
     )
 
 
-def saxo_list_analytics_storage(scope: StorageScope) -> AnalyticsToolResponse:
+def saxo_list_analytics_storage(scope: StorageScope) -> StorageListResponse:
     """List safe local storage metadata through the local-only boundary service."""
     tool = "saxo_list_analytics_storage"
     store: AnalyticsStore | None = None
@@ -1124,10 +1310,9 @@ def saxo_list_analytics_storage(scope: StorageScope) -> AnalyticsToolResponse:
     finally:
         if store is not None:
             store.close()
-    return _response(
-        tool,
-        result,
-        status="passed",
+    return StorageListToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_preview_analytics_deletion",
         next_action="Preview an exact scope before any local deletion.",
         network_call_made=False,
@@ -1135,7 +1320,7 @@ def saxo_list_analytics_storage(scope: StorageScope) -> AnalyticsToolResponse:
     )
 
 
-def saxo_preview_analytics_deletion(scope: StorageScope) -> AnalyticsToolResponse:
+def saxo_preview_analytics_deletion(scope: StorageScope) -> DeletionPreviewResponse:
     """Preview an exact local dependency closure and issue one bounded token."""
     tool = "saxo_preview_analytics_deletion"
     store: AnalyticsStore | None = None
@@ -1153,10 +1338,9 @@ def saxo_preview_analytics_deletion(scope: StorageScope) -> AnalyticsToolRespons
     finally:
         if store is not None:
             store.close()
-    return _response(
-        tool,
-        result,
-        status="preview_ready",
+    return DeletionPreviewToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_delete_analytics_data",
         next_action="Use the returned token once before it expires, or preview again.",
         network_call_made=False,
@@ -1164,7 +1348,7 @@ def saxo_preview_analytics_deletion(scope: StorageScope) -> AnalyticsToolRespons
     )
 
 
-def saxo_delete_analytics_data(token: str) -> AnalyticsToolResponse:
+def saxo_delete_analytics_data(token: str) -> DeletionResponse:
     """Consume one revision-bound token through the local-only deletion service."""
     tool = "saxo_delete_analytics_data"
     store: AnalyticsStore | None = None
@@ -1184,10 +1368,9 @@ def saxo_delete_analytics_data(token: str) -> AnalyticsToolResponse:
     finally:
         if store is not None:
             store.close()
-    return _response(
-        tool,
-        result,
-        status="deleted",
+    return DeletionToolResponse(
+        tool_name=tool,
+        result=result,
         next_tool="saxo_list_analytics_storage",
         next_action="List local storage to inspect the remaining value-free metadata.",
         network_call_made=False,
@@ -1195,11 +1378,13 @@ def saxo_delete_analytics_data(token: str) -> AnalyticsToolResponse:
     )
 
 
-def _stored_analysis_response(
+def _stored_analysis_response(  # noqa: PLR0911
     tool: str,
     analysis_kind: str,
     dataset_ids: Sequence[str],
     visibility: VisibilityMode,
+    *,
+    periods_per_year: float | None = None,
 ) -> CanonicalAnalysisToolResponse:
     """Authenticate exact stored lineage and fail closed before any unproved calculation."""
     if visibility is VisibilityMode.PRIVATE_USER_RESULT and _server_environment() == "LIVE":
@@ -1218,7 +1403,71 @@ def _stored_analysis_response(
         store = AnalyticsStore.open(config)
         for dataset_id in dataset_ids:
             store.get_authenticated_dataset(dataset_id)
-        profile = _proof_registry(config).profile(analysis_kind)
+        registry = _proof_registry(config)
+        profile = registry.profile(analysis_kind)
+        if profile is None:
+            return _canonical_analysis_refusal(
+                tool,
+                analysis_kind,
+                visibility,
+                "missing_proof_profile",
+                "No checked-in proof profile covers this stored analysis kind.",
+                next_tool="saxo_analytics_capabilities",
+                next_action="Inspect the installed proof state; do not substitute a calculation.",
+            )
+        if profile.activation_state.value != "active":
+            return _canonical_analysis_refusal(
+                tool,
+                analysis_kind,
+                visibility,
+                profile.quarantine_reason or "proof_quarantined",
+                "The checked-in proof profile is not active, so no analytical claim was produced.",
+                next_tool="saxo_analytics_capabilities",
+                next_action="Inspect proof maturity and wait for an active checked-in profile.",
+            )
+        if (
+            tool == "saxo_analyze_market"
+            and analysis_kind == "market_comparison"
+            and periods_per_year is not None
+        ):
+            result = execute_market_comparison(
+                tool_name=tool,
+                dataset_ids=tuple(dataset_ids),
+                periods_per_year=periods_per_year,
+                visibility=visibility,
+                config=config,
+                store=store,
+                registry=registry,
+            )
+            return VerifiedAnalysisToolResponse(
+                tool_name=tool,
+                analysis_kind=analysis_kind,
+                analysis_id=result.analysis_id,
+                result=result,
+                warnings=_warning_codes(result),
+                next_action="Explain, render, or export this exact stored analysis handle.",
+            )
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            "proof_bound_executor_unavailable",
+            "No proof-bound stored-input executor is registered for this exact analysis request.",
+            next_tool="saxo_analytics_capabilities",
+            next_action=(
+                "Use only an installed proof-bound analysis kind; do not provide source values."
+            ),
+        )
+    except StoredAnalysisExecutionError as error:
+        return _canonical_analysis_refusal(
+            tool,
+            analysis_kind,
+            visibility,
+            error.reason_code,
+            "The authenticated stored input cannot satisfy the active proof-bound executor.",
+            next_tool="saxo_sync_research_data",
+            next_action="Refresh the exact stored input or select its supported bounded analysis.",
+        )
     except (
         AnalyticsConfigError,
         ProofProfileError,
@@ -1241,37 +1490,6 @@ def _stored_analysis_response(
     finally:
         if store is not None:
             store.close()
-    if profile is None:
-        return _canonical_analysis_refusal(
-            tool,
-            analysis_kind,
-            visibility,
-            "missing_proof_profile",
-            "No checked-in proof profile covers this stored analysis kind.",
-            next_tool="saxo_analytics_capabilities",
-            next_action="Inspect the installed proof state; do not substitute a calculation.",
-        )
-    if profile.activation_state.value != "active":
-        return _canonical_analysis_refusal(
-            tool,
-            analysis_kind,
-            visibility,
-            profile.quarantine_reason or "proof_quarantined",
-            "The checked-in proof profile is not active, so no analytical claim was produced.",
-            next_tool="saxo_analytics_capabilities",
-            next_action="Inspect proof maturity and wait for an active checked-in profile.",
-        )
-    return _canonical_analysis_refusal(
-        tool,
-        analysis_kind,
-        visibility,
-        "proof_bound_executor_unavailable",
-        "No proof-bound stored-input executor is registered for this exact analysis request.",
-        next_tool="saxo_analytics_capabilities",
-        next_action=(
-            "Use only an installed proof-bound analysis kind; do not provide source values."
-        ),
-    )
 
 
 def _canonical_analysis_refusal(  # noqa: PLR0913 - explicit safe recovery envelope
@@ -1307,34 +1525,6 @@ def _canonical_analysis_refusal(  # noqa: PLR0913 - explicit safe recovery envel
     )
 
 
-def _response(  # noqa: PLR0913 - shared structured response fields
-    tool: str,
-    result: object,
-    *,
-    status: str | None = None,
-    reason_code: str | None = None,
-    message: str | None = None,
-    next_tool: str | None,
-    next_action: str | None,
-    network_call_made: bool | None,
-    local_state_changed: bool,
-) -> AnalyticsToolResponse:
-    payload = _payload(result)
-    resolved_status = status or _status_value(getattr(result, "status", None)) or "passed"
-    return AnalyticsToolResponse(
-        status=resolved_status,
-        tool_name=tool,
-        result=payload,
-        reason_code=reason_code,
-        message=message,
-        warnings=_warning_codes(result),
-        next_tool=next_tool,
-        next_action=next_action,
-        network_call_made=network_call_made,
-        local_state_changed=local_state_changed,
-    )
-
-
 def _refusal(
     tool: str,
     reason_code: str,
@@ -1342,9 +1532,8 @@ def _refusal(
     *,
     next_tool: str,
     next_action: str,
-) -> AnalyticsToolResponse:
-    return AnalyticsToolResponse(
-        status="refused",
+) -> OperationalRefusalToolResponse:
+    return OperationalRefusalToolResponse(
         tool_name=tool,
         reason_code=reason_code,
         message=message,
@@ -1360,7 +1549,7 @@ def _known_failure(
     error: Exception,
     *,
     next_tool: str,
-) -> AnalyticsToolResponse:
+) -> OperationalRefusalToolResponse:
     reason_code, message = _known_failure_details(error)
     return _refusal(
         tool,
@@ -1636,7 +1825,10 @@ async def _shutdown_analytics_runtime(
                     _job_runtime = None
 
 
-def _job_field_refusal(reason_code: str, message: str) -> AnalyticsToolResponse:
+def _job_field_refusal(
+    reason_code: str,
+    message: str,
+) -> OperationalRefusalToolResponse:
     return _refusal(
         "saxo_manage_analysis_job",
         reason_code,
@@ -1677,13 +1869,6 @@ def _universe_missing_field(
     return None
 
 
-def _status_value(value: object) -> str | None:
-    if value is None:
-        return None
-    raw = getattr(value, "value", value)
-    return raw if isinstance(raw, str) and _SAFE_CODE.fullmatch(raw) else None
-
-
 def _warning_codes(value: object) -> tuple[str, ...]:
     warnings: set[str] = set()
     for item in cast("Sequence[object]", getattr(value, "warnings", ())):
@@ -1696,15 +1881,6 @@ def _warning_codes(value: object) -> tuple[str, ...]:
         if isinstance(code, str) and _SAFE_CODE.fullmatch(code):
             warnings.add(code)
     return tuple(sorted(warnings))
-
-
-def _payload(value: object) -> dict[str, JsonValue]:
-    converted = cast("object", to_jsonable_python(value))
-    if isinstance(converted, Mapping):
-        payload = dict(cast("Mapping[str, object]", converted))
-    else:
-        payload = {"value": converted}
-    return _RESULT_ADAPTER.validate_python(payload)
 
 
 def _artifact_result(
@@ -1779,7 +1955,10 @@ def _artifact_result(
     return ToolResult(content=content, structured_content=structured, is_error=False)
 
 
-def _artifact_failure_result(tool: str, response: AnalyticsToolResponse) -> ToolResult:
+def _artifact_failure_result(
+    tool: str,
+    response: OperationalRefusalToolResponse,
+) -> ToolResult:
     refusal = RefusedArtifactToolResponse(
         tool_name=tool,
         reason_code=response.reason_code or "artifact_delivery_refused",
@@ -1816,6 +1995,11 @@ def analytics_tool_output_schema(tool_id: str) -> dict[str, object] | None:
         return schema
     if tool_id in _ARTIFACT_TOOLS:
         schema = _ARTIFACT_OUTPUT_ADAPTER.json_schema()
+        schema["type"] = "object"
+        return schema
+    adapter = _OPERATIONAL_OUTPUT_ADAPTERS.get(tool_id)
+    if adapter is not None:
+        schema = adapter.json_schema()
         schema["type"] = "object"
         return schema
     return None

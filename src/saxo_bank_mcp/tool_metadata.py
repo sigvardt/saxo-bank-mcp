@@ -98,8 +98,8 @@ _ANALYTICS_TOOL_METADATA: dict[str, ToolMetadata] = {
     "saxo_analyze_market": _analytics_metadata(
         "analytics_local_compute",
         environments=["LOCAL", "SIM", "LIVE_READ"],
-        local_state=False,
-        hint="Run only a typed bounded-market domain calculation.",
+        local_state=True,
+        hint="Persist only a proof-bound typed bounded-market domain calculation.",
     ),
     "saxo_analyze_instruments": _analytics_metadata(
         "analytics_local_compute",
