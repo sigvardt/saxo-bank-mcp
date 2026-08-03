@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 from typing import Final
@@ -7,6 +8,7 @@ from typing import Final
 import pytest
 from pydantic import ValidationError
 
+import saxo_bank_mcp.qa_analytics_evidence as evidence_module
 from saxo_bank_mcp.analytics_chart_semantics import core_template_bindings
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_proof_profiles import load_proof_profile_catalog
@@ -22,19 +24,12 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     AnalysisProofExecutionContract,
     AnalyticsProofMatrixBundle,
     EvidenceCoverageError,
-    EvidenceProvenanceError,
     ProofCaseReceipt,
     ProofExecutionKind,
     SkillScenarioEvidenceReceipt,
-    authenticate_proof_producer_artifacts,
     build_proof_execution_contracts,
-    canonical_evidence_sha256,
     catalog_coverage_errors,
-    coverage_catalog_sha256,
     load_analysis_kind_catalog,
-    producer_command_receipt_sha256,
-    proof_bundle_sha256,
-    proof_contract_sha256,
     validate_analysis_evidence,
     validate_proof_matrix_bundle,
 )
@@ -50,7 +45,6 @@ from saxo_bank_mcp.qa_analytics_sim import (
     ControlledSimCaseReceipt,
     ControlledSimLifecycleReceipt,
     PostSendTimeoutReceipt,
-    analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_sim_contracts,
 )
@@ -103,14 +97,17 @@ def _case_receipt(kind: ProofExecutionKind, *, applicable: bool = True) -> Proof
     )
 
 
-def _analytics_case_receipt(kind: AnalyticsCaseKind) -> AnalyticsCaseReceipt:
+def _analytics_case_receipt(
+    kind: AnalyticsCaseKind,
+    result_state: str,
+) -> AnalyticsCaseReceipt:
     states: dict[AnalyticsCaseKind, AnalyticsCaseState] = {
         "success": "passed",
-        "degradation": "degraded",
+        "degradation": "refused" if result_state == "refused" else "degraded",
         "refusal": "refused",
         "privacy": "passed",
         "timeout": "timed_out",
-        "recovery": "refused",
+        "recovery": "reconciled",
     }
     return AnalyticsCaseReceipt(
         kind=kind,
@@ -118,21 +115,16 @@ def _analytics_case_receipt(kind: AnalyticsCaseKind) -> AnalyticsCaseReceipt:
         reason_code=f"{kind}_observed",
         mcp_call_observed=True,
         result_parsed=kind != "timeout",
-        result_state={
-            "success": "passed",
-            "degradation": "degraded",
-            "refusal": "refused",
-            "privacy": "refused",
-            "timeout": "timed_out",
-            "recovery": "refused",
-        }[kind],
-        mcp_is_error=kind in {"refusal", "privacy", "timeout", "recovery"},
+        result_state=result_state,
+        mcp_is_error=kind in {"refusal", "privacy", "timeout"},
         network_call_made=False,
         broker_write_made=False,
         private_values_published=False,
         request_sha256="9" * 64,
         response_sha256="a" * 64,
         evidence_sha256="8" * 64,
+        reconciles_request_sha256="b" * 64 if kind == "recovery" else None,
+        reconciliation_observation_sha256="c" * 64 if kind == "recovery" else None,
     )
 
 
@@ -405,7 +397,10 @@ def _complete_bundle() -> tuple[
     analytics_case_receipts = tuple(
         AnalyticsToolCaseEvidence(
             tool_id=contract.tool_id,
-            cases=tuple(_analytics_case_receipt(case.kind) for case in contract.cases),
+            cases=tuple(
+                _analytics_case_receipt(case.kind, case.expected_states[0])
+                for case in contract.cases
+            ),
         )
         for contract in analytics_sim_contracts()
     )
@@ -533,97 +528,40 @@ def test_complete_cross_layer_bundle_validates_every_receipt_once() -> None:
     ) == ("trusted_producer_provenance_missing",)
 
 
-def test_only_owner_bound_candidate_producer_evidence_issues_trusted_provenance(
+def test_caller_written_producer_json_cannot_issue_trusted_provenance(
     tmp_path: Path,
 ) -> None:
     catalog, contracts, bundle = _complete_bundle()
     evidence_root = tmp_path / "producer-evidence"
     evidence_root.mkdir(mode=0o700)
     evidence_root.chmod(0o700)
-    session_payload = {
-        "candidate_commit": bundle.candidate_commit,
-        "environment": "SIM",
-        "fastmcp_session_sha256": canonical_evidence_sha256(
-            bundle.sim_tool_matrix.model_dump(mode="json"),
-        ),
-        "fastmcp_call_count": len(catalog.tool_ids) + len(analytics_case_calls()),
-        "matrix_tool_receipt_count": 60,
-        "analytics_case_receipt_count": len(analytics_case_calls()),
-        "mcp_transport_observed": True,
-        "live_events": 0,
-        "live_mutation_calls": 0,
-        "disclaimer_response_made": False,
-        "purchase_occurred": False,
-    }
-    probe_payload = {
-        "candidate_commit": bundle.candidate_commit,
-        "bundle_sha256": proof_bundle_sha256(bundle),
-        "coverage_catalog_sha256": coverage_catalog_sha256(catalog),
-        "proof_contract_sha256": proof_contract_sha256(contracts),
-        "analysis_receipt_count": len(contracts),
-        "proof_case_receipt_count": sum(len(contract.cases) for contract in contracts),
-        "artifact_parity_receipt_count": len(catalog.artifact_template_ids),
-        "artifact_visual_receipt_count": len(catalog.artifact_template_ids),
-        "skill_scenario_receipt_count": len(catalog.skill_scenario_tools),
-    }
-    session_sha = canonical_evidence_sha256(session_payload)
-    probe_sha = canonical_evidence_sha256(probe_payload)
-    command_payload = {
-        "producer": "run_analytics_proof_matrix",
-        "candidate_commit": bundle.candidate_commit,
-        "installed_candidate_commit": bundle.candidate_commit,
-        "command_name": "analytics_proof_matrix",
-        "command_exit_code": 0,
-        "command_timed_out": False,
-        "command_cleanup_complete": True,
-        "command_receipt_sha256": producer_command_receipt_sha256(
-            candidate_commit=bundle.candidate_commit,
-            installed_candidate_commit=bundle.candidate_commit,
-            session_receipt_sha256=session_sha,
-            probe_receipt_sha256=probe_sha,
-        ),
-    }
     paths = tuple(evidence_root / name for name in ("command.json", "session.json", "probe.json"))
-    for path, payload in zip(
-        paths,
-        (command_payload, session_payload, probe_payload),
-        strict=True,
-    ):
-        path.write_text(json.dumps(payload), encoding="utf-8")
+    for path in paths:
+        path.write_text(json.dumps({"candidate_commit": bundle.candidate_commit}), encoding="utf-8")
         path.chmod(0o600)
 
-    provenance = authenticate_proof_producer_artifacts(
+    assert not hasattr(evidence_module, "authenticate_proof_producer_artifacts")
+    assert (
+        "trusted_provenance"
+        not in inspect.signature(
+            validate_proof_matrix_bundle,
+        ).parameters
+    )
+    assert validate_proof_matrix_bundle(
         bundle=bundle,
         catalog=catalog,
         contracts=contracts,
-        installed_candidate_commit=bundle.candidate_commit,
-        command_evidence_path=paths[0],
-        session_evidence_path=paths[1],
-        probe_evidence_path=paths[2],
-    )
-    assert validate_proof_matrix_bundle(
-        bundle,
-        catalog=catalog,
-        contracts=contracts,
-        trusted_provenance=provenance,
-    ) == ("proof_profiles_not_active",)
+    ) == ("trusted_producer_provenance_missing", "proof_profiles_not_active")
+    assert all(path.is_file() for path in paths)
 
-    changed_bundle = bundle.model_copy(update={"candidate_commit": "2" * 40})
-    assert "trusted_producer_provenance_invalid" in validate_proof_matrix_bundle(
-        changed_bundle,
-        catalog=catalog,
-        contracts=contracts,
-        trusted_provenance=provenance,
-    )
 
-    paths[0].chmod(0o644)
-    with pytest.raises(EvidenceProvenanceError, match="owner-only"):
-        authenticate_proof_producer_artifacts(
-            bundle=bundle,
-            catalog=catalog,
-            contracts=contracts,
-            installed_candidate_commit=bundle.candidate_commit,
-            command_evidence_path=paths[0],
-            session_evidence_path=paths[1],
-            probe_evidence_path=paths[2],
-        )
+def test_proof_runner_requires_executed_production_install_not_fixture_or_paths() -> None:
+    runner = (
+        Path(__file__).resolve().parents[1] / "scripts/run_analytics_proof_matrix.py"
+    ).read_text(encoding="utf-8")
+
+    assert "load_verified_install_report" in runner
+    assert "load_install_report_for_consumers" not in runner
+    assert "--producer-command-evidence" not in runner
+    assert "--producer-session-evidence" not in runner
+    assert "--producer-probe-evidence" not in runner

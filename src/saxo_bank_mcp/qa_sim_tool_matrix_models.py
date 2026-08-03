@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Literal
 from urllib.parse import urlparse
 
@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.config import SIM_ENDPOINTS
 from saxo_bank_mcp.qa_analytics_sim import (
+    AnalyticsRuntimeResources,
     AnalyticsToolCaseEvidence,
     BrokerageStateFingerprint,
     analytics_case_evidence_errors,
@@ -184,3 +185,6 @@ class MatrixRuntimeState:
     preflight: PreflightFlags
     before: BrokerageStateFingerprint | None
     after: BrokerageStateFingerprint | None
+    analytics_resources: AnalyticsRuntimeResources = field(
+        default_factory=AnalyticsRuntimeResources,
+    )

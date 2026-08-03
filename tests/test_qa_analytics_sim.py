@@ -14,7 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 
 import saxo_bank_mcp.qa_sim_tool_matrix as matrix_module
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.analytics_models import AnalysisId, DatasetId, DeletionPreviewToken, JobId
+from saxo_bank_mcp.analytics_models import AnalysisId, DatasetId, JobId
 from saxo_bank_mcp.analytics_store import StorageScope
 from saxo_bank_mcp.analytics_sync import SyncResearchRequest
 from saxo_bank_mcp.mcp_analytics_tools import (
@@ -34,6 +34,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     AnalyticsCaseKind,
     AnalyticsCaseReceipt,
     AnalyticsCaseState,
+    AnalyticsRuntimeResources,
     AnalyticsToolCaseEvidence,
     BrokerageStateComponent,
     BrokerageStateFingerprint,
@@ -47,6 +48,11 @@ from saxo_bank_mcp.qa_analytics_sim import (
     assert_analytics_case_coverage,
     isolated_analytics_state,
     merge_matrix_receipts,
+)
+from saxo_bank_mcp.qa_sim_tool_matrix import (
+    analytics_case_receipt,
+    materialize_analytics_case_arguments,
+    run_analytics_cleanup_cases,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_helpers import (
     MatrixClient,
@@ -109,7 +115,7 @@ def _analytics_case_evidence() -> tuple[AnalyticsToolCaseEvidence, ...]:
         "refusal": "refused",
         "privacy": "passed",
         "timeout": "timed_out",
-        "recovery": "refused",
+        "recovery": "reconciled",
     }
     return tuple(
         AnalyticsToolCaseEvidence(
@@ -122,13 +128,17 @@ def _analytics_case_evidence() -> tuple[AnalyticsToolCaseEvidence, ...]:
                     mcp_call_observed=True,
                     result_parsed=case.kind != "timeout",
                     result_state=case.expected_states[0],
-                    mcp_is_error=case.kind in {"refusal", "privacy", "timeout", "recovery"},
+                    mcp_is_error=case.kind in {"refusal", "privacy", "timeout"},
                     network_call_made=False,
                     broker_write_made=False,
                     private_values_published=False,
                     request_sha256="b" * 64,
                     response_sha256="c" * 64,
                     evidence_sha256="d" * 64,
+                    reconciles_request_sha256=("e" * 64 if case.kind == "recovery" else None),
+                    reconciliation_observation_sha256=(
+                        "f" * 64 if case.kind == "recovery" else None
+                    ),
                 )
                 for case in contract.cases
             ),
@@ -180,6 +190,285 @@ def test_analytics_sim_contracts_cover_21_tools_and_all_applicable_cases_once() 
             assert "recovery" in kinds
 
 
+def test_analytics_success_contracts_use_each_tools_real_state() -> None:
+    expected = {
+        "saxo_analytics_capabilities": ("passed",),
+        "saxo_resolve_research_universe": ("resolved",),
+        "saxo_manage_research_universe": ("passed",),
+        "saxo_sync_research_data": ("passed",),
+        "saxo_get_research_dataset": ("passed",),
+        "saxo_analyze_market": ("verified",),
+        "saxo_analyze_instruments": ("verified",),
+        "saxo_analyze_portfolio": ("verified",),
+        "saxo_size_position": ("verified",),
+        "saxo_run_scenario": ("verified",),
+        "saxo_optimize_portfolio": ("verified",),
+        "saxo_model_derivatives": ("verified",),
+        "saxo_backtest_strategy": ("verified",),
+        "saxo_propose_trade_from_analysis": ("verified",),
+        "saxo_render_analysis": ("inline", "resource_link"),
+        "saxo_export_analysis": ("inline", "resource_link"),
+        "saxo_explain_analysis": ("passed",),
+        "saxo_manage_analysis_job": ("job_queued",),
+        "saxo_list_analytics_storage": ("passed",),
+        "saxo_preview_analytics_deletion": ("preview_ready",),
+        "saxo_delete_analytics_data": ("deleted",),
+    }
+    observed = {
+        contract.tool_id: next(
+            case.expected_states for case in contract.cases if case.kind == "success"
+        )
+        for contract in analytics_sim_contracts()
+    }
+
+    assert observed == expected
+
+
+def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
+    calls = analytics_case_calls()
+    by_case = {(call.tool_id, call.kind): call for call in calls}
+    for contract in analytics_sim_contracts():
+        kinds = {case.kind for case in contract.cases}
+        if "degradation" in kinds:
+            success = by_case[(contract.tool_id, "success")]
+            degradation = by_case[(contract.tool_id, "degradation")]
+            assert success.input_strategy != degradation.input_strategy
+            assert success.arguments != degradation.arguments
+        if "recovery" in kinds:
+            recovery = by_case[(contract.tool_id, "recovery")]
+            assert recovery.input_strategy == "observe_exact_timed_operation"
+            assert recovery.arguments != {"__qa_schema_extra_rejection__": True}
+            assert recovery.reconciles_kind == "timeout"
+
+
+def test_real_success_result_states_are_not_marked_failed() -> None:
+    contracts = {
+        contract.tool_id: next(case for case in contract.cases if case.kind == "success")
+        for contract in analytics_sim_contracts()
+    }
+    calls = {call.tool_id: call for call in analytics_case_calls() if call.kind == "success"}
+    for tool, observed_state in (
+        ("saxo_resolve_research_universe", "resolved"),
+        ("saxo_preview_analytics_deletion", "preview_ready"),
+        ("saxo_delete_analytics_data", "deleted"),
+    ):
+        receipt = analytics_case_receipt(
+            calls[tool],
+            contracts[tool].expected_states,
+            MatrixToolObservation(
+                payload={"status": observed_state},
+                result_parsed=True,
+                result_state=observed_state,
+                mcp_is_error=False,
+            ),
+        )
+        assert receipt.state == "passed"
+
+
+def test_runtime_arguments_chain_server_issued_handles_and_timeout_identity() -> None:
+    resources = AnalyticsRuntimeResources()
+    resources.dataset_ids.append("ds_11111111111141118111111111111111")
+    resources.degraded_dataset_ids.append("ds_22222222222242228222222222222222")
+    resources.analysis_ids.append("an_33333333333343338333333333333333")
+    resources.job_ids.append("jb_44444444444444448444444444444444")
+    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+
+    dataset_success = materialize_analytics_case_arguments(
+        calls[("saxo_get_research_dataset", "success")], resources
+    )
+    dataset_degraded = materialize_analytics_case_arguments(
+        calls[("saxo_get_research_dataset", "degradation")],
+        resources,
+    )
+    render_success = materialize_analytics_case_arguments(
+        calls[("saxo_render_analysis", "success")], resources
+    )
+    timeout_call = calls[("saxo_manage_analysis_job", "timeout")]
+    timeout_arguments = materialize_analytics_case_arguments(timeout_call, resources)
+    resources.remember_timeout(timeout_call, timeout_arguments)
+    recovery_call = calls[("saxo_manage_analysis_job", "recovery")]
+    recovery_arguments = materialize_analytics_case_arguments(recovery_call, resources)
+
+    assert dataset_success == {"dataset_id": resources.dataset_ids[0], "page": 1, "limit": 100}
+    assert dataset_degraded == {
+        "dataset_id": resources.degraded_dataset_ids[0],
+        "page": 1,
+        "limit": 100,
+    }
+    assert render_success["analysis_id"] == resources.analysis_ids[0]
+    assert (
+        timeout_arguments
+        == recovery_arguments
+        == {
+            "action": "check",
+            "job_id": resources.job_ids[0],
+        }
+    )
+    assert resources.timed_operation is not None
+    assert resources.timed_operation.request_sha256 == matrix_module.digest(timeout_arguments)
+
+
+def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _runtime_state()
+    state.analytics_resources.dataset_ids.append("ds_11111111111141118111111111111111")
+    state.analytics_resources.job_ids.append("jb_22222222222242228222222222222222")
+    issued_deletion_handle = "dp_33333333333343338333333333333333"
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def local_result(
+        _client: object,
+        tool: str,
+        arguments: dict[str, object],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed.append((tool, arguments))
+        if tool == "saxo_manage_analysis_job":
+            return MatrixToolObservation(
+                payload={"status": "job_completed"},
+                result_parsed=True,
+                result_state="job_completed",
+                mcp_is_error=False,
+            )
+        if tool == "saxo_list_analytics_storage":
+            already_deleted = any(name == "saxo_delete_analytics_data" for name, _ in observed)
+            entries: list[JsonValue] = []
+            if not already_deleted:
+                entries = [
+                    {
+                        "data_type": "datasets",
+                        "object_id": state.analytics_resources.dataset_ids[0],
+                    },
+                    {
+                        "data_type": "jobs",
+                        "object_id": state.analytics_resources.job_ids[0],
+                    },
+                ]
+            payload: dict[str, JsonValue] = {
+                "status": "passed",
+                "result": {
+                    "entries": entries,
+                    "runtime_state": {
+                        "job_count": len(entries),
+                        "cache_entry_count": len(entries),
+                        "temporary_entry_count": 0,
+                        "fingerprint_sha256": "a" * 64,
+                    },
+                },
+            }
+            return MatrixToolObservation(
+                payload=payload,
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
+        if tool == "saxo_preview_analytics_deletion":
+            assert arguments == {"scope": {"data_types": ["datasets", "jobs"]}}
+            return MatrixToolObservation(
+                payload={
+                    "status": "preview_ready",
+                    "result": {"preview": {"token": issued_deletion_handle}},
+                },
+                result_parsed=True,
+                result_state="preview_ready",
+                mcp_is_error=False,
+            )
+        assert tool == "saxo_delete_analytics_data"
+        assert arguments == {"token": issued_deletion_handle}
+        return MatrixToolObservation(
+            payload={"status": "deleted"},
+            result_parsed=True,
+            result_state="deleted",
+            mcp_is_error=False,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", local_result)
+    receipts = anyio.run(
+        run_analytics_cleanup_cases,
+        cast("MatrixClient", object()),
+        state,
+    )
+
+    assert tuple(receipt.kind for receipt in receipts) == ("success", "success")
+    assert all(receipt.state == "passed" for receipt in receipts)
+    assert state.analytics_resources.cleanup_verified is True
+    assert state.uncleaned == 0
+    assert any(tool == "saxo_delete_analytics_data" for tool, _ in observed)
+
+
+def test_analytics_cleanup_never_deletes_while_an_issued_job_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _runtime_state()
+    state.analytics_resources.job_ids.append("jb_22222222222242228222222222222222")
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def active_job(
+        _client: object,
+        tool: str,
+        arguments: dict[str, object],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed.append((tool, arguments))
+        if tool == "saxo_manage_analysis_job":
+            return MatrixToolObservation(
+                payload={"status": "job_running"},
+                result_parsed=True,
+                result_state="job_running",
+                mcp_is_error=False,
+            )
+        if tool == "saxo_list_analytics_storage":
+            return MatrixToolObservation(
+                payload={
+                    "status": "passed",
+                    "result": {
+                        "entries": [
+                            {
+                                "data_type": "jobs",
+                                "object_id": state.analytics_resources.job_ids[0],
+                            },
+                        ],
+                        "runtime_state": {
+                            "job_count": 1,
+                            "cache_entry_count": 0,
+                            "temporary_entry_count": 1,
+                            "fingerprint_sha256": "a" * 64,
+                        },
+                    },
+                },
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
+        assert arguments == {}
+        return MatrixToolObservation(
+            payload={"status": "invalid_arguments"},
+            result_parsed=True,
+            result_state="invalid_arguments",
+            mcp_is_error=True,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", active_job)
+    receipts = anyio.run(
+        matrix_module.run_analytics_cleanup_cases,
+        cast("MatrixClient", object()),
+        state,
+    )
+
+    assert all(receipt.state == "failed" for receipt in receipts)
+    assert state.uncleaned == 1
+    assert state.analytics_resources.cleanup_verified is False
+    assert not any(
+        tool == "saxo_preview_analytics_deletion" and arguments.get("scope")
+        for tool, arguments in observed
+    )
+    assert not any(
+        tool == "saxo_delete_analytics_data" and arguments.get("token")
+        for tool, arguments in observed
+    )
+
+
 def test_primary_calls_are_value_free_and_cover_all_analytics_tools() -> None:
     calls = analytics_primary_calls()
 
@@ -221,7 +510,7 @@ def test_primary_calls_satisfy_the_typed_adapter_input_contracts() -> None:
     TypeAdapter(JobId).validate_python(calls["saxo_manage_analysis_job"]["job_id"])
     assert calls["saxo_list_analytics_storage"]["scope"] == {}
     StorageScope()
-    TypeAdapter(DeletionPreviewToken).validate_python(calls["saxo_delete_analytics_data"]["token"])
+    assert calls["saxo_delete_analytics_data"] == {}
 
 
 def test_matrix_merge_produces_exact_60_unique_receipts() -> None:
@@ -421,7 +710,7 @@ def test_case_receipts_preserve_reduced_refusal_timeout_and_recovery_states() ->
         "refusal": "refused",
         "privacy": "passed",
         "timeout": "timed_out",
-        "recovery": "refused",
+        "recovery": "reconciled",
     }
     receipts = tuple(
         AnalyticsCaseReceipt(
@@ -436,15 +725,17 @@ def test_case_receipts_preserve_reduced_refusal_timeout_and_recovery_states() ->
                 "refusal": "refused",
                 "privacy": "refused",
                 "timeout": "timed_out",
-                "recovery": "refused",
+                "recovery": "job_completed",
             }[kind],
-            mcp_is_error=kind in {"refusal", "privacy", "timeout", "recovery"},
+            mcp_is_error=kind in {"refusal", "privacy", "timeout"},
             network_call_made=False,
             broker_write_made=False,
             private_values_published=False,
             request_sha256="b" * 64,
             response_sha256="c" * 64,
             evidence_sha256="d" * 64,
+            reconciles_request_sha256="e" * 64 if kind == "recovery" else None,
+            reconciliation_observation_sha256="f" * 64 if kind == "recovery" else None,
         )
         for kind in ANALYTICS_CASE_KINDS
     )
@@ -565,16 +856,33 @@ def test_passed_matrix_requires_every_applicable_analytics_case_receipt() -> Non
     assert tuple((call.tool_id, call.kind) for call in calls) == expected
 
 
-def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(
+def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected_calls = analytics_case_calls()
+    expected_calls = tuple(
+        call
+        for call in analytics_case_calls()
+        if not (
+            call.kind == "success"
+            and call.tool_id in {"saxo_preview_analytics_deletion", "saxo_delete_analytics_data"}
+        )
+    )
     contracts = {
         (contract.tool_id, case.kind): case
         for contract in analytics_sim_contracts()
         for case in contract.cases
     }
     observed: list[tuple[str, dict[str, object], float | None]] = []
+    case_index = 0
+    dataset_id = "ds_11111111111141118111111111111111"
+    degraded_dataset_id = "ds_22222222222242228222222222222222"
+    analysis_id = "an_33333333333343338333333333333333"
+    degraded_analysis_id = "an_44444444444444448444444444444444"
+    instrument_handle = "ih_55555555555545558555555555555555"
+    degraded_instrument_handle = "ih_66666666666646668666666666666666"
+    job_id = "jb_77777777777747778777777777777777"
+    artifact_id = "ar_88888888888848888888888888888888"
+    deletion_handle = "dp_99999999999949998999999999999999"
 
     async def result_for_case(
         _client: object,
@@ -583,20 +891,102 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(
         *,
         timeout_seconds: float | None = None,
     ) -> MatrixToolObservation:
-        call = expected_calls[len(observed)]
-        assert (tool, arguments, timeout_seconds) == (
-            call.tool_id,
-            call.arguments,
-            call.timeout_seconds,
-        )
+        nonlocal case_index
         observed.append((tool, arguments, timeout_seconds))
+        if case_index >= len(expected_calls):
+            if tool == "saxo_manage_analysis_job":
+                return MatrixToolObservation(
+                    payload={"status": "job_completed"},
+                    result_parsed=True,
+                    result_state="job_completed",
+                    mcp_is_error=False,
+                )
+            if tool == "saxo_list_analytics_storage":
+                deleted = any(item[0] == "saxo_delete_analytics_data" for item in observed)
+                entries = (
+                    []
+                    if deleted
+                    else [
+                        {"data_type": "datasets", "object_id": dataset_id},
+                        {"data_type": "jobs", "object_id": job_id},
+                    ]
+                )
+                return MatrixToolObservation(
+                    payload={
+                        "status": "passed",
+                        "result": {
+                            "entries": entries,
+                            "runtime_state": {
+                                "job_count": 0 if deleted else 1,
+                                "cache_entry_count": 0 if deleted else 1,
+                                "temporary_entry_count": 0,
+                                "fingerprint_sha256": "1" * 64,
+                            },
+                        },
+                    },
+                    result_parsed=True,
+                    result_state="passed",
+                    mcp_is_error=False,
+                )
+            if tool == "saxo_preview_analytics_deletion":
+                return MatrixToolObservation(
+                    payload={
+                        "status": "preview_ready",
+                        "result": {"preview": {"token": deletion_handle}},
+                    },
+                    result_parsed=True,
+                    result_state="preview_ready",
+                    mcp_is_error=False,
+                )
+            assert tool == "saxo_delete_analytics_data"
+            assert arguments == {"token": deletion_handle}
+            return MatrixToolObservation(
+                payload={"status": "deleted"},
+                result_parsed=True,
+                result_state="deleted",
+                mcp_is_error=False,
+            )
+        call = expected_calls[case_index]
+        case_index += 1
+        assert (tool, timeout_seconds) == (call.tool_id, call.timeout_seconds)
         contract = contracts[(call.tool_id, call.kind)]
         state = contract.expected_states[0]
+        payload: dict[str, JsonValue] = {"status": state}
+        if call.tool_id == "saxo_resolve_research_universe":
+            payload["result"] = {
+                "instrument_handle": (
+                    instrument_handle if call.kind == "success" else degraded_instrument_handle
+                ),
+            }
+        elif call.tool_id == "saxo_sync_research_data" and call.kind in {
+            "success",
+            "degradation",
+        }:
+            payload["result"] = {
+                "datasets": [
+                    {
+                        "dataset_id": (
+                            dataset_id if call.kind == "success" else degraded_dataset_id
+                        ),
+                    },
+                ],
+            }
+        elif call.tool_id.startswith("saxo_analyze_") and call.kind in {
+            "success",
+            "degradation",
+        }:
+            payload["analysis_id"] = analysis_id if call.kind == "success" else degraded_analysis_id
+        elif call.tool_id in {"saxo_render_analysis", "saxo_export_analysis"} and (
+            call.kind == "success"
+        ):
+            payload["artifact_id"] = artifact_id
+        elif call.tool_id == "saxo_manage_analysis_job" and call.kind == "success":
+            payload["result"] = {"job_id": job_id}
         return MatrixToolObservation(
-            payload={"status": state},
+            payload=payload,
             result_parsed=call.kind != "timeout",
             result_state=state,
-            mcp_is_error=call.kind in {"refusal", "privacy", "timeout", "recovery"},
+            mcp_is_error=call.kind in {"refusal", "privacy", "timeout"},
             timed_out=call.kind == "timeout",
         )
 
@@ -608,9 +998,10 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(
         state,
     )
 
-    assert len(observed) == len(expected_calls)
+    assert case_index == len(expected_calls)
     assert len(state.analytics_case_receipts) == len(ANALYTICS_TOOL_IDS)
     assert set(state.receipts) == set(ANALYTICS_TOOL_IDS)
+    assert state.analytics_resources.cleanup_verified is True
     assert state.errors == []
 
 

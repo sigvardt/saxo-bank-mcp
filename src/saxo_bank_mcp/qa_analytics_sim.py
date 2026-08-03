@@ -7,6 +7,7 @@ import json
 import os
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Literal, Self
 
@@ -80,22 +81,64 @@ _DEGRADATION_TOOLS: Final = frozenset(
         "saxo_explain_analysis",
     },
 )
-_TIMEOUT_RECOVERY_TOOLS: Final = frozenset(
-    {
-        "saxo_resolve_research_universe",
-        "saxo_sync_research_data",
-        "saxo_manage_analysis_job",
-        "saxo_render_analysis",
-        "saxo_export_analysis",
-        "saxo_delete_analytics_data",
-    },
-)
+_TIMEOUT_RECOVERY_TOOLS: Final = frozenset({"saxo_manage_analysis_job"})
 _SAFE_UUID4_PAYLOAD: Final = "00000000000040008000000000000000"
 _SAFE_INSTRUMENT_HANDLE: Final = f"ih_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_DATASET_HANDLE: Final = f"ds_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_ANALYSIS_HANDLE: Final = f"an_{_SAFE_UUID4_PAYLOAD}"
+_SAFE_DEGRADED_ANALYSIS_HANDLE: Final = "an_11111111111141118111111111111111"
 _SAFE_JOB_HANDLE: Final = f"jb_{_SAFE_UUID4_PAYLOAD}"
-_SAFE_DELETION_TOKEN: Final = f"dp_{_SAFE_UUID4_PAYLOAD}"
+
+_SUCCESS_STATES_BY_TOOL: Final[dict[str, tuple[str, ...]]] = {
+    "saxo_analytics_capabilities": ("passed",),
+    "saxo_resolve_research_universe": ("resolved",),
+    "saxo_manage_research_universe": ("passed",),
+    "saxo_sync_research_data": ("passed",),
+    "saxo_get_research_dataset": ("passed",),
+    "saxo_analyze_market": ("verified",),
+    "saxo_analyze_instruments": ("verified",),
+    "saxo_analyze_portfolio": ("verified",),
+    "saxo_size_position": ("verified",),
+    "saxo_run_scenario": ("verified",),
+    "saxo_optimize_portfolio": ("verified",),
+    "saxo_model_derivatives": ("verified",),
+    "saxo_backtest_strategy": ("verified",),
+    "saxo_propose_trade_from_analysis": ("verified",),
+    "saxo_render_analysis": ("inline", "resource_link"),
+    "saxo_export_analysis": ("inline", "resource_link"),
+    "saxo_explain_analysis": ("passed",),
+    "saxo_manage_analysis_job": ("job_queued",),
+    "saxo_list_analytics_storage": ("passed",),
+    "saxo_preview_analytics_deletion": ("preview_ready",),
+    "saxo_delete_analytics_data": ("deleted",),
+}
+_DEGRADATION_STATES_BY_TOOL: Final[dict[str, tuple[str, ...]]] = {
+    "saxo_resolve_research_universe": ("ambiguous", "unavailable"),
+    "saxo_sync_research_data": ("degraded", "refused"),
+    "saxo_get_research_dataset": ("refused",),
+    "saxo_analyze_market": ("degraded", "refused"),
+    "saxo_analyze_instruments": ("degraded", "refused"),
+    "saxo_analyze_portfolio": ("degraded", "refused"),
+    "saxo_size_position": ("degraded", "refused"),
+    "saxo_run_scenario": ("degraded", "refused"),
+    "saxo_optimize_portfolio": ("degraded", "refused"),
+    "saxo_model_derivatives": ("degraded", "refused"),
+    "saxo_backtest_strategy": ("degraded", "refused"),
+    "saxo_propose_trade_from_analysis": ("refused",),
+    "saxo_render_analysis": ("refused",),
+    "saxo_export_analysis": ("refused",),
+    "saxo_explain_analysis": ("refused",),
+}
+_REFUSAL_STATES: Final = ("refused", "denied", "invalid_arguments", "invalid_request")
+_JOB_RECONCILIATION_STATES: Final = (
+    "job_queued",
+    "job_running",
+    "job_completed",
+    "job_failed",
+    "job_cancelled",
+    "job_expired",
+    "job_interrupted_restart_required",
+)
 
 
 class _StrictReceipt(BaseModel):
@@ -149,17 +192,26 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     response_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reconciles_request_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    reconciliation_observation_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    blind_retry_attempted: Literal[False] = False
     call_path: Literal["fastmcp.Client.call_tool"] = "fastmcp.Client.call_tool"
 
     @model_validator(mode="after")
     def _validate_outcome(self) -> Self:
         allowed: dict[AnalyticsCaseKind, frozenset[AnalyticsCaseState]] = {
             "success": frozenset({"passed"}),
-            "degradation": frozenset({"degraded"}),
+            "degradation": frozenset({"degraded", "refused"}),
             "refusal": frozenset({"refused"}),
             "privacy": frozenset({"passed"}),
             "timeout": frozenset({"timed_out"}),
-            "recovery": frozenset({"reconciled", "refused"}),
+            "recovery": frozenset({"reconciled"}),
         }
         if self.state != "failed" and self.state not in allowed[self.kind]:
             raise ValueError("analytics case state does not match its case kind")
@@ -170,8 +222,15 @@ class AnalyticsCaseReceipt(_StrictReceipt):
         refusal_states = {"refused", "denied", "invalid_arguments", "invalid_request"}
         if self.state == "refused" and self.result_state not in refusal_states:
             raise ValueError("analytics refusal evidence requires a refused result")
-        if self.state == "reconciled" and self.result_state != "reconciled":
-            raise ValueError("analytics recovery evidence requires a reconciled result")
+        if self.state == "reconciled" and (
+            self.reconciles_request_sha256 is None or self.reconciliation_observation_sha256 is None
+        ):
+            raise ValueError("analytics recovery must observe the exact timed operation")
+        if self.kind != "recovery" and (
+            self.reconciles_request_sha256 is not None
+            or self.reconciliation_observation_sha256 is not None
+        ):
+            raise ValueError("only recovery evidence may bind a timed operation")
         if self.state != "failed" and (self.broker_write_made or self.private_values_published):
             raise ValueError("passing analytics case evidence violates safety or privacy")
         return self
@@ -181,7 +240,63 @@ class AnalyticsCaseCall(_StrictReceipt):
     tool_id: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
     kind: AnalyticsCaseKind
     arguments: dict[str, JsonValue]
+    input_strategy: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    reconciles_kind: Literal["timeout"] | None = None
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
+
+    @model_validator(mode="after")
+    def _validate_recovery_strategy(self) -> Self:
+        if self.kind == "recovery" and (
+            self.input_strategy != "observe_exact_timed_operation"
+            or self.reconciles_kind != "timeout"
+        ):
+            raise ValueError("analytics recovery must bind the exact timed operation")
+        if self.kind != "recovery" and self.reconciles_kind is not None:
+            raise ValueError("only recovery calls may name a reconciled case")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyticsTimedOperation:
+    tool_id: str
+    request_sha256: str
+    arguments: dict[str, JsonValue]
+
+
+@dataclass(slots=True)
+class AnalyticsRuntimeResources:
+    """Server-issued handles retained only for one isolated FastMCP matrix session."""
+
+    instrument_handles: list[str] = field(default_factory=list)
+    degraded_instrument_handles: list[str] = field(default_factory=list)
+    dataset_ids: list[str] = field(default_factory=list)
+    degraded_dataset_ids: list[str] = field(default_factory=list)
+    analysis_ids: list[str] = field(default_factory=list)
+    degraded_analysis_ids: list[str] = field(default_factory=list)
+    artifact_ids: list[str] = field(default_factory=list)
+    job_ids: list[str] = field(default_factory=list)
+    deletion_token: str | None = None
+    timed_operation: AnalyticsTimedOperation | None = None
+    cleanup_verified: bool = False
+
+    def remember_timeout(
+        self,
+        call: AnalyticsCaseCall,
+        arguments: dict[str, JsonValue],
+    ) -> None:
+        if call.kind != "timeout":
+            raise ValueError("only a timed case can establish reconciliation identity")
+        self.timed_operation = AnalyticsTimedOperation(
+            tool_id=call.tool_id,
+            request_sha256=_request_sha256(arguments),
+            arguments=dict(arguments),
+        )
+
+
+def _request_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str).encode(),
+    ).hexdigest()
 
 
 class AnalyticsToolCaseEvidence(_StrictReceipt):
@@ -345,33 +460,20 @@ def analytics_sim_contracts() -> tuple[AnalyticsToolSimContract, ...]:
     """Return one immutable case contract for every analytics MCP tool."""
     contracts: list[AnalyticsToolSimContract] = []
     for tool_id in ANALYTICS_TOOL_IDS:
-        cases = [
-            _case("success", ("passed", "verified", "completed", "inline", "resource_link")),
-        ]
+        cases = [_case("success", _SUCCESS_STATES_BY_TOOL[tool_id])]
         if tool_id in _DEGRADATION_TOOLS:
-            cases.append(
-                _case(
-                    "degradation",
-                    ("degraded", "reduced", "ambiguous", "unavailable"),
-                ),
-            )
+            cases.append(_case("degradation", _DEGRADATION_STATES_BY_TOOL[tool_id]))
         cases.extend(
             (
-                _case(
-                    "refusal",
-                    ("refused", "denied", "invalid_arguments", "invalid_request"),
-                ),
-                _case(
-                    "privacy",
-                    ("refused", "denied", "invalid_arguments", "invalid_request"),
-                ),
+                _case("refusal", _REFUSAL_STATES),
+                _case("privacy", _REFUSAL_STATES),
             ),
         )
         if tool_id in _TIMEOUT_RECOVERY_TOOLS:
             cases.extend(
                 (
-                    _case("timeout", ("timed_out", "unknown_state")),
-                    _case("recovery", ("refused", "invalid_arguments", "invalid_request")),
+                    _case("timeout", ("timed_out",)),
+                    _case("recovery", _JOB_RECONCILIATION_STATES),
                 ),
             )
         contracts.append(
@@ -463,8 +565,12 @@ def analytics_case_contract_sha256() -> str:
         "contracts": [contract.model_dump(mode="json") for contract in analytics_sim_contracts()],
         "calls": [call.model_dump(mode="json") for call in analytics_case_calls()],
     }
+    return _json_sha256(material)
+
+
+def _json_sha256(value: object) -> str:
     return hashlib.sha256(
-        json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+        json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
     ).hexdigest()
 
 
@@ -653,7 +759,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
         "saxo_manage_analysis_job": {"action": "check", "job_id": _SAFE_JOB_HANDLE},
         "saxo_list_analytics_storage": {"scope": {}},
         "saxo_preview_analytics_deletion": {"scope": {}},
-        "saxo_delete_analytics_data": {"token": _SAFE_DELETION_TOKEN},
+        "saxo_delete_analytics_data": {},
     }
     return tuple((tool_id, calls[tool_id]) for tool_id in ANALYTICS_TOOL_IDS)
 
@@ -661,28 +767,130 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
 def analytics_case_calls() -> tuple[AnalyticsCaseCall, ...]:
     """Return every applicable case as a real FastMCP call contract.
 
-    Success, degradation, timeout, and recovery use the bounded typed request. Refusal and
-    privacy use a guaranteed schema-extra rejection, so the privacy probe cannot enter a domain
-    service or publish owner values. A runtime result must still match its declared case contract.
+    The static arguments are schema examples only. The matrix materializes every stateful call
+    from handles issued earlier in the same FastMCP session. Refusal and privacy cases use a
+    guaranteed schema-extra rejection and never enter a domain service.
     """
     primary = dict(analytics_primary_calls())
     calls: list[AnalyticsCaseCall] = []
     for contract in analytics_sim_contracts():
         for case in contract.cases:
             arguments: dict[str, JsonValue]
-            if case.kind in {"refusal", "privacy", "recovery"}:
+            if case.kind in {"refusal", "privacy"}:
                 arguments = {"__qa_schema_extra_rejection__": True}
+            elif case.kind == "recovery" or (
+                case.kind == "success"
+                and contract.tool_id
+                in {"saxo_preview_analytics_deletion", "saxo_delete_analytics_data"}
+            ):
+                arguments = {}
             else:
                 arguments = dict(primary[contract.tool_id])
+                if case.kind == "degradation":
+                    arguments = _degradation_schema_arguments(contract.tool_id, arguments)
             calls.append(
                 AnalyticsCaseCall(
                     tool_id=contract.tool_id,
                     kind=case.kind,
                     arguments=arguments,
+                    input_strategy=_case_input_strategy(contract.tool_id, case.kind),
+                    reconciles_kind="timeout" if case.kind == "recovery" else None,
                     timeout_seconds=0.001 if case.kind == "timeout" else None,
                 ),
             )
     return tuple(calls)
+
+
+def _case_input_strategy(tool_id: str, kind: AnalyticsCaseKind) -> str:
+    if kind == "refusal":
+        return "schema_refusal"
+    if kind == "privacy":
+        return "schema_privacy_refusal"
+    if kind == "timeout":
+        return "check_issued_job_with_timeout"
+    if kind == "recovery":
+        return "observe_exact_timed_operation"
+    success: dict[str, str] = {
+        "saxo_analytics_capabilities": "capabilities",
+        "saxo_resolve_research_universe": "resolve_exact_fixture",
+        "saxo_manage_research_universe": "list_universes",
+        "saxo_sync_research_data": "sync_issued_instrument",
+        "saxo_get_research_dataset": "read_issued_dataset",
+        "saxo_analyze_market": "analyze_issued_dataset",
+        "saxo_analyze_instruments": "analyze_issued_dataset_and_instrument",
+        "saxo_analyze_portfolio": "analyze_issued_dataset",
+        "saxo_size_position": "size_issued_dataset_and_instrument",
+        "saxo_run_scenario": "scenario_issued_dataset_and_instrument",
+        "saxo_optimize_portfolio": "optimize_issued_dataset",
+        "saxo_model_derivatives": "model_issued_dataset_and_instrument",
+        "saxo_backtest_strategy": "backtest_issued_dataset_and_instrument",
+        "saxo_propose_trade_from_analysis": "propose_from_issued_analysis",
+        "saxo_render_analysis": "render_issued_analysis",
+        "saxo_export_analysis": "export_issued_analysis",
+        "saxo_explain_analysis": "explain_issued_analysis",
+        "saxo_manage_analysis_job": "start_job_from_issued_analysis",
+        "saxo_list_analytics_storage": "list_isolated_storage",
+        "saxo_preview_analytics_deletion": "preview_exact_test_closure",
+        "saxo_delete_analytics_data": "consume_issued_deletion_token",
+    }
+    selected = success[tool_id]
+    return selected if kind == "success" else f"{selected}_degraded"
+
+
+def _degradation_schema_arguments(  # noqa: C901, PLR0912 - exact bounded catalog
+    tool_id: str,
+    arguments: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
+    """Keep declared degradation inputs distinct without supplying runtime source facts."""
+    cloned: JsonValue = json.loads(json.dumps(arguments, allow_nan=False))
+    if not isinstance(cloned, dict):
+        return {}
+    if tool_id == "saxo_resolve_research_universe":
+        cloned["query"] = "controlled fixture"
+        return cloned
+    if tool_id == "saxo_get_research_dataset":
+        cloned["page"] = 2
+        return cloned
+    if tool_id in {
+        "saxo_propose_trade_from_analysis",
+        "saxo_render_analysis",
+        "saxo_export_analysis",
+        "saxo_explain_analysis",
+    }:
+        cloned["analysis_id"] = _SAFE_DEGRADED_ANALYSIS_HANDLE
+        if tool_id == "saxo_propose_trade_from_analysis":
+            cloned["quantity"] = "2"
+        elif tool_id == "saxo_render_analysis":
+            cloned["output_format"] = "html"
+        elif tool_id == "saxo_export_analysis":
+            cloned["output_format"] = "csv"
+        return cloned
+    request = cloned.get("request")
+    if not isinstance(request, dict):
+        return cloned
+    if tool_id == "saxo_sync_research_data":
+        items = request.get("items")
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            items[0]["interval"] = "1m"
+    elif tool_id == "saxo_analyze_market":
+        request["periods_per_year"] = 365.0
+    elif tool_id == "saxo_analyze_instruments":
+        request["rolling_window"] = 10
+    elif tool_id == "saxo_analyze_portfolio":
+        request["analysis_kind"] = "tax_lot_export"
+    elif tool_id == "saxo_size_position":
+        request["maximum_loss"] = "2"
+    elif tool_id == "saxo_run_scenario":
+        shocks = request.get("shocks")
+        if isinstance(shocks, list) and shocks and isinstance(shocks[0], dict):
+            shocks[0]["price_shock_ratio"] = "-0.2"
+    elif tool_id == "saxo_optimize_portfolio":
+        request["maximum_turnover"] = "0"
+    elif tool_id == "saxo_model_derivatives":
+        request["volatility_assumption"] = "0"
+    elif tool_id == "saxo_backtest_strategy":
+        request["starting_equity"] = 500.0
+    return cloned
 
 
 def merge_matrix_receipts(

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 import anyio
 from fastmcp import Client
@@ -23,6 +24,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     BROKERAGE_STATE_COMPONENTS,
     AnalyticsCaseCall,
     AnalyticsCaseReceipt,
+    AnalyticsRuntimeResources,
     AnalyticsToolCaseEvidence,
     BrokerageStateComponent,
     BrokerageStateFingerprint,
@@ -68,6 +70,17 @@ from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.trading_write_registry import trading_write_specs
 
 _SHA256_HEX_LENGTH = 64
+_SAFE_HANDLE = re.compile(r"^(?P<kind>ih|ds|an|ar|jb|dp)_[0-9a-f]{32}$")
+_ACTIVE_JOB_STATES: Final = frozenset({"job_queued", "job_running"})
+_TERMINAL_JOB_STATES: Final = frozenset(
+    {
+        "job_completed",
+        "job_failed",
+        "job_cancelled",
+        "job_expired",
+        "job_interrupted_restart_required",
+    },
+)
 
 # Re-export models for producer imports.
 __all__ = [
@@ -376,60 +389,101 @@ async def run_analytics_case_phase(
         for contract in analytics_sim_contracts()
         for case in contract.cases
     }
-    per_tool: dict[str, list[AnalyticsCaseReceipt]] = {
-        tool_id: [] for tool_id in ANALYTICS_TOOL_IDS
+    per_tool: dict[str, dict[str, AnalyticsCaseReceipt]] = {
+        tool_id: {} for tool_id in ANALYTICS_TOOL_IDS
     }
     for case_call in analytics_case_calls():
+        if case_call.kind == "success" and case_call.tool_id in {
+            "saxo_preview_analytics_deletion",
+            "saxo_delete_analytics_data",
+        }:
+            continue
+        arguments = materialize_analytics_case_arguments(
+            case_call,
+            state.analytics_resources,
+        )
+        observed_call = case_call.model_copy(update={"arguments": arguments})
         result = await call_tool(
             client,
-            case_call.tool_id,
-            case_call.arguments,
-            timeout_seconds=case_call.timeout_seconds,
+            observed_call.tool_id,
+            observed_call.arguments,
+            timeout_seconds=observed_call.timeout_seconds,
         )
-        case_contract = contracts[(case_call.tool_id, case_call.kind)]
-        case_receipt = _analytics_case_receipt(case_call, case_contract.expected_states, result)
-        per_tool[case_call.tool_id].append(case_receipt)
-        if case_call.kind == "success":
+        if observed_call.kind == "timeout" and result.timed_out:
+            state.analytics_resources.remember_timeout(observed_call, arguments)
+        timed_operation = state.analytics_resources.timed_operation
+        reconciles_request = (
+            timed_operation.request_sha256
+            if observed_call.kind == "recovery"
+            and timed_operation is not None
+            and timed_operation.tool_id == observed_call.tool_id
+            else None
+        )
+        case_contract = contracts[(observed_call.tool_id, observed_call.kind)]
+        case_receipt = analytics_case_receipt(
+            observed_call,
+            case_contract.expected_states,
+            result,
+            reconciles_request_sha256=reconciles_request,
+        )
+        per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
+        _remember_analytics_handles(state.analytics_resources, observed_call, result)
+        if observed_call.kind == "success":
             _record(
                 state,
-                case_call.tool_id,
+                observed_call.tool_id,
                 result,
-                case_call.arguments,
+                observed_call.arguments,
                 status="completed",
             )
         else:
             _observe_auxiliary(state, result)
+    preview_receipt, delete_receipt = await run_analytics_cleanup_cases(client, state)
+    per_tool["saxo_preview_analytics_deletion"]["success"] = preview_receipt
+    per_tool["saxo_delete_analytics_data"]["success"] = delete_receipt
     state.analytics_case_receipts.extend(
-        AnalyticsToolCaseEvidence(tool_id=tool_id, cases=tuple(per_tool[tool_id]))
-        for tool_id in ANALYTICS_TOOL_IDS
+        AnalyticsToolCaseEvidence(
+            tool_id=contract.tool_id,
+            cases=tuple(per_tool[contract.tool_id][case.kind] for case in contract.cases),
+        )
+        for contract in analytics_sim_contracts()
     )
 
 
-def _analytics_case_receipt(
+def analytics_case_receipt(
     case_call: AnalyticsCaseCall,
     expected_states: tuple[str, ...],
     result: MatrixToolObservation,
+    *,
+    reconciles_request_sha256: str | None = None,
 ) -> AnalyticsCaseReceipt:
     private_values = (
         _private_values_detected(result.payload) if case_call.kind == "privacy" else False
     )
     broker_write = _broker_write_detected(result.payload)
     matched = result.result_state in expected_states
+    refusal_state = result.result_state in {
+        "refused",
+        "denied",
+        "invalid_arguments",
+        "invalid_request",
+    }
     if case_call.kind == "timeout" and result.timed_out:
         case_state: Literal[
             "passed", "degraded", "refused", "timed_out", "reconciled", "failed"
         ] = "timed_out"
-    elif not matched or broker_write or private_values:
+    elif (
+        not matched
+        or broker_write
+        or private_values
+        or (case_call.kind == "recovery" and reconciles_request_sha256 is None)
+    ):
         case_state = "failed"
     elif case_call.kind in {"success", "privacy"}:
         case_state = "passed"
     elif case_call.kind == "degradation":
-        case_state = "degraded"
-    elif case_call.kind == "refusal" or result.result_state in {
-        "refused",
-        "invalid_arguments",
-        "invalid_request",
-    }:
+        case_state = "refused" if refusal_state else "degraded"
+    elif case_call.kind == "refusal":
         case_state = "refused"
     else:
         case_state = "reconciled"
@@ -439,6 +493,7 @@ def _analytics_case_receipt(
         "result_state": result.result_state,
         "request_sha256": digest(case_call.arguments),
         "response_sha256": digest(result.payload),
+        "reconciles_request_sha256": reconciles_request_sha256,
     }
     return AnalyticsCaseReceipt(
         kind=case_call.kind,
@@ -454,6 +509,408 @@ def _analytics_case_receipt(
         request_sha256=digest(case_call.arguments),
         response_sha256=digest(result.payload),
         evidence_sha256=digest(evidence_material),
+        reconciles_request_sha256=(
+            reconciles_request_sha256 if case_state == "reconciled" else None
+        ),
+        reconciliation_observation_sha256=(
+            digest(result.payload) if case_state == "reconciled" else None
+        ),
+    )
+
+
+def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - bounded dispatch
+    case_call: AnalyticsCaseCall,
+    resources: AnalyticsRuntimeResources,
+) -> dict[str, JsonValue]:
+    """Bind one case to handles issued earlier in the same FastMCP session."""
+    if case_call.kind in {"refusal", "privacy"}:
+        return dict(case_call.arguments)
+    if case_call.kind == "recovery":
+        timed = resources.timed_operation
+        if timed is None or timed.tool_id != case_call.tool_id:
+            return {}
+        return dict(timed.arguments)
+    if case_call.tool_id == "saxo_analytics_capabilities":
+        return {}
+    if case_call.tool_id == "saxo_resolve_research_universe":
+        return {
+            "query": (
+                "controlled stock fixture" if case_call.kind == "success" else "controlled fixture"
+            ),
+        }
+    if case_call.tool_id == "saxo_manage_research_universe":
+        return {"action": "list"}
+    if case_call.tool_id == "saxo_sync_research_data":
+        handle = _selected_handle(
+            resources.instrument_handles,
+            resources.degraded_instrument_handles,
+            degraded=case_call.kind == "degradation",
+        )
+        if handle is None:
+            return {}
+        item: dict[str, JsonValue] = {
+            "data_kind": "price_bars",
+            "handle": handle,
+            "interval": "1d" if case_call.kind == "success" else "1m",
+            "start": "2026-01-01T00:00:00Z",
+            "end": "2026-01-31T00:00:00Z",
+        }
+        return {"request": {"items": [item]}}
+    if case_call.tool_id == "saxo_get_research_dataset":
+        dataset_id = _selected_handle(
+            resources.dataset_ids,
+            resources.degraded_dataset_ids,
+            degraded=case_call.kind == "degradation",
+            require_degraded=case_call.kind == "degradation",
+        )
+        return {"dataset_id": dataset_id, "page": 1, "limit": 100} if dataset_id is not None else {}
+    if case_call.tool_id in {
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+    }:
+        return _materialize_analysis_arguments(case_call, resources)
+    if case_call.tool_id in {
+        "saxo_propose_trade_from_analysis",
+        "saxo_render_analysis",
+        "saxo_export_analysis",
+        "saxo_explain_analysis",
+    }:
+        return _materialize_analysis_consumer_arguments(case_call, resources)
+    if case_call.tool_id == "saxo_manage_analysis_job":
+        if case_call.kind in {"timeout", "recovery"}:
+            job_id = resources.job_ids[0] if resources.job_ids else None
+            return {"action": "check", "job_id": job_id} if job_id is not None else {}
+        analysis_id = resources.analysis_ids[0] if resources.analysis_ids else None
+        if analysis_id is None:
+            return {}
+        return {
+            "action": "start",
+            "request": {
+                "job_kind": "report_generation",
+                "analysis_ids": [analysis_id],
+                "parameters": [
+                    {"name": "template_id", "value": "relative_performance"},
+                    {"name": "output_format", "value": "html"},
+                ],
+                "total_work_units": 1,
+            },
+        }
+    if case_call.tool_id == "saxo_list_analytics_storage":
+        return {"scope": {}}
+    return {}
+
+
+def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adapters
+    case_call: AnalyticsCaseCall,
+    resources: AnalyticsRuntimeResources,
+) -> dict[str, JsonValue]:
+    degraded = case_call.kind == "degradation"
+    dataset_id = _selected_handle(
+        resources.dataset_ids,
+        resources.degraded_dataset_ids,
+        degraded=degraded,
+        require_degraded=degraded,
+    )
+    if dataset_id is None:
+        return {}
+    instrument_handle = _selected_handle(
+        resources.instrument_handles,
+        resources.degraded_instrument_handles,
+        degraded=degraded,
+    )
+    arguments = _clone_arguments(case_call.arguments)
+    request = arguments.get("request")
+    if not isinstance(request, dict):
+        return {}
+    if "dataset_ids" in request:
+        request["dataset_ids"] = [dataset_id]
+    if "dataset_id" in request:
+        request["dataset_id"] = dataset_id
+    if "instrument_handles" in request:
+        if instrument_handle is None:
+            return {}
+        request["instrument_handles"] = [instrument_handle]
+    if "instrument_handle" in request:
+        if instrument_handle is None:
+            return {}
+        request["instrument_handle"] = instrument_handle
+    if degraded:
+        if case_call.tool_id == "saxo_size_position":
+            request["maximum_loss"] = "2"
+        elif case_call.tool_id == "saxo_run_scenario":
+            shocks = request.get("shocks")
+            if isinstance(shocks, list) and shocks and isinstance(shocks[0], dict):
+                shocks[0]["price_shock_ratio"] = "-0.2"
+        elif case_call.tool_id == "saxo_optimize_portfolio":
+            request["maximum_turnover"] = "0"
+        elif case_call.tool_id == "saxo_backtest_strategy":
+            request["starting_equity"] = 500.0
+    return arguments
+
+
+def _materialize_analysis_consumer_arguments(
+    case_call: AnalyticsCaseCall,
+    resources: AnalyticsRuntimeResources,
+) -> dict[str, JsonValue]:
+    degraded = case_call.kind == "degradation"
+    analysis_id = _selected_handle(
+        resources.analysis_ids,
+        resources.degraded_analysis_ids,
+        degraded=degraded,
+        require_degraded=degraded,
+    )
+    if analysis_id is None:
+        return {}
+    if case_call.tool_id == "saxo_propose_trade_from_analysis":
+        instrument = resources.instrument_handles[0] if resources.instrument_handles else None
+        if instrument is None:
+            return {}
+        return {
+            "analysis_id": analysis_id,
+            "instrument_handle": instrument,
+            "side": "buy",
+            "quantity": "1" if not degraded else "2",
+        }
+    if case_call.tool_id == "saxo_render_analysis":
+        return {
+            "analysis_id": analysis_id,
+            "template_id": "relative_performance",
+            "output_format": "png" if not degraded else "html",
+        }
+    if case_call.tool_id == "saxo_export_analysis":
+        return {
+            "analysis_id": analysis_id,
+            "export_kind": "table",
+            "output_format": "json" if not degraded else "csv",
+        }
+    return {"analysis_id": analysis_id}
+
+
+def _clone_arguments(arguments: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    cloned: JsonValue = json.loads(json.dumps(arguments, allow_nan=False))
+    return cloned if isinstance(cloned, dict) else {}
+
+
+def _selected_handle(
+    primary: list[str],
+    degraded_handles: list[str],
+    *,
+    degraded: bool,
+    require_degraded: bool = False,
+) -> str | None:
+    if degraded and degraded_handles:
+        return degraded_handles[0]
+    if degraded and require_degraded:
+        return None
+    return primary[0] if primary else None
+
+
+def _remember_analytics_handles(
+    resources: AnalyticsRuntimeResources,
+    case_call: AnalyticsCaseCall,
+    result: MatrixToolObservation,
+) -> None:
+    if not result.result_parsed or result.mcp_is_error:
+        return
+    found: dict[str, list[str]] = {kind: [] for kind in ("ih", "ds", "an", "ar", "jb", "dp")}
+    _collect_safe_handles(result.payload, found)
+    degraded = case_call.kind == "degradation" or result.result_state in {
+        "ambiguous",
+        "degraded",
+        "reduced",
+        "unavailable",
+    }
+    _extend_unique(
+        resources.degraded_instrument_handles if degraded else resources.instrument_handles,
+        found["ih"],
+    )
+    _extend_unique(
+        resources.degraded_dataset_ids if degraded else resources.dataset_ids,
+        found["ds"],
+    )
+    _extend_unique(
+        resources.degraded_analysis_ids if degraded else resources.analysis_ids,
+        found["an"],
+    )
+    _extend_unique(resources.artifact_ids, found["ar"])
+    _extend_unique(resources.job_ids, found["jb"])
+    if case_call.tool_id == "saxo_preview_analytics_deletion" and found["dp"]:
+        resources.deletion_token = found["dp"][0]
+
+
+def _collect_safe_handles(value: JsonValue, found: dict[str, list[str]]) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _collect_safe_handles(item, found)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_safe_handles(item, found)
+        return
+    if not isinstance(value, str):
+        return
+    match = _SAFE_HANDLE.fullmatch(value)
+    if match is not None:
+        found[match.group("kind")].append(value)
+
+
+def _extend_unique(target: list[str], values: list[str]) -> None:
+    for value in values:
+        if value not in target:
+            target.append(value)
+
+
+async def run_analytics_cleanup_cases(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+) -> tuple[AnalyticsCaseReceipt, AnalyticsCaseReceipt]:
+    """Stop matrix-owned jobs, delete the exact isolated closure, and prove it empty."""
+    jobs_stopped = await _stop_analytics_jobs(client, state)
+    listing = await call_tool(client, "saxo_list_analytics_storage", {"scope": {}})
+    _observe_auxiliary(state, listing)
+    data_types = _listed_storage_types(listing)
+    preview_call, delete_call = (
+        call
+        for call in analytics_case_calls()
+        if call.kind == "success"
+        and call.tool_id in {"saxo_preview_analytics_deletion", "saxo_delete_analytics_data"}
+    )
+    data_type_values: list[JsonValue] = list(data_types)
+    preview_arguments: dict[str, JsonValue] = (
+        {"scope": {"data_types": data_type_values}} if jobs_stopped and data_type_values else {}
+    )
+    preview_observation = await call_tool(
+        client,
+        preview_call.tool_id,
+        preview_arguments,
+    )
+    observed_preview = preview_call.model_copy(update={"arguments": preview_arguments})
+    _remember_analytics_handles(
+        state.analytics_resources,
+        observed_preview,
+        preview_observation,
+    )
+    preview_contract = next(
+        case
+        for contract in analytics_sim_contracts()
+        if contract.tool_id == preview_call.tool_id
+        for case in contract.cases
+        if case.kind == "success"
+    )
+    preview_receipt = analytics_case_receipt(
+        observed_preview,
+        preview_contract.expected_states,
+        preview_observation,
+    )
+    _record(
+        state,
+        observed_preview.tool_id,
+        preview_observation,
+        preview_arguments,
+        status="completed",
+    )
+
+    token = state.analytics_resources.deletion_token if jobs_stopped else None
+    delete_arguments: dict[str, JsonValue] = {"token": token} if token is not None else {}
+    delete_observation = await call_tool(
+        client,
+        delete_call.tool_id,
+        delete_arguments,
+    )
+    observed_delete = delete_call.model_copy(update={"arguments": delete_arguments})
+    delete_contract = next(
+        case
+        for contract in analytics_sim_contracts()
+        if contract.tool_id == delete_call.tool_id
+        for case in contract.cases
+        if case.kind == "success"
+    )
+    delete_receipt = analytics_case_receipt(
+        observed_delete,
+        delete_contract.expected_states,
+        delete_observation,
+    )
+    _record(
+        state,
+        observed_delete.tool_id,
+        delete_observation,
+        delete_arguments,
+        status="completed",
+    )
+    after = await call_tool(client, "saxo_list_analytics_storage", {"scope": {}})
+    _observe_auxiliary(state, after)
+    clean = _storage_is_empty(after)
+    state.analytics_resources.cleanup_verified = clean
+    if not clean:
+        state.errors.append("analytics_cleanup_incomplete")
+        state.uncleaned = max(state.uncleaned, 1)
+    return preview_receipt, delete_receipt
+
+
+async def _stop_analytics_jobs(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+) -> bool:
+    stopped = True
+    for job_id in tuple(state.analytics_resources.job_ids):
+        arguments: dict[str, JsonValue] = {"action": "check", "job_id": job_id}
+        observation = await call_tool(client, "saxo_manage_analysis_job", arguments)
+        _observe_auxiliary(state, observation)
+        if observation.result_state in _ACTIVE_JOB_STATES:
+            cancel_arguments: dict[str, JsonValue] = {"action": "cancel", "job_id": job_id}
+            observation = await call_tool(
+                client,
+                "saxo_manage_analysis_job",
+                cancel_arguments,
+            )
+            _observe_auxiliary(state, observation)
+        for _ in range(16):
+            if observation.result_state in _TERMINAL_JOB_STATES:
+                break
+            await anyio.sleep(0)  # noqa: ASYNC115 - yield to the bounded in-process job
+            observation = await call_tool(client, "saxo_manage_analysis_job", arguments)
+            _observe_auxiliary(state, observation)
+        if observation.result_state not in _TERMINAL_JOB_STATES:
+            state.errors.append("analytics_job_cleanup_incomplete")
+            state.uncleaned = max(state.uncleaned, 1)
+            stopped = False
+    return stopped
+
+
+def _listed_storage_types(result: MatrixToolObservation) -> list[str]:
+    if not result.result_parsed or result.result_state != "passed":
+        return []
+    payload = result.payload.get("result")
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+    found: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        data_type = item.get("data_type")
+        if isinstance(data_type, str):
+            found.add(data_type)
+    found.discard("deletion_receipts")
+    return sorted(found)
+
+
+def _storage_is_empty(result: MatrixToolObservation) -> bool:
+    if not result.result_parsed or result.result_state != "passed":
+        return False
+    payload = result.payload.get("result")
+    if not isinstance(payload, dict) or payload.get("entries") != []:
+        return False
+    runtime = payload.get("runtime_state")
+    return isinstance(runtime, dict) and all(
+        runtime.get(field) == 0
+        for field in ("job_count", "cache_entry_count", "temporary_entry_count")
     )
 
 
@@ -645,6 +1102,9 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
     if before != after:
         state.errors.append("state_fingerprint_mismatch")
         state.uncleaned = max(state.uncleaned, 1)
+    if not state.analytics_resources.cleanup_verified:
+        state.errors.append("analytics_cleanup_unverified")
+        state.uncleaned = max(state.uncleaned, 1)
     if state.live_events:
         state.errors.append("live_transport_or_ledger_event")
     if state.live_mutation_calls:
@@ -656,7 +1116,9 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
     if analytics_count != len(ANALYTICS_TOOL_IDS):
         state.errors.append("analytics_tool_coverage_incomplete")
     unchanged = before == after
-    cleanup_complete = state.uncleaned == 0 and unchanged
+    cleanup_complete = (
+        state.uncleaned == 0 and unchanged and state.analytics_resources.cleanup_verified
+    )
     status: Literal["passed", "failed", "blocked"] = (
         "blocked"
         if is_blocker(state.errors)

@@ -10,19 +10,13 @@ import re
 import sys
 from pathlib import Path
 
-from pydantic import TypeAdapter, ValidationError
-
-from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
+from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_evidence import (
     ANALYSIS_KIND_CATALOG_PATH,
-    AnalyticsProofMatrixBundle,
     EvidenceCoverageError,
-    EvidenceProvenanceError,
-    authenticate_proof_producer_artifacts,
     build_proof_execution_contracts,
     load_analysis_kind_catalog,
-    validate_proof_matrix_bundle,
 )
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -34,7 +28,7 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Plan or validate the complete Saxo analytics proof matrix.",
     )
@@ -44,11 +38,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
         default=ANALYSIS_KIND_CATALOG_PATH,
     )
     parser.add_argument("--candidate-commit", default=None)
-    parser.add_argument("--receipts", type=Path, default=None)
     parser.add_argument("--install-report", type=Path, default=None)
-    parser.add_argument("--producer-command-evidence", type=Path, default=None)
-    parser.add_argument("--producer-session-evidence", type=Path, default=None)
-    parser.add_argument("--producer-probe-evidence", type=Path, default=None)
+    parser.add_argument("--codex-global-home", type=Path, default=None)
+    parser.add_argument("--claude-global-home", type=Path, default=None)
+    parser.add_argument("--fixture-cleanup-ledger", type=Path, default=None)
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -76,20 +69,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             success=True,
         )
     if (
-        args.receipts is None
-        or args.install_report is None
-        or args.producer_command_evidence is None
-        or args.producer_session_evidence is None
-        or args.producer_probe_evidence is None
+        args.install_report is None
+        or args.codex_global_home is None
+        or args.claude_global_home is None
+        or args.fixture_cleanup_ledger is None
         or not isinstance(args.candidate_commit, str)
         or _COMMIT_PATTERN.fullmatch(args.candidate_commit) is None
     ):
         return _publish(
             args.out,
-            {"status": "refused", "reason": "proof_producer_evidence_missing"},
+            {"status": "refused", "reason": "proof_producer_execution_context_missing"},
             success=False,
         )
-    install, install_errors = load_install_report_for_consumers(args.install_report)
+    install, install_errors = load_verified_install_report(
+        args.install_report,
+        codex_global_home=args.codex_global_home,
+        claude_global_home=args.claude_global_home,
+        fixture_cleanup_ledger=args.fixture_cleanup_ledger,
+    )
     if install is None:
         return _publish(
             args.out,
@@ -100,71 +97,30 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             },
             success=False,
         )
-    try:
-        payload = json.loads(args.receipts.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    if install.candidate_commit != args.candidate_commit:
         return _publish(
             args.out,
-            {"status": "failed", "reason": "proof_receipts_invalid"},
+            {"status": "failed", "reason": "proof_installed_candidate_mismatch"},
             success=False,
         )
-    if not isinstance(payload, dict):
-        return _publish(
-            args.out,
-            {"status": "failed", "reason": "proof_receipts_invalid"},
-            success=False,
-        )
-    try:
-        bundle = TypeAdapter(AnalyticsProofMatrixBundle).validate_python(payload, strict=True)
-    except ValidationError:
-        return _publish(
-            args.out,
-            {"status": "failed", "reason": "proof_receipts_invalid"},
-            success=False,
-        )
-    try:
-        trusted_provenance = authenticate_proof_producer_artifacts(
-            bundle=bundle,
-            catalog=catalog,
-            contracts=contracts,
-            installed_candidate_commit=install.candidate_commit,
-            command_evidence_path=args.producer_command_evidence,
-            session_evidence_path=args.producer_session_evidence,
-            probe_evidence_path=args.producer_probe_evidence,
-        )
-    except EvidenceProvenanceError:
-        return _publish(
-            args.out,
-            {"status": "failed", "reason": "proof_producer_evidence_invalid"},
-            success=False,
-        )
-    errors = list(
-        validate_proof_matrix_bundle(
-            bundle,
-            catalog=catalog,
-            contracts=contracts,
-            trusted_provenance=trusted_provenance,
-        ),
-    )
-    if bundle.candidate_commit != args.candidate_commit:
-        errors.append("candidate_commit_mismatch")
-    passed = not errors
+    # Caller-authored receipt paths are deliberately not accepted. Task 24 must execute the
+    # independently verified installed producer and pass its process-owned result directly to
+    # the private final-validation path. Until that happens, remain fail closed.
     return _publish(
         args.out,
         {
-            "status": "passed" if passed else "failed",
-            "execution_performed": True,
+            "status": "refused",
+            "execution_performed": False,
+            "reason": "proof_producer_execution_required",
             "candidate_commit": args.candidate_commit,
             "analysis_kind_count": len(contracts),
-            "evidence_receipt_count": len(bundle.analysis_receipts),
+            "evidence_receipt_count": len(catalog.evidence_receipt_ids),
             "contract_sha256": _digest(contract_material),
-            "receipts_sha256": _digest(bundle.model_dump(mode="json")),
-            "errors": errors,
             "live_mutation_calls": 0,
             "broker_write_made": False,
             "redacted_publication": True,
         },
-        success=passed,
+        success=False,
     )
 
 

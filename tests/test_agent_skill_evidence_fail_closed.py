@@ -399,32 +399,40 @@ def _matrix_state_payload(observed_state: str) -> dict[str, JsonValue]:
 
 
 def _analytics_case_payloads() -> list[JsonValue]:
-    state_by_kind = {
-        "success": "passed",
-        "degradation": "degraded",
-        "refusal": "refused",
-        "privacy": "passed",
-        "timeout": "timed_out",
-        "recovery": "refused",
-    }
     return [
         {
             "tool_id": contract.tool_id,
             "cases": [
                 {
                     "kind": case.kind,
-                    "state": state_by_kind[case.kind],
+                    "state": (
+                        "refused"
+                        if case.kind == "degradation" and case.expected_states[0] == "refused"
+                        else {
+                            "success": "passed",
+                            "degradation": "degraded",
+                            "refusal": "refused",
+                            "privacy": "passed",
+                            "timeout": "timed_out",
+                            "recovery": "reconciled",
+                        }[case.kind]
+                    ),
                     "reason_code": f"{case.kind}_observed",
                     "mcp_call_observed": True,
                     "result_parsed": case.kind != "timeout",
                     "result_state": case.expected_states[0],
-                    "mcp_is_error": case.kind in {"refusal", "privacy", "timeout", "recovery"},
+                    "mcp_is_error": case.kind in {"refusal", "privacy", "timeout"},
                     "network_call_made": False,
                     "broker_write_made": False,
                     "private_values_published": False,
                     "request_sha256": "b" * 64,
                     "response_sha256": "c" * 64,
                     "evidence_sha256": "d" * 64,
+                    "reconciles_request_sha256": ("e" * 64 if case.kind == "recovery" else None),
+                    "reconciliation_observation_sha256": (
+                        "f" * 64 if case.kind == "recovery" else None
+                    ),
+                    "blind_retry_attempted": False,
                     "call_path": "fastmcp.Client.call_tool",
                 }
                 for case in contract.cases

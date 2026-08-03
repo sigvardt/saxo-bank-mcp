@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import stat
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, Literal, Self
 
@@ -39,7 +36,6 @@ from saxo_bank_mcp.qa_analytics_sim import (
     AnalyticsToolCaseEvidence,
     ControlledSimLifecycleReceipt,
     PostSendTimeoutReceipt,
-    analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_case_evidence_errors,
 )
@@ -90,16 +86,10 @@ ANALYSIS_KIND_CATALOG_PATH: Final = (
     _SOURCE_CATALOG_PATH if _SOURCE_CATALOG_PATH.is_file() else _WORKTREE_CATALOG_PATH
 )
 _SAFE_ID_PATTERN: Final = r"^[a-z][a-z0-9_]{0,127}$"
-_OWNER_FILE_MODE: Final = 0o600
-_OWNER_DIRECTORY_MODE: Final = 0o700
 
 
 class EvidenceCoverageError(ValueError):
     """Raised when checked-in evidence coverage diverges from a frozen inventory."""
-
-
-class EvidenceProvenanceError(ValueError):
-    """Raised when final evidence did not come from the bounded installed producer."""
 
 
 class _StrictModel(BaseModel):
@@ -109,61 +99,6 @@ class _StrictModel(BaseModel):
         strict=True,
         hide_input_in_errors=True,
     )
-
-
-class ProducerCommandEvidence(_StrictModel):
-    producer: Literal["run_analytics_proof_matrix"]
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    installed_candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    command_name: Literal["analytics_proof_matrix"]
-    command_exit_code: Literal[0]
-    command_timed_out: Literal[False]
-    command_cleanup_complete: Literal[True]
-    command_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-
-
-class ProducerSessionEvidence(_StrictModel):
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    environment: Literal["SIM"]
-    fastmcp_session_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    fastmcp_call_count: int = Field(ge=60)
-    matrix_tool_receipt_count: Literal[60]
-    analytics_case_receipt_count: int = Field(gt=0)
-    mcp_transport_observed: Literal[True]
-    live_events: Literal[0]
-    live_mutation_calls: Literal[0]
-    disclaimer_response_made: Literal[False]
-    purchase_occurred: Literal[False]
-
-
-class ProducerProbeEvidence(_StrictModel):
-    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
-    bundle_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    coverage_catalog_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    proof_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    analysis_receipt_count: int = Field(gt=0)
-    proof_case_receipt_count: int = Field(gt=0)
-    artifact_parity_receipt_count: int = Field(gt=0)
-    artifact_visual_receipt_count: int = Field(gt=0)
-    skill_scenario_receipt_count: int = Field(gt=0)
-
-
-_TRUSTED_PRODUCER_CAPABILITY: Final = object()
-
-
-@dataclass(frozen=True, slots=True)
-class TrustedExecutionProvenance:
-    """Opaque in-process authority; it is intentionally not JSON/Pydantic constructible."""
-
-    candidate_commit: str
-    installed_candidate_commit: str
-    bundle_sha256: str
-    coverage_catalog_sha256: str
-    proof_contract_sha256: str
-    command_receipt_sha256: str
-    session_receipt_sha256: str
-    probe_receipt_sha256: str
-    capability: object = field(repr=False, compare=False)
 
 
 class AnalysisKindCatalog(_StrictModel):
@@ -441,189 +376,23 @@ class AnalyticsProofMatrixBundle(_StrictModel):
     private_values_published: Literal[False]
 
 
-def canonical_evidence_sha256(value: object) -> str:
-    """Fingerprint typed evidence without accepting non-finite or repr-based values."""
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode(),
-    ).hexdigest()
-
-
-def proof_bundle_sha256(bundle: AnalyticsProofMatrixBundle) -> str:
-    return canonical_evidence_sha256(bundle.model_dump(mode="json"))
-
-
-def coverage_catalog_sha256(catalog: AnalysisKindCatalog) -> str:
-    return canonical_evidence_sha256(catalog.model_dump(mode="json"))
-
-
-def proof_contract_sha256(contracts: Sequence[AnalysisProofExecutionContract]) -> str:
-    return canonical_evidence_sha256(
-        [contract.model_dump(mode="json") for contract in contracts],
-    )
-
-
-def producer_command_receipt_sha256(
-    *,
-    candidate_commit: str,
-    installed_candidate_commit: str,
-    session_receipt_sha256: str,
-    probe_receipt_sha256: str,
-) -> str:
-    """Bind the successful bounded command to its exact session and proof probe."""
-    return canonical_evidence_sha256(
-        {
-            "producer": "run_analytics_proof_matrix",
-            "candidate_commit": candidate_commit,
-            "installed_candidate_commit": installed_candidate_commit,
-            "command_name": "analytics_proof_matrix",
-            "command_exit_code": 0,
-            "command_timed_out": False,
-            "command_cleanup_complete": True,
-            "session_receipt_sha256": session_receipt_sha256,
-            "probe_receipt_sha256": probe_receipt_sha256,
-        },
-    )
-
-
-def authenticate_proof_producer_artifacts(  # noqa: PLR0913
-    *,
-    bundle: AnalyticsProofMatrixBundle,
-    catalog: AnalysisKindCatalog,
-    contracts: Sequence[AnalysisProofExecutionContract],
-    installed_candidate_commit: str,
-    command_evidence_path: Path,
-    session_evidence_path: Path,
-    probe_evidence_path: Path,
-) -> TrustedExecutionProvenance:
-    """Issue opaque authority only for exact owner-only installed-runner artifacts."""
-    paths = (command_evidence_path, session_evidence_path, probe_evidence_path)
-    parents = {_require_owner_evidence_file(path) for path in paths}
-    if len(parents) != 1:
-        raise EvidenceProvenanceError("producer evidence must share one owner-only directory")
-    try:
-        command = ProducerCommandEvidence.model_validate_json(
-            command_evidence_path.read_text(encoding="utf-8"),
-            strict=True,
-        )
-        session = ProducerSessionEvidence.model_validate_json(
-            session_evidence_path.read_text(encoding="utf-8"),
-            strict=True,
-        )
-        probe = ProducerProbeEvidence.model_validate_json(
-            probe_evidence_path.read_text(encoding="utf-8"),
-            strict=True,
-        )
-    except (OSError, ValidationError) as error:
-        raise EvidenceProvenanceError("producer evidence schema is invalid") from error
-    candidate = bundle.candidate_commit
-    if (
-        candidate != installed_candidate_commit
-        or command.candidate_commit != candidate
-        or command.installed_candidate_commit != candidate
-        or session.candidate_commit != candidate
-        or probe.candidate_commit != candidate
-    ):
-        raise EvidenceProvenanceError("producer evidence candidate binding mismatch")
-    bundle_fingerprint = proof_bundle_sha256(bundle)
-    catalog_fingerprint = coverage_catalog_sha256(catalog)
-    contract_fingerprint = proof_contract_sha256(contracts)
-    session_fingerprint = canonical_evidence_sha256(session.model_dump(mode="json"))
-    probe_fingerprint = canonical_evidence_sha256(probe.model_dump(mode="json"))
-    matrix_fingerprint = canonical_evidence_sha256(
-        bundle.sim_tool_matrix.model_dump(mode="json"),
-    )
-    expected_case_count = len(analytics_case_calls())
-    if (
-        probe.bundle_sha256 != bundle_fingerprint
-        or probe.coverage_catalog_sha256 != catalog_fingerprint
-        or probe.proof_contract_sha256 != contract_fingerprint
-        or probe.analysis_receipt_count != len(contracts)
-        or probe.proof_case_receipt_count != sum(len(contract.cases) for contract in contracts)
-        or probe.artifact_parity_receipt_count != len(catalog.artifact_template_ids)
-        or probe.artifact_visual_receipt_count != len(catalog.artifact_template_ids)
-        or probe.skill_scenario_receipt_count != len(catalog.skill_scenario_tools)
-        or session.analytics_case_receipt_count != expected_case_count
-        or session.fastmcp_call_count < len(catalog.tool_ids) + expected_case_count
-        or session.matrix_tool_receipt_count != len(bundle.sim_tool_matrix.tool_receipts)
-        or session.fastmcp_session_sha256 != matrix_fingerprint
-        or command.command_receipt_sha256
-        != producer_command_receipt_sha256(
-            candidate_commit=candidate,
-            installed_candidate_commit=installed_candidate_commit,
-            session_receipt_sha256=session_fingerprint,
-            probe_receipt_sha256=probe_fingerprint,
-        )
-    ):
-        raise EvidenceProvenanceError("producer evidence coverage binding mismatch")
-    return TrustedExecutionProvenance(
-        candidate_commit=candidate,
-        installed_candidate_commit=installed_candidate_commit,
-        bundle_sha256=bundle_fingerprint,
-        coverage_catalog_sha256=catalog_fingerprint,
-        proof_contract_sha256=contract_fingerprint,
-        command_receipt_sha256=command.command_receipt_sha256,
-        session_receipt_sha256=session_fingerprint,
-        probe_receipt_sha256=probe_fingerprint,
-        capability=_TRUSTED_PRODUCER_CAPABILITY,
-    )
-
-
-def _require_owner_evidence_file(path: Path) -> Path:
-    try:
-        file_state = path.lstat()
-        parent_state = path.parent.lstat()
-    except OSError as error:
-        raise EvidenceProvenanceError("producer evidence is unavailable") from error
-    if (
-        path.is_symlink()
-        or not stat.S_ISREG(file_state.st_mode)
-        or file_state.st_uid != os.getuid()
-        or file_state.st_nlink != 1
-        or stat.S_IMODE(file_state.st_mode) != _OWNER_FILE_MODE
-    ):
-        raise EvidenceProvenanceError("producer evidence file is not owner-only regular data")
-    if (
-        path.parent.is_symlink()
-        or not stat.S_ISDIR(parent_state.st_mode)
-        or parent_state.st_uid != os.getuid()
-        or stat.S_IMODE(parent_state.st_mode) != _OWNER_DIRECTORY_MODE
-    ):
-        raise EvidenceProvenanceError("producer evidence directory is not owner-only")
-    try:
-        return path.parent.resolve(strict=True)
-    except OSError as error:
-        raise EvidenceProvenanceError("producer evidence directory is unavailable") from error
-
-
 def validate_proof_matrix_bundle(  # noqa: C901, PLR0912
     bundle: AnalyticsProofMatrixBundle,
     *,
     catalog: AnalysisKindCatalog | None = None,
     contracts: Sequence[AnalysisProofExecutionContract] | None = None,
-    trusted_provenance: TrustedExecutionProvenance | None = None,
 ) -> tuple[str, ...]:
-    """Validate final cross-layer bindings without executing or relabelling any proof."""
+    """Validate claims without granting producer authority from caller-owned data.
+
+    The public validator is intentionally incapable of issuing a final pass. The exact
+    installed producer must execute the matrix and use its private process-bound validation
+    path; JSON receipts and recomputable hashes are never authority.
+    """
     selected_catalog = catalog or load_analysis_kind_catalog()
     selected_contracts = tuple(
         contracts or build_proof_execution_contracts(catalog=selected_catalog)
     )
-    errors: list[str] = []
-    if trusted_provenance is None:
-        errors.append("trusted_producer_provenance_missing")
-    elif (
-        trusted_provenance.capability is not _TRUSTED_PRODUCER_CAPABILITY
-        or trusted_provenance.candidate_commit != bundle.candidate_commit
-        or trusted_provenance.installed_candidate_commit != bundle.candidate_commit
-        or trusted_provenance.bundle_sha256 != proof_bundle_sha256(bundle)
-        or trusted_provenance.coverage_catalog_sha256 != coverage_catalog_sha256(selected_catalog)
-        or trusted_provenance.proof_contract_sha256 != proof_contract_sha256(selected_contracts)
-    ):
-        errors.append("trusted_producer_provenance_invalid")
+    errors: list[str] = ["trusted_producer_provenance_missing"]
     errors.extend(
         validate_analysis_evidence(
             bundle.analysis_receipts,
