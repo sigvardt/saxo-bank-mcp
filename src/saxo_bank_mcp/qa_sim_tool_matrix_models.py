@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import Final, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.config import SIM_ENDPOINTS
+from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS, EXPECTED_TOOL_COUNT
 
 NON_EXECUTABLE_SIM: Final = frozenset({"saxo_list_live_accounts", "saxo_precheck_live_order"})
 SIM_GATEWAY_HOST: Final = urlparse(SIM_ENDPOINTS.rest_base_url).hostname or "gateway.saxobank.com"
@@ -53,7 +54,46 @@ class SimToolMatrixReceipt(BaseModel):
     uncleaned_resources: int
     hosts: tuple[str, ...]
     live_events: int
+    # Optional here for compatibility with the pre-Task-23 matrix producer
+    # receipt. The final analytics proof bundle requires every field below.
+    live_mutation_calls: int | None = Field(default=None, ge=0)
+    analytics_tool_receipt_count: int | None = Field(default=None, ge=0)
+    analytics_case_contract_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    cleanup_complete: bool | None = None
+    account_state_unchanged: bool | None = None
+    redacted_publication: bool | None = None
+    purchase_occurred: Literal[False] = False
     errors: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def _validate_pass_claim(self) -> SimToolMatrixReceipt:
+        if self.status == "passed" and (
+            self.reason != ""
+            or len(self.tool_receipts) != EXPECTED_TOOL_COUNT
+            or len({receipt.tool for receipt in self.tool_receipts}) != EXPECTED_TOOL_COUNT
+            or (
+                self.analytics_tool_receipt_count is not None
+                and self.analytics_tool_receipt_count != len(ANALYTICS_TOOL_IDS)
+            )
+            or self.live_events != 0
+            or self.live_mutation_calls not in {None, 0}
+            or not self.disclaimer_response_completed
+            or not self.fixture_reference_validated
+            or not self.account_allowlist_resolved
+            or not self.auth_status_completed
+            or not self.session_capabilities_completed
+            or self.before_state_fingerprint != self.after_state_fingerprint
+            or self.cleanup_complete is False
+            or self.account_state_unchanged is False
+            or self.redacted_publication is False
+            or self.uncleaned_resources != 0
+            or self.errors
+        ):
+            raise ValueError("passed SIM matrix lacks complete safe 60-tool evidence")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +130,7 @@ class MatrixRuntimeState:
     errors: list[str]
     hosts: set[str]
     live_events: int
+    live_mutation_calls: int
     receipts: dict[str, MatrixScenarioReceipt]
     lifecycle_seen: set[str]
     registered_ops: list[str]

@@ -20,6 +20,14 @@ from saxo_bank_mcp.order_mutation_models import (
     PRODUCTION_ORDER_TOOL_NAMES,
 )
 from saxo_bank_mcp.qa_account import resolve_sim_account_key
+from saxo_bank_mcp.qa_analytics_sim import (
+    analytics_case_contract_sha256,
+    analytics_primary_calls,
+    analytics_sim_contracts,
+    assert_analytics_case_coverage,
+    isolated_analytics_state,
+    live_mutation_calls_in,
+)
 from saxo_bank_mcp.qa_order_probes import (
     call_order_tool_for_matrix,
     create_order_preview_for_matrix,
@@ -63,6 +71,7 @@ from saxo_bank_mcp.qa_trading_write_probes import (
 )
 from saxo_bank_mcp.safety import reset_safety_state
 from saxo_bank_mcp.server import mcp
+from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.streaming import reset_local_subscriptions
 from saxo_bank_mcp.trading_write_registry import trading_write_specs
 
@@ -106,6 +115,7 @@ async def _run_matrix(fixtures: MatrixFixtures) -> SimToolMatrixReceipt:
         errors=[],
         hosts={SIM_GATEWAY_HOST},
         live_events=0,
+        live_mutation_calls=0,
         receipts={},
         lifecycle_seen=set(),
         registered_ops=[],
@@ -121,40 +131,43 @@ async def _run_matrix(fixtures: MatrixFixtures) -> SimToolMatrixReceipt:
     )
     reset_safety_state()
     reset_local_subscriptions()
-    async with Client(mcp) as client:
-        await _run_auth_preflight(client, state)
-        account = await resolve_sim_account_key(
-            default_account_key="SIM-ACCOUNT-1",
-            tool_name="saxo_sim_tool_matrix",
-        )
-        account_ok = account.discovered and account.source == "sim_accounts_me"
-        fixtures_ok = await validate_fixtures(fixtures)
-        if not account_ok:
-            state.errors.append("account_allowlist_unresolved")
-        if not fixtures_ok:
-            state.errors.append("fixture_reference_invalid")
-        state.preflight = PreflightFlags(
-            fixtures_ok=fixtures_ok,
-            account_ok=account_ok,
-            auth_ok=state.preflight.auth_ok,
-            session_ok=state.preflight.session_ok,
-        )
-        if state.errors:
-            return _blocked(state)
+    with tempfile.TemporaryDirectory(prefix="saxo-mcp-task23-") as runtime_dir:
+        runtime_root = Path(runtime_dir)
+        with isolated_analytics_state(runtime_root / "state"):
+            async with Client(mcp) as client:
+                await _run_auth_preflight(client, state)
+                account = await resolve_sim_account_key(
+                    default_account_key="SIM-ACCOUNT-1",
+                    tool_name="saxo_sim_tool_matrix",
+                )
+                account_ok = account.discovered and account.source == "sim_accounts_me"
+                fixtures_ok = await validate_fixtures(fixtures)
+                if not account_ok:
+                    state.errors.append("account_allowlist_unresolved")
+                if not fixtures_ok:
+                    state.errors.append("fixture_reference_invalid")
+                state.preflight = PreflightFlags(
+                    fixtures_ok=fixtures_ok,
+                    account_ok=account_ok,
+                    auth_ok=state.preflight.auth_ok,
+                    session_ok=state.preflight.session_ok,
+                )
+                if state.errors:
+                    return _blocked(state)
 
-        with (
-            tempfile.TemporaryDirectory(prefix="saxo-mcp-todo15-") as audit_dir,
-            safety_env_for_matrix(account.account_key),
-            safety_environment_for_matrix(account.account_key, Path(audit_dir)),
-        ):
-            state.before = await state_fingerprint()
-            await _run_read_and_refusal_phase(client, state, fixtures)
-            await _run_disclaimer_phase(client, state)
-            await _run_preview_phase(client, state, account.account_key, fixtures)
-            await _run_order_mutation_phase(client, state, account.account_key)
-            await _run_trading_write_phase(client, state, account.account_key)
-            await _run_trailing_phase(client, state, account.account_key, fixtures)
-            state.after = await state_fingerprint()
+                with (
+                    safety_env_for_matrix(account.account_key),
+                    safety_environment_for_matrix(account.account_key, runtime_root / "audit"),
+                ):
+                    state.before = await state_fingerprint()
+                    await _run_read_and_refusal_phase(client, state, fixtures)
+                    await _run_analytics_phase(client, state)
+                    await _run_disclaimer_phase(client, state)
+                    await _run_preview_phase(client, state, account.account_key, fixtures)
+                    await _run_order_mutation_phase(client, state, account.account_key)
+                    await _run_trading_write_phase(client, state, account.account_key)
+                    await _run_trailing_phase(client, state, account.account_key, fixtures)
+                    state.after = await state_fingerprint()
 
     return _finalize(state)
 
@@ -237,6 +250,18 @@ async def _run_disclaimer_phase(client: MatrixClient, state: MatrixRuntimeState)
     )
     _record(state, "saxo_register_disclaimer_response", response, response_args)
     state.lifecycle_seen.add("saxo_register_disclaimer_response")
+
+
+async def _run_analytics_phase(client: MatrixClient, state: MatrixRuntimeState) -> None:
+    """Exercise each analytics adapter once through the actual FastMCP call path."""
+    coverage_errors = assert_analytics_case_coverage(analytics_sim_contracts())
+    state.errors.extend(coverage_errors)
+    for tool, arguments in analytics_primary_calls():
+        payload = await call_tool(client, tool, arguments)
+        status: Literal["completed", "expected_refusal"] = (
+            "expected_refusal" if payload.get("status") == "refused" else "completed"
+        )
+        _record(state, tool, payload, arguments, status=status)
 
 
 async def _run_preview_phase(
@@ -376,6 +401,7 @@ def _record(
     state.receipts[tool] = receipt_for(tool, payload, arguments, status=status)
     state.hosts.update(hosts_of(payload))
     state.live_events += live_transport_events(payload)
+    state.live_mutation_calls += live_mutation_calls_in(payload)
 
 
 def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
@@ -392,9 +418,16 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
         state.uncleaned = max(state.uncleaned, 1)
     if state.live_events:
         state.errors.append("live_transport_or_ledger_event")
+    if state.live_mutation_calls:
+        state.errors.append("live_mutation_call")
     expected_ops = {spec.operation_id for spec in trading_write_specs()}
     if set(state.registered_ops) != expected_ops:
         state.errors.append("registered_trading_write_coverage_incomplete")
+    analytics_count = len(set(state.receipts) & set(ANALYTICS_TOOL_IDS))
+    if analytics_count != len(ANALYTICS_TOOL_IDS):
+        state.errors.append("analytics_tool_coverage_incomplete")
+    unchanged = state.before == state.after
+    cleanup_complete = state.uncleaned == 0 and unchanged
     status: Literal["passed", "failed", "blocked"] = (
         "blocked"
         if is_blocker(state.errors)
@@ -418,6 +451,12 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
         uncleaned_resources=state.uncleaned,
         hosts=tuple(sorted(state.hosts)),
         live_events=state.live_events,
+        live_mutation_calls=state.live_mutation_calls,
+        analytics_tool_receipt_count=analytics_count,
+        analytics_case_contract_sha256=analytics_case_contract_sha256(),
+        cleanup_complete=cleanup_complete,
+        account_state_unchanged=unchanged,
+        redacted_publication=True,
         errors=tuple(state.errors),
     )
 
@@ -439,6 +478,12 @@ def _blocked(state: MatrixRuntimeState) -> SimToolMatrixReceipt:
         uncleaned_resources=0,
         hosts=tuple(sorted(state.hosts)),
         live_events=state.live_events,
+        live_mutation_calls=state.live_mutation_calls,
+        analytics_tool_receipt_count=len(set(state.receipts) & set(ANALYTICS_TOOL_IDS)),
+        analytics_case_contract_sha256=analytics_case_contract_sha256(),
+        cleanup_complete=False,
+        account_state_unchanged=False,
+        redacted_publication=True,
         errors=tuple(state.errors),
     )
 

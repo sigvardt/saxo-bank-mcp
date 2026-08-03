@@ -19,12 +19,22 @@ from saxo_bank_mcp.agent_skill_matrix import (
     verify_matrix_report,
 )
 from saxo_bank_mcp.agent_skill_matrix_producer import run_real_matrix_report
+from saxo_bank_mcp.qa_analytics_evidence import (
+    ANALYSIS_KIND_CATALOG_PATH,
+    EvidenceCoverageError,
+    load_analysis_kind_catalog,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run or verify the Saxo MCP tool matrix.")
     parser.add_argument(
         "--manifest", type=Path, default=Path("data/saxo/agent_tool_scenarios.json")
+    )
+    parser.add_argument(
+        "--analysis-kind-catalog",
+        type=Path,
+        default=ANALYSIS_KIND_CATALOG_PATH,
     )
     parser.add_argument("--environment", default="SIM")
     parser.add_argument("--require-tools", type=int, default=60)
@@ -42,6 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-source-commit", default=None)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    try:
+        load_analysis_kind_catalog(args.analysis_kind_catalog)
+    except EvidenceCoverageError:
+        write_json(
+            args.out,
+            {"status": "failed", "reason": "analytics_evidence_catalog_invalid"},
+        )
+        return 1
     if args.verify_only:
         if args.report is None:
             sys.stderr.write("missing --report for --verify-only\n")
