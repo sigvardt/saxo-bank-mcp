@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from importlib import import_module
 from pathlib import Path
 from typing import Final
 
@@ -57,6 +58,7 @@ EXPECTED_METRIC_COUNT: Final = 206
 EXPECTED_ANALYSIS_KIND_COUNT: Final = 54
 EXPECTED_TOOL_COUNT: Final = 60
 EXPECTED_ARTIFACT_TEMPLATE_COUNT: Final = 20
+SHA256_HEX_LENGTH: Final = 64
 
 
 def _case_receipt(kind: ProofExecutionKind, *, applicable: bool = True) -> ProofCaseReceipt:
@@ -565,3 +567,115 @@ def test_proof_runner_requires_executed_production_install_not_fixture_or_paths(
     assert "--producer-command-evidence" not in runner
     assert "--producer-session-evidence" not in runner
     assert "--producer-probe-evidence" not in runner
+    assert "proof_producer_execution_required" not in runner
+    assert "run_verified_installed_producer" in runner
+
+
+def test_verified_installed_candidate_executes_process_owned_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    install_models = import_module("saxo_bank_mcp.agent_skill_install_models")
+    commit = "1" * 40
+    installed_candidate = Path(__file__).resolve().parents[1]
+    install = install_models.InstallEvidenceReport.model_construct(
+        execution_mode="installed_verification",
+        candidate_commit=commit,
+        repo=installed_candidate,
+        clone=install_models.CloneEvidence.model_construct(
+            path=installed_candidate,
+            commit=commit,
+            source_repo=installed_candidate,
+            clean=True,
+        ),
+        codex=install_models.ClientInstallEvidence.model_construct(
+            cache_root=installed_candidate,
+        ),
+        claude=install_models.ClientInstallEvidence.model_construct(
+            cache_root=installed_candidate,
+        ),
+    )
+    cache_sha256 = "2" * 64
+
+    def accept_clean_source(_repo: Path, _candidate_commit: str) -> None:
+        return None
+
+    def verified_digests(_install: object) -> tuple[str, str, str]:
+        return cache_sha256, cache_sha256, cache_sha256
+
+    monkeypatch.setattr(producer, "_require_clean_source_commit", accept_clean_source)
+    monkeypatch.setattr(
+        producer,
+        "_verified_install_digests",
+        verified_digests,
+    )
+
+    validated = producer.run_verified_installed_producer(
+        install,
+        candidate_commit=commit,
+    )
+
+    assert validated.status == "blocked"
+    assert validated.producer_authenticated is True
+    assert validated.execution_performed is True
+    assert validated.candidate_commit == commit
+    assert validated.installed_cache_sha256 == cache_sha256
+    assert validated.executed_receipt_count == len(
+        evidence_module.load_analysis_kind_catalog().analysis_kinds
+    )
+    assert len(validated.proof_execution_sha256) == SHA256_HEX_LENGTH
+    assert validated.validation_errors == ("proof_profiles_not_active",)
+
+    producer_parameters = inspect.signature(producer.produce_installed_result).parameters
+    assert "executed_bundle" not in producer_parameters
+    assert "receipt_path" not in producer_parameters
+    assert "evidence_path" not in producer_parameters
+
+
+def test_fixture_install_cannot_acquire_proof_producer_authority() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    install_models = import_module("saxo_bank_mcp.agent_skill_install_models")
+    fixture = install_models.FixtureSupportReport.model_construct(
+        execution_mode="fixture_support",
+    )
+
+    with pytest.raises(producer.ProofProducerError, match="fixture_support_not_production"):
+        producer.run_verified_installed_producer(
+            fixture,
+            candidate_commit="1" * 40,
+        )
+
+
+def test_copied_installed_producer_json_has_no_process_authority(tmp_path: Path) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    copied = producer.InstalledProofProducerResult(
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+        producer_module_sha256="3" * 64,
+        catalog_sha256="4" * 64,
+        contract_sha256="5" * 64,
+        status="blocked",
+        execution_performed=True,
+        process_local_activation=False,
+        executed_receipt_count=len(evidence_module.load_analysis_kind_catalog().analysis_kinds),
+        proof_execution_sha256="6" * 64,
+        validation_errors=("proof_profiles_not_active",),
+    )
+    copied_path = tmp_path / "copied-producer.json"
+    copied_path.write_text(copied.model_dump_json(), encoding="utf-8")
+    parameters = inspect.signature(producer.run_verified_installed_producer).parameters
+
+    assert "receipt_path" not in parameters
+    assert "result_path" not in parameters
+    assert "evidence_path" not in parameters
+    with pytest.raises(producer.ProofProducerError, match="trusted_producer_provenance_missing"):
+        producer._validate_process_owned_result(  # noqa: SLF001
+            object(),
+            command=("uv",),
+            cache_root=tmp_path,
+            candidate_commit="1" * 40,
+            installed_cache_sha256="2" * 64,
+            producer_module_sha256="3" * 64,
+            authority=object(),
+        )
+    assert copied_path.is_file()

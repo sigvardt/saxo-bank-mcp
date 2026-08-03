@@ -18,6 +18,7 @@ from fastmcp import Client
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_execution import StoredBacktestExecutionContext
 from saxo_bank_mcp.analytics_instrument_identity import (
     instrument_handle_for_saxo_identity,
     put_saxo_instrument_identity,
@@ -122,15 +123,30 @@ class _ChartFixtureExecutor:
                     "Data": [
                         {
                             "CloseBid": 100.0,
+                            "OpenBid": 100.0,
+                            "HighBid": 100.0,
+                            "LowBid": 100.0,
                             "PriceType": "RealTime",
                             "Time": "2026-08-03T09:00:00Z",
                             "Volume": 10,
                         },
                         {
-                            "CloseBid": 110.0,
+                            "CloseBid": 105.0,
+                            "OpenBid": 100.0,
+                            "HighBid": 105.0,
+                            "LowBid": 100.0,
                             "PriceType": "RealTime",
                             "Time": "2026-08-03T09:01:00Z",
                             "Volume": 11,
+                        },
+                        {
+                            "CloseBid": 110.0,
+                            "OpenBid": 105.0,
+                            "HighBid": 110.0,
+                            "LowBid": 105.0,
+                            "PriceType": "RealTime",
+                            "Time": "2026-08-03T09:02:00Z",
+                            "Volume": 12,
                         },
                     ],
                     "DataVersion": 1,
@@ -171,62 +187,166 @@ def _seed_chart_instrument(config: AnalyticsConfig) -> str:
     return handle
 
 
+async def _synced_chart_fixture(
+    config: AnalyticsConfig,
+) -> tuple[str, str, str, _ChartFixtureExecutor]:
+    handle = _seed_chart_instrument(config)
+    executor = _ChartFixtureExecutor()
+    sync = await sync_price_bars(
+        handle,
+        ChartInterval.ONE_MINUTE,
+        _NOW - timedelta(hours=1),
+        _NOW - timedelta(minutes=58),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        clock=lambda: _NOW,
+    )
+    dataset_id = sync.datasets[0].dataset_id
+    store = AnalyticsStore.open(config)
+    try:
+        source_revision = store.get_authenticated_dataset(dataset_id).source_revision
+    finally:
+        store.close()
+    return handle, dataset_id, source_revision, executor
+
+
 def _active_market_registry(
     config: AnalyticsConfig,
     *,
     source_revision: str,
 ) -> ProofRegistry:
-    definitions = load_metric_definition_catalog()
-    definition = definitions.by_id()["price_return"]
-    contract = source_contracts_by_id()["chart_v3"]
-    source = SourceContractProofBinding(
-        contract_id="chart_v3",
-        contract_sha256=source_contract_fingerprint(contract),
-        field_paths=("CloseBid", "Time"),
-    )
-    profile = ProofProfile(
-        proof_profile_id="vp_market_comparison_test_v1",
-        profile_version="1",
-        activation_state=ProfileActivationState.ACTIVE,
-        quarantine_reason=None,
+    return _active_test_registry(
+        config,
         analysis_kind="market_comparison",
-        schema_version="1",
-        metric_definitions=(
-            MetricDefinitionBinding(
-                metric_id=definition.metric_id,
-                definition_version=definition.definition_version,
-            ),
-        ),
-        source_contracts=(source,),
+        metric_ids=("price_return",),
         source_revision=source_revision,
-        engines=(
-            EngineProofBinding(
-                engine_name="saxo_analytics",
-                engine_version="1",
-                code_commit="abcdef0",
+        artifact_template_ids=("relative_performance",),
+    )
+
+
+def _active_test_registry(
+    config: AnalyticsConfig,
+    *,
+    analysis_kind: str,
+    metric_ids: tuple[str, ...],
+    source_revision: str,
+    artifact_template_ids: tuple[str, ...] = (),
+) -> ProofRegistry:
+    return _active_test_registry_many(
+        config,
+        (
+            (
+                analysis_kind,
+                metric_ids,
+                source_revision,
+                artifact_template_ids,
             ),
         ),
-        artifact_template_ids=("relative_performance",),
-        definition_catalog_sha256=definitions.fingerprint_sha256,
-        source_catalog_sha256=source_contract_catalog_sha256(),
-        valid_until=datetime(2099, 1, 1, tzinfo=UTC),
+    )
+
+
+def _active_test_registry_many(
+    config: AnalyticsConfig,
+    registrations: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...]], ...],
+) -> ProofRegistry:
+    definitions = load_metric_definition_catalog()
+    definitions_by_id = definitions.by_id()
+    profile_sources: list[tuple[SourceContractProofBinding, ...]] = []
+    catalog_source_fields: dict[str, set[str]] = {}
+    for _analysis_kind, metric_ids, _source_revision, _templates in registrations:
+        source_fields: dict[str, set[str]] = {}
+        for metric_id in metric_ids:
+            for binding in definitions_by_id[metric_id].input_bindings:
+                if binding.source_contract_id is not None:
+                    source_fields.setdefault(binding.source_contract_id, set()).update(
+                        binding.field_paths
+                    )
+                    catalog_source_fields.setdefault(binding.source_contract_id, set()).update(
+                        binding.field_paths
+                    )
+        profile_sources.append(
+            tuple(
+                SourceContractProofBinding(
+                    contract_id=contract_id,
+                    contract_sha256=source_contract_fingerprint(
+                        source_contracts_by_id()[contract_id]
+                    ),
+                    field_paths=tuple(sorted(field_paths)),
+                )
+                for contract_id, field_paths in sorted(source_fields.items())
+            )
+        )
+    catalog_sources = tuple(
+        SourceContractProofBinding(
+            contract_id=contract_id,
+            contract_sha256=source_contract_fingerprint(source_contracts_by_id()[contract_id]),
+            field_paths=tuple(sorted(field_paths)),
+        )
+        for contract_id, field_paths in sorted(catalog_source_fields.items())
+    )
+    profiles = tuple(
+        ProofProfile(
+            proof_profile_id=f"vp_{analysis_kind}_test_v1",
+            profile_version="1",
+            activation_state=ProfileActivationState.ACTIVE,
+            quarantine_reason=None,
+            analysis_kind=analysis_kind,
+            schema_version="1",
+            metric_definitions=tuple(
+                MetricDefinitionBinding(
+                    metric_id=definitions_by_id[metric_id].metric_id,
+                    definition_version=definitions_by_id[metric_id].definition_version,
+                )
+                for metric_id in metric_ids
+            ),
+            source_contracts=sources,
+            source_revision=source_revision,
+            engines=(
+                EngineProofBinding(
+                    engine_name="saxo_analytics",
+                    engine_version="1",
+                    code_commit="abcdef0",
+                ),
+            ),
+            artifact_template_ids=artifact_template_ids,
+            definition_catalog_sha256=definitions.fingerprint_sha256,
+            source_catalog_sha256=source_contract_catalog_sha256(),
+            valid_until=datetime(2099, 1, 1, tzinfo=UTC),
+        )
+        for (
+            analysis_kind,
+            metric_ids,
+            source_revision,
+            artifact_template_ids,
+        ), sources in zip(registrations, profile_sources, strict=True)
+    )
+    production_metric_ids = tuple(
+        dict.fromkeys(
+            metric_id
+            for _kind, metrics, _revision, _templates in registrations
+            for metric_id in metrics
+        )
+    )
+    all_templates = tuple(
+        template
+        for _kind, _metrics, _revision, templates in registrations
+        for template in templates
     )
     catalog = ProofProfileCatalog(
         schema_version="1",
-        catalog_version="area-f-test-1",
+        catalog_version="area-g-test-1",
         definition_catalog_sha256=definitions.fingerprint_sha256,
         source_catalog_sha256=source_contract_catalog_sha256(),
-        production_metric_ids=("price_return",),
-        production_analysis_kinds=("market_comparison",),
-        production_artifact_template_ids=("relative_performance",),
-        artifact_owners=(
-            ArtifactOwnerBinding(
-                template_id="relative_performance",
-                analysis_kind="market_comparison",
-            ),
+        production_metric_ids=production_metric_ids,
+        production_analysis_kinds=tuple(item[0] for item in registrations),
+        production_artifact_template_ids=all_templates,
+        artifact_owners=tuple(
+            ArtifactOwnerBinding(template_id=template_id, analysis_kind=analysis_kind)
+            for analysis_kind, _metrics, _revision, templates in registrations
+            for template_id in templates
         ),
-        source_field_coverage=(source,),
-        profiles=(profile,),
+        source_field_coverage=catalog_sources,
+        profiles=profiles,
     )
     return ProofRegistry(definitions=definitions, catalog=catalog, config=config)
 
@@ -239,6 +359,52 @@ def anyio_backend() -> str:
 def _state_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("SAXO_MCP_ANALYTICS_STORE_QUOTA_GIB", "1")
+
+
+def _bounded_strategy() -> tools_module.StrategyDefinition:
+    return tools_module.StrategyDefinition.model_validate(
+        {
+            "entry": {
+                "left": {"kind": "close", "window": 1},
+                "comparison": "greater_than",
+                "right_indicator": None,
+                "threshold": 0.0,
+            },
+            "exit": {
+                "left": {"kind": "close", "window": 1},
+                "comparison": "less_than",
+                "right_indicator": None,
+                "threshold": 0.0,
+            },
+            "direction": "long",
+            "sizing": {"kind": "fixed_weight", "target_weight": 0.5},
+            "rebalancing": {
+                "kind": "every_n_bars",
+                "interval_bars": 5,
+                "fill_timing": "next_bar_open",
+            },
+            "constraints": {
+                "allow_long": True,
+                "allow_short": False,
+                "maximum_absolute_position_weight": 0.5,
+                "maximum_gross_exposure": 1.0,
+                "minimum_cash_weight": 0.5,
+            },
+            "transaction_costs": {
+                "commission_basis_points": 0.0,
+                "fixed_cost_per_fill": 0.0,
+                "currency": "USD",
+            },
+            "slippage": {"kind": "none", "basis_points": 0.0},
+            "evaluation_split": {
+                "kind": "holdout",
+                "train_end_at": datetime(2026, 1, 1, tzinfo=UTC),
+                "holdout_start_at": datetime(2026, 1, 2, tzinfo=UTC),
+            },
+            "missing_bar_policy": "refuse",
+            "delisting_policy": "terminal_close",
+        },
+    )
 
 
 def test_exact_analytics_catalog_moves_server_from_39_to_60() -> None:
@@ -666,26 +832,10 @@ async def test_active_proof_market_adapter_persists_replays_renders_and_explains
     _state_env(monkeypatch, tmp_path)
     monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
     config = tools_module._analytics_config()  # noqa: SLF001
-    handle = _seed_chart_instrument(config)
-    executor = _ChartFixtureExecutor()
-    sync = await sync_price_bars(
-        handle,
-        ChartInterval.ONE_MINUTE,
-        _NOW - timedelta(hours=1),
-        _NOW - timedelta(minutes=59),
-        provider=SaxoAnalyticsProvider(request_executor=executor),
-        config=config,
-        clock=lambda: _NOW,
-    )
-    dataset_id = sync.datasets[0].dataset_id
-    store = AnalyticsStore.open(config)
-    try:
-        dataset = store.get_authenticated_dataset(dataset_id)
-    finally:
-        store.close()
+    _, dataset_id, source_revision, executor = await _synced_chart_fixture(config)
     registry = _active_market_registry(
         config,
-        source_revision=dataset.source_revision,
+        source_revision=source_revision,
     )
 
     def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
@@ -768,6 +918,343 @@ async def test_active_proof_market_adapter_persists_replays_renders_and_explains
         assert len(checked.result.artifact_ids) == 1
     finally:
         await tools_module.shutdown_analytics_runtime()
+
+
+@pytest.mark.anyio
+async def test_active_proof_instrument_adapter_uses_domain_engine_and_replays(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    handle, dataset_id, source_revision, executor = await _synced_chart_fixture(config)
+    instrument_registry = _active_test_registry(
+        config,
+        analysis_kind="instrument_price_return",
+        metric_ids=("price_return",),
+        source_revision=source_revision,
+    )
+
+    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+        return instrument_registry
+
+    monkeypatch.setattr(
+        tools_module,
+        "_proof_registry",
+        active_registry,
+    )
+    instrument = tools_module.saxo_analyze_instruments(
+        tools_module.StoredInstrumentToolRequest(
+            analysis_kind="instrument_price_return",
+            dataset_ids=(dataset_id,),
+            instrument_handles=(handle,),
+            rolling_window=2,
+            periods_per_year=252,
+            requested_return="price_return",
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        )
+    )
+    assert executor.call_count == 1
+    assert isinstance(instrument, tools_module.VerifiedAnalysisToolResponse)
+    assert instrument.result.metrics[0].metric_id == "price_return"
+    assert instrument.result.metrics[0].value == pytest.approx(0.1)
+    assert (
+        replay_analysis(
+            instrument.analysis_id,
+            config=config,
+            registry=instrument_registry,
+        )
+        == instrument.result
+    )
+
+
+@pytest.mark.anyio
+async def test_bounded_backtest_adapter_executes_then_requires_authenticated_ghost_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    handle, chart_dataset_id, source_revision, _ = await _synced_chart_fixture(config)
+    store = AnalyticsStore.open(config)
+    try:
+        chart_material = store.get_authenticated_dataset_material(chart_dataset_id)
+        reference_contract = source_contracts_by_id()["reference_instruments_v1"]
+        reference_page = store.put_source_page(
+            source_kind="reference_instruments",
+            page_key="bounded-backtest-reference",
+            source_revision=source_revision,
+            contract_name="reference_instruments_v1",
+            contract_sha256=source_contract_fingerprint(reference_contract),
+            payload={
+                "contract_id": "reference_instruments_v1",
+                "rows": [{"schema": "synthetic_reference"}],
+                "sync_metadata": chart_material.pages[0].payload["sync_metadata"],
+            },
+            row_count=1,
+            source_timestamp=_NOW,
+            account_scope=chart_material.account_scope,
+            instrument_handle=handle,
+        )
+        dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+        dataset = store.create_dataset(
+            dataset_id=dataset_id,
+            account_scope=chart_material.account_scope,
+            source_scope="saxo_openapi",
+            source_revision=source_revision,
+            source_page_ids=(
+                *(page.page_id for page in chart_material.pages),
+                reference_page.page_id,
+            ),
+            created_at=chart_material.dataset.created_at,
+            coverage_start=chart_material.coverage_start,
+            coverage_end=chart_material.coverage_end,
+            quality_state=chart_material.dataset.quality_state,
+        )
+    finally:
+        store.close()
+    registry = _active_test_registry(
+        config,
+        analysis_kind="bounded_backtest",
+        metric_ids=("total_return",),
+        source_revision=source_revision,
+    )
+
+    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+        return registry
+
+    store = AnalyticsStore.open(config)
+    try:
+        material = store.get_authenticated_dataset_material(dataset_id)
+        dataset = material.dataset
+        context = StoredBacktestExecutionContext(
+            account_alias=material.account_scope,
+            instrument_handle=handle,
+            missing_interval_count=0,
+            missing_fields=(),
+            warnings=(),
+        )
+        store.create_snapshot(
+            snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
+            dataset_id=dataset_id,
+            snapshot_kind="backtest_input",
+            account_scope=material.account_scope,
+            source_revision=dataset.source_revision,
+            as_of=dataset.created_at,
+            payload=context.model_dump(mode="json"),
+        )
+    finally:
+        store.close()
+    monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
+    strategy_payload = _bounded_strategy().model_dump(mode="json")
+    strategy_payload["evaluation_split"] = {
+        "kind": "holdout",
+        "train_end_at": datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+        "holdout_start_at": datetime(2026, 8, 3, 9, 1, tzinfo=UTC),
+    }
+    strategy = tools_module.StrategyDefinition.model_validate(strategy_payload)
+
+    response = tools_module.saxo_backtest_strategy(
+        tools_module.StoredBacktestToolRequest(
+            dataset_id=dataset_id,
+            instrument_handle=handle,
+            strategy=strategy,
+            starting_equity=1000,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        )
+    )
+
+    assert isinstance(response, tools_module.RefusedAnalysisToolResponse)
+    assert response.reason_code == "ghost_authenticated_receipt_required"
+    assert response.analysis_id is None
+    assert response.broker_write_made is False
+
+
+@pytest.mark.anyio
+async def test_pretrade_adapter_replays_real_analysis_and_requires_server_owned_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    handle, dataset_id, source_revision, _ = await _synced_chart_fixture(config)
+    registry = _active_test_registry_many(
+        config,
+        (
+            ("instrument_price_return", ("price_return",), source_revision, ()),
+            (
+                "pretrade_impact",
+                ("estimated_transaction_cost", "maximum_loss"),
+                source_revision,
+                (),
+            ),
+        ),
+    )
+
+    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+        return registry
+
+    monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
+    origin = tools_module.saxo_analyze_instruments(
+        tools_module.StoredInstrumentToolRequest(
+            analysis_kind="instrument_price_return",
+            dataset_ids=(dataset_id,),
+            instrument_handles=(handle,),
+            rolling_window=2,
+            periods_per_year=252,
+            requested_return="price_return",
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        )
+    )
+    assert isinstance(origin, tools_module.VerifiedAnalysisToolResponse)
+
+    proposal = tools_module.saxo_propose_trade_from_analysis(
+        origin.analysis_id,
+        handle,
+        "buy",
+        Decimal(1),
+        proposal_price=Decimal(100),
+        maximum_loss=Decimal(10),
+        holding_period_days=0,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+    )
+
+    assert isinstance(proposal, tools_module.RefusedAnalysisToolResponse)
+    assert proposal.reason_code == "pretrade_context_unavailable"
+    assert proposal.analysis_id is None
+    assert proposal.broker_write_made is False
+    assert proposal.approval_authority is False
+    assert proposal.execution_authority is False
+    assert proposal.next_tool != "saxo_create_order_preview"
+
+
+@pytest.mark.anyio
+async def test_active_portfolio_adapter_refuses_price_bars_and_nonprivate_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    config = tools_module._analytics_config()  # noqa: SLF001
+    _, dataset_id, source_revision, _ = await _synced_chart_fixture(config)
+    registry = _active_test_registry(
+        config,
+        analysis_kind="portfolio_performance",
+        metric_ids=("time_weighted_return",),
+        source_revision=source_revision,
+    )
+
+    def active_registry(_config: AnalyticsConfig) -> ProofRegistry:
+        return registry
+
+    monkeypatch.setattr(tools_module, "_proof_registry", active_registry)
+    wrong_dataset = tools_module.saxo_analyze_portfolio(
+        tools_module.StoredPortfolioToolRequest(
+            analysis_kind="portfolio_performance",
+            dataset_ids=(dataset_id,),
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        )
+    )
+    wrong_visibility = tools_module.saxo_analyze_portfolio(
+        tools_module.StoredPortfolioToolRequest(
+            analysis_kind="portfolio_performance",
+            dataset_ids=(dataset_id,),
+            visibility=VisibilityMode.FINGERPRINT_ONLY,
+        )
+    )
+
+    assert isinstance(wrong_dataset, tools_module.RefusedAnalysisToolResponse)
+    assert wrong_dataset.reason_code == "analytics_object_not_found"
+    assert isinstance(wrong_visibility, tools_module.RefusedAnalysisToolResponse)
+    assert wrong_visibility.reason_code == "private_result_required"
+
+
+@pytest.mark.anyio
+async def test_unavailable_typed_analysis_inputs_refuse_through_real_fastmcp_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Unavailable server-owned contexts refuse before any analytical claim is made."""
+    _state_env(monkeypatch, tmp_path)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    calls: dict[str, dict[str, object]] = {
+        "saxo_analyze_portfolio": {
+            "request": {
+                "analysis_kind": "portfolio_performance",
+                "dataset_ids": [dataset_id],
+                "visibility": "private_user_result",
+            }
+        },
+        "saxo_size_position": {
+            "request": {
+                "dataset_id": dataset_id,
+                "instrument_handle": instrument_handle,
+                "method": "stop_distance",
+                "maximum_loss": "10",
+                "risk_budget_confirmed": True,
+                "stop_price": "99",
+                "visibility": "private_user_result",
+            }
+        },
+        "saxo_run_scenario": {
+            "request": {
+                "analysis_kind": "scenario_custom",
+                "dataset_id": dataset_id,
+                "shocks": [
+                    {
+                        "instrument_handle": instrument_handle,
+                        "price_shock_ratio": "-0.1",
+                    }
+                ],
+                "numeric_shocks_echoed_by_caller": True,
+                "caller_accepted_numeric_shocks": True,
+                "visibility": "private_user_result",
+            }
+        },
+        "saxo_optimize_portfolio": {
+            "request": {
+                "analysis_kind": "portfolio_minimum_variance",
+                "dataset_id": dataset_id,
+                "objective": "minimum_variance",
+                "objective_confirmed_by_caller": True,
+                "constraints_confirmed_by_caller": True,
+                "short_policy": "long_only",
+                "maximum_turnover": "1",
+                "maximum_transaction_cost_ratio": "0.01",
+                "maximum_margin_ratio": "1",
+                "visibility": "private_user_result",
+            }
+        },
+        "saxo_model_derivatives": {
+            "request": {
+                "analysis_kind": "derivatives_model",
+                "dataset_id": dataset_id,
+                "instrument_handles": [instrument_handle],
+                "visibility": "private_user_result",
+            }
+        },
+        "saxo_backtest_strategy": {
+            "request": {
+                "dataset_id": dataset_id,
+                "instrument_handle": instrument_handle,
+                "strategy": _bounded_strategy().model_dump(mode="json"),
+                "starting_equity": 1000.0,
+                "visibility": "private_user_result",
+            }
+        },
+    }
+    server = create_mcp_server(allowed_tools=frozenset(calls))
+    async with Client(server) as client:
+        for tool_id, arguments in calls.items():
+            response = await client.call_tool(tool_id, arguments)
+            assert response.structured_content is not None
+            assert response.structured_content["status"] == "refused", tool_id
+            assert response.structured_content["reason_code"] == "analytics_object_not_found"
+            assert response.structured_content["broker_write_made"] is False
 
 
 @pytest.mark.anyio
@@ -1006,9 +1493,87 @@ def test_trade_proposal_binds_instrument_and_authenticates_analysis_dataset(
     assert isinstance(mismatch, tools_module.RefusedAnalysisToolResponse)
     assert isinstance(bound, tools_module.RefusedAnalysisToolResponse)
     assert mismatch.reason_code == "proposal_context_mismatch"
-    assert bound.reason_code == "pretrade_context_unavailable"
+    assert bound.reason_code == "explicit_pretrade_inputs_required"
     assert mismatch.next_tool != "saxo_create_order_preview"
     assert bound.next_tool != "saxo_create_order_preview"
+
+
+def test_bound_pretrade_context_dispatches_proposal_without_broker_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A matching server-owned context produces analysis only, never a preview or write."""
+    _state_env(monkeypatch, tmp_path)
+    analysis_id = new_safe_handle(HandleKind.ANALYSIS_ID)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+
+    class _Store:
+        def get_authenticated_dataset(self, _dataset_id: str) -> object:
+            return object()
+
+        def close(self) -> None:
+            return None
+
+    def replay(
+        _analysis_id: str,
+        *,
+        config: AnalyticsConfig,
+        registry: object,
+    ) -> object:
+        del config, registry
+        return SimpleNamespace(
+            provenance=SimpleNamespace(dataset_id=dataset_id),
+            request=SimpleNamespace(instrument_handles=(instrument_handle,)),
+        )
+
+    def open_store(_config: AnalyticsConfig) -> _Store:
+        return _Store()
+
+    def proof_registry(_config: AnalyticsConfig) -> object:
+        return object()
+
+    monkeypatch.setattr(
+        tools_module,
+        "replay_analysis",
+        replay,
+    )
+    monkeypatch.setattr(
+        tools_module.AnalyticsStore,
+        "open",
+        staticmethod(open_store),
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", proof_registry)
+    routed: list[dict[str, object]] = []
+
+    def execute(**kwargs: object) -> object:
+        routed.append(kwargs)
+        raise tools_module.StoredAnalysisExecutionError("fixture_domain_refusal")
+
+    monkeypatch.setattr(tools_module, "execute_pretrade_proposal", execute)
+
+    response = tools_module.saxo_propose_trade_from_analysis(
+        analysis_id,
+        instrument_handle,
+        "buy",
+        Decimal(1),
+        proposal_price=Decimal(100),
+        maximum_loss=Decimal(10),
+        holding_period_days=5,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+    )
+
+    assert len(routed) == 1
+    assert routed[0]["side"] == "buy"
+    assert routed[0]["quantity"] == Decimal(1)
+    assert routed[0]["proposal_price"] == Decimal(100)
+    assert routed[0]["maximum_loss"] == Decimal(10)
+    assert isinstance(response, tools_module.RefusedAnalysisToolResponse)
+    assert response.reason_code == "fixture_domain_refusal"
+    assert response.broker_write_made is False
+    assert response.approval_authority is False
+    assert response.execution_authority is False
+    assert response.next_tool != "saxo_create_order_preview"
 
 
 def _schema_property_names(schema: object) -> tuple[str, ...]:

@@ -179,6 +179,60 @@ def test_storage_listing_uses_normalized_store_scope_and_safe_local_evidence(
         store.close()
 
 
+def test_safe_instruments_are_counted_in_runtime_cache_state(tmp_path: Path) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+        with store._write_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO safe_instruments (
+                    instrument_handle,
+                    asset_type,
+                    safe_label,
+                    source_revision,
+                    source_timestamp,
+                    fingerprint_sha256,
+                    metadata_json
+                )
+                VALUES (?, 'Stock', 'Synthetic instrument', 'rev-synthetic', ?, ?, '{}')
+                """,
+                (instrument_handle, _NOW, "1" * 64),
+            )
+            store._bump_revision(connection)
+
+        populated = list_storage(StorageScope(), store=store)
+        filtered = list_storage(
+            StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
+            store=store,
+        )
+
+        assert tuple(entry.object_id for entry in filtered.entries) == (instrument_handle,)
+        assert populated.runtime_state.cache_entry_count == 1
+        assert filtered.runtime_state.cache_entry_count == 1
+        assert (
+            populated.runtime_state.fingerprint_sha256 == filtered.runtime_state.fingerprint_sha256
+        )
+
+        preview = preview_deletion(
+            StorageScope(
+                data_types=(StorageDataType.SAFE_INSTRUMENTS,),
+                instrument_handles=(instrument_handle,),
+            ),
+            store=store,
+        )
+        delete_analytics_data(preview.preview.token, store=store)
+        cleared = list_storage(StorageScope(), store=store)
+
+        assert cleared.entries == ()
+        assert cleared.runtime_state.cache_entry_count == 0
+        assert (
+            cleared.runtime_state.fingerprint_sha256 != populated.runtime_state.fingerprint_sha256
+        )
+    finally:
+        store.close()
+
+
 def test_deletion_preview_reports_exact_dependency_closure_rows_and_bytes(
     tmp_path: Path,
 ) -> None:

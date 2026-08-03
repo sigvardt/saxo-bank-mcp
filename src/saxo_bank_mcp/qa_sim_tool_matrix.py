@@ -436,6 +436,17 @@ async def run_analytics_case_phase(
                 observed_call.arguments,
                 status="completed",
             )
+        elif observed_call.tool_id not in state.receipts and case_receipt.state in {
+            "degraded",
+            "refused",
+        }:
+            _record(
+                state,
+                observed_call.tool_id,
+                result,
+                observed_call.arguments,
+                status=("completed" if case_receipt.state == "degraded" else "expected_refusal"),
+            )
         else:
             _observe_auxiliary(state, result)
     preview_receipt, delete_receipt = await run_analytics_cleanup_cases(client, state)
@@ -611,12 +622,25 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
     resources: AnalyticsRuntimeResources,
 ) -> dict[str, JsonValue]:
     degraded = case_call.kind == "degradation"
-    dataset_id = _selected_handle(
-        resources.dataset_ids,
-        resources.degraded_dataset_ids,
-        degraded=degraded,
-        require_degraded=degraded,
+    route = {
+        "saxo_analyze_market": "price_bars",
+        "saxo_analyze_instruments": "price_bars",
+        "saxo_analyze_portfolio": "portfolio_performance",
+        "saxo_size_position": "position_sizing",
+        "saxo_run_scenario": "scenario_custom",
+        "saxo_optimize_portfolio": "portfolio_minimum_variance",
+        "saxo_model_derivatives": "derivatives_model",
+        "saxo_backtest_strategy": "bounded_backtest",
+    }[case_call.tool_id]
+    routed = (
+        resources.degraded_dataset_ids_by_analysis_kind
+        if degraded
+        else resources.dataset_ids_by_analysis_kind
     )
+    dataset_ids = routed.get(route, [])
+    if degraded and not dataset_ids:
+        dataset_ids = resources.dataset_ids_by_analysis_kind.get("price_bars", [])
+    dataset_id = dataset_ids[0] if dataset_ids else None
     if dataset_id is None:
         return {}
     instrument_handle = _selected_handle(
@@ -659,6 +683,24 @@ def _materialize_analysis_consumer_arguments(
     resources: AnalyticsRuntimeResources,
 ) -> dict[str, JsonValue]:
     degraded = case_call.kind == "degradation"
+    if case_call.tool_id == "saxo_propose_trade_from_analysis":
+        analysis_ids = (
+            resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
+        ).get("instrument_price_return", [])
+        analysis_id = analysis_ids[0] if analysis_ids else None
+        instrument = resources.instrument_handles[0] if resources.instrument_handles else None
+        if analysis_id is None or instrument is None:
+            return {}
+        return {
+            "analysis_id": analysis_id,
+            "instrument_handle": instrument,
+            "side": "buy",
+            "quantity": "1" if not degraded else "2",
+            "proposal_price": "50",
+            "maximum_loss": "1",
+            "holding_period_days": 0,
+            "visibility": "private_user_result",
+        }
     analysis_id = _selected_handle(
         resources.analysis_ids,
         resources.degraded_analysis_ids,
@@ -667,16 +709,6 @@ def _materialize_analysis_consumer_arguments(
     )
     if analysis_id is None:
         return {}
-    if case_call.tool_id == "saxo_propose_trade_from_analysis":
-        instrument = resources.instrument_handles[0] if resources.instrument_handles else None
-        if instrument is None:
-            return {}
-        return {
-            "analysis_id": analysis_id,
-            "instrument_handle": instrument,
-            "side": "buy",
-            "quantity": "1" if not degraded else "2",
-        }
     if case_call.tool_id == "saxo_render_analysis":
         return {
             "analysis_id": analysis_id,
@@ -740,8 +772,54 @@ def _remember_analytics_handles(
     )
     _extend_unique(resources.artifact_ids, found["ar"])
     _extend_unique(resources.job_ids, found["jb"])
+    _remember_typed_resources(resources, result.payload, degraded=degraded)
     if case_call.tool_id == "saxo_preview_analytics_deletion" and found["dp"]:
         resources.deletion_token = found["dp"][0]
+
+
+def _remember_typed_resources(
+    resources: AnalyticsRuntimeResources,
+    payload: dict[str, JsonValue],
+    *,
+    degraded: bool,
+) -> None:
+    """Index only server-issued handles that name their exact stored input kind."""
+    dataset_routes = (
+        resources.degraded_dataset_ids_by_analysis_kind
+        if degraded
+        else resources.dataset_ids_by_analysis_kind
+    )
+    analysis_routes = (
+        resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
+    )
+
+    def visit(value: JsonValue) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        dataset_id = value.get("dataset_id")
+        data_kind = value.get("data_kind")
+        analysis_kind = value.get("analysis_kind")
+        if isinstance(dataset_id, str):
+            route = (
+                analysis_kind
+                if isinstance(analysis_kind, str)
+                else data_kind
+                if isinstance(data_kind, str)
+                else None
+            )
+            if route is not None:
+                _extend_unique(dataset_routes.setdefault(route, []), [dataset_id])
+        analysis_id = value.get("analysis_id")
+        if isinstance(analysis_id, str) and isinstance(analysis_kind, str):
+            _extend_unique(analysis_routes.setdefault(analysis_kind, []), [analysis_id])
+        for item in value.values():
+            visit(item)
+
+    visit(payload)
 
 
 def _collect_safe_handles(value: JsonValue, found: dict[str, list[str]]) -> None:

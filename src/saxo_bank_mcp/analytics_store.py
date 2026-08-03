@@ -156,6 +156,7 @@ _DELETION_COLUMNS: Final = {
     "price_bars": "page_id",
     "proof_receipts": "analysis_id",
     "quotes": "page_id",
+    "safe_instruments": "instrument_handle",
     "source_pages": "page_id",
     "transactions": "page_id",
 }
@@ -168,6 +169,10 @@ _BYTE_SUM_QUERIES: Final = {
     "datasets": ("SELECT coalesce(sum(byte_count), 0) FROM datasets WHERE dataset_id = ANY(?)"),
     "source_pages": (
         "SELECT coalesce(sum(byte_count), 0) FROM source_pages WHERE page_id = ANY(?)"
+    ),
+    "safe_instruments": (
+        "SELECT coalesce(sum(octet_length(encode(metadata_json))), 0) "
+        "FROM safe_instruments WHERE instrument_handle = ANY(?)"
     ),
 }
 _DELETION_ORDER: Final = (
@@ -187,6 +192,7 @@ _DELETION_ORDER: Final = (
     "closed_positions",
     "costs",
     "source_pages",
+    "safe_instruments",
 )
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
@@ -223,6 +229,7 @@ class StorageDataType(StrEnum):
     """Typed data classes accepted by storage listing and deletion scopes."""
 
     SOURCE_PAGES = "source_pages"
+    SAFE_INSTRUMENTS = "safe_instruments"
     PRICE_BARS = "price_bars"
     QUOTES = "quotes"
     OPTION_SNAPSHOTS = "option_snapshots"
@@ -461,6 +468,44 @@ class StoredSnapshot:
     fingerprint_sha256: str
     byte_count: int
     as_of: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSourceMaterial:
+    """Private server-side source material after full dataset authentication."""
+
+    page_id: str
+    contract_name: str
+    contract_sha256: str
+    source_kind: str
+    source_revision: str
+    source_timestamp: datetime
+    fingerprint_sha256: str
+    account_scope: str | None
+    instrument_handle: str | None
+    payload: Mapping[str, SourceJsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedDatasetMaterial:
+    """Authenticated dataset metadata and its immutable server-owned source pages."""
+
+    dataset: StoredDataset
+    account_scope: str
+    coverage_start: datetime
+    coverage_end: datetime
+    pages: tuple[AuthenticatedSourceMaterial, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedSnapshotMaterial:
+    """One fingerprint-verified typed snapshot owned by an authenticated dataset."""
+
+    snapshot: StoredSnapshot
+    snapshot_kind: str
+    account_scope: str
+    source_revision: str
+    payload: Mapping[str, SourceJsonValue]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1888,6 +1933,213 @@ class AnalyticsStore:
         with self._read_connection() as connection:
             return self.authenticate_dataset(connection, dataset_id)
 
+    def get_authenticated_dataset_material(
+        self,
+        dataset_id: str,
+    ) -> AuthenticatedDatasetMaterial:
+        """Load private source material only after recomputing its full stored lineage."""
+        self._require_open()
+        with self._read_connection() as connection:
+            return self._authenticate_dataset_material(connection, dataset_id)
+
+    @staticmethod
+    def _authenticate_dataset_material(
+        connection: duckdb.DuckDBPyConnection,
+        dataset_id: str,
+    ) -> AuthenticatedDatasetMaterial:
+        dataset = AnalyticsStore.authenticate_dataset(connection, dataset_id)
+        metadata = connection.execute(
+            """
+            SELECT account_scope, epoch_us(coverage_start), epoch_us(coverage_end)
+            FROM datasets
+            WHERE dataset_id = ?
+            """,
+            (dataset_id,),
+        ).fetchone()
+        if metadata is None:
+            raise StoreNotFoundError("dataset does not exist")
+        account_scope = _require_str(metadata[0])
+        coverage_start = _require_datetime(metadata[1])
+        coverage_end = _require_datetime(metadata[2])
+        page_id_rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT page_id
+                FROM dataset_source_pages
+                WHERE dataset_id = ?
+                ORDER BY page_id
+                """,
+                (dataset_id,),
+            ).fetchall(),
+        )
+        page_ids = tuple(_require_str(row[0]) for row in page_id_rows)
+        rows = AnalyticsStore._validated_dataset_source_rows(
+            connection,
+            page_ids,
+            account_scope,
+            None,
+        )
+        pages: list[AuthenticatedSourceMaterial] = []
+        for row in rows:
+            try:
+                loaded = json.loads(_require_str(row[9]))
+            except (TypeError, ValueError) as error:
+                raise StoreValidationError(
+                    "dataset source page integrity check failed",
+                ) from error
+            if not isinstance(loaded, dict):
+                raise StoreValidationError("dataset source page integrity check failed")
+            pages.append(
+                AuthenticatedSourceMaterial(
+                    page_id=_require_str(row[0]),
+                    contract_name=_require_str(row[10]),
+                    contract_sha256=_require_str(row[6]),
+                    source_kind=_require_str(row[11]),
+                    source_revision=_require_str(row[5]),
+                    source_timestamp=_require_datetime(row[15]),
+                    fingerprint_sha256=_require_str(row[1]),
+                    account_scope=_optional_str(row[4]),
+                    instrument_handle=_optional_str(row[7]),
+                    payload=cast("dict[str, SourceJsonValue]", loaded),
+                ),
+            )
+        return AuthenticatedDatasetMaterial(
+            dataset=dataset,
+            account_scope=account_scope,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+            pages=tuple(pages),
+        )
+
+    def get_authenticated_snapshot_material(
+        self,
+        dataset_id: str,
+        snapshot_kind: str,
+    ) -> AuthenticatedSnapshotMaterial:
+        """Load exactly one kind-bound snapshot from one authenticated dataset."""
+        if _SAFE_NAME_PATTERN.fullmatch(snapshot_kind) is None:
+            raise StoreValidationError("snapshot kind is invalid")
+        self._require_open()
+        with self._read_connection() as connection:
+            dataset = self._authenticate_dataset_material(connection, dataset_id)
+            rows = cast(
+                "list[tuple[object, ...]]",
+                connection.execute(
+                    """
+                    SELECT snapshot_id, dataset_id, snapshot_kind, account_scope,
+                           source_revision, epoch_us(as_of), byte_count,
+                           fingerprint_sha256, payload_json
+                    FROM account_snapshots
+                    WHERE dataset_id = ? AND snapshot_kind = ?
+                    ORDER BY snapshot_id
+                    """,
+                    (dataset_id, snapshot_kind),
+                ).fetchall(),
+            )
+            if not rows:
+                raise StoreNotFoundError("typed execution snapshot does not exist")
+            if len(rows) != 1:
+                raise StoreConflictError("typed execution snapshot is ambiguous")
+            return self._validated_snapshot_material(rows[0], dataset)
+
+    def find_authenticated_snapshot_materials(
+        self,
+        snapshot_kind: str,
+    ) -> tuple[AuthenticatedSnapshotMaterial, ...]:
+        """Find server-owned contexts by type without accepting a caller snapshot handle."""
+        if _SAFE_NAME_PATTERN.fullmatch(snapshot_kind) is None:
+            raise StoreValidationError("snapshot kind is invalid")
+        self._require_open()
+        with self._read_connection() as connection:
+            rows = cast(
+                "list[tuple[object, ...]]",
+                connection.execute(
+                    """
+                    SELECT snapshot_id, dataset_id, snapshot_kind, account_scope,
+                           source_revision, epoch_us(as_of), byte_count,
+                           fingerprint_sha256, payload_json
+                    FROM account_snapshots
+                    WHERE snapshot_kind = ?
+                    ORDER BY as_of DESC, snapshot_id
+                    """,
+                    (snapshot_kind,),
+                ).fetchall(),
+            )
+            datasets: dict[str, AuthenticatedDatasetMaterial] = {}
+            snapshots: list[AuthenticatedSnapshotMaterial] = []
+            for row in rows:
+                dataset_id = _require_str(row[1])
+                dataset = datasets.get(dataset_id)
+                if dataset is None:
+                    dataset = self._authenticate_dataset_material(connection, dataset_id)
+                    datasets[dataset_id] = dataset
+                snapshots.append(self._validated_snapshot_material(row, dataset))
+            return tuple(snapshots)
+
+    @staticmethod
+    def _validated_snapshot_material(
+        row: tuple[object, ...],
+        dataset: AuthenticatedDatasetMaterial,
+    ) -> AuthenticatedSnapshotMaterial:
+        try:
+            snapshot_id = _require_str(row[0])
+            dataset_id = _require_str(row[1])
+            snapshot_kind = _require_str(row[2])
+            account_scope = _require_str(row[3])
+            source_revision = _require_str(row[4])
+            as_of = _require_datetime(row[5])
+            byte_count = _require_int(row[6])
+            fingerprint_sha256 = _require_str(row[7])
+            payload_json = _require_str(row[8])
+            loaded = json.loads(payload_json)
+        except (IndexError, StoreError, TypeError, ValueError) as error:
+            raise StoreValidationError("snapshot integrity check failed") from error
+        if not isinstance(loaded, dict):
+            raise StoreValidationError("snapshot integrity check failed")
+        payload = cast("dict[str, SourceJsonValue]", loaded)
+        _validate_handle(snapshot_id, "ps")
+        _validate_account_scope(account_scope)
+        _validate_source_revision(source_revision)
+        _validate_utc(as_of)
+        if (
+            _SAFE_NAME_PATTERN.fullmatch(snapshot_kind) is None
+            or dataset_id != dataset.dataset.dataset_id
+            or account_scope != dataset.account_scope
+            or source_revision != dataset.dataset.source_revision
+            or as_of > dataset.dataset.created_at
+            or byte_count != len(payload_json.encode())
+            or payload_json != _canonical_json(payload)
+        ):
+            raise StoreValidationError("snapshot integrity check failed")
+        expected_fingerprint = _fingerprint(
+            _canonical_json(
+                {
+                    "account_scope": account_scope,
+                    "as_of": as_of.isoformat(),
+                    "dataset_id": dataset_id,
+                    "payload_sha256": _fingerprint(payload_json),
+                    "snapshot_kind": snapshot_kind,
+                    "source_revision": source_revision,
+                },
+            ),
+        )
+        if fingerprint_sha256 != expected_fingerprint:
+            raise StoreConflictError("snapshot fingerprint does not match stored material")
+        return AuthenticatedSnapshotMaterial(
+            snapshot=StoredSnapshot(
+                snapshot_id=snapshot_id,
+                dataset_id=dataset_id,
+                fingerprint_sha256=fingerprint_sha256,
+                byte_count=byte_count,
+                as_of=as_of,
+            ),
+            snapshot_kind=snapshot_kind,
+            account_scope=account_scope,
+            source_revision=source_revision,
+            payload=payload,
+        )
+
     @staticmethod
     def _dataset_by_id(
         connection: duckdb.DuckDBPyConnection,
@@ -2540,6 +2792,7 @@ class AnalyticsStore:
         scope: StorageScope,
     ) -> tuple[StorageEntry, ...]:
         entries = [
+            *self._safe_instrument_entries(connection),
             *self._source_page_entries(connection),
             *self._normalized_page_entries(connection),
             *self._dataset_entries(connection),
@@ -2556,6 +2809,40 @@ class AnalyticsStore:
                 key=lambda entry: (entry.data_type.value, entry.object_id),
             ),
         )
+
+    @staticmethod
+    def _safe_instrument_entries(
+        connection: duckdb.DuckDBPyConnection,
+    ) -> list[StorageEntry]:
+        rows = cast(
+            "list[tuple[object, ...]]",
+            connection.execute(
+                """
+                SELECT
+                    instrument_handle,
+                    source_revision,
+                    epoch_us(source_timestamp),
+                    octet_length(encode(metadata_json)),
+                    fingerprint_sha256
+                FROM safe_instruments
+                """,
+            ).fetchall(),
+        )
+        return [
+            StorageEntry(
+                data_type=StorageDataType.SAFE_INSTRUMENTS,
+                object_id=_require_str(row[0]),
+                account_scope=None,
+                instrument_handle=_require_str(row[0]),
+                source_revision=_require_str(row[1]),
+                start_at=_require_datetime(row[2]),
+                end_at=_require_datetime(row[2]),
+                row_count=1,
+                byte_count=_require_int(row[3]),
+                fingerprint_sha256=_require_str(row[4]),
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _source_page_entries(
@@ -2953,6 +3240,11 @@ class AnalyticsStore:
         artifact_ids = {
             entry.object_id for entry in entries if entry.data_type is StorageDataType.ARTIFACTS
         }
+        safe_instrument_handles = {
+            entry.object_id
+            for entry in entries
+            if entry.data_type is StorageDataType.SAFE_INSTRUMENTS
+        }
 
         dataset_ids.update(
             _select_strings(
@@ -3015,6 +3307,7 @@ class AnalyticsStore:
             "price_bars": source_page_ids,
             "proof_receipts": analysis_ids,
             "quotes": source_page_ids,
+            "safe_instruments": safe_instrument_handles,
             "source_pages": source_page_ids,
             "transactions": source_page_ids,
         }
@@ -3047,6 +3340,7 @@ class AnalyticsStore:
                 "analyses",
                 "artifacts",
                 "datasets",
+                "safe_instruments",
                 "source_pages",
             )
         )
@@ -4071,6 +4365,9 @@ def _plan_from_json(value: str) -> _DeletionPlan:
 
 __all__ = (
     "AnalyticsStore",
+    "AuthenticatedDatasetMaterial",
+    "AuthenticatedSnapshotMaterial",
+    "AuthenticatedSourceMaterial",
     "DeletionPreview",
     "DeletionReceipt",
     "DeletionTokenError",

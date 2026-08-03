@@ -23,8 +23,19 @@ from saxo_bank_mcp.analytics_config import (
     load_analytics_config,
 )
 from saxo_bank_mcp.analytics_execution import (
+    BacktestExecutionParameters,
+    DerivativesExecutionParameters,
+    InstrumentExecutionParameters,
+    OptimizationExecutionParameters,
+    PortfolioExecutionParameters,
+    PositionSizingExecutionParameters,
+    ScenarioExecutionParameters,
+    ScenarioExecutionShock,
     StoredAnalysisExecutionError,
+    StoredExecutionParameters,
     execute_market_comparison,
+    execute_pretrade_proposal,
+    execute_stored_analysis,
 )
 from saxo_bank_mcp.analytics_export import (
     StoredReportExportRequest,
@@ -914,6 +925,16 @@ def saxo_analyze_instruments(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        parameters=(
+            InstrumentExecutionParameters(
+                instrument_handles=request.instrument_handles,
+                rolling_window=request.rolling_window,
+                periods_per_year=request.periods_per_year,
+                requested_return=request.requested_return,
+            )
+            if request.analysis_kind == "instrument_price_return"
+            else None
+        ),
     )
 
 
@@ -926,6 +947,11 @@ def saxo_analyze_portfolio(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        parameters=(
+            PortfolioExecutionParameters()
+            if request.analysis_kind == "portfolio_performance"
+            else None
+        ),
     )
 
 
@@ -938,6 +964,14 @@ def saxo_size_position(
         request.analysis_kind,
         (request.dataset_id,),
         VisibilityMode(request.visibility),
+        parameters=PositionSizingExecutionParameters(
+            instrument_handle=request.instrument_handle,
+            method=request.method,
+            maximum_loss=request.maximum_loss,
+            risk_budget_confirmed=request.risk_budget_confirmed,
+            stop_price=request.stop_price,
+            volatility_multiple=request.volatility_multiple,
+        ),
     )
 
 
@@ -960,6 +994,20 @@ def saxo_run_scenario(
         request.analysis_kind,
         (request.dataset_id,),
         VisibilityMode(request.visibility),
+        parameters=ScenarioExecutionParameters(
+            analysis_kind=request.analysis_kind,
+            shocks=tuple(
+                ScenarioExecutionShock(
+                    instrument_handle=shock.instrument_handle,
+                    price_shock_ratio=shock.price_shock_ratio,
+                    volatility_shock_points=shock.volatility_shock_points,
+                    rate_shock_basis_points=shock.rate_shock_basis_points,
+                )
+                for shock in request.shocks
+            ),
+            numeric_shocks_echoed_by_caller=request.numeric_shocks_echoed_by_caller,
+            caller_accepted_numeric_shocks=request.caller_accepted_numeric_shocks,
+        ),
     )
 
 
@@ -982,6 +1030,16 @@ def saxo_optimize_portfolio(
         request.analysis_kind,
         (request.dataset_id,),
         VisibilityMode(request.visibility),
+        parameters=OptimizationExecutionParameters(
+            analysis_kind=request.analysis_kind,
+            objective=request.objective,
+            objective_confirmed_by_caller=request.objective_confirmed_by_caller,
+            constraints_confirmed_by_caller=request.constraints_confirmed_by_caller,
+            short_policy=request.short_policy,
+            maximum_turnover=request.maximum_turnover,
+            maximum_transaction_cost_ratio=request.maximum_transaction_cost_ratio,
+            maximum_margin_ratio=request.maximum_margin_ratio,
+        ),
     )
 
 
@@ -994,6 +1052,15 @@ def saxo_model_derivatives(
         request.analysis_kind,
         (request.dataset_id,),
         VisibilityMode(request.visibility),
+        parameters=(
+            DerivativesExecutionParameters(
+                instrument_handles=request.instrument_handles,
+                volatility_assumption=request.volatility_assumption,
+                rate_assumption=request.rate_assumption,
+            )
+            if request.analysis_kind == "derivatives_model"
+            else None
+        ),
     )
 
 
@@ -1006,6 +1073,11 @@ def saxo_backtest_strategy(
         request.analysis_kind,
         (request.dataset_id,),
         VisibilityMode(request.visibility),
+        parameters=BacktestExecutionParameters(
+            instrument_handle=request.instrument_handle,
+            strategy=request.strategy,
+            starting_equity=request.starting_equity,
+        ),
     )
 
 
@@ -1023,17 +1095,69 @@ def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices o
     visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
 ) -> CanonicalAnalysisToolResponse:
     """Replay one stored analysis and accept only explicit user trade choices."""
-    del side, quantity, proposal_price, maximum_loss, holding_period_days
     tool = "saxo_propose_trade_from_analysis"
     selected_visibility = VisibilityMode(visibility)
+    if _server_environment() != "SIM":
+        return _canonical_analysis_refusal(
+            tool,
+            "pretrade_impact",
+            selected_visibility,
+            "sim_pretrade_context_required",
+            "A current server-owned SIM account context is required for this proposal.",
+            next_tool="saxo_explain_analysis",
+            next_action="Inspect the stored analysis without creating a broker request.",
+        )
+    store: AnalyticsStore | None = None
     try:
         config = _analytics_config()
-        result = replay_analysis(analysis_id, config=config, registry=_proof_registry(config))
+        registry = _proof_registry(config)
+        result = replay_analysis(analysis_id, config=config, registry=registry)
         store = AnalyticsStore.open(config)
-        try:
-            store.get_authenticated_dataset(result.provenance.dataset_id)
-        finally:
-            store.close()
+        store.get_authenticated_dataset(result.provenance.dataset_id)
+        bound_handles = tuple(getattr(result.request, "instrument_handles", ()))
+        if not bound_handles or instrument_handle not in bound_handles:
+            return _canonical_analysis_refusal(
+                tool,
+                "pretrade_impact",
+                selected_visibility,
+                "proposal_context_mismatch",
+                "The explicit instrument choice is not bound to the replayed analysis.",
+                next_tool="saxo_explain_analysis",
+                next_action=(
+                    "Inspect the stored analysis and make a separate explicit matching choice."
+                ),
+            )
+        proposal = execute_pretrade_proposal(
+            tool_name=tool,
+            origin=result,
+            instrument_handle=instrument_handle,
+            side=side,
+            quantity=quantity,
+            proposal_price=proposal_price,
+            maximum_loss=maximum_loss,
+            holding_period_days=holding_period_days,
+            visibility=selected_visibility,
+            store=store,
+            registry=registry,
+        )
+        return VerifiedAnalysisToolResponse(
+            tool_name=tool,
+            analysis_kind="pretrade_impact",
+            analysis_id=proposal.analysis_id,
+            result=proposal,
+            warnings=_warning_codes(proposal),
+            next_action="Explain this non-authorizing proposal analysis by its stored handle.",
+        )
+    except StoredAnalysisExecutionError as error:
+        return _canonical_analysis_refusal(
+            tool,
+            "pretrade_impact",
+            selected_visibility,
+            error.reason_code,
+            "The stored analysis and current server-owned context cannot prove this proposal.",
+            next_tool="saxo_explain_analysis",
+            next_action="Refresh or inspect the stored inputs without creating a broker request.",
+        )
     except (
         AnalysisReplayRefused,
         AnalyticsConfigError,
@@ -1051,29 +1175,9 @@ def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices o
             next_tool="saxo_explain_analysis",
             next_action="Explain or refresh the stored analysis before any new proposal request.",
         )
-    bound_handles = tuple(getattr(result.request, "instrument_handles", ()))
-    if not bound_handles or instrument_handle not in bound_handles:
-        return _canonical_analysis_refusal(
-            tool,
-            "pretrade_impact",
-            selected_visibility,
-            "proposal_context_mismatch",
-            "The explicit instrument choice is not bound to the replayed analysis.",
-            next_tool="saxo_explain_analysis",
-            next_action="Inspect the stored analysis and make a separate explicit matching choice.",
-        )
-    return _canonical_analysis_refusal(
-        tool,
-        "pretrade_impact",
-        selected_visibility,
-        "pretrade_context_unavailable",
-        "The replayed analysis lacks a complete current server-owned pretrade context.",
-        next_tool="saxo_explain_analysis",
-        next_action=(
-            "Refresh the required stored account and market sources; a broker preview requires a "
-            "separate later user request."
-        ),
-    )
+    finally:
+        if store is not None:
+            store.close()
 
 
 def saxo_render_analysis(
@@ -1383,13 +1487,14 @@ def saxo_delete_analytics_data(token: str) -> DeletionResponse:
     )
 
 
-def _stored_analysis_response(  # noqa: PLR0911
+def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0913
     tool: str,
     analysis_kind: str,
     dataset_ids: Sequence[str],
     visibility: VisibilityMode,
     *,
     periods_per_year: float | None = None,
+    parameters: StoredExecutionParameters | None = None,
 ) -> CanonicalAnalysisToolResponse:
     """Authenticate exact stored lineage and fail closed before any unproved calculation."""
     if visibility is VisibilityMode.PRIVATE_USER_RESULT and _server_environment() == "LIVE":
@@ -1440,6 +1545,28 @@ def _stored_analysis_response(  # noqa: PLR0911
                 dataset_ids=tuple(dataset_ids),
                 periods_per_year=periods_per_year,
                 visibility=visibility,
+                config=config,
+                store=store,
+                registry=registry,
+            )
+            return VerifiedAnalysisToolResponse(
+                tool_name=tool,
+                analysis_kind=analysis_kind,
+                analysis_id=result.analysis_id,
+                result=result,
+                warnings=_warning_codes(result),
+                next_action="Explain, render, or export this exact stored analysis handle.",
+            )
+        if parameters is not None:
+            if len(dataset_ids) != 1:
+                raise StoredAnalysisExecutionError(  # noqa: TRY301
+                    "single_primary_dataset_required"
+                )
+            result = execute_stored_analysis(
+                tool_name=tool,
+                dataset_id=dataset_ids[0],
+                visibility=visibility,
+                parameters=parameters,
                 config=config,
                 store=store,
                 registry=registry,

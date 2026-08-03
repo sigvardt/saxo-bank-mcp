@@ -66,7 +66,6 @@ _DEGRADATION_TOOLS: Final = frozenset(
     {
         "saxo_resolve_research_universe",
         "saxo_sync_research_data",
-        "saxo_get_research_dataset",
         "saxo_analyze_market",
         "saxo_analyze_instruments",
         "saxo_analyze_portfolio",
@@ -75,13 +74,22 @@ _DEGRADATION_TOOLS: Final = frozenset(
         "saxo_optimize_portfolio",
         "saxo_model_derivatives",
         "saxo_backtest_strategy",
-        "saxo_propose_trade_from_analysis",
-        "saxo_render_analysis",
-        "saxo_export_analysis",
-        "saxo_explain_analysis",
     },
 )
-_TIMEOUT_RECOVERY_TOOLS: Final = frozenset({"saxo_manage_analysis_job"})
+DECLARED_ANALYTICS_SUCCESS_TOOL_IDS: Final[tuple[str, ...]] = (
+    "saxo_analytics_capabilities",
+    "saxo_resolve_research_universe",
+    "saxo_manage_research_universe",
+    "saxo_sync_research_data",
+    "saxo_get_research_dataset",
+    "saxo_list_analytics_storage",
+    "saxo_preview_analytics_deletion",
+    "saxo_delete_analytics_data",
+)
+_DECLARED_ANALYTICS_SUCCESS_TOOLS: Final = frozenset(
+    DECLARED_ANALYTICS_SUCCESS_TOOL_IDS,
+)
+_TIMEOUT_RECOVERY_TOOLS: Final[frozenset[str]] = frozenset()
 _SAFE_UUID4_PAYLOAD: Final = "00000000000040008000000000000000"
 _SAFE_INSTRUMENT_HANDLE: Final = f"ih_{_SAFE_UUID4_PAYLOAD}"
 _SAFE_DATASET_HANDLE: Final = f"ds_{_SAFE_UUID4_PAYLOAD}"
@@ -171,8 +179,8 @@ class AnalyticsToolSimContract(_StrictReceipt):
         kinds = tuple(case.kind for case in self.cases)
         if len(kinds) != len(set(kinds)):
             raise ValueError("analytics case contracts must be unique")
-        if "success" not in kinds or "refusal" not in kinds or "privacy" not in kinds:
-            raise ValueError("analytics tools require success, refusal, and privacy contracts")
+        if "refusal" not in kinds or "privacy" not in kinds:
+            raise ValueError("analytics tools require refusal and privacy contracts")
         if "timeout" in kinds and "recovery" not in kinds:
             raise ValueError("timeout coverage requires an explicit recovery contract")
         return self
@@ -271,8 +279,12 @@ class AnalyticsRuntimeResources:
     degraded_instrument_handles: list[str] = field(default_factory=list)
     dataset_ids: list[str] = field(default_factory=list)
     degraded_dataset_ids: list[str] = field(default_factory=list)
+    dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
+    degraded_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
     analysis_ids: list[str] = field(default_factory=list)
     degraded_analysis_ids: list[str] = field(default_factory=list)
+    analysis_ids_by_kind: dict[str, list[str]] = field(default_factory=dict)
+    degraded_analysis_ids_by_kind: dict[str, list[str]] = field(default_factory=dict)
     artifact_ids: list[str] = field(default_factory=list)
     job_ids: list[str] = field(default_factory=list)
     deletion_token: str | None = None
@@ -460,7 +472,11 @@ def analytics_sim_contracts() -> tuple[AnalyticsToolSimContract, ...]:
     """Return one immutable case contract for every analytics MCP tool."""
     contracts: list[AnalyticsToolSimContract] = []
     for tool_id in ANALYTICS_TOOL_IDS:
-        cases = [_case("success", _SUCCESS_STATES_BY_TOOL[tool_id])]
+        cases = (
+            [_case("success", _SUCCESS_STATES_BY_TOOL[tool_id])]
+            if tool_id in _DECLARED_ANALYTICS_SUCCESS_TOOLS
+            else []
+        )
         if tool_id in _DEGRADATION_TOOLS:
             cases.append(_case("degradation", _DEGRADATION_STATES_BY_TOOL[tool_id]))
         cases.extend(
@@ -518,8 +534,10 @@ def assert_analytics_case_coverage(
         if contract is None:
             continue
         kinds = {case.kind for case in contract.cases}
-        if not {"success", "refusal", "privacy"} <= kinds:
+        if not {"refusal", "privacy"} <= kinds:
             errors.append(f"analytics_required_cases_missing:{tool_id}")
+        if (tool_id in _DECLARED_ANALYTICS_SUCCESS_TOOLS) != ("success" in kinds):
+            errors.append(f"analytics_success_applicability_mismatch:{tool_id}")
         if tool_id in _DEGRADATION_TOOLS and "degradation" not in kinds:
             errors.append(f"analytics_degradation_case_missing:{tool_id}")
         if tool_id in _TIMEOUT_RECOVERY_TOOLS and not {"timeout", "recovery"} <= kinds:
@@ -673,6 +691,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
             "request": {
                 "analysis_kind": "market_comparison",
                 "dataset_ids": [_SAFE_DATASET_HANDLE],
+                "visibility": "private_user_result",
             },
         },
         "saxo_analyze_instruments": {
@@ -680,12 +699,14 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "analysis_kind": "instrument_price_return",
                 "dataset_ids": [_SAFE_DATASET_HANDLE],
                 "instrument_handles": [_SAFE_INSTRUMENT_HANDLE],
+                "visibility": "private_user_result",
             },
         },
         "saxo_analyze_portfolio": {
             "request": {
                 "analysis_kind": "portfolio_performance",
                 "dataset_ids": [_SAFE_DATASET_HANDLE],
+                "visibility": "private_user_result",
             },
         },
         "saxo_size_position": {
@@ -696,6 +717,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "maximum_loss": "1",
                 "risk_budget_confirmed": True,
                 "stop_price": "99",
+                "visibility": "private_user_result",
             },
         },
         "saxo_run_scenario": {
@@ -710,6 +732,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 ],
                 "numeric_shocks_echoed_by_caller": True,
                 "caller_accepted_numeric_shocks": True,
+                "visibility": "private_user_result",
             },
         },
         "saxo_optimize_portfolio": {
@@ -723,6 +746,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "maximum_turnover": "1",
                 "maximum_transaction_cost_ratio": "0.01",
                 "maximum_margin_ratio": "1",
+                "visibility": "private_user_result",
             },
         },
         "saxo_model_derivatives": {
@@ -730,6 +754,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "analysis_kind": "derivatives_model",
                 "dataset_id": _SAFE_DATASET_HANDLE,
                 "instrument_handles": [_SAFE_INSTRUMENT_HANDLE],
+                "visibility": "private_user_result",
             },
         },
         "saxo_backtest_strategy": {
@@ -738,6 +763,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                 "instrument_handle": _SAFE_INSTRUMENT_HANDLE,
                 "strategy": strategy,
                 "starting_equity": 1000.0,
+                "visibility": "private_user_result",
             },
         },
         "saxo_propose_trade_from_analysis": {
@@ -745,6 +771,10 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
             "instrument_handle": _SAFE_INSTRUMENT_HANDLE,
             "side": "buy",
             "quantity": "1",
+            "proposal_price": "50",
+            "maximum_loss": "1",
+            "holding_period_days": 0,
+            "visibility": "private_user_result",
         },
         "saxo_render_analysis": {
             "analysis_id": _SAFE_ANALYSIS_HANDLE,
@@ -873,21 +903,19 @@ def _degradation_schema_arguments(  # noqa: C901, PLR0912 - exact bounded catalo
         if isinstance(items, list) and items and isinstance(items[0], dict):
             items[0]["interval"] = "1m"
     elif tool_id == "saxo_analyze_market":
-        request["periods_per_year"] = 365.0
+        request["analysis_kind"] = "market_microstructure"
     elif tool_id == "saxo_analyze_instruments":
-        request["rolling_window"] = 10
+        request["analysis_kind"] = "instrument_quote"
     elif tool_id == "saxo_analyze_portfolio":
         request["analysis_kind"] = "tax_lot_export"
     elif tool_id == "saxo_size_position":
         request["maximum_loss"] = "2"
     elif tool_id == "saxo_run_scenario":
-        shocks = request.get("shocks")
-        if isinstance(shocks, list) and shocks and isinstance(shocks[0], dict):
-            shocks[0]["price_shock_ratio"] = "-0.2"
+        request["caller_accepted_numeric_shocks"] = False
     elif tool_id == "saxo_optimize_portfolio":
-        request["maximum_turnover"] = "0"
+        request["objective_confirmed_by_caller"] = False
     elif tool_id == "saxo_model_derivatives":
-        request["volatility_assumption"] = "0"
+        request["analysis_kind"] = "option_payoff"
     elif tool_id == "saxo_backtest_strategy":
         request["starting_equity"] = 500.0
     return cloned

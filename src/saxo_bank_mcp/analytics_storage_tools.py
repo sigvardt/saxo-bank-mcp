@@ -105,6 +105,7 @@ def _runtime_state(
 ) -> LocalAnalyticsRuntimeState:
     job_count = sum(entry.data_type is StorageDataType.JOBS for entry in entries)
     cache_types = {
+        StorageDataType.SAFE_INSTRUMENTS,
         StorageDataType.SOURCE_PAGES,
         StorageDataType.DATASETS,
         StorageDataType.ACCOUNT_SNAPSHOTS,

@@ -18,6 +18,10 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     build_proof_execution_contracts,
     load_analysis_kind_catalog,
 )
+from saxo_bank_mcp.qa_analytics_proof_producer import (
+    ProofProducerError,
+    run_verified_installed_producer,
+)
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 
@@ -28,7 +32,7 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     parser = argparse.ArgumentParser(
         description="Plan or validate the complete Saxo analytics proof matrix.",
     )
@@ -103,24 +107,50 @@ def main(argv: list[str] | None = None) -> int:
             {"status": "failed", "reason": "proof_installed_candidate_mismatch"},
             success=False,
         )
-    # Caller-authored receipt paths are deliberately not accepted. Task 24 must execute the
-    # independently verified installed producer and pass its process-owned result directly to
-    # the private final-validation path. Until that happens, remain fail closed.
-    return _publish(
-        args.out,
+    try:
+        validated = run_verified_installed_producer(
+            install,
+            candidate_commit=args.candidate_commit,
+        )
+    except ProofProducerError as error:
+        return _publish(
+            args.out,
+            {
+                "status": "refused",
+                "execution_performed": False,
+                "reason": str(error),
+                "live_mutation_calls": 0,
+                "broker_write_made": False,
+                "redacted_publication": True,
+            },
+            success=False,
+        )
+    except (OSError, ValueError):
+        return _publish(
+            args.out,
+            {
+                "status": "refused",
+                "execution_performed": False,
+                "reason": "proof_producer_local_boundary_failed",
+                "live_mutation_calls": 0,
+                "broker_write_made": False,
+                "redacted_publication": True,
+            },
+            success=False,
+        )
+    payload = validated.model_dump(mode="json")
+    payload.update(
         {
-            "status": "refused",
-            "execution_performed": False,
-            "reason": "proof_producer_execution_required",
-            "candidate_commit": args.candidate_commit,
             "analysis_kind_count": len(contracts),
             "evidence_receipt_count": len(catalog.evidence_receipt_ids),
             "contract_sha256": _digest(contract_material),
-            "live_mutation_calls": 0,
-            "broker_write_made": False,
             "redacted_publication": True,
         },
-        success=False,
+    )
+    return _publish(
+        args.out,
+        payload,
+        success=validated.status == "validated",
     )
 
 

@@ -553,6 +553,32 @@ def _seed_normalized_scope(
     return page.page_id
 
 
+def _seed_safe_instrument(
+    store: AnalyticsStore,
+    *,
+    fingerprint: str,
+) -> str:
+    instrument_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    with store._write_connection() as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            INSERT INTO safe_instruments (
+                instrument_handle,
+                asset_type,
+                safe_label,
+                source_revision,
+                source_timestamp,
+                fingerprint_sha256,
+                metadata_json
+            )
+            VALUES (?, 'Stock', 'Synthetic instrument', 'rev-1', ?, ?, '{}')
+            """,
+            (instrument_handle, _SOURCE_AT, fingerprint),
+        )
+        store._bump_revision(connection)  # noqa: SLF001
+    return instrument_handle
+
+
 def _all_local_bytes(root: Path) -> int:
     return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
 
@@ -1178,6 +1204,50 @@ def test_snapshot_retry_is_idempotent_and_conflicting_reuse_is_rejected(
         store.close()
 
 
+def test_execution_material_requires_exact_authenticated_dataset_and_snapshot_kind(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        page = _source_page(
+            store,
+            source_kind="performance",
+            payload={"row_count": 1, "schema": "redacted_portfolio_page"},
+        )
+        dataset = _dataset(store, page.page_id)
+        snapshot = store.create_snapshot(
+            snapshot_id=new_safe_handle(HandleKind.PORTFOLIO_SNAPSHOT_ID),
+            dataset_id=dataset.dataset_id,
+            snapshot_kind="portfolio_execution_input",
+            account_scope="aggregate",
+            source_revision=dataset.source_revision,
+            as_of=_SOURCE_AT,
+            payload={"schema_version": "1"},
+        )
+
+        material = store.get_authenticated_dataset_material(dataset.dataset_id)
+        typed = store.get_authenticated_snapshot_material(
+            dataset.dataset_id,
+            "portfolio_execution_input",
+        )
+        found = store.find_authenticated_snapshot_materials(
+            "portfolio_execution_input",
+        )
+
+        assert material.dataset == dataset
+        assert tuple(source.page_id for source in material.pages) == (page.page_id,)
+        assert typed.snapshot == snapshot
+        assert typed.payload == {"schema_version": "1"}
+        assert found == (typed,)
+        with pytest.raises(StoreNotFoundError, match="typed execution snapshot"):
+            store.get_authenticated_snapshot_material(
+                dataset.dataset_id,
+                "derivatives_execution_input",
+            )
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize(
     ("account_scope", "source_revision"),
     [
@@ -1648,6 +1718,41 @@ def test_normalized_storage_scopes_preview_and_delete_the_direct_closure(
         assert "token" not in dumped
         assert "payload" not in dumped
         assert "value" not in dumped
+    finally:
+        store.close()
+
+
+def test_safe_instrument_scope_lists_and_deletes_only_the_matching_handle(
+    tmp_path: Path,
+) -> None:
+    store = AnalyticsStore.open(_config(tmp_path))
+    try:
+        selected = _seed_safe_instrument(store, fingerprint="1" * 64)
+        unrelated = _seed_safe_instrument(store, fingerprint="2" * 64)
+
+        entries = store.list_storage(
+            StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
+        )
+
+        assert {entry.object_id for entry in entries} == {selected, unrelated}
+        assert all(entry.instrument_handle == entry.object_id for entry in entries)
+        assert all(entry.row_count == 1 for entry in entries)
+        assert all("metadata" not in repr(entry).lower() for entry in entries)
+
+        preview = store.preview_delete(
+            StorageScope(
+                data_types=(StorageDataType.SAFE_INSTRUMENTS,),
+                instrument_handles=(selected,),
+            ),
+        )
+
+        assert preview.table_counts == (store_module.TableCount(table="safe_instruments", rows=1),)
+        receipt = store.delete_previewed(preview.token)
+        assert receipt.table_counts == preview.table_counts
+        remaining = store.list_storage(
+            StorageScope(data_types=(StorageDataType.SAFE_INSTRUMENTS,)),
+        )
+        assert tuple(entry.object_id for entry in remaining) == (unrelated,)
     finally:
         store.close()
 

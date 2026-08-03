@@ -182,7 +182,6 @@ def test_analytics_sim_contracts_cover_21_tools_and_all_applicable_cases_once() 
     for contract in contracts:
         kinds = tuple(case.kind for case in contract.cases)
         assert len(kinds) == len(set(kinds))
-        assert "success" in kinds
         assert "refusal" in kinds
         assert "privacy" in kinds
         assert set(kinds) <= set(ANALYTICS_CASE_KINDS)
@@ -190,38 +189,51 @@ def test_analytics_sim_contracts_cover_21_tools_and_all_applicable_cases_once() 
             assert "recovery" in kinds
 
 
-def test_analytics_success_contracts_use_each_tools_real_state() -> None:
+def test_analytics_success_contracts_include_only_in_session_issuable_results() -> None:
     expected = {
         "saxo_analytics_capabilities": ("passed",),
         "saxo_resolve_research_universe": ("resolved",),
         "saxo_manage_research_universe": ("passed",),
         "saxo_sync_research_data": ("passed",),
         "saxo_get_research_dataset": ("passed",),
-        "saxo_analyze_market": ("verified",),
-        "saxo_analyze_instruments": ("verified",),
-        "saxo_analyze_portfolio": ("verified",),
-        "saxo_size_position": ("verified",),
-        "saxo_run_scenario": ("verified",),
-        "saxo_optimize_portfolio": ("verified",),
-        "saxo_model_derivatives": ("verified",),
-        "saxo_backtest_strategy": ("verified",),
-        "saxo_propose_trade_from_analysis": ("verified",),
-        "saxo_render_analysis": ("inline", "resource_link"),
-        "saxo_export_analysis": ("inline", "resource_link"),
-        "saxo_explain_analysis": ("passed",),
-        "saxo_manage_analysis_job": ("job_queued",),
         "saxo_list_analytics_storage": ("passed",),
         "saxo_preview_analytics_deletion": ("preview_ready",),
         "saxo_delete_analytics_data": ("deleted",),
     }
     observed = {
-        contract.tool_id: next(
-            case.expected_states for case in contract.cases if case.kind == "success"
-        )
+        contract.tool_id: success.expected_states
         for contract in analytics_sim_contracts()
+        if (
+            success := next(
+                (case for case in contract.cases if case.kind == "success"),
+                None,
+            )
+        )
+        is not None
     }
 
     assert observed == expected
+
+    unsupported_successes = {
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+        "saxo_render_analysis",
+        "saxo_export_analysis",
+        "saxo_explain_analysis",
+        "saxo_manage_analysis_job",
+    }
+    by_tool = {contract.tool_id: contract for contract in analytics_sim_contracts()}
+    assert all(
+        "success" not in {case.kind for case in by_tool[tool_id].cases}
+        for tool_id in unsupported_successes
+    )
 
 
 def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
@@ -229,7 +241,7 @@ def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
     by_case = {(call.tool_id, call.kind): call for call in calls}
     for contract in analytics_sim_contracts():
         kinds = {case.kind for case in contract.cases}
-        if "degradation" in kinds:
+        if {"success", "degradation"} <= kinds:
             success = by_case[(contract.tool_id, "success")]
             degradation = by_case[(contract.tool_id, "degradation")]
             assert success.input_strategy != degradation.input_strategy
@@ -243,8 +255,15 @@ def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
 
 def test_real_success_result_states_are_not_marked_failed() -> None:
     contracts = {
-        contract.tool_id: next(case for case in contract.cases if case.kind == "success")
+        contract.tool_id: success
         for contract in analytics_sim_contracts()
+        if (
+            success := next(
+                (case for case in contract.cases if case.kind == "success"),
+                None,
+            )
+        )
+        is not None
     }
     calls = {call.tool_id: call for call in analytics_case_calls() if call.kind == "success"}
     for tool, observed_state in (
@@ -265,47 +284,119 @@ def test_real_success_result_states_are_not_marked_failed() -> None:
         assert receipt.state == "passed"
 
 
-def test_runtime_arguments_chain_server_issued_handles_and_timeout_identity() -> None:
+def test_runtime_arguments_chain_server_issued_dataset_handles() -> None:
     resources = AnalyticsRuntimeResources()
     resources.dataset_ids.append("ds_11111111111141118111111111111111")
-    resources.degraded_dataset_ids.append("ds_22222222222242228222222222222222")
-    resources.analysis_ids.append("an_33333333333343338333333333333333")
-    resources.job_ids.append("jb_44444444444444448444444444444444")
     calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
 
     dataset_success = materialize_analytics_case_arguments(
         calls[("saxo_get_research_dataset", "success")], resources
     )
-    dataset_degraded = materialize_analytics_case_arguments(
-        calls[("saxo_get_research_dataset", "degradation")],
-        resources,
-    )
-    render_success = materialize_analytics_case_arguments(
-        calls[("saxo_render_analysis", "success")], resources
-    )
-    timeout_call = calls[("saxo_manage_analysis_job", "timeout")]
-    timeout_arguments = materialize_analytics_case_arguments(timeout_call, resources)
-    resources.remember_timeout(timeout_call, timeout_arguments)
-    recovery_call = calls[("saxo_manage_analysis_job", "recovery")]
-    recovery_arguments = materialize_analytics_case_arguments(recovery_call, resources)
-
     assert dataset_success == {"dataset_id": resources.dataset_ids[0], "page": 1, "limit": 100}
-    assert dataset_degraded == {
-        "dataset_id": resources.degraded_dataset_ids[0],
-        "page": 1,
-        "limit": 100,
-    }
-    assert render_success["analysis_id"] == resources.analysis_ids[0]
-    assert (
-        timeout_arguments
-        == recovery_arguments
-        == {
-            "action": "check",
-            "job_id": resources.job_ids[0],
-        }
+    assert resources.timed_operation is None
+
+
+def test_unissuable_analysis_families_are_not_declared_as_matrix_successes() -> None:
+    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    for tool_id in (
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+        "saxo_propose_trade_from_analysis",
+    ):
+        assert (tool_id, "success") not in calls
+
+
+def test_analysis_refusal_probes_use_only_same_session_issued_dataset_handles() -> None:
+    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    resources = AnalyticsRuntimeResources()
+    dataset_id = "ds_11111111111141118111111111111111"
+    instrument_handle = "ih_22222222222242228222222222222222"
+    resources.dataset_ids.append(dataset_id)
+    resources.dataset_ids_by_analysis_kind["price_bars"] = [dataset_id]
+    resources.instrument_handles.append(instrument_handle)
+
+    for tool_id in (
+        "saxo_analyze_market",
+        "saxo_analyze_instruments",
+        "saxo_analyze_portfolio",
+        "saxo_size_position",
+        "saxo_run_scenario",
+        "saxo_optimize_portfolio",
+        "saxo_model_derivatives",
+        "saxo_backtest_strategy",
+    ):
+        materialized = materialize_analytics_case_arguments(
+            calls[(tool_id, "degradation")],
+            resources,
+        )
+        request = cast("dict[str, JsonValue]", materialized["request"])
+        selected = request.get("dataset_id")
+        if selected is None:
+            selected = cast("list[JsonValue]", request["dataset_ids"])[0]
+        assert selected == dataset_id
+
+    assert ("saxo_propose_trade_from_analysis", "degradation") not in calls
+    assert ("saxo_render_analysis", "degradation") not in calls
+    assert ("saxo_export_analysis", "degradation") not in calls
+    assert ("saxo_explain_analysis", "degradation") not in calls
+
+
+def test_analysis_runtime_indexes_only_typed_server_issued_handles() -> None:
+    calls = {(call.tool_id, call.kind): call for call in analytics_case_calls()}
+    resources = AnalyticsRuntimeResources()
+    dataset_id = "ds_11111111111141118111111111111111"
+    untyped_dataset_id = "ds_22222222222242228222222222222222"
+    analysis_id = "an_33333333333343338333333333333333"
+
+    matrix_module._remember_analytics_handles(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        resources,
+        calls[("saxo_sync_research_data", "success")],
+        MatrixToolObservation(
+            payload={
+                "status": "passed",
+                "result": {
+                    "datasets": [
+                        {
+                            "dataset_id": dataset_id,
+                            "data_kind": "portfolio_performance",
+                        },
+                        {"dataset_id": untyped_dataset_id},
+                    ],
+                },
+            },
+            result_parsed=True,
+            result_state="passed",
+            mcp_is_error=False,
+        ),
     )
-    assert resources.timed_operation is not None
-    assert resources.timed_operation.request_sha256 == matrix_module.digest(timeout_arguments)
+    matrix_module._remember_analytics_handles(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        resources,
+        calls[("saxo_analyze_portfolio", "degradation")],
+        MatrixToolObservation(
+            payload={
+                "status": "verified",
+                "analysis_id": analysis_id,
+                "analysis_kind": "portfolio_performance",
+            },
+            result_parsed=True,
+            result_state="verified",
+            mcp_is_error=False,
+        ),
+    )
+
+    assert resources.dataset_ids_by_analysis_kind == {
+        "portfolio_performance": [dataset_id],
+    }
+    assert resources.degraded_analysis_ids_by_kind == {
+        "portfolio_performance": [analysis_id],
+    }
+    assert untyped_dataset_id in resources.dataset_ids
 
 
 def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
@@ -337,6 +428,10 @@ def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
             if not already_deleted:
                 entries = [
                     {
+                        "data_type": "safe_instruments",
+                        "object_id": "ih_55555555555545558555555555555555",
+                    },
+                    {
                         "data_type": "datasets",
                         "object_id": state.analytics_resources.dataset_ids[0],
                     },
@@ -364,7 +459,9 @@ def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
                 mcp_is_error=False,
             )
         if tool == "saxo_preview_analytics_deletion":
-            assert arguments == {"scope": {"data_types": ["datasets", "jobs"]}}
+            assert arguments == {
+                "scope": {"data_types": ["datasets", "jobs", "safe_instruments"]},
+            }
             return MatrixToolObservation(
                 payload={
                     "status": "preview_ready",
