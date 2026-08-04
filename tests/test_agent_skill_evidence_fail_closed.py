@@ -287,6 +287,7 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
         str(out.relative_to(source)) if out.is_relative_to(source) else str(out),
         env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "FAKE_RUN_ROOT": str(run_root)},
         cwd=source,
+        timeout_seconds=360,
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
     commands = _logged_commands(log)
@@ -999,12 +1000,15 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "LOG.parent.mkdir(parents=True, exist_ok=True)",
                 "LOG.open('a', encoding='utf-8').write(json.dumps({'argv': sys.argv[1:]}) + '\\n')",
                 "name = pathlib.Path(sys.argv[0]).name",
+                "args = list(sys.argv[1:])",
+                "while args and (args[0] in {'--bare', '--no-chrome'} or args[0] == '-c'):",
+                "    args = args[2:] if args[0] == '-c' else args[1:]",
                 "if '--help' in sys.argv:",
-                "    if name == 'codex' and sys.argv[1:4] == ['plugin', 'marketplace', 'add']:",
+                "    if name == 'codex' and args[:3] == ['plugin', 'marketplace', 'add']:",
                 "        print('Usage: codex plugin marketplace add [OPTIONS] <SOURCE>')",
                 "    elif name == 'codex':",
                 "        print('Commands: add list marketplace')",
-                "    elif name == 'claude' and sys.argv[1:4] == ['plugin', 'marketplace', 'add']:",
+                "    elif name == 'claude' and args[:3] == ['plugin', 'marketplace', 'add']:",
                 "        print('Usage: claude plugin marketplace add [options] <source>')",
                 "    else:",
                 "        print('Commands: install update details')",
@@ -1061,30 +1065,30 @@ def _write_fake_plugin_cli(path: Path, log: Path) -> None:
                 "    else:",
                 "        _register_claude(cache, version)",
                 "    return cache",
-                "if name == 'codex' and sys.argv[1:3] == ['plugin', 'remove']:",
+                "if name == 'codex' and args[:2] == ['plugin', 'remove']:",
                 "    print(json.dumps({'pluginId': plugin_id}))",
-                "elif name == 'codex' and sys.argv[1:4] == ['plugin', 'add', '--json']:",
+                "elif name == 'codex' and args[:3] == ['plugin', 'add', '--json']:",
                 "    cache = _install_cache('codex')",
                 "    print(json.dumps({'pluginId': plugin_id, 'installedPath': str(cache),",
                 "                      'version': _version(), 'name': plugin}))",
-                "elif name == 'codex' and sys.argv[1:3] == ['plugin', 'list']:",
+                "elif name == 'codex' and args[:2] == ['plugin', 'list']:",
                 "    version = _version()",
                 "    cache = (codex_home / 'plugins' / 'cache' / mkt / plugin / version)",
                 "    print(json.dumps({'installed': [{'name': plugin, 'version': version,",
                 "      'pluginId': plugin_id, 'installedPath': str(cache)}], 'available': []}))",
-                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'install']:",
+                "elif name == 'claude' and args[:2] == ['plugin', 'install']:",
                 "    cache = _install_cache('claude')",
                 "    print(json.dumps({'installPath': str(cache)}))",
-                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'list']:",
+                "elif name == 'claude' and args[:2] == ['plugin', 'list']:",
                 "    version = _version()",
                 "    cache = (home / '.claude' / 'plugins' / 'cache' / mkt / plugin / version)",
                 "    if not cache.is_dir(): cache = _install_cache('claude')",
                 "    print(json.dumps([{'id': plugin_id, 'version': version,",
                 "                       'installPath': str(cache)}]))",
-                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'update']:",
+                "elif name == 'claude' and args[:2] == ['plugin', 'update']:",
                 "    cache = _install_cache('claude')",
                 "    print('updated')",
-                "elif name == 'claude' and sys.argv[1:3] == ['plugin', 'details']:",
+                "elif name == 'claude' and args[:2] == ['plugin', 'details']:",
                 "    print('Skills (9) saxo-analytics, saxo-auth-session, saxo-bank, saxo-openapi, "
                 "saxo-qa-operations, saxo-reads, saxo-safety-recovery, "
                 "saxo-streaming, saxo-trading')",
@@ -1120,7 +1124,10 @@ def _write_fake_uv_install_probe(path: Path, log: Path) -> None:
 
 
 def _logged_commands(log: Path) -> list[str]:
-    return [
-        " ".join(str(item) for item in json.loads(line)["argv"])
-        for line in log.read_text(encoding="utf-8").splitlines()
-    ]
+    commands: list[str] = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        args = [str(item) for item in json.loads(line)["argv"]]
+        while args and (args[0] in {"--bare", "--no-chrome"} or args[0] == "-c"):
+            args = args[2:] if args[0] == "-c" else args[1:]
+        commands.append(" ".join(args))
+    return commands

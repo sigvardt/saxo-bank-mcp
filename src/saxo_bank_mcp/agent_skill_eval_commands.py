@@ -8,10 +8,8 @@ from pathlib import Path
 from typing import Final
 
 from saxo_bank_mcp.agent_skill_eval_models import Harness
-from saxo_bank_mcp.agent_skill_router_eval_protocol import (
-    CODEX_FILE_CREDENTIAL_STORE_OVERRIDES,
-    configured_codex_mcp_server_names,
-)
+from saxo_bank_mcp.agent_skill_install_env import CODEX_FILE_CREDENTIAL_STORE_OVERRIDES
+from saxo_bank_mcp.agent_skill_router_eval_protocol import configured_codex_mcp_server_names
 from saxo_bank_mcp.server_eval_tool_filter import derive_eval_tool_filter_env
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 

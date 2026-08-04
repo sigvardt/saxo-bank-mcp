@@ -303,13 +303,22 @@ def _client_version(
         enrich_eval_cli_env,
         resolve_cli_executable,
     )
+    from saxo_bank_mcp.agent_skill_install_env import (  # noqa: PLC0415
+        claude_non_ui_command,
+        codex_file_store_command,
+    )
 
     binary_name = "codex" if harness == "codex" else "claude"
     launch_env = enrich_eval_cli_env(env)
     binary = resolve_cli_executable(binary_name, launch_env)
+    command = (
+        codex_file_store_command(binary, "--version")
+        if harness == "codex"
+        else claude_non_ui_command(binary, "--version", bare=True)
+    )
     try:
         result = process_manager.run(
-            (binary, "--version"),
+            command,
             cwd=Path(launch_env.get("TMPDIR") or launch_env.get("HOME") or "."),
             env=launch_env,
             timeout_seconds=30,

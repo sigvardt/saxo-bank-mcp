@@ -9,6 +9,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from saxo_bank_mcp.agent_skill_eval_models import RouterDecision
+from saxo_bank_mcp.agent_skill_install_env import CODEX_FILE_CREDENTIAL_STORE_OVERRIDES
 
 CODEX_TOOL_ITEM_TYPES: Final = frozenset(
     {"command_execution", "file_change", "mcp_tool_call", "web_search", "dynamic_tool_call"},
@@ -18,12 +19,6 @@ CLAUDE_COMMAND_TOOLS: Final = frozenset(
     {"bash", "shell", "computer", "edit", "write", "read", "notebookedit"},
 )
 CLAUDE_PROTOCOL_TOOLS: Final = frozenset({"structuredoutput"})
-CODEX_FILE_CREDENTIAL_STORE_OVERRIDES: Final = (
-    "-c",
-    'cli_auth_credentials_store="file"',
-    "-c",
-    'mcp_oauth_credentials_store="file"',
-)
 
 
 class _CodexItem(BaseModel):

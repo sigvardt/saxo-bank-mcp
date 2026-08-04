@@ -18,7 +18,12 @@ from saxo_bank_mcp.agent_skill_install_discovery import (
     require_distinct_caches,
     skill_inventory,
 )
-from saxo_bank_mcp.agent_skill_install_env import auth_env_keys, build_isolated_env
+from saxo_bank_mcp.agent_skill_install_env import (
+    auth_env_keys,
+    build_isolated_env,
+    claude_non_ui_command,
+    codex_file_store_command,
+)
 from saxo_bank_mcp.agent_skill_install_models import (
     EXPECTED_TOOLS,
     CommandReceipt,
@@ -112,16 +117,16 @@ def discover_cli_help(
     claude_env: dict[str, str],
 ) -> tuple[CommandResult, ...]:
     commands = (
-        ("codex_plugin_help", ("codex", "plugin", "--help"), codex_env),
+        ("codex_plugin_help", _codex_plugin_command("--help"), codex_env),
         (
             "codex_marketplace_help",
-            ("codex", "plugin", "marketplace", "add", "--help"),
+            _codex_plugin_command("marketplace", "add", "--help"),
             codex_env,
         ),
-        ("claude_plugin_help", ("claude", "plugin", "--help"), claude_env),
+        ("claude_plugin_help", _claude_plugin_command("--help"), claude_env),
         (
             "claude_marketplace_help",
-            ("claude", "plugin", "marketplace", "add", "--help"),
+            _claude_plugin_command("marketplace", "add", "--help"),
             claude_env,
         ),
     )
@@ -135,10 +140,10 @@ def run_codex_install(
     commands = (
         (
             "codex_marketplace_add",
-            ("codex", "plugin", "marketplace", "add", "--json", str(marketplace)),
+            _codex_plugin_command("marketplace", "add", "--json", str(marketplace)),
         ),
-        ("codex_plugin_add", ("codex", "plugin", "add", "--json", PLUGIN_REF)),
-        ("codex_plugin_list", ("codex", "plugin", "list", "--json")),
+        ("codex_plugin_add", _codex_plugin_command("add", "--json", PLUGIN_REF)),
+        ("codex_plugin_list", _codex_plugin_command("list", "--json")),
     )
     return tuple(run_command(name, argv, cwd=marketplace, env=env) for name, argv in commands)
 
@@ -148,13 +153,13 @@ def run_claude_install(
     env: dict[str, str],
 ) -> tuple[CommandResult, ...]:
     commands = (
-        ("claude_marketplace_add", ("claude", "plugin", "marketplace", "add", str(marketplace))),
+        ("claude_marketplace_add", _claude_plugin_command("marketplace", "add", str(marketplace))),
         (
             "claude_plugin_install",
-            ("claude", "plugin", "install", PLUGIN_REF, "--scope", "user"),
+            _claude_plugin_command("install", PLUGIN_REF, "--scope", "user"),
         ),
-        ("claude_plugin_list", ("claude", "plugin", "list", "--json")),
-        ("claude_plugin_details", ("claude", "plugin", "details", PLUGIN_NAME)),
+        ("claude_plugin_list", _claude_plugin_command("list", "--json")),
+        ("claude_plugin_details", _claude_plugin_command("details", PLUGIN_NAME)),
     )
     return tuple(run_command(name, argv, cwd=marketplace, env=env) for name, argv in commands)
 
@@ -186,13 +191,13 @@ def run_update_probe(  # noqa: PLR0913
         receipts.extend(result.receipt for result in (*codex_bump_results, *claude_bump_results))
         codex_list = run_command(
             "codex_plugin_list_bumped",
-            ("codex", "plugin", "list", "--json"),
+            _codex_plugin_command("list", "--json"),
             cwd=marketplace,
             env=codex_env,
         )
         claude_list = run_command(
             "claude_plugin_list_bumped",
-            ("claude", "plugin", "list", "--json"),
+            _claude_plugin_command("list", "--json"),
             cwd=marketplace,
             env=claude_env,
         )
@@ -244,13 +249,13 @@ def run_update_probe(  # noqa: PLR0913
     receipts.extend(result.receipt for result in (*codex_restore_results, *claude_restore_results))
     codex_list = run_command(
         "codex_plugin_list_restored",
-        ("codex", "plugin", "list", "--json"),
+        _codex_plugin_command("list", "--json"),
         cwd=marketplace,
         env=codex_env,
     )
     claude_list = run_command(
         "claude_plugin_list_restored",
-        ("claude", "plugin", "list", "--json"),
+        _claude_plugin_command("list", "--json"),
         cwd=marketplace,
         env=claude_env,
     )
@@ -518,13 +523,13 @@ def _reinstall_codex(
 ) -> tuple[CommandResult, ...]:
     remove = run_command(
         f"codex_plugin_remove_{label}",
-        ("codex", "plugin", "remove", "--json", PLUGIN_REF),
+        _codex_plugin_command("remove", "--json", PLUGIN_REF),
         cwd=marketplace,
         env=env,
     )
     add = run_command(
         f"codex_plugin_add_{label}",
-        ("codex", "plugin", "add", "--json", PLUGIN_REF),
+        _codex_plugin_command("add", "--json", PLUGIN_REF),
         cwd=marketplace,
         env=env,
     )
@@ -543,17 +548,25 @@ def _update_claude(
     """
     uninstall = run_command(
         f"claude_plugin_uninstall_{label}",
-        ("claude", "plugin", "uninstall", PLUGIN_REF, "--scope", "user"),
+        _claude_plugin_command("uninstall", PLUGIN_REF, "--scope", "user"),
         cwd=marketplace,
         env=env,
     )
     install = run_command(
         f"claude_plugin_install_{label}",
-        ("claude", "plugin", "install", PLUGIN_REF, "--scope", "user"),
+        _claude_plugin_command("install", PLUGIN_REF, "--scope", "user"),
         cwd=marketplace,
         env=env,
     )
     return (uninstall, install)
+
+
+def _codex_plugin_command(*args: str) -> tuple[str, ...]:
+    return codex_file_store_command("codex", "plugin", *args)
+
+
+def _claude_plugin_command(*args: str) -> tuple[str, ...]:
+    return claude_non_ui_command("claude", "plugin", *args, bare=True)
 
 
 def _json_file(path: Path) -> dict[str, JsonValue]:

@@ -47,7 +47,7 @@ jobs:
         run: uv run --locked python scripts/validators/validate_plugin.py .
 
       - name: Claude plugin validate
-        run: claude plugin validate --strict .
+        run: claude --bare --no-chrome plugin validate --strict .
 
       - name: Skill quick validate saxo-auth-session
         run: uv run --locked python scripts/validators/quick_validate.py skills/saxo-auth-session

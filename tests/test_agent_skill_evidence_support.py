@@ -243,6 +243,7 @@ def run_cli(
     *args: str,
     env: dict[str, str] | None = None,
     cwd: Path | None = None,
+    timeout_seconds: int = 180,
 ) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
     if env is not None:
@@ -253,7 +254,7 @@ def run_cli(
         env=merged_env,
         text=True,
         capture_output=True,
-        timeout=180,
+        timeout=timeout_seconds,
         check=False,
     )
 

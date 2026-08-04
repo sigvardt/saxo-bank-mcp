@@ -4,7 +4,7 @@ import os
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 # Parent env keys allowed into the isolated install environment.
 _PATH_KEYS: Final = ("PATH", "HOMEBREW_PREFIX", "HOMEBREW_CELLAR", "HOMEBREW_REPOSITORY")
@@ -37,6 +37,7 @@ _WRITE_BEARING_KEYS: Final = (
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
     "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "SAXO_MCP_SIM_CREDENTIAL_FILE",
     "SAXO_MCP_LIVE_CREDENTIAL_FILE",
     "SAXO_MCP_TOKEN_CACHE_PATH",
@@ -67,6 +68,7 @@ _BLOCKED_PREFIXES: Final = (
 )
 # Task-created ephemeral trees only. Never includes clone, caches, or registration roots.
 _DISPOSABLE_RUN_ROOT_RELATIVES: Final = (
+    "command-guards",
     "marketplace-source",
     "probe-env",
     "verify-probe-env",
@@ -90,6 +92,16 @@ _DISPOSABLE_CODEX_HOME_RELATIVES: Final = (
 VERIFY_HOME_NAME: Final = "verify-home"
 VERIFY_CODEX_HOME_NAME: Final = "verify-codex-home"
 VERIFY_PROBE_ENV_NAME: Final = "verify-probe-env"
+CODEX_FILE_CREDENTIAL_STORE_OVERRIDES: Final = (
+    "-c",
+    'cli_auth_credentials_store="file"',
+    "-c",
+    'mcp_oauth_credentials_store="file"',
+)
+CLAUDE_NO_UI_ARGS: Final = ("--no-chrome",)
+_COMMAND_GUARD_DIR: Final = "command-guards"
+_SECURITY_GUARD_TEXT: Final = "#!/bin/sh\nexit 77\n"
+_OWNER_ONLY_EXECUTABLE_MODE: Final = 0o700
 # Verifier-only scratch: throwaway homes/probe plus shared run-root env dirs created by probes.
 # Never includes run_root/home/** or run_root/codex-home/**.
 _VERIFY_SCRATCH_RUN_ROOT_RELATIVES: Final = (
@@ -146,6 +158,7 @@ def build_isolated_env(  # noqa: C901, PLR0912
     xdg_data = home_r / ".local" / "share"
     xdg_state = home_r / ".local" / "state"
     claude_config = home_r / ".claude"
+    command_guard = _ensure_client_command_guard(root)
     for path in (
         tmp,
         uv_cache,
@@ -164,6 +177,7 @@ def build_isolated_env(  # noqa: C901, PLR0912
         "HOME": str(home_r),
         "CODEX_HOME": str(codex_r),
         "CLAUDE_CONFIG_DIR": str(claude_config),
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(claude_config),
         "XDG_CONFIG_HOME": str(xdg_config),
         "XDG_CACHE_HOME": str(xdg_cache),
         "XDG_DATA_HOME": str(xdg_data),
@@ -188,7 +202,11 @@ def build_isolated_env(  # noqa: C901, PLR0912
             env[key] = value
     if "PATH" not in env:
         env["PATH"] = os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    path_parts = env["PATH"].split(os.pathsep)
+    guard_part = str(command_guard)
+    path_parts = [
+        guard_part,
+        *(part for part in env["PATH"].split(os.pathsep) if part != guard_part),
+    ]
     # node is required for Claude Code / some Codex Node shebang wrappers when
     # the CLI is launched by absolute path and the shebang is `#!/usr/bin/env node`.
     # Keep which() parent dirs (symlink locations), not realpath package bins:
@@ -227,6 +245,57 @@ def build_isolated_env(  # noqa: C901, PLR0912
             env[key] = str(resolved)
     _assert_write_bearing_contained(env, root)
     return env
+
+
+def codex_file_store_command(binary: str, *args: str) -> tuple[str, ...]:
+    """Build a Codex argv that cannot select the platform credential store."""
+    return (binary, *CODEX_FILE_CREDENTIAL_STORE_OVERRIDES, *args)
+
+
+def claude_non_ui_command(binary: str, *args: str, bare: bool = False) -> tuple[str, ...]:
+    """Build a Claude argv with browser UI disabled and optional auth-free bare mode."""
+    bare_args = ("--bare",) if bare else ()
+    return (binary, *bare_args, *CLAUDE_NO_UI_ARGS, *args)
+
+
+def _ensure_client_command_guard(root: Path) -> Path:
+    """Shadow Claude's macOS security subprocess with an owner-only non-actioning command."""
+    directory = root / _COMMAND_GUARD_DIR
+    target = directory / "security"
+    try:
+        if directory.is_symlink():
+            _raise_client_command_guard_invalid()
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(_OWNER_ONLY_EXECUTABLE_MODE)
+        if os.path.lexists(target):
+            mode = target.lstat().st_mode
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or (mode & 0o777) != _OWNER_ONLY_EXECUTABLE_MODE
+                or target.read_text(encoding="utf-8") != _SECURITY_GUARD_TEXT
+            ):
+                _raise_client_command_guard_invalid()
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(target, flags, _OWNER_ONLY_EXECUTABLE_MODE)
+            try:
+                os.write(descriptor, _SECURITY_GUARD_TEXT.encode())
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            target.chmod(_OWNER_ONLY_EXECUTABLE_MODE)
+    except EnvironmentContainmentError:
+        raise
+    except OSError as exc:
+        raise EnvironmentContainmentError("client_command_guard_invalid") from exc
+    return directory
+
+
+def _raise_client_command_guard_invalid() -> NoReturn:
+    raise EnvironmentContainmentError("client_command_guard_invalid")
 
 
 def parent_env_is_blocked(key: str) -> bool:
