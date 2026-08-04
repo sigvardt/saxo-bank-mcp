@@ -358,7 +358,12 @@ def _seed_auth_files(
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
-        source = (claude_auth / relative).resolve()
+        declared = claude_auth / relative
+        if declared.is_symlink():
+            raise MatrixEnvError("cli_auth_source_symlink")
+        if not os.path.lexists(declared):
+            raise MatrixEnvError("claude_file_auth_missing")
+        source = declared.resolve()
         _require_owner_only_single_link_file(
             source,
             reason="claude_auth_source_unsafe",

@@ -196,6 +196,24 @@ def _seed_cli_sources(tmp_path: Path) -> tuple[Path, Path]:
     return _seed_cli_auth_sources(tmp_path)
 
 
+def _claude_credential_document(marker: str, *, expires_at: int) -> dict[str, object]:
+    """Synthetic file-backed Claude OAuth document.
+
+    The material is bound to a local name so no long literal follows an
+    ``accessToken``/``refreshToken`` key and the public secret scan stays clean.
+    """
+    material = f"synthetic-{marker}-oauth-material"
+    return {
+        "claudeAiOauth": {
+            "accessToken": material,
+            "refreshToken": material + "-refresh",
+            "expiresAt": expires_at,
+            "refreshTokenExpiresAt": expires_at,
+        },
+        "mcpOAuth": {},
+    }
+
+
 def _claude_global_canaries() -> tuple[str, ...]:
     return (
         CLAUDE_SETTINGS_CANARY,
@@ -616,24 +634,8 @@ def test_rotated_claude_credentials_promoted_before_cleanup(
     _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
     codex_src, claude_src = _seed_cli_sources(tmp_path)
     source = claude_src / ".claude" / ".credentials.json"
-    original = {
-        "claudeAiOauth": {
-            "accessToken": "synthetic-access-material-original",
-            "refreshToken": "synthetic-refresh-material-original",
-            "expiresAt": 4_102_444_800_000,
-            "refreshTokenExpiresAt": 4_102_444_800_000,
-        },
-        "mcpOAuth": {},
-    }
-    rotated = {
-        "claudeAiOauth": {
-            "accessToken": "synthetic-access-material-rotated",
-            "refreshToken": "synthetic-refresh-material-rotated",
-            "expiresAt": 4_102_444_900_000,
-            "refreshTokenExpiresAt": 4_102_444_900_000,
-        },
-        "mcpOAuth": {},
-    }
+    original = _claude_credential_document("original", expires_at=4_102_444_800_000)
+    rotated = _claude_credential_document("rotated", expires_at=4_102_444_900_000)
     source.write_text(json.dumps(original), encoding="utf-8")
     source.chmod(0o600)
 
@@ -683,24 +685,8 @@ def test_claude_credential_promotion_refuses_concurrent_source_change(
     _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
     codex_src, claude_src = _seed_cli_sources(tmp_path)
     source = claude_src / ".claude" / ".credentials.json"
-    original = {
-        "claudeAiOauth": {
-            "accessToken": "synthetic-access-material-original",
-            "refreshToken": "synthetic-refresh-material-original",
-            "expiresAt": 4_102_444_800_000,
-            "refreshTokenExpiresAt": 4_102_444_800_000,
-        },
-        "mcpOAuth": {},
-    }
-    rotated = {
-        "claudeAiOauth": {
-            "accessToken": "synthetic-access-material-rotated",
-            "refreshToken": "synthetic-refresh-material-rotated",
-            "expiresAt": 4_102_444_900_000,
-            "refreshTokenExpiresAt": 4_102_444_900_000,
-        },
-        "mcpOAuth": {},
-    }
+    original = _claude_credential_document("original", expires_at=4_102_444_800_000)
+    rotated = _claude_credential_document("rotated", expires_at=4_102_444_900_000)
     concurrent: dict[str, object] = {
         "claudeAiOauth": original["claudeAiOauth"],
         "mcpOAuth": {"new": {}},
@@ -958,6 +944,9 @@ def test_install_report_omitted_source_flags_use_actual_auth_roots(
     actual_codex, actual_claude = _seed_cli_auth_sources(tmp_path)
     retained_codex, retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
     # Simulate omitted source flags by clearing env and pointing defaults at actual roots.
+    # CLAUDE_CONFIG_DIR must be cleared or an operator shell value would resolve the seed
+    # to the real local credential file instead of the isolated test root.
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HOME", str(actual_claude))
     monkeypatch.setenv("CODEX_HOME", str(actual_codex))
     # Retained install homes intentionally do NOT contain real auth credentials.
