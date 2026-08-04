@@ -18,7 +18,10 @@ from saxo_bank_mcp.analytics_store import (
     StorageEntry,
     StorageScope,
 )
-from saxo_bank_mcp.request_ledger import RequestLedgerEvent, capture_scoped_request_ledger
+from saxo_bank_mcp.request_ledger import (
+    RequestLedgerEvent,
+    capture_scoped_request_ledger_delta,
+)
 
 type StorageOperation = Literal["list_storage", "preview_deletion", "delete_analytics_data"]
 
@@ -192,7 +195,7 @@ def _run_local_only[T](
     operation: StorageOperation,
     action: Callable[[], T],
 ) -> _LocalResult[T]:
-    with capture_scoped_request_ledger() as ledger:
+    with capture_scoped_request_ledger_delta() as ledger:
         try:
             value = action()
         except BaseException:

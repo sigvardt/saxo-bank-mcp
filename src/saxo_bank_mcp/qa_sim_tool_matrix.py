@@ -353,6 +353,9 @@ def _state_component_values(  # noqa: PLR0911
     if name in {"positions", "orders", "trade_messages"}:
         response = _safe_response_value(payload.get("response"))
         count = _safe_response_count(response)
+        if name == "positions":
+            fingerprint = _position_inventory_fingerprint(response)
+            return count, fingerprint, available and response is not None
         source_fingerprint = payload.get("response_fingerprint")
         fingerprint = (
             source_fingerprint
@@ -384,6 +387,44 @@ def _state_component_values(  # noqa: PLR0911
         else digest(runtime_state)
     )
     return count, fingerprint, available
+
+
+_POSITION_INVENTORY_FIELDS: Final = frozenset(
+    {
+        "AccountId",
+        "Amount",
+        "AssetType",
+        "ClientId",
+        "ExecutionTimeOpen",
+        "IsForceOpen",
+        "OpenPrice",
+        "PositionId",
+        "Uic",
+        "ValueDate",
+    },
+)
+
+
+def _position_inventory_fingerprint(response: JsonValue | None) -> str:
+    """Hash stable position inventory while excluding live marks and P&L."""
+    rows: JsonValue = response
+    if isinstance(response, dict) and isinstance(response.get("Data"), list):
+        rows = response["Data"]
+    if not isinstance(rows, list):
+        return digest({"positions": []})
+    inventory: list[dict[str, JsonValue]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        base = raw.get("PositionBase")
+        source = base if isinstance(base, dict) else raw
+        stable = {key: source[key] for key in sorted(_POSITION_INVENTORY_FIELDS) if key in source}
+        top_position_id = raw.get("PositionId")
+        if "PositionId" not in stable and top_position_id is not None:
+            stable["PositionId"] = top_position_id
+        inventory.append(stable)
+    inventory.sort(key=digest)
+    return digest({"positions": inventory})
 
 
 def _safe_response_value(value: JsonValue | None) -> JsonValue | None:
@@ -2071,7 +2112,7 @@ async def run_analytics_cleanup_cases(
     )
     data_type_values: list[JsonValue] = list(data_types)
     preview_arguments: dict[str, JsonValue] = (
-        {"scope": {"data_types": data_type_values}} if jobs_stopped and data_type_values else {}
+        {"scope": {"data_types": data_type_values}} if jobs_stopped else {}
     )
     preview_observation = await call_tool(
         client,

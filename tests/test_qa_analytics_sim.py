@@ -641,6 +641,122 @@ def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
     assert any(tool == "saxo_delete_analytics_data" for tool, _ in observed)
 
 
+def test_analytics_cleanup_previews_an_explicit_empty_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _runtime_state()
+    issued_deletion_handle = "dp_33333333333343338333333333333333"
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def empty_storage(
+        _client: object,
+        tool: str,
+        arguments: dict[str, object],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed.append((tool, arguments))
+        if tool == "saxo_list_analytics_storage":
+            return MatrixToolObservation(
+                payload={
+                    "status": "passed",
+                    "result": {
+                        "entries": [],
+                        "runtime_state": {
+                            "job_count": 0,
+                            "cache_entry_count": 0,
+                            "temporary_entry_count": 0,
+                            "fingerprint_sha256": "a" * 64,
+                        },
+                    },
+                },
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
+        if tool == "saxo_preview_analytics_deletion":
+            assert arguments == {"scope": {"data_types": []}}
+            return MatrixToolObservation(
+                payload={
+                    "status": "preview_ready",
+                    "result": {"preview": {"token": issued_deletion_handle}},
+                },
+                result_parsed=True,
+                result_state="preview_ready",
+                mcp_is_error=False,
+            )
+        assert tool == "saxo_delete_analytics_data"
+        assert arguments == {"token": issued_deletion_handle}
+        return MatrixToolObservation(
+            payload={"status": "deleted"},
+            result_parsed=True,
+            result_state="deleted",
+            mcp_is_error=False,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", empty_storage)
+    receipts = anyio.run(
+        run_analytics_cleanup_cases,
+        cast("MatrixClient", object()),
+        state,
+    )
+
+    assert all(receipt.state == "passed" for receipt in receipts)
+    assert state.analytics_resources.cleanup_verified is True
+    assert state.uncleaned == 0
+    assert observed[1] == (
+        "saxo_preview_analytics_deletion",
+        {"scope": {"data_types": []}},
+    )
+
+
+def test_position_state_fingerprint_uses_inventory_not_live_marks() -> None:
+    def observation(
+        *, amount: int, current_price: int, source_digest: str
+    ) -> MatrixToolObservation:
+        return MatrixToolObservation(
+            payload={
+                "status": "passed",
+                "response": {
+                    "Data": [
+                        {
+                            "PositionBase": {
+                                "AssetType": "Stock",
+                                "Amount": amount,
+                                "Uic": 9001,
+                            },
+                            "PositionView": {
+                                "CurrentPrice": current_price,
+                                "ProfitLossOnTrade": current_price - 100,
+                            },
+                        },
+                    ],
+                },
+                "response_fingerprint": source_digest,
+            },
+            result_parsed=True,
+            result_state="passed",
+            mcp_is_error=False,
+        )
+
+    first = matrix_module._state_component_values(  # noqa: SLF001
+        "positions",
+        observation(amount=1, current_price=100, source_digest="a" * 64),
+    )
+    remarked = matrix_module._state_component_values(  # noqa: SLF001
+        "positions",
+        observation(amount=1, current_price=101, source_digest="b" * 64),
+    )
+    resized = matrix_module._state_component_values(  # noqa: SLF001
+        "positions",
+        observation(amount=2, current_price=101, source_digest="c" * 64),
+    )
+
+    assert first[0] == remarked[0] == resized[0] == 1
+    assert first[2] is remarked[2] is resized[2] is True
+    assert first[1] == remarked[1]
+    assert first[1] != resized[1]
+
+
 def test_analytics_cleanup_never_deletes_while_an_issued_job_is_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

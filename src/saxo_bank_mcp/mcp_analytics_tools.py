@@ -522,6 +522,7 @@ _CANONICAL_ANALYSIS_OUTPUT_ADAPTER: Final[TypeAdapter[CanonicalAnalysisToolRespo
 _ARTIFACT_OUTPUT_ADAPTER: Final[TypeAdapter[ArtifactToolResponse]] = TypeAdapter(
     ArtifactToolResponse
 )
+_STORAGE_SCOPE_ADAPTER: Final[TypeAdapter[StorageScope]] = TypeAdapter(StorageScope)
 _OPERATIONAL_OUTPUT_ADAPTERS: Final[dict[str, TypeAdapter[object]]] = {
     "saxo_analytics_capabilities": TypeAdapter(CapabilitiesResponse),
     "saxo_resolve_research_universe": TypeAdapter(ResolutionResponse),
@@ -1849,6 +1850,7 @@ def saxo_list_analytics_storage(scope: StorageScope) -> StorageListResponse:
     tool = "saxo_list_analytics_storage"
     store: AnalyticsStore | None = None
     try:
+        scope = _STORAGE_SCOPE_ADAPTER.validate_python(scope)
         config = _analytics_config()
         store = AnalyticsStore.open(config)
         result = list_storage(
@@ -1882,6 +1884,7 @@ def saxo_preview_analytics_deletion(scope: StorageScope) -> DeletionPreviewRespo
     tool = "saxo_preview_analytics_deletion"
     store: AnalyticsStore | None = None
     try:
+        scope = _STORAGE_SCOPE_ADAPTER.validate_python(scope)
         store = AnalyticsStore.open(_analytics_config())
         result = preview_deletion(scope, store=store)
     except (

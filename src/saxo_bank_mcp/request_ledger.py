@@ -123,10 +123,11 @@ class _EventBuffer:
 @dataclass(frozen=True, slots=True)
 class RequestLedgerCapture:
     _buffer: _EventBuffer
+    _start: int = 0
 
     @property
     def events(self) -> list[RequestLedgerEvent]:
-        return self._buffer.snapshot()
+        return self._buffer.snapshot()[self._start :]
 
 
 class _LedgerRegistry:
@@ -189,6 +190,17 @@ def capture_scoped_request_ledger() -> Generator[RequestLedgerCapture]:
         yield RequestLedgerCapture(active)
     finally:
         _SCOPED_BUFFER.reset(token)
+
+
+@contextmanager
+def capture_scoped_request_ledger_delta() -> Generator[RequestLedgerCapture]:
+    """Capture only events added during a local operation inside an MCP call."""
+    active = _SCOPED_BUFFER.get()
+    if active is None:
+        with capture_scoped_request_ledger() as capture:
+            yield capture
+        return
+    yield RequestLedgerCapture(active, len(active.snapshot()))
 
 
 def safe_request_events(events: list[RequestLedgerEvent]) -> list[RequestLedgerEventJson]:
@@ -269,7 +281,6 @@ def _safe_path(path: str) -> str:
 
 def safe_query_names(request: httpx2.Request) -> tuple[str, ...]:
     names = {
-        name if name in _SAFE_QUERY_NAMES else _REDACTED_PATH_SEGMENT
-        for name in request.url.params
+        name if name in _SAFE_QUERY_NAMES else _REDACTED_PATH_SEGMENT for name in request.url.params
     }
     return tuple(sorted(names))

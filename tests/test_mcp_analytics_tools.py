@@ -1501,6 +1501,26 @@ async def test_all_analytics_tools_register_once_with_schema_and_description() -
 
 
 @pytest.mark.anyio
+async def test_storage_scope_is_reconstructed_at_the_fastmcp_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    server = create_mcp_server(allowed_tools=frozenset({"saxo_list_analytics_storage"}))
+
+    async with Client(server) as client:
+        response = await client.call_tool(
+            "saxo_list_analytics_storage",
+            {"scope": {}},
+            raise_on_error=False,
+        )
+
+    assert response.is_error is False
+    assert response.structured_content is not None
+    assert response.structured_content["status"] == "passed"
+
+
+@pytest.mark.anyio
 async def test_analytics_schemas_expose_no_paths_raw_broker_ids_or_trust_switches() -> None:
     server = create_mcp_server(allowed_tools=frozenset(ANALYTICS_TOOL_IDS))
     async with Client(server) as client:

@@ -13,6 +13,8 @@ from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.request_ledger import (
     RequestLedgerAlreadyActiveError,
     capture_request_ledger,
+    capture_scoped_request_ledger,
+    capture_scoped_request_ledger_delta,
     safe_query_names,
 )
 
@@ -219,6 +221,27 @@ def test_capture_refuses_nested_ledgers() -> None:
         capture_request_ledger(),
     ):
         pytest.fail("nested ledger started")
+
+
+@pytest.mark.anyio
+async def test_scoped_delta_capture_observes_only_new_events() -> None:
+    async def handler(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200)
+
+    with capture_scoped_request_ledger() as outer:
+        async with create_async_client(transport=httpx2.MockTransport(handler)) as client:
+            await client.get("https://gateway.saxobank.com/sim/openapi/port/v1/accounts/me")
+        with capture_scoped_request_ledger_delta() as inner:
+            assert inner.events == []
+            async with create_async_client(transport=httpx2.MockTransport(handler)) as client:
+                await client.get("https://gateway.saxobank.com/sim/openapi/port/v1/positions/me")
+        assert [event.phase for event in inner.events] == ["attempted", "completed"]
+        assert [event.phase for event in outer.events] == [
+            "attempted",
+            "completed",
+            "attempted",
+            "completed",
+        ]
 
 
 @pytest.mark.anyio
