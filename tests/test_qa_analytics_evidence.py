@@ -8,7 +8,7 @@ from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from runpy import run_path
-from typing import Final, Literal, NoReturn
+from typing import Final, Literal, NoReturn, cast
 
 import pytest
 from pydantic import ValidationError
@@ -683,8 +683,10 @@ def test_verified_installed_candidate_executes_process_owned_producer(
         command: tuple[str, ...],
         *,
         claude_cache_root: Path,
+        source_repo: Path,
     ) -> CommandResult:
         assert claude_cache_root == installed_candidate
+        assert source_repo == installed_candidate
         produced = producer.produce_installed_result(
             candidate_commit=commit,
             installed_cache_sha256=cache_sha256,
@@ -1715,15 +1717,17 @@ def _fake_agent_evaluation_command(
 def _agent_evaluation_runtime_env(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-) -> None:
+) -> Path:
     for variable, name in (
         ("SAXO_ANALYTICS_CLAUDE_CACHE_ROOT", "claude-cache"),
         ("SAXO_ANALYTICS_CODEX_HOME", "codex-home"),
         ("SAXO_ANALYTICS_CLAUDE_HOME", "claude-home"),
+        ("SAXO_ANALYTICS_SOURCE_REPO", "source-repo"),
     ):
         path = tmp_path / name
         path.mkdir(mode=0o700)
         monkeypatch.setenv(variable, str(path))
+    return tmp_path / "source-repo"
 
 
 def test_agent_evaluation_missing_or_caller_authored_inputs_cannot_mint_receipts(
@@ -1735,6 +1739,7 @@ def test_agent_evaluation_missing_or_caller_authored_inputs_cannot_mint_receipts
         "SAXO_ANALYTICS_CLAUDE_CACHE_ROOT",
         "SAXO_ANALYTICS_CODEX_HOME",
         "SAXO_ANALYTICS_CLAUDE_HOME",
+        "SAXO_ANALYTICS_SOURCE_REPO",
     ):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(
@@ -1844,6 +1849,32 @@ def test_authentic_process_agent_evaluation_issues_exact_tool_receipts(
         load_analysis_kind_catalog().skill_scenario_tools
     )
     assert all(receipt.evaluation_state == "passed" for receipt in receipts)
+
+
+def test_agent_evaluation_uses_the_verified_source_clone_not_the_plugin_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    source_repo = _agent_evaluation_runtime_env(monkeypatch, tmp_path)
+    report = _agent_evaluation_report(candidate_commit="1" * 40)
+    execute = _fake_agent_evaluation_command(report)
+    observed_source: list[Path] = []
+
+    def inspect_command(*args: object, **kwargs: object) -> CommandResult:
+        argv = cast("tuple[str, ...]", args[1])
+        observed_source.append(Path(argv[argv.index("--source-repo") + 1]).resolve())
+        return execute(*args, **kwargs)
+
+    monkeypatch.setattr(producer, "run_command", inspect_command)
+
+    producer._run_installed_agent_evaluation(  # noqa: SLF001
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+    )
+
+    assert observed_source == [source_repo.resolve()]
+    assert observed_source[0] != Path.cwd().resolve()
 
 
 def test_installed_producer_child_requires_an_isolated_sim_auth_lease() -> None:

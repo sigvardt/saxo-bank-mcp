@@ -401,6 +401,7 @@ def run_verified_installed_producer(
         install.codex.cache_root,
         command,
         claude_cache_root=install.claude.cache_root,
+        source_repo=install.clone.path,
     )
 
     _require_clean_source_commit(install.repo, candidate_commit)
@@ -1048,12 +1049,14 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
     claude_raw = os.environ.get("SAXO_ANALYTICS_CLAUDE_CACHE_ROOT", "").strip()
     codex_home_raw = os.environ.get("SAXO_ANALYTICS_CODEX_HOME", "").strip()
     claude_home_raw = os.environ.get("SAXO_ANALYTICS_CLAUDE_HOME", "").strip()
-    if not claude_raw or not codex_home_raw or not claude_home_raw:
+    source_repo_raw = os.environ.get("SAXO_ANALYTICS_SOURCE_REPO", "").strip()
+    if not claude_raw or not codex_home_raw or not claude_home_raw or not source_repo_raw:
         raise ProofProducerError("installed_agent_evaluation_runtime_missing")
     claude_cache_root = Path(claude_raw).resolve()
     codex_home = Path(codex_home_raw).resolve()
     claude_home = Path(claude_home_raw).resolve()
-    for root in (codex_cache_root, claude_cache_root, codex_home, claude_home):
+    source_repo = Path(source_repo_raw).resolve()
+    for root in (codex_cache_root, claude_cache_root, codex_home, claude_home, source_repo):
         try:
             metadata = root.lstat()
         except OSError as error:
@@ -1071,6 +1074,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
             claude_cache_root=claude_cache_root,
             codex_home=codex_home,
             claude_home=claude_home,
+            source_repo=source_repo,
             report_path=report_path,
         )
         env = dict(os.environ)
@@ -1101,6 +1105,7 @@ def _agent_evaluation_command(  # noqa: PLR0913
     claude_cache_root: Path,
     codex_home: Path,
     claude_home: Path,
+    source_repo: Path,
     report_path: Path,
 ) -> tuple[str, ...]:
     return (
@@ -1130,7 +1135,7 @@ def _agent_evaluation_command(  # noqa: PLR0913
         "--expected-source-commit",
         candidate_commit,
         "--source-repo",
-        str(codex_cache_root),
+        str(source_repo),
         "--out",
         str(report_path),
     )
@@ -1534,6 +1539,7 @@ def _execute_installed_child(
     command: tuple[str, ...],
     *,
     claude_cache_root: Path,
+    source_repo: Path,
 ) -> CommandResult:
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-proof-producer-", dir=temp_parent) as raw:
@@ -1558,6 +1564,7 @@ def _execute_installed_child(
         env["SAXO_ANALYTICS_CLAUDE_CACHE_ROOT"] = str(claude_cache_root.resolve())
         env["SAXO_ANALYTICS_CODEX_HOME"] = str(runtime.codex_home.resolve())
         env["SAXO_ANALYTICS_CLAUDE_HOME"] = str(runtime.home.resolve())
+        env["SAXO_ANALYTICS_SOURCE_REPO"] = str(source_repo.resolve())
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             env["UV_CACHE_DIR"] = uv_cache
         try:
