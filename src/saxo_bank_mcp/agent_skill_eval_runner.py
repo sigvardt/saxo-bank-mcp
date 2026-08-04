@@ -28,6 +28,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixIsolatedRuntime,
     cleanup_matrix_isolated_runtime,
     prepare_eval_isolated_runtime,
+    promote_rotated_claude_credentials,
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
@@ -410,6 +411,10 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
         except MatrixEnvError as exc:
             promote_error = exc
         try:
+            promote_rotated_claude_credentials(runtime)
+        except MatrixEnvError as exc:
+            promote_error = _combine_promotion_errors(promote_error, exc)
+        try:
             require_matrix_runtime_cleanup(runtime.run_root)
         except MatrixEnvError as exc:
             cleanup_error = exc
@@ -543,6 +548,15 @@ def _primary_runtime_error(
     if cleanup_error is not None:
         return cleanup_error.reason
     return ""
+
+
+def _combine_promotion_errors(
+    current: MatrixEnvError | None,
+    latest: MatrixEnvError,
+) -> MatrixEnvError:
+    if current is None:
+        return latest
+    return MatrixEnvError(f"{current.reason}+{latest.reason}")
 
 
 def _cleanup_fields(

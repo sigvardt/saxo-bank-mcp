@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
-from dataclasses import dataclass, field
+import tempfile
+from contextlib import suppress
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
 from saxo_bank_mcp.agent_skill_install_env import (
     EnvironmentContainmentError,
@@ -36,6 +39,8 @@ _SIM_CREDENTIAL_NAME: Final = "sim-credentials"
 _TOKEN_CACHE_BASENAME: Final = "token-cache.json"  # noqa: S105 - filename, not a secret
 OWNER_FILE_MODE: Final = 0o600
 OWNER_DIR_MODE: Final = 0o700
+MAX_CLAUDE_CREDENTIAL_BYTES: Final = 1_048_576
+MIN_CLAUDE_OAUTH_MATERIAL_LENGTH: Final = 20
 # Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
 _CLAUDE_AUTH_SEED_RELATIVES: Final = (Path(".claude") / ".credentials.json",)
@@ -83,6 +88,8 @@ class MatrixIsolatedRuntime:
     # Continuity markers for optimistic SIM promotion only — never evidence fields.
     sim_token_source: Path = field(repr=False)
     sim_token_source_digest: str = field(repr=False)
+    claude_auth_source: Path | None = field(default=None, repr=False)
+    claude_auth_source_digest: str | None = field(default=None, repr=False)
 
 
 def matrix_runtime_root(evidence_root: Path) -> Path:
@@ -269,7 +276,8 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
 
     Auth sources (source_*) default to actual global CLI roots when omitted.
     Retained install homes seed plugin registration/artifacts only. Never conflate.
-    Sources are never written and never published as evidence fields.
+    Sources are never published as evidence fields. Validated credential rotations are
+    promoted optimistically after child cleanup so one-time refresh material is not lost.
     Account discovery remains inside the logical FastMCP matrix call path.
     """
     runtime = prepare_matrix_isolated_runtime(
@@ -277,7 +285,7 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
         runtime_name=EVAL_RUNTIME_NAME,
     )
     try:
-        seed_isolated_cli_homes(
+        claude_auth_source, claude_auth_source_digest = seed_isolated_cli_homes(
             runtime,
             source_codex_home=source_codex_home,
             source_claude_home=source_claude_home,
@@ -291,7 +299,11 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
     except OSError as exc:
         cleanup_matrix_isolated_runtime(runtime.run_root)
         raise MatrixEnvError("eval_cli_home_seed_failed") from exc
-    return runtime
+    return replace(
+        runtime,
+        claude_auth_source=claude_auth_source,
+        claude_auth_source_digest=claude_auth_source_digest,
+    )
 
 
 def apply_case_eval_allowlists(env: dict[str, str], *, case_id: str) -> dict[str, str]:
@@ -310,9 +322,13 @@ def seed_isolated_cli_homes(  # noqa: PLR0913
     retained_codex_home: Path | None = None,
     retained_claude_home: Path | None = None,
     retained_codex_plugin_root: Path | None = None,
-) -> None:
+) -> tuple[Path, str]:
     """Seed auth from actual CLI roots; seed plugin state from retained install homes."""
-    _seed_auth_files(runtime, source_codex_home, source_claude_home)
+    claude_auth_source, claude_auth_source_digest = _seed_auth_files(
+        runtime,
+        source_codex_home,
+        source_claude_home,
+    )
     _seed_retained_plugin_registration(runtime, retained_codex_home, retained_claude_home)
     if retained_codex_plugin_root is not None:
         _seed_codex_plugin_tree(
@@ -323,13 +339,14 @@ def seed_isolated_cli_homes(  # noqa: PLR0913
     for path in (runtime.home, runtime.codex_home, runtime.home / ".claude"):
         if path.exists():
             path.chmod(OWNER_DIR_MODE)
+    return claude_auth_source, claude_auth_source_digest
 
 
 def _seed_auth_files(
     runtime: MatrixIsolatedRuntime,
     source_codex_home: Path | None,
     source_claude_home: Path | None,
-) -> None:
+) -> tuple[Path, str]:
     codex_auth = _resolve_codex_source_home(source_codex_home)
     claude_auth = _resolve_claude_source_home(source_claude_home)
     for name in _CODEX_AUTH_SEED_FILES:
@@ -341,13 +358,25 @@ def _seed_auth_files(
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
+        source = (claude_auth / relative).resolve()
+        _require_owner_only_single_link_file(
+            source,
+            reason="claude_auth_source_unsafe",
+        )
+        digest = _regular_file_digest(source)
+        if digest is None:
+            raise MatrixEnvError("claude_auth_source_unsafe")
         copied = _copy_optional_owner_only_file(
-            claude_auth / relative,
+            source,
             runtime.home / relative,
             copy_reason="claude_auth_copy_failed",
         )
         if copied is None:
             raise MatrixEnvError("claude_file_auth_missing")
+        if _regular_file_digest(source) != digest or _regular_file_digest(copied) != digest:
+            raise MatrixEnvError("claude_auth_source_unsafe")
+        return source, digest
+    raise MatrixEnvError("claude_file_auth_missing")
 
 
 def _seed_retained_plugin_registration(
@@ -399,6 +428,26 @@ def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
     if _regular_file_digest(destination) != runtime.sim_token_source_digest:
         raise MatrixEnvError("token_promote_source_changed")
     _persist_and_verify_promotion(destination, token)
+
+
+def promote_rotated_claude_credentials(runtime: MatrixIsolatedRuntime) -> None:
+    """Promote one validated file-backed Claude OAuth rotation before cleanup."""
+    source = runtime.claude_auth_source
+    source_digest = runtime.claude_auth_source_digest
+    if source is None or source_digest is None:
+        return
+    contained = runtime.home / ".claude" / ".credentials.json"
+    contained_digest = _regular_file_digest(contained)
+    if contained_digest is not None and contained_digest == source_digest:
+        return
+    payload = _load_promotable_claude_credentials(contained)
+    _require_owner_only_single_link_file(
+        source,
+        reason="claude_auth_promote_destination_invalid",
+    )
+    if _regular_file_digest(source) != source_digest:
+        raise MatrixEnvError("claude_auth_promote_source_changed")
+    _persist_and_verify_claude_credentials(source, payload)
 
 
 def cleanup_matrix_isolated_runtime(run_root: Path) -> list[str]:
@@ -463,6 +512,91 @@ def _persist_and_verify_promotion(destination: Path, token: SaxoTokenSet) -> Non
         raise MatrixEnvError("token_promote_verify_failed") from exc
     if reloaded is None or reloaded != token:
         raise MatrixEnvError("token_promote_verify_failed")
+
+
+def _load_promotable_claude_credentials(contained: Path) -> bytes:
+    _require_owner_only_single_link_file(
+        contained,
+        reason="claude_auth_promote_contained_invalid",
+    )
+    try:
+        payload = contained.read_bytes()
+        raw_document = json.loads(payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise MatrixEnvError("claude_auth_promote_credentials_invalid") from exc
+    if not isinstance(raw_document, dict):
+        raise MatrixEnvError("claude_auth_promote_credentials_invalid")
+    document = cast("dict[str, object]", raw_document)
+    if len(payload) > MAX_CLAUDE_CREDENTIAL_BYTES:
+        raise MatrixEnvError("claude_auth_promote_credentials_invalid")
+    raw_oauth = document.get("claudeAiOauth")
+    if not isinstance(raw_oauth, dict):
+        raise MatrixEnvError("claude_auth_promote_credentials_invalid")
+    oauth = cast("dict[str, object]", raw_oauth)
+    access = oauth.get("accessToken")
+    refresh = oauth.get("refreshToken")
+    expires_at = oauth.get("expiresAt")
+    refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+    if (
+        not isinstance(access, str)
+        or len(access) < MIN_CLAUDE_OAUTH_MATERIAL_LENGTH
+        or not isinstance(refresh, str)
+        or len(refresh) < MIN_CLAUDE_OAUTH_MATERIAL_LENGTH
+        or not isinstance(expires_at, int)
+        or expires_at <= 0
+        or not isinstance(refresh_expires_at, int)
+        or refresh_expires_at <= 0
+    ):
+        raise MatrixEnvError("claude_auth_promote_credentials_invalid")
+    return payload
+
+
+def _persist_and_verify_claude_credentials(destination: Path, payload: bytes) -> None:
+    pending: Path | None = None
+    descriptor: int | None = None
+    try:
+        descriptor, raw_pending = tempfile.mkstemp(
+            prefix=f".{destination.name}.promotion-",
+            dir=destination.parent,
+        )
+        pending = Path(raw_pending)
+        os.fchmod(descriptor, OWNER_FILE_MODE)
+        _write_all_and_fsync(descriptor, payload)
+        os.close(descriptor)
+        descriptor = None
+        pending.replace(destination)
+        directory = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OSError as exc:
+        if descriptor is not None:
+            os.close(descriptor)
+        if pending is not None:
+            with suppress(OSError):
+                pending.unlink(missing_ok=True)
+        raise MatrixEnvError("claude_auth_promote_write_failed") from exc
+    _require_owner_only_single_link_file(
+        destination,
+        reason="claude_auth_promote_verify_failed",
+    )
+    try:
+        verified = destination.read_bytes()
+    except OSError as exc:
+        raise MatrixEnvError("claude_auth_promote_verify_failed") from exc
+    if verified != payload:
+        raise MatrixEnvError("claude_auth_promote_verify_failed")
+
+
+def _write_all_and_fsync(descriptor: int, payload: bytes) -> None:
+    written = 0
+    while written < len(payload):
+        count = os.write(descriptor, payload[written:])
+        if count <= 0:
+            raise OSError("credential promotion write made no progress")
+        written += count
+    os.fsync(descriptor)
 
 
 def _resolve_sim_credential_source() -> Path:
@@ -711,6 +845,16 @@ def _owner_only_regular_file_reason(path: Path) -> str | None:
 
 def _require_owner_only_regular_file(path: Path, *, reason: str) -> None:
     if _owner_only_regular_file_reason(path) is not None:
+        raise MatrixEnvError(reason)
+
+
+def _require_owner_only_single_link_file(path: Path, *, reason: str) -> None:
+    _require_owner_only_regular_file(path, reason=reason)
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise MatrixEnvError(reason) from exc
+    if metadata.st_nlink != 1 or metadata.st_uid != os.getuid():
         raise MatrixEnvError(reason)
 
 

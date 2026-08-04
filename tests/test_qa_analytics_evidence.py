@@ -654,6 +654,9 @@ def test_verified_installed_candidate_executes_process_owned_producer(
         claude=install_models.ClientInstallEvidence.model_construct(
             cache_root=installed_candidate,
         ),
+        fixture_cleanup=install_models.FixtureCleanup.model_construct(
+            run_root=installed_candidate,
+        ),
     )
     cache_sha256 = "2" * 64
 
@@ -678,15 +681,19 @@ def test_verified_installed_candidate_executes_process_owned_producer(
         block_proof_bundle,
     )
 
-    def execute_child(
+    def execute_child(  # noqa: PLR0913
         cache_root: Path,
         command: tuple[str, ...],
         *,
         claude_cache_root: Path,
         source_repo: Path,
+        retained_codex_home: Path,
+        retained_claude_home: Path,
     ) -> CommandResult:
         assert claude_cache_root == installed_candidate
         assert source_repo == installed_candidate
+        assert retained_codex_home == installed_candidate / "codex-home"
+        assert retained_claude_home == installed_candidate / "home"
         produced = producer.produce_installed_result(
             candidate_commit=commit,
             installed_cache_sha256=cache_sha256,

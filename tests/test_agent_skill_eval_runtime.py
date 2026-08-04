@@ -607,6 +607,147 @@ def test_rotated_token_promoted_before_cleanup(
     assert not eval_runtime_root(evidence).exists()
 
 
+def test_rotated_claude_credentials_promoted_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "out"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
+    codex_src, claude_src = _seed_cli_sources(tmp_path)
+    source = claude_src / ".claude" / ".credentials.json"
+    original = {
+        "claudeAiOauth": {
+            "accessToken": "synthetic-access-material-original",
+            "refreshToken": "synthetic-refresh-material-original",
+            "expiresAt": 4_102_444_800_000,
+            "refreshTokenExpiresAt": 4_102_444_800_000,
+        },
+        "mcpOAuth": {},
+    }
+    rotated = {
+        "claudeAiOauth": {
+            "accessToken": "synthetic-access-material-rotated",
+            "refreshToken": "synthetic-refresh-material-rotated",
+            "expiresAt": 4_102_444_900_000,
+            "refreshTokenExpiresAt": 4_102_444_900_000,
+        },
+        "mcpOAuth": {},
+    }
+    source.write_text(json.dumps(original), encoding="utf-8")
+    source.chmod(0o600)
+
+    def mutate_then_pass(  # noqa: PLR0913
+        case: SkillEvalCase,
+        harness: str,
+        grants: tuple[str, ...],
+        *,
+        roots: HarnessRoots,
+        env: dict[str, str],
+        expected_router_source_sha256: str | None = None,
+        process_manager: object | None = None,
+    ) -> EvalRunRecord:
+        _ = process_manager
+        _ = (grants, roots, expected_router_source_sha256)
+        contained = Path(env["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+        contained.write_text(json.dumps(rotated), encoding="utf-8")
+        contained.chmod(0o600)
+        return _passed_record(case, harness)
+
+    _install_binding(monkeypatch)
+    monkeypatch.setattr(eval_runner, "client_versions", _stub_versions)
+    monkeypatch.setattr(eval_runner, "execute_model_case", mutate_then_pass)
+    options = _options(
+        tmp_path,
+        dry_run=False,
+        credential_mode="ephemeral-owner-only-copy",
+        expected_source_commit="abc123",
+        source_codex_home=codex_src,
+        source_claude_home=claude_src,
+    )
+
+    code = run_eval_suite(options)
+
+    assert code == 0
+    assert json.loads(source.read_text(encoding="utf-8")) == rotated
+    assert source.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert not eval_runtime_root(evidence).exists()
+
+
+def test_claude_credential_promotion_refuses_concurrent_source_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "out"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
+    codex_src, claude_src = _seed_cli_sources(tmp_path)
+    source = claude_src / ".claude" / ".credentials.json"
+    original = {
+        "claudeAiOauth": {
+            "accessToken": "synthetic-access-material-original",
+            "refreshToken": "synthetic-refresh-material-original",
+            "expiresAt": 4_102_444_800_000,
+            "refreshTokenExpiresAt": 4_102_444_800_000,
+        },
+        "mcpOAuth": {},
+    }
+    rotated = {
+        "claudeAiOauth": {
+            "accessToken": "synthetic-access-material-rotated",
+            "refreshToken": "synthetic-refresh-material-rotated",
+            "expiresAt": 4_102_444_900_000,
+            "refreshTokenExpiresAt": 4_102_444_900_000,
+        },
+        "mcpOAuth": {},
+    }
+    concurrent: dict[str, object] = {
+        "claudeAiOauth": original["claudeAiOauth"],
+        "mcpOAuth": {"new": {}},
+    }
+    source.write_text(json.dumps(original), encoding="utf-8")
+    source.chmod(0o600)
+
+    def mutate_then_pass(  # noqa: PLR0913
+        case: SkillEvalCase,
+        harness: str,
+        grants: tuple[str, ...],
+        *,
+        roots: HarnessRoots,
+        env: dict[str, str],
+        expected_router_source_sha256: str | None = None,
+        process_manager: object | None = None,
+    ) -> EvalRunRecord:
+        _ = process_manager
+        _ = (grants, roots, expected_router_source_sha256)
+        contained = Path(env["CLAUDE_CONFIG_DIR"]) / ".credentials.json"
+        contained.write_text(json.dumps(rotated), encoding="utf-8")
+        contained.chmod(0o600)
+        source.write_text(json.dumps(concurrent), encoding="utf-8")
+        source.chmod(0o600)
+        return _passed_record(case, harness)
+
+    _install_binding(monkeypatch)
+    monkeypatch.setattr(eval_runner, "client_versions", _stub_versions)
+    monkeypatch.setattr(eval_runner, "execute_model_case", mutate_then_pass)
+    options = _options(
+        tmp_path,
+        dry_run=False,
+        credential_mode="ephemeral-owner-only-copy",
+        expected_source_commit="abc123",
+        source_codex_home=codex_src,
+        source_claude_home=claude_src,
+    )
+
+    code = run_eval_suite(options)
+
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+    assert code == 1
+    assert payload["cleanup"]["runtime_error"] == "claude_auth_promote_source_changed"
+    assert json.loads(source.read_text(encoding="utf-8")) == concurrent
+    assert not eval_runtime_root(evidence).exists()
+
+
 def test_cleanup_runs_on_child_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

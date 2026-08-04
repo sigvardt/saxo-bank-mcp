@@ -36,6 +36,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
     prepare_eval_isolated_runtime,
+    promote_rotated_claude_credentials,
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
@@ -402,6 +403,8 @@ def run_verified_installed_producer(
         command,
         claude_cache_root=install.claude.cache_root,
         source_repo=install.clone.path,
+        retained_codex_home=install.fixture_cleanup.run_root / "codex-home",
+        retained_claude_home=install.fixture_cleanup.run_root / "home",
     )
 
     _require_clean_source_commit(install.repo, candidate_commit)
@@ -1534,12 +1537,14 @@ def _producer_command(candidate_commit: str, installed_cache_sha256: str) -> tup
     )
 
 
-def _execute_installed_child(
+def _execute_installed_child(  # noqa: C901, PLR0912, PLR0913
     cache_root: Path,
     command: tuple[str, ...],
     *,
     claude_cache_root: Path,
     source_repo: Path,
+    retained_codex_home: Path,
+    retained_claude_home: Path,
 ) -> CommandResult:
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-proof-producer-", dir=temp_parent) as raw:
@@ -1550,6 +1555,8 @@ def _execute_installed_child(
                 runtime_root,
                 source_codex_home=None,
                 source_claude_home=None,
+                retained_codex_home=retained_codex_home,
+                retained_claude_home=retained_claude_home,
                 retained_codex_plugin_root=cache_root,
             )
         except MatrixEnvError as error:
@@ -1582,6 +1589,15 @@ def _execute_installed_child(
                 promote_rotated_sim_token_cache(runtime)
             except MatrixEnvError as error:
                 promotion_error = error
+            try:
+                promote_rotated_claude_credentials(runtime)
+            except MatrixEnvError as error:
+                if promotion_error is None:
+                    promotion_error = error
+                else:
+                    promotion_error = MatrixEnvError(
+                        f"{promotion_error.reason}+{error.reason}",
+                    )
             try:
                 require_matrix_runtime_cleanup(runtime.run_root)
             except MatrixEnvError as error:
