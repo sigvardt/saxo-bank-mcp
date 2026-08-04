@@ -268,6 +268,13 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
     assert "--ephemeral" in codex
     assert (codex[codex.index("--sandbox")], "read-only") == ("--sandbox", "read-only")
     assert 'approval_policy="never"' in codex
+    assert 'cli_auth_credentials_store="file"' in codex
+    assert 'mcp_oauth_credentials_store="file"' in codex
+    assert not any(
+        unsafe in argument.lower()
+        for argument in codex
+        for unsafe in ("keychain", "keyring", "security", "browser", "login")
+    )
     assert (
         codex[codex.index("shell_tool") - 1],
         codex[codex.index("shell_tool")],
@@ -282,6 +289,7 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
         claude[claude.index("--permission-mode") + 1],
     ) == ("--permission-mode", "bypassPermissions")
     assert "--strict-mcp-config" in claude
+    assert "--no-chrome" in claude
     assert claude[claude.index("--mcp-config") + 1] == str(mcp_config)
     disallowed = claude[claude.index("--disallowedTools") + 1]
     assert "Bash" in disallowed
@@ -292,3 +300,8 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
     assert "--output-format" in claude
     assert "stream-json" in claude
     assert "plan" not in claude
+    assert not any(
+        unsafe in argument.lower()
+        for argument in claude
+        for unsafe in ("keychain", "keyring", "security", "browser", "login")
+    )

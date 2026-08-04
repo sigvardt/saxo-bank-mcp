@@ -31,8 +31,9 @@ from saxo_bank_mcp.agent_skill_eval_tool_protocol import (
     parse_codex_model_output,
 )
 from saxo_bank_mcp.agent_skill_matrix_env import (
+    MatrixEnvError,
+    eval_runtime_root,
     prepare_eval_isolated_runtime,
-    require_matrix_runtime_cleanup,
 )
 from saxo_bank_mcp.agent_skill_router_eval_protocol import parse_claude_router_output
 
@@ -1124,9 +1125,15 @@ def test_lifecycle_prompt_and_skill_require_preview_place_cancel_ledger() -> Non
     )
 
 
-def test_claude_keychain_seed_writes_owner_only_credentials(
+@pytest.mark.parametrize(
+    ("missing", "reason"),
+    [("codex", "codex_file_auth_missing"), ("claude", "claude_file_auth_missing")],
+)
+def test_eval_runtime_requires_file_credentials_without_keychain_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    missing: str,
+    reason: str,
 ) -> None:
     evidence = tmp_path / "evidence"
     evidence.mkdir()
@@ -1162,32 +1169,26 @@ def test_claude_keychain_seed_writes_owner_only_credentials(
     )
     monkeypatch.setenv("SAXO_MCP_SIM_CREDENTIAL_FILE", str(sim_cred))
     monkeypatch.setenv("SAXO_MCP_TOKEN_CACHE_PATH", str(sim_token))
-    monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
-    (tmp_path / "empty-home").mkdir()
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-    canary = "seed-fixture-canary-value"
-    blob = json.dumps({"claudeAiOauth": {"sessionMaterial": canary}})
+    codex_home = tmp_path / "codex-source"
+    claude_home = tmp_path / "claude-source"
+    codex_home.mkdir()
+    (claude_home / ".claude").mkdir(parents=True)
+    codex_auth = codex_home / "auth.json"
+    claude_auth = claude_home / ".claude" / ".credentials.json"
+    codex_auth.write_text('{"auth":"synthetic"}\n', encoding="utf-8")
+    claude_auth.write_text('{"auth":"synthetic"}\n', encoding="utf-8")
+    codex_auth.chmod(OWNER_FILE_MODE)
+    claude_auth.chmod(OWNER_FILE_MODE)
+    (codex_auth if missing == "codex" else claude_auth).unlink()
 
-    def fake_export() -> str | None:
-        return blob
+    with pytest.raises(MatrixEnvError, match=reason):
+        prepare_eval_isolated_runtime(
+            evidence,
+            source_codex_home=codex_home,
+            source_claude_home=claude_home,
+        )
 
-    monkeypatch.setattr(
-        "saxo_bank_mcp.agent_skill_matrix_env._export_claude_keychain_credentials",
-        fake_export,
-    )
-
-    runtime = prepare_eval_isolated_runtime(
-        evidence,
-        source_codex_home=None,
-        source_claude_home=None,
-    )
-    try:
-        cred = runtime.home / ".claude" / ".credentials.json"
-        assert cred.is_file()
-        assert cred.stat().st_mode & 0o777 == OWNER_FILE_MODE
-        assert cred.read_text(encoding="utf-8") == blob
-        rendered = json.dumps(runtime.env)
-        assert canary not in rendered
-    finally:
-        require_matrix_runtime_cleanup(runtime.run_root)
+    assert not eval_runtime_root(evidence).exists()
+    source = Path("src/saxo_bank_mcp/agent_skill_matrix_env.py").read_text(encoding="utf-8")
+    assert "/usr/bin/security" not in source
+    assert "keychain" not in source.lower()

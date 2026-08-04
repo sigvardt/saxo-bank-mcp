@@ -18,6 +18,12 @@ CLAUDE_COMMAND_TOOLS: Final = frozenset(
     {"bash", "shell", "computer", "edit", "write", "read", "notebookedit"},
 )
 CLAUDE_PROTOCOL_TOOLS: Final = frozenset({"structuredoutput"})
+CODEX_FILE_CREDENTIAL_STORE_OVERRIDES: Final = (
+    "-c",
+    'cli_auth_credentials_store="file"',
+    "-c",
+    'mcp_oauth_credentials_store="file"',
+)
 
 
 class _CodexItem(BaseModel):
@@ -192,6 +198,7 @@ def codex_router_command(
         "remote_plugin",
         "-c",
         'web_search="disabled"',
+        *CODEX_FILE_CREDENTIAL_STORE_OVERRIDES,
         *mcp_overrides,
         "--color",
         "never",

@@ -148,16 +148,29 @@ def test_native_router_commands_disable_tools_and_mcp(tmp_path: Path) -> None:
     assert "--ignore-rules" in codex
     assert _adjacent_pair(codex, "shell_tool") == ("--disable", "shell_tool")
     assert 'web_search="disabled"' in codex
+    assert 'cli_auth_credentials_store="file"' in codex
+    assert 'mcp_oauth_credentials_store="file"' in codex
     assert "mcp_servers.cloud-run.enabled=false" in codex
     assert "mcp_servers.playwright.enabled=false" in codex
+    assert not any(
+        unsafe in argument.lower()
+        for argument in codex
+        for unsafe in ("keychain", "keyring", "security", "browser", "login")
+    )
 
     # Then: Claude exposes no built-in tools or MCP servers.
     # argv0 may be absolute (symlink-preserving resolve) or bare when missing.
     assert claude[0] == "claude" or Path(claude[0]).name.startswith("claude")
     assert _adjacent_pair(claude, "") == ("--tools", "")
     assert "--safe-mode" in claude
+    assert "--no-chrome" in claude
     assert "--strict-mcp-config" in claude
     assert '{"mcpServers":{}}' in claude
+    assert not any(
+        unsafe in argument.lower()
+        for argument in claude
+        for unsafe in ("keychain", "keyring", "security", "browser", "login")
+    )
 
 
 def test_codex_mcp_names_and_response_schema_are_strict(tmp_path: Path) -> None:

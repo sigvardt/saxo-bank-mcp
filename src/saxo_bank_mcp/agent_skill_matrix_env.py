@@ -4,7 +4,6 @@ import hashlib
 import os
 import shutil
 import stat
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -40,7 +39,6 @@ OWNER_DIR_MODE: Final = 0o700
 # Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
 _CLAUDE_AUTH_SEED_RELATIVES: Final = (Path(".claude") / ".credentials.json",)
-_CLAUDE_KEYCHAIN_SERVICE: Final = "Claude Code-credentials"
 # Retained install plugin registration/artifacts only (options.codex_home / options.claude_home).
 _CODEX_PLUGIN_SEED_FILES: Final = ("config.toml",)
 _CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
@@ -335,11 +333,13 @@ def _seed_auth_files(
     codex_auth = _resolve_codex_source_home(source_codex_home)
     claude_auth = _resolve_claude_source_home(source_claude_home)
     for name in _CODEX_AUTH_SEED_FILES:
-        _copy_optional_owner_only_file(
+        copied = _copy_optional_owner_only_file(
             codex_auth / name,
             runtime.codex_home / name,
             copy_reason="codex_auth_copy_failed",
         )
+        if copied is None:
+            raise MatrixEnvError("codex_file_auth_missing")
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
         copied = _copy_optional_owner_only_file(
             claude_auth / relative,
@@ -347,72 +347,7 @@ def _seed_auth_files(
             copy_reason="claude_auth_copy_failed",
         )
         if copied is None:
-            _seed_claude_credentials_from_keychain(runtime.home / relative)
-
-
-def _export_claude_keychain_credentials() -> str | None:
-    """Read Claude Code keychain auth noninteractively. Never log the value."""
-    account = os.environ.get("USER", "").strip() or os.environ.get("LOGNAME", "").strip() or "user"
-    try:
-        result = subprocess.run(
-            [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-s",
-                _CLAUDE_KEYCHAIN_SERVICE,
-                "-a",
-                account,
-                "-w",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        # Older installs may use account "user" even when $USER differs.
-        if account == "user":
-            return None
-        try:
-            result = subprocess.run(
-                [
-                    "/usr/bin/security",
-                    "find-generic-password",
-                    "-s",
-                    _CLAUDE_KEYCHAIN_SERVICE,
-                    "-a",
-                    "user",
-                    "-w",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if result.returncode != 0:
-            return None
-    blob = result.stdout.removesuffix("\n")
-    if not blob.startswith("{"):
-        return None
-    return blob
-
-
-def _seed_claude_credentials_from_keychain(target: Path) -> None:
-    """Materialize owner-only .credentials.json from Keychain when file auth is absent."""
-    blob = _export_claude_keychain_credentials()
-    if blob is None:
-        return
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.parent.chmod(OWNER_DIR_MODE)
-        target.write_text(blob, encoding="utf-8")
-        target.chmod(OWNER_FILE_MODE)
-    except OSError as exc:
-        raise MatrixEnvError("claude_auth_copy_failed") from exc
+            raise MatrixEnvError("claude_file_auth_missing")
 
 
 def _seed_retained_plugin_registration(
