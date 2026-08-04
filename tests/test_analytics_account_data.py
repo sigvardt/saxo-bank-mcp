@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlencode
 
 import duckdb
@@ -39,7 +40,10 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 
 
 class _PayloadExecutor:
-    def __init__(self, payloads: Sequence[Mapping[str, object]]) -> None:
+    def __init__(
+        self,
+        payloads: Sequence[Mapping[str, object] | list[Mapping[str, object]]],
+    ) -> None:
         self._payloads = list(payloads)
         self.calls: list[tuple[str, str, dict[str, str]]] = []
 
@@ -110,11 +114,18 @@ def _closed_position(
     closing: dict[str, object] = {"Amount": 1.0, "AssetType": "Stock"}
     if uic is not None:
         closing["Uic"] = uic
-    return {
+    result: dict[str, object] = {
+        "Amount": 1.0,
+        "AssetType": "Stock",
+        "ClosePositionId": position_id,
         "ClosedPosition": closed,
         "ClosedPositionId": position_id,
         "ClosingPosition": closing,
+        "PnLAccountCurrency": 8.0,
     }
+    if closed_at is not None:
+        result["TradeDateClose"] = closed_at
+    return result
 
 
 def _category_counts(result: AccountSyncResult) -> dict[str, int]:
@@ -694,8 +705,8 @@ async def test_private_account_result_caps_records_across_all_source_pages(
             "$top": config.limits.response_rows,
             "AccountKeys": scope.account_key.get_secret_value(),
             "ClientKey": scope.client_key.get_secret_value(),
-            "FromDate": _START.isoformat(),
-            "ToDate": _END.isoformat(),
+            "FromDate": _START.date().isoformat(),
+            "ToDate": _END.date().isoformat(),
         },
     )
     executor = _PayloadExecutor(
@@ -823,6 +834,50 @@ async def test_closed_positions_filter_date_granularity_to_exact_utc_coverage(
 
 
 @pytest.mark.anyio
+async def test_current_flat_closed_position_normalizes_without_inventing_instrument_identity(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    result = await sync_closed_positions(
+        _scope(),
+        _START,
+        _END,
+        provider=SaxoAnalyticsProvider(
+            request_executor=_PayloadExecutor(
+                (
+                    {
+                        "Data": [
+                            {
+                                "Amount": 1.0,
+                                "AssetType": "Stock",
+                                "ClosePositionId": "synthetic-current-close",
+                                "PnLAccountCurrency": 8.0,
+                                "TradeDateClose": "2026-07-17",
+                            },
+                        ],
+                    },
+                ),
+            ),
+        ),
+        config=config,
+        visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        trusted_local_host=True,
+        clock=lambda: _CAPTURED_AT,
+    )
+
+    assert result.datasets[0].row_count == 1
+    assert "closed_position_instrument_unavailable" in result.datasets[0].warnings
+    assert result.private_records is not None
+    assert result.private_records[0].effective_at == datetime(
+        2026,
+        7,
+        17,
+        tzinfo=UTC,
+    )
+    assert result.private_records[0].instrument_handle is None
+
+
+@pytest.mark.anyio
 async def test_same_source_identity_stays_isolated_between_account_aliases(
     tmp_path: Path,
 ) -> None:
@@ -886,14 +941,17 @@ async def test_account_history_syncs_transactions_bookings_and_closed_positions(
                 "Data": [
                     {
                         "Amount": -2.0,
-                        "BookingDate": "2026-07-16T10:00:00Z",
-                        "BookingId": "synthetic-booking",
+                        "BkAmountId": "synthetic-booking",
+                        "Date": "2026-07-16",
                     },
                 ],
             },
             {
                 "Data": [
                     {
+                        "Amount": 1.0,
+                        "AssetType": "Stock",
+                        "ClosePositionId": "synthetic-closed-position",
                         "ClosedPosition": {
                             "ClosedProfitLoss": 8.0,
                             "ExecutionTimeClose": "2026-07-17T10:00:00Z",
@@ -904,6 +962,8 @@ async def test_account_history_syncs_transactions_bookings_and_closed_positions(
                             "AssetType": "Stock",
                             "Uic": 1001,
                         },
+                        "PnLAccountCurrency": 8.0,
+                        "TradeDateClose": "2026-07-17T10:00:00Z",
                     },
                 ],
             },
@@ -920,6 +980,10 @@ async def test_account_history_syncs_transactions_bookings_and_closed_positions(
     )
 
     assert result.source_request_count == 3
+    assert executor.calls[0][2]["FromDate"] == _START.date().isoformat()
+    assert executor.calls[0][2]["ToDate"] == _END.date().isoformat()
+    assert executor.calls[1][2]["FromDate"] == _START.date().isoformat()
+    assert executor.calls[1][2]["ToDate"] == _END.date().isoformat()
     assert [item.data_kind for item in result.datasets] == [
         "transactions",
         "bookings",
@@ -984,32 +1048,62 @@ async def test_cost_sources_preserve_fee_tax_and_missing_fx_time_privately(
     config = _config(tmp_path)
     scope = _scope()
     handle = _seed_instrument(config)
-    executor = _PayloadExecutor(
-        (
-            {
-                "Cost": {"Commission": 2.0, "StampDuty": 1.0, "TotalCost": 3.0},
-                "Currency": "DKK",
-                "HoldingPeriodInDays": 1,
+    cost_payload = cast(
+        "Mapping[str, object]",
+        {
+            "AccountCurrency": "DKK",
+            "AccountID": "synthetic-account",
+            "Amount": 1.0,
+            "AssetType": "Stock",
+            "Cost": {
+                "Long": {
+                    "BuySell": "Buy",
+                    "Currency": "DKK",
+                    "TotalCost": 3.0,
+                    "TotalCostPct": 0.03,
+                    "TradingCost": {
+                        "Commissions": [
+                            {"Pct": 0.02, "Rule": {}, "Value": 2.0},
+                        ],
+                        "Spread": {
+                            "DisplayDecimals": 2,
+                            "Pct": 0.01,
+                            "Rule": {"Value": 0.01},
+                            "Value": 1.0,
+                        },
+                    },
+                },
             },
-        ),
+            "CostCalculationAssumptions": [],
+            "HoldingPeriodInDays": 1,
+            "Instrument": "Synthetic instrument",
+            "Price": 50.0,
+            "Uic": 1,
+        },
     )
+    executor = _PayloadExecutor((cost_payload,))
 
     result = await sync_cost_sources(
         scope,
         (handle,),
         provider=SaxoAnalyticsProvider(request_executor=executor),
         config=config,
+        reference_prices={handle: 50.0},
         visibility=VisibilityMode.PRIVATE_USER_RESULT,
         trusted_local_host=True,
         clock=lambda: _CAPTURED_AT,
     )
 
     assert result.source_request_count == 1
+    assert executor.calls[0][2]["Amount"] == "1"
+    assert executor.calls[0][2]["HoldingPeriodInDays"] == "1"
+    assert float(executor.calls[0][2]["Price"]) == 50.0
+    assert "TradeContext" not in executor.calls[0][2]
     assert result.private_records is not None
     record = result.private_records[0]
     assert record.amount_value == 3.0
     assert record.fee_value == 2.0
-    assert record.tax_value == 1.0
+    assert record.tax_value is None
     assert record.currency == "DKK"
     assert record.fx_timestamp is None
     assert record.tax_lot_basis_available is False
@@ -1038,23 +1132,30 @@ async def test_account_analysis_sources_capture_exact_performance_and_exposure_l
     handle = _seed_instrument(config)
     executor = _PayloadExecutor(
         (
-            {"AccountValue": 1000.0, "TimeWeightedReturn": 1.0},
+            {"AccountValue": 1000.0, "AccumulatedProfitLoss": 10.0},
             {
-                "Data": [
-                    {"Date": "2026-07-31", "EndOfDayBalance": 990.0},
-                    {"Date": "2026-08-01", "EndOfDayBalance": 1000.0},
-                ],
+                "Balance": {
+                    "AccountValue": [
+                        {"Date": "2026-07-31", "Value": 990.0},
+                        {"Date": "2026-08-01", "Value": 1000.0},
+                    ],
+                    "CashTransfer": [],
+                },
+                "TimeWeighted": {
+                    "Accumulated": [
+                        {"Date": "2026-07-31", "Value": 0.0},
+                        {"Date": "2026-08-01", "Value": 1.0},
+                    ],
+                },
             },
-            {
-                "Data": [
-                    {
-                        "Amount": 1.0,
-                        "AssetType": "Stock",
-                        "Currency": "DKK",
-                        "Uic": 1001,
-                    },
-                ],
-            },
+            [
+                {
+                    "Amount": 1.0,
+                    "AssetType": "Stock",
+                    "Currency": "DKK",
+                    "Uic": 1001,
+                },
+            ],
         ),
     )
 

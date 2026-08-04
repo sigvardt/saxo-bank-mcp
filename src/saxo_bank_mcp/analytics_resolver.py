@@ -105,7 +105,9 @@ class ResolutionResult(_StrictModel):
 
 
 class _SourceInstrument(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    # The provider has already validated every declared source field. Resolver identity needs only
+    # this bounded projection and ignores other contract-declared reference metadata.
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
 
     identifier: int = Field(alias="Identifier", ge=0)
     asset_type: str = Field(alias="AssetType", min_length=1, max_length=64)

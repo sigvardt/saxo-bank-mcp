@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final, Protocol, cast
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 
 import httpx2
 from pydantic import TypeAdapter, ValidationError
@@ -116,7 +116,7 @@ _BLOCKED_ROUTING_KEYS: Final = frozenset(
         "url",
     }
 )
-_SAFE_PATH_VALUE_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+-]{1,255}$")
+_SAFE_PATH_VALUE_PATTERN: Final = re.compile(r"^[A-Za-z0-9._:+/|=-]{1,255}$")
 _SAFE_CURSOR_INTEGER_PATTERN: Final = re.compile(r"^[0-9]+$")
 _SAFE_CURSOR_TOKEN_PATTERN: Final = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
 _SAFE_ERROR_CODE_PATTERN: Final = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,127}$")
@@ -126,6 +126,9 @@ _MAX_RETRY_DELAY_SECONDS: Final = 30.0
 _BASE_RETRY_DELAY_SECONDS: Final = 0.05
 _SOURCE_OBJECT_ADAPTER: Final[TypeAdapter[dict[str, SourceJsonValue]]] = TypeAdapter(
     dict[str, SourceJsonValue]
+)
+_SOURCE_ROWS_ADAPTER: Final[TypeAdapter[list[dict[str, SourceJsonValue]]]] = TypeAdapter(
+    list[dict[str, SourceJsonValue]]
 )
 
 type Sleep = Callable[[float], Awaitable[None]]
@@ -796,7 +799,7 @@ def _path_parameter(value: object, contract_id: str) -> str:
             "source route parameter is not a safe path segment",
             contract_id=contract_id,
         )
-    return rendered
+    return quote(rendered, safe="")
 
 
 def _query_parameter(value: object, contract_id: str) -> str:
@@ -838,9 +841,9 @@ def _query_parameter(value: object, contract_id: str) -> str:
 
 def _registered_operation(
     contract: SourceContract,
-    request_target: str,
+    _request_target: str,
 ) -> EndpointOperation:
-    registered = find_registered_endpoint("GET", request_target)
+    registered = find_registered_endpoint("GET", contract.path_template)
     if (
         registered is None
         or registered.operation.operation_id != contract.operation_id
@@ -1030,6 +1033,10 @@ def _parse_response_object(
 ) -> dict[str, SourceJsonValue]:
     try:
         parsed = parse_json_value(content)
+        contract = source_contracts_by_id().get(contract_id)
+        if contract is not None and contract.response_shape is SourceResponseShape.TOP_LEVEL_ARRAY:
+            rows = _SOURCE_ROWS_ADAPTER.validate_python(parsed, strict=True)
+            return {"Data": cast("SourceJsonValue", rows)}
         return _SOURCE_OBJECT_ADAPTER.validate_python(parsed, strict=True)
     except (StrictJsonError, ValidationError):
         raise SourcePayloadError(

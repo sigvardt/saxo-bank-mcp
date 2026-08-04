@@ -62,7 +62,7 @@
           "input_id": "ordered_price_observations",
           "unit": "price_and_utc_timestamp",
           "source_contract_id": "chart_v3",
-          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "field_paths": ["Time", "Close", "CloseBid", "Open", "OpenBid", "High", "HighBid", "Low", "LowBid", "Volume"],
           "derived_input": null
         },
         {
@@ -99,14 +99,14 @@
           "input_id": "portfolio_valuations",
           "unit": "reporting_currency_and_utc_timestamp",
           "source_contract_id": "performance_timeseries_v4",
-          "field_paths": ["Date", "EndOfDayBalance", "TimeWeightedReturn", "Benchmark"],
+          "field_paths": ["Balance.AccountValue.Date", "Balance.AccountValue.Value", "Balance.CashTransfer.Date", "Balance.CashTransfer.Value", "TimeWeighted.Accumulated.Date", "TimeWeighted.Accumulated.Value", "Benchmark"],
           "derived_input": null
         },
         {
           "input_id": "portfolio_summary",
           "unit": "reporting_currency_and_ratio",
           "source_contract_id": "performance_summary_v4",
-          "field_paths": ["AccountValue", "TimeWeightedReturn", "TotalCashBalance"],
+          "field_paths": ["AccountValue", "AccumulatedProfitLoss", "TotalCashBalance"],
           "derived_input": null
         },
         {
@@ -297,7 +297,7 @@
           "input_id": "eligible_price_bars",
           "unit": "price_volume_and_utc_timestamp",
           "source_contract_id": "chart_v3",
-          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "field_paths": ["Time", "Close", "CloseBid", "Open", "OpenBid", "High", "HighBid", "Low", "LowBid", "Volume"],
           "derived_input": null
         }
       ],
@@ -375,7 +375,7 @@
           "input_id": "technical_price_bars",
           "unit": "ohlcv_and_utc_timestamp",
           "source_contract_id": "chart_v3",
-          "field_paths": ["Time", "CloseBid", "OpenBid", "HighBid", "LowBid", "Volume"],
+          "field_paths": ["Time", "Close", "CloseBid", "Open", "OpenBid", "High", "HighBid", "Low", "LowBid", "Volume"],
           "derived_input": null
         },
         {
@@ -509,7 +509,7 @@
               "input_id": "price_return_endpoints",
               "unit": "price_and_utc_timestamp",
               "source_contract_id": "chart_v3",
-              "field_paths": ["Time", "CloseBid"],
+              "field_paths": ["Time", "Close", "CloseBid"],
               "derived_input": null
             }
           ]
@@ -525,7 +525,7 @@
               "input_id": "daily_return_closes",
               "unit": "price_and_utc_timestamp",
               "source_contract_id": "chart_v3",
-              "field_paths": ["Time", "CloseBid"],
+              "field_paths": ["Time", "Close", "CloseBid"],
               "derived_input": null
             }
           ]
@@ -744,7 +744,7 @@
         {"metric_id": "arrival_price", "meaning": "Exact MCP-captured market reference at decision time.", "formula": "reference_price_id=bid selects captured_quote.Quote.Bid, reference_price_id=ask selects captured_quote.Quote.Ask, and reference_price_id=midpoint requires synchronized Bid and Ask then computes (Bid+Ask)/2; refuse every other reference_price_id or an absent decision-time capture."},
         {"metric_id": "midpoint_price", "meaning": "Midpoint of one synchronized eligible bid and ask quote.", "formula": "(bid + ask) / 2.", "default_metric_class": "calculated_verified"},
         {"metric_id": "vwap", "meaning": "Volume-weighted average execution price.", "formula": "I={the complete ordered eligible executions in the exact request interval}; vwap=sum_{i in I}(price_i*volume_i)/sum_{i in I}(volume_i); refuse zero total volume.", "default_metric_class": "calculated_verified"},
-        {"metric_id": "bar_approximation_price", "meaning": "Explicit nearest Saxo chart-bar reference when no decision quote exists.", "formula": "bar_price_id=open_bid selects nearest_completed_bar.OpenBid, bar_price_id=close_bid selects CloseBid, bar_price_id=high_bid selects HighBid, and bar_price_id=low_bid selects LowBid; refuse every other bar_price_id and never label the result as arrival_price or midpoint_price.", "default_metric_class": "approximation"},
+        {"metric_id": "bar_approximation_price", "meaning": "Explicit nearest Saxo chart-bar reference when no decision quote exists.", "formula": "Select Open, Close, High, or Low from the exact stored chart basis; a bid-basis bar uses OpenBid, CloseBid, HighBid, or LowBid respectively. Refuse every other bar_price_id and never label the result as arrival_price or midpoint_price.", "default_metric_class": "approximation"},
         {"metric_id": "slippage", "meaning": "Side-normalized execution price difference from the eligible reference.", "formula": "side_sign*(execution_price-reference_price), where positive is adverse cost.", "default_metric_class": "calculated_verified"},
         {"metric_id": "spread", "meaning": "Eligible ask minus bid.", "formula": "ask - bid; refuse missing or asynchronous sides.", "default_metric_class": "calculated_verified"}
       ]

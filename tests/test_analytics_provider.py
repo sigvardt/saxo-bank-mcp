@@ -156,6 +156,96 @@ async def test_provider_uses_only_the_frozen_registered_read_route() -> None:
 
 
 @pytest.mark.anyio
+async def test_safe_base64_style_source_path_segment_is_not_mistaken_for_routing() -> None:
+    executor = FakeExecutor([_json_response(200, {"Data": []})])
+    provider = _provider(executor)
+    first_segment = "segment-a"
+    second_segment = "safe|selector/+=="
+
+    pages = [
+        page
+        async for page in provider.fetch(
+            "bookings_v1",
+            {
+                "$top": 1,
+                "AccountKey": first_segment,
+                "ClientKey": second_segment,
+                "FromDate": "2026-01-01T00:00:00+00:00",
+                "ToDate": "2026-01-02T00:00:00+00:00",
+            },
+        )
+    ]
+
+    assert len(pages) == 1
+    assert executor.calls[0][1] == "/cs/v1/reports/bookings/safe%7Cselector%2F%2B%3D%3D"
+
+
+@pytest.mark.anyio
+async def test_current_top_level_exposure_array_is_canonicalized_by_its_exact_contract() -> None:
+    executor = FakeExecutor(
+        [
+            _json_response(
+                200,
+                [
+                    {
+                        "Amount": 1.0,
+                        "AssetType": "Stock",
+                        "AverageOpenPrice": 1.0,
+                        "CalculationReliability": "Ok",
+                        "CanBeClosed": True,
+                        "DisplayAndFormat": {
+                            "Currency": "USD",
+                            "Decimals": 2,
+                            "Description": "Synthetic instrument",
+                            "Format": "Normal",
+                            "Symbol": "SYN",
+                        },
+                        "InstrumentPriceDayPercentChange": 0.0,
+                        "NetPositionId": "synthetic-net-position",
+                        "ProfitLossOnTrade": 0.0,
+                        "Uic": 1,
+                    },
+                ],
+            ),
+        ],
+    )
+
+    pages = [
+        page
+        async for page in _provider(executor).fetch(
+            "exposure_instruments_v1",
+            {"AssetType": "Stock", "Uic": 1},
+        )
+    ]
+
+    assert len(pages) == 1
+    assert pages[0].row_count == 1
+    assert pages[0].rows[0]["AssetType"] == "Stock"
+
+
+@pytest.mark.anyio
+async def test_source_path_segment_still_rejects_caller_percent_encoding() -> None:
+    provider = _provider(FakeExecutor([]))
+    first_segment = "segment-a"
+    encoded_segment = "unsafe%2Fselector"
+
+    with pytest.raises(SourceRequestError, match="safe path segment"):
+        _ = [
+            page
+            async for page in provider.fetch(
+                "bookings_v1",
+                {
+                    "$top": 1,
+                    "AccountKey": first_segment,
+                    "ClientKey": encoded_segment,
+                    "FromDate": "2026-01-01T00:00:00+00:00",
+                    "ToDate": "2026-01-02T00:00:00+00:00",
+                },
+            )
+        ]
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("routing_key", ["url", "path", "method", "operation_id", "__next"])
 async def test_provider_rejects_raw_caller_routing_before_transport(
     routing_key: str,
@@ -270,8 +360,8 @@ async def test_returned_pagination_cannot_change_the_scoped_resource_path() -> N
                 {
                     "Data": [
                         {
-                            "BookingId": "synthetic-booking",
-                            "BookingDate": "2026-07-29T08:00:00Z",
+                            "BkAmountId": "synthetic-booking",
+                            "Date": "2026-07-29",
                         }
                     ],
                     "__next": ("/cs/v1/reports/bookings/client-b?$skiptoken=private-continuation"),
@@ -473,8 +563,8 @@ async def test_path_scoped_continuation_is_rebuilt_before_transport() -> None:
                 {
                     "Data": [
                         {
-                            "BookingId": "synthetic-booking-a",
-                            "BookingDate": "2026-07-29T08:00:00Z",
+                            "BkAmountId": "synthetic-booking-a",
+                            "Date": "2026-07-29",
                         }
                     ],
                     "__next": ("/cs/v1/reports/bookings/client-a?$skiptoken=second"),
@@ -485,8 +575,8 @@ async def test_path_scoped_continuation_is_rebuilt_before_transport() -> None:
                 {
                     "Data": [
                         {
-                            "BookingId": "synthetic-booking-b",
-                            "BookingDate": "2026-07-29T08:01:00Z",
+                            "BkAmountId": "synthetic-booking-b",
+                            "Date": "2026-07-29",
                         }
                     ]
                 },

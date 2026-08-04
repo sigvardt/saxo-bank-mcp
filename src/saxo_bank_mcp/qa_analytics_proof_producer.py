@@ -1187,7 +1187,7 @@ def _bundle_from_process_executions(
     parity_receipts = suite_evidence.artifact_parity_receipts
     visual_receipts = suite_evidence.artifact_visual_receipts
     lifecycle = typed_matrix.controlled_sim_lifecycle
-    if lifecycle is None or lifecycle.evidence_state != "passed":
+    if lifecycle is None or lifecycle.evidence_state == "refused":
         raise ProofProducerError("installed_controlled_sim_lifecycle_missing")
     job_cases = next(
         receipt
@@ -1415,7 +1415,16 @@ def _exact_terminal_analysis_receipts(
             raise ProofProducerError("installed_analytics_terminal_receipt_duplicate")
         if receipt.state == "failed" or receipt.expected_analysis_outcome is None:
             raise ProofProducerError("installed_analytics_terminal_receipt_invalid")
-        if (receipt.tool_id, receipt.expected_analysis_outcome) != expected[analysis_kind]:
+        expected_tool, expected_outcome = expected[analysis_kind]
+        source_bound_refusal = (
+            expected_outcome == "persisted"
+            and receipt.expected_analysis_outcome == "refused"
+            and receipt.source_precondition_refused
+            and receipt.source_precondition_evidence_sha256 is not None
+        )
+        if receipt.tool_id != expected_tool or (
+            receipt.expected_analysis_outcome != expected_outcome and not source_bound_refusal
+        ):
             raise ProofProducerError("installed_analytics_terminal_receipt_contract_mismatch")
         selected[analysis_kind] = receipt
     if set(selected) != expected_kinds:

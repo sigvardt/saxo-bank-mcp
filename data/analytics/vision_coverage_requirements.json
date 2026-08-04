@@ -350,9 +350,13 @@
       "contract_id": "chart_v3",
       "field_paths": [
         "Time",
+        "Close",
         "CloseBid",
+        "Open",
         "OpenBid",
+        "High",
         "HighBid",
+        "Low",
         "LowBid",
         "Volume",
         "AskVolume",
@@ -436,9 +440,12 @@
     {
       "contract_id": "performance_timeseries_v4",
       "field_paths": [
-        "Date",
-        "EndOfDayBalance",
-        "TimeWeightedReturn",
+        "Balance.AccountValue.Date",
+        "Balance.AccountValue.Value",
+        "Balance.CashTransfer.Date",
+        "Balance.CashTransfer.Value",
+        "TimeWeighted.Accumulated.Date",
+        "TimeWeighted.Accumulated.Value",
         "Benchmark"
       ]
     },

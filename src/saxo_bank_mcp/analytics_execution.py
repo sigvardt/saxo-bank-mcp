@@ -639,24 +639,52 @@ def _build_portfolio_context(  # noqa: PLR0913
     _ = config, source_dataset_ids, origin_analysis
     summary = _single_source_row(pages, "performance_summary_v4")
     balance = _single_source_row(pages, "balances_v1")
-    series = tuple(
-        sorted(
-            _source_rows(pages, "performance_timeseries_v4"),
-            key=lambda row: _utc_value(row, "Date"),
-        ),
-    )
+    timeseries = _single_source_row(pages, "performance_timeseries_v4")
+    current_balance = timeseries.get("Balance")
+    if isinstance(current_balance, Mapping):
+        typed_balance = cast("Mapping[str, object]", current_balance)
+        series = tuple(
+            sorted(
+                _mapping_rows_value(typed_balance, "AccountValue"),
+                key=lambda row: _utc_value(row, "Date"),
+            ),
+        )
+        if _mapping_rows_value(typed_balance, "CashTransfer", required=False):
+            raise StoredAnalysisExecutionError(
+                "portfolio_flow_boundary_valuations_unavailable",
+            )
+        value_field = "Value"
+    else:
+        series = tuple(
+            sorted(
+                _source_rows(pages, "performance_timeseries_v4"),
+                key=lambda row: _utc_value(row, "Date"),
+            ),
+        )
+        value_field = "EndOfDayBalance"
     if len(series) < _MINIMUM_PORTFOLIO_VALUATIONS:
         raise StoredAnalysisExecutionError("portfolio_boundary_valuations_unavailable")
     if _source_rows(pages, "transactions_v1") or _source_rows(pages, "bookings_v1"):
         raise StoredAnalysisExecutionError("portfolio_flow_boundary_valuations_unavailable")
     start_at = _utc_value(series[0], "Date")
     end_at = _utc_value(series[-1], "Date")
-    opening = _decimal_value(series[0], "EndOfDayBalance", positive=True)
-    closing = _decimal_value(series[-1], "EndOfDayBalance", nonnegative=True)
-    summary_closing = _decimal_value(summary, "AccountValue", nonnegative=True)
+    opening = _decimal_value(series[0], value_field, positive=True)
+    closing = _decimal_value(series[-1], value_field, nonnegative=True)
+    summary_closing = (
+        _decimal_value(summary, "AccountValue", nonnegative=True)
+        if summary.get("AccountValue") is not None
+        else _decimal_value(balance, "TotalValue", nonnegative=True)
+    )
     if closing != summary_closing or end_at > as_of:
         raise StoredAnalysisExecutionError("portfolio_performance_reconciliation_unavailable")
     profit_loss = closing - opening
+    saxo_profit_loss = (
+        _decimal_value(summary, "AccumulatedProfitLoss")
+        if summary.get("AccumulatedProfitLoss") is not None
+        else profit_loss
+    )
+    if saxo_profit_loss != profit_loss:
+        raise StoredAnalysisExecutionError("portfolio_performance_reconciliation_unavailable")
     reported_return = summary.get("TimeWeightedReturn")
     if reported_return is not None:
         calculated_return = profit_loss / opening * Decimal(100)
@@ -697,7 +725,7 @@ def _build_portfolio_context(  # noqa: PLR0913
             benchmark=None,
             saxo_totals=SaxoPerformanceTotals(
                 closing_value=summary_closing,
-                total_profit_loss=profit_loss,
+                total_profit_loss=saxo_profit_loss,
                 currency=_text_value(balance, "Currency"),
             ),
             named_differences=(),
@@ -724,8 +752,7 @@ def _build_scenario_context(  # noqa: PLR0913
         (_text_value(row, "AssetType"), _integer_value(row, "Uic")): row
         for row in _source_rows(pages, "exposure_instruments_v1")
     }
-    components: list[ScenarioComponent] = []
-    shocks: list[ScenarioShock] = []
+    component_values: dict[str, Decimal] = {}
     for position in _source_rows(pages, "positions_v1"):
         base = _mapping_value(position, "PositionBase")
         view = _mapping_value(position, "PositionView")
@@ -738,31 +765,34 @@ def _build_scenario_context(  # noqa: PLR0913
         }:
             raise StoredAnalysisExecutionError("scenario_exposure_scope_incomplete")
         handle = instrument_handle_for_saxo_identity(asset_type, uic)
-        current_value = _decimal_value(view, "Exposure")
-        if current_value == 0:
-            raise StoredAnalysisExecutionError("scenario_zero_exposure_unavailable")
-        components.append(
-            ScenarioComponent(
-                account_alias=account_alias,
-                instrument_handle=handle,
-                branch_id="linear",
-                current_value=current_value,
-                currency=reporting_currency,
-                current_margin_requirement=Decimal(0),
-                model_analysis_id=None,
-            ),
+        component_values[handle] = component_values.get(handle, Decimal(0)) + _decimal_value(
+            view,
+            "Exposure",
         )
-        shocks.append(
-            ScenarioShock(
-                instrument_handle=handle,
-                price_shock_ratio=Decimal(0),
-                volatility_shock_points=Decimal(0),
-                rate_shock_basis_points=Decimal(0),
-                cash_flow_shock=Decimal(0),
-                repriced_value_at_base_fx=None,
-                stressed_margin_requirement=Decimal(0),
-            ),
+    components = tuple(
+        ScenarioComponent(
+            account_alias=account_alias,
+            instrument_handle=handle,
+            branch_id="linear",
+            current_value=component_values[handle],
+            currency=reporting_currency,
+            current_margin_requirement=Decimal(0),
+            model_analysis_id=None,
         )
+        for handle in sorted(component_values)
+    )
+    shocks = tuple(
+        ScenarioShock(
+            instrument_handle=handle,
+            price_shock_ratio=Decimal(0),
+            volatility_shock_points=Decimal(0),
+            rate_shock_basis_points=Decimal(0),
+            cash_flow_shock=Decimal(0),
+            repriced_value_at_base_fx=None,
+            stressed_margin_requirement=Decimal(0),
+        )
+        for handle in sorted(component_values)
+    )
     if not components:
         raise StoredAnalysisExecutionError("scenario_exposure_scope_incomplete")
     return StoredScenarioExecutionContext(
@@ -782,8 +812,8 @@ def _build_scenario_context(  # noqa: PLR0913
             accepted_shock_map_sha256=None,
             historical_start_at=None,
             historical_end_at=None,
-            components=tuple(components),
-            component_shocks=tuple(shocks),
+            components=components,
+            component_shocks=shocks,
             currency_shocks=(CurrencyShock(currency=reporting_currency, shock_ratio=Decimal(0)),),
             current_margin_headroom=_decimal_value(
                 balance,
@@ -856,7 +886,7 @@ def _build_optimization_context(  # noqa: C901, PLR0913
         if len(rows) != 1:
             raise StoredAnalysisExecutionError("optimization_cost_scope_incomplete")
         cost_by_handle[page.instrument_handle] = _decimal_value(
-            _mapping_value(rows[0], "Cost"),
+            _cost_side(rows[0]),
             "TotalCost",
             nonnegative=True,
         )
@@ -1102,15 +1132,10 @@ def _build_pretrade_context(  # noqa: C901, PLR0912, PLR0913, PLR0915
     if len(cost_pages) != 1:
         raise StoredAnalysisExecutionError("pretrade_cost_scope_ambiguous")
     cost_row = _single_source_row(cost_pages, "costs_v1")
-    if cost_row.get("Currency") not in {None, reporting_currency}:
+    raw_cost = _cost_side(cost_row)
+    if _cost_currency(cost_row, raw_cost) not in {None, reporting_currency}:
         raise StoredAnalysisExecutionError("pretrade_currency_mismatch")
-    raw_cost = _mapping_value(cost_row, "Cost")
-    commission = _optional_decimal_value(
-        raw_cost,
-        "Commission",
-        default=Decimal(0),
-        nonnegative=True,
-    )
+    commission = _cost_commission(raw_cost)
     stamp = _optional_decimal_value(
         raw_cost,
         "StampDuty",
@@ -1266,9 +1291,9 @@ def _build_position_sizing_context(  # noqa: PLR0913
     instrument_handle = instrument_handle_for_saxo_identity(asset_type, uic)
     if selected_handle != instrument_handle:
         raise StoredAnalysisExecutionError("position_sizing_instrument_scope_mismatch")
-    cost = _mapping_value(selected_cost, "Cost")
+    cost = _cost_side(selected_cost)
     reporting_currency = _text_value(balance, "Currency")
-    if selected_cost.get("Currency") not in {None, reporting_currency}:
+    if _cost_currency(selected_cost, cost) not in {None, reporting_currency}:
         raise StoredAnalysisExecutionError("position_sizing_currency_mismatch")
     return StoredPositionSizingExecutionContext(
         request=PositionSizingRequest(
@@ -1332,6 +1357,25 @@ def _source_rows(
     return tuple(rows)
 
 
+def _mapping_rows_value(
+    value: Mapping[str, object],
+    name: str,
+    *,
+    required: bool = True,
+) -> tuple[Mapping[str, object], ...]:
+    rows = value.get(name)
+    if rows is None and not required:
+        return ()
+    if not isinstance(rows, list):
+        raise StoredAnalysisExecutionError("analysis_source_rows_invalid")
+    typed_rows: list[Mapping[str, object]] = []
+    for row in cast("list[object]", rows):
+        if not isinstance(row, Mapping):
+            raise StoredAnalysisExecutionError("analysis_source_rows_invalid")
+        typed_rows.append(cast("Mapping[str, object]", row))
+    return tuple(typed_rows)
+
+
 def _dataset_rows_or_empty(
     dataset_id: str,
     *,
@@ -1363,6 +1407,43 @@ def _mapping_value(row: Mapping[str, object], name: str) -> Mapping[str, object]
     if not isinstance(value, Mapping):
         raise StoredAnalysisExecutionError("analysis_source_field_missing")
     return cast("Mapping[str, object]", value)
+
+
+def _cost_side(row: Mapping[str, object]) -> Mapping[str, object]:
+    cost = _mapping_value(row, "Cost")
+    current = cost.get("Long")
+    return cast("Mapping[str, object]", current) if isinstance(current, Mapping) else cost
+
+
+def _cost_currency(
+    row: Mapping[str, object],
+    cost: Mapping[str, object],
+) -> str | None:
+    for value in (cost.get("Currency"), row.get("Currency"), row.get("AccountCurrency")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _cost_commission(cost: Mapping[str, object]) -> Decimal:
+    if cost.get("Commission") is not None:
+        return _decimal_value(cost, "Commission", nonnegative=True)
+    trading = cost.get("TradingCost")
+    if not isinstance(trading, Mapping):
+        return Decimal(0)
+    commissions = cast("Mapping[str, object]", trading).get("Commissions")
+    if not isinstance(commissions, Sequence) or isinstance(commissions, str | bytes):
+        return Decimal(0)
+    total = Decimal(0)
+    for item in cast("Sequence[object]", commissions):
+        if not isinstance(item, Mapping):
+            raise StoredAnalysisExecutionError("analysis_source_field_invalid")
+        total += _decimal_value(
+            cast("Mapping[str, object]", item),
+            "Value",
+            nonnegative=True,
+        )
+    return total
 
 
 def _text_value(row: Mapping[str, object], name: str) -> str:
@@ -1765,7 +1846,7 @@ def _execute_portfolio(  # noqa: PLR0913
         base.dataset_id != dataset_id
         or base.snapshot_id != snapshot.snapshot.snapshot_id
         or base.account_alias != primary.account_scope
-        or base.end_at != snapshot.snapshot.as_of
+        or base.end_at > snapshot.snapshot.as_of
     ):
         raise StoredAnalysisExecutionError("stored_portfolio_context_mismatch")
     dataset = _model_with_updates(
@@ -1793,7 +1874,7 @@ def _execute_portfolio(  # noqa: PLR0913
         primary=primary,
         snapshot_id=snapshot.snapshot.snapshot_id,
         instrument_handles=(),
-        as_of=dataset.end_at,
+        as_of=snapshot.snapshot.as_of,
         start_at=dataset.start_at,
         end_at=dataset.end_at,
         reporting_currency=dataset.reporting_currency,

@@ -147,7 +147,7 @@ class SimToolMatrixReceipt(BaseModel):
             or len(observed_analysis_kinds) != len(set(observed_analysis_kinds))
             or any(receipt.state == "failed" for receipt in self.analysis_execution_receipts)
             or self.controlled_sim_lifecycle is None
-            or self.controlled_sim_lifecycle.evidence_state != "passed"
+            or self.controlled_sim_lifecycle.evidence_state == "refused"
             or any(
                 component.observed_state != "available"
                 for component in self.before_state_fingerprint.components

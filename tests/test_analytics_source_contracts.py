@@ -210,6 +210,184 @@ def test_additive_fields_quarantine_dependent_analytics() -> None:
     assert "AskVolume" in comparison.missing_optional_fields
 
 
+def test_current_saxo_last_traded_chart_fields_match_the_bound_contract() -> None:
+    chart = source_contracts_by_id()["chart_v3"]
+
+    comparison = compare_source_schema(
+        chart,
+        {
+            "Data": [
+                {
+                    "Close": 101.0,
+                    "High": 102.0,
+                    "Interest": 0.0,
+                    "Low": 99.0,
+                    "MarketTradingState": "Open",
+                    "Open": 100.0,
+                    "Time": "2026-01-02T00:00:00Z",
+                    "Volume": 12.0,
+                }
+            ],
+            "DataVersion": 7,
+        },
+    )
+
+    assert comparison.compatible is True
+    assert comparison.additive_fields == ()
+    assert comparison.missing_required_fields == ()
+
+
+@pytest.mark.parametrize(
+    ("contract_id", "payload"),
+    cast(
+        "list[tuple[str, dict[str, object]]]",
+        [
+            (
+                "balances_v1",
+                {
+                    "CalculationReliability": "Ok",
+                    "CashBalance": 0.0,
+                    "ChangesScheduled": False,
+                    "CollateralCreditValue": {},
+                    "Currency": "USD",
+                    "CurrencyDecimals": 2,
+                    "InitialMargin": {},
+                    "MarginCollateralNotAvailableDetail": {},
+                    "NetPositionsCount": 0,
+                },
+            ),
+            (
+                "positions_v1",
+                {
+                    "Data": [
+                        {
+                            "NetPositionId": "synthetic-net-position",
+                            "PositionBase": {
+                                "AccountId": "synthetic-account",
+                                "Amount": 1.0,
+                                "AssetType": "Stock",
+                                "CanBeClosed": True,
+                                "RelatedOpenOrders": [],
+                                "Uic": 1,
+                            },
+                            "PositionId": "synthetic-position",
+                            "PositionView": {
+                                "CalculationReliability": "Ok",
+                                "CurrentPrice": 1.0,
+                                "CurrentPriceDelayMinutes": 0,
+                                "CurrentPriceType": "RealTime",
+                                "Exposure": 1.0,
+                                "MarketState": "Open",
+                            },
+                        }
+                    ]
+                },
+            ),
+            (
+                "performance_summary_v4",
+                {
+                    "AccumulatedProfitLoss": 0.0,
+                    "BenchMarks": [],
+                    "From": "2026-01-01",
+                    "InceptionDay": "2026-01-01",
+                    "LastTradeDay": "2026-01-01",
+                    "Thru": "2026-01-02",
+                    "TotalCashBalance": 0.0,
+                    "TotalCashBalancePerCurrency": [],
+                    "TotalOpenPositionsValue": 0.0,
+                    "TotalPositionsValuePerCurrency": [],
+                    "TotalPositionsValuePerProductPerSecurity": [],
+                    "TradeSummary": {},
+                    "WinFraction": 0.0,
+                },
+            ),
+            (
+                "performance_timeseries_v4",
+                {
+                    "Balance": {
+                        "AccountValue": [{"Date": "2026-01-01", "Value": 1.0}],
+                        "CashTransfer": [],
+                    },
+                    "Benchmark": [],
+                    "KeyFigures": {},
+                    "TimeWeighted": {
+                        "Accumulated": [{"Date": "2026-01-01", "Value": 0.0}],
+                        "MonthlyReturn": [],
+                        "YearlyReturn": [],
+                    },
+                },
+            ),
+            (
+                "info_price_v1",
+                {
+                    "AssetType": "Stock",
+                    "LastUpdated": "2026-01-01T00:00:00Z",
+                    "PriceSource": "Saxo",
+                    "Quote": {
+                        "Amount": 1,
+                        "Ask": 1.0,
+                        "AskSize": 1.0,
+                        "Bid": 1.0,
+                        "BidSize": 1.0,
+                        "DelayedByMinutes": 0,
+                        "ErrorCode": "None",
+                        "MarketState": "Open",
+                        "Mid": 1.0,
+                        "PriceSource": "Saxo",
+                        "PriceSourceType": "Primary",
+                        "PriceTypeAsk": "RealTime",
+                        "PriceTypeBid": "RealTime",
+                    },
+                    "Uic": 1,
+                },
+            ),
+            (
+                "costs_v1",
+                {
+                    "AccountCurrency": "USD",
+                    "AccountID": "synthetic-account",
+                    "Amount": 1.0,
+                    "AssetType": "Stock",
+                    "Cost": {
+                        "Long": {
+                            "BuySell": "Buy",
+                            "Currency": "USD",
+                            "TotalCost": 1.0,
+                            "TotalCostPct": 0.01,
+                            "TradingCost": {
+                                "Commissions": [
+                                    {"Pct": 0.01, "Rule": {}, "Value": 1.0},
+                                ],
+                                "Spread": {
+                                    "DisplayDecimals": 2,
+                                    "Pct": 0.0,
+                                    "Rule": {"Value": 0.0},
+                                    "Value": 0.0,
+                                },
+                            },
+                        },
+                    },
+                    "CostCalculationAssumptions": [],
+                    "HoldingPeriodInDays": 1,
+                    "Instrument": "Synthetic instrument",
+                    "Price": 1.0,
+                    "Uic": 1,
+                },
+            ),
+        ],
+    ),
+)
+def test_current_saxo_task24_source_shapes_are_contract_bound(
+    contract_id: str,
+    payload: dict[str, object],
+) -> None:
+    comparison = compare_source_schema(source_contracts_by_id()[contract_id], payload)
+
+    assert comparison.compatible is True
+    assert comparison.structural_errors == ()
+    assert comparison.additive_fields == ()
+
+
 def test_response_contract_closes_envelope_objects_and_list_items() -> None:
     contracts = source_contracts_by_id()
     positions = contracts["positions_v1"]
@@ -404,8 +582,12 @@ def test_omitted_optional_performance_fields_remain_compatible() -> None:
     )
 
     assert comparison.compatible is True
-    assert next(field for field in performance.fields if field.name == "Date").value_type is (
-        SourceValueType.DATE
+    balance = next(field for field in performance.fields if field.name == "Balance")
+    account_values = next(field for field in balance.properties if field.name == "AccountValue")
+    assert account_values.items is not None
+    assert (
+        next(field for field in account_values.items.properties if field.name == "Date").value_type
+        is SourceValueType.DATE
     )
     assert "Benchmark" in comparison.missing_optional_fields
     assert comparison.structural_errors == ()
@@ -512,7 +694,6 @@ def test_structural_response_drift_is_fail_closed(
         "exposure_instruments_v1",
         "info_prices_list_v1",
         "orders_v1",
-        "performance_timeseries_v4",
         "positions_v1",
         "reference_instrument_details_v1",
         "reference_instruments_v1",

@@ -67,13 +67,13 @@ from saxo_bank_mcp.analytics_source_contracts import source_contract_catalog_sha
 from saxo_bank_mcp.analytics_store import AnalyticsStore
 
 _NOW = datetime(2026, 8, 1, 12, tzinfo=UTC)
-_SOURCE_SHA = "29f480ba97c45faac440876272afd3c865afcb558c5a9ee9c089d26d1ed46d09"
-_PAGE_ID = "sp_679644729f339eae7292daa7c34077dd69d855b8e858a9506dd997f7eb013a3c"
-_DATASET_FINGERPRINT = "73c3374786b35a8265ae0e80611cf6a1e4b9997011621eede3301f5c661a2a2e"
+_SOURCE_SHA = "bfbe3aade89a27d80722eb42246007040baee06e5ea045e4185f0f40ebfcf4ce"
+_PAGE_ID = "sp_bab33b76b93a54d7f8bddca943a1ec0cc3e950509f46601b02da7a2fa2413a00"
+_DATASET_FINGERPRINT = "22e0a2f2405abc496ac271320c6f4d6c02e689aa9dbc1ef9b92b0fa15ae59cb8"
 _SOURCE_PAYLOAD = {
     "rows": [
-        {"CloseBid": 100.0, "Time": "2026-08-01T11:58:00Z"},
-        {"CloseBid": 101.0, "Time": "2026-08-01T11:59:00Z"},
+        {"Close": 100.0, "Time": "2026-08-01T11:58:00Z"},
+        {"Close": 101.0, "Time": "2026-08-01T11:59:00Z"},
     ],
 }
 _ANALYSIS_PARAMETERS_DOMAIN = b"saxo-bank-mcp:analysis-parameters:v1\x00"
@@ -127,7 +127,7 @@ def _registry(  # noqa: PLR0913
     source = SourceContractProofBinding(
         contract_id="chart_v3",
         contract_sha256=_SOURCE_SHA,
-        field_paths=("CloseBid", "Time"),
+        field_paths=("Close", "CloseBid", "Time"),
     )
     profile = ProofProfile(
         proof_profile_id=f"vp_{analysis_kind}_v1",

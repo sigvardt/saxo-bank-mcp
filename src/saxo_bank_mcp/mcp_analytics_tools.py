@@ -17,7 +17,7 @@ from typing import Annotated, Final, Literal, cast
 
 import mcp.types as mt
 from fastmcp.tools import ToolResult
-from pydantic import AnyUrl, BaseModel, ConfigDict, Field, SecretStr, TypeAdapter
+from pydantic import AnyUrl, BaseModel, BeforeValidator, ConfigDict, Field, SecretStr, TypeAdapter
 
 from saxo_bank_mcp.analytics_account_data import (
     AccountScope,
@@ -160,11 +160,14 @@ from saxo_bank_mcp.analytics_sync import (
     DatasetNotFoundError,
     DatasetPage,
     IngestionFingerprints,
+    QuoteDatasetRow,
+    QuoteDatasetSummary,
     SyncError,
     SyncLimitError,
     SyncResearchRequest,
     SyncResult,
     SyncStatus,
+    capture_quote,
     get_dataset,
     sync_research_data,
 )
@@ -191,6 +194,19 @@ type ManageUniverseAction = Literal["create", "list", "update", "delete"]
 type ManageJobAction = Literal["start", "check", "cancel"]
 type ExportKind = Literal["table", "report"]
 type AnalyticsExportFormat = Literal["csv", "parquet", "json", "html", "pdf"]
+
+
+def _sync_request_from_decoded_json(value: object) -> SyncResearchRequest:
+    """Preserve the strict domain model while accepting FastMCP's decoded JSON arrays."""
+    if isinstance(value, SyncResearchRequest):
+        return value
+    return SyncResearchRequest.model_validate_json(json.dumps(value))
+
+
+type FastMcpSyncResearchRequest = Annotated[
+    SyncResearchRequest,
+    BeforeValidator(_sync_request_from_decoded_json),
+]
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _JOB_RUNTIME_LOCK: Final = RLock()
@@ -902,7 +918,7 @@ def saxo_manage_research_universe(  # noqa: PLR0913 - exact bounded transition f
     )
 
 
-async def saxo_sync_research_data(request: SyncResearchRequest) -> SyncResponse:
+async def saxo_sync_research_data(request: FastMcpSyncResearchRequest) -> SyncResponse:
     """Run one bounded source sync through the existing Saxo-only provider."""
     tool = "saxo_sync_research_data"
     try:
@@ -1130,12 +1146,32 @@ async def _capture_server_account_analytics(
             if kind in {"position_sizing", "portfolio_minimum_variance", "pretrade_impact"}
         ),
     )
+    quote_summaries: list[QuoteDatasetSummary] = []
     if handles and cost_kinds:
+        reference_prices: dict[str, float] = {}
+        for handle in handles:
+            quote_result = await capture_quote(
+                handle,
+                provider=provider,
+                config=config,
+                request_budget=budget,
+            )
+            source_count += quote_result.source_request_count
+            if len(quote_result.datasets) != 1 or not isinstance(
+                quote_result.datasets[0],
+                QuoteDatasetSummary,
+            ):
+                raise SyncError("current server-owned cost reference quote is unavailable")
+            quote_summary = quote_result.datasets[0]
+            quote_summaries.append(quote_summary)
+            quote_page = get_dataset(quote_summary.dataset_id, 1, 1, config=config)
+            reference_prices[handle] = _cost_reference_price(quote_page, handle)
         costs = await sync_cost_sources(
             scope,
             handles,
             provider=provider,
             config=config,
+            reference_prices=reference_prices,
             request_budget=budget,
         )
         source_count += costs.source_request_count
@@ -1195,13 +1231,31 @@ async def _capture_server_account_analytics(
         )
         for summary in supplemental
     )
-    summaries = (snapshot_summary, *results)
+    summaries = (snapshot_summary, *quote_summaries, *results)
     quality_complete = all(summary.quality_state is QualityState.COMPLETE for summary in summaries)
     return SyncResult(
         status=SyncStatus.COMPLETE if quality_complete else SyncStatus.DEGRADED,
         source_request_count=source_count,
         datasets=summaries,
     )
+
+
+def _cost_reference_price(page: DatasetPage, instrument_handle: str) -> float:
+    if page.total_rows != 1 or len(page.rows) != 1:
+        raise SyncError("current server-owned cost reference quote is unavailable")
+    row = page.rows[0]
+    if not isinstance(row, QuoteDatasetRow) or row.instrument_handle != instrument_handle:
+        raise SyncError("current server-owned cost reference quote is unavailable")
+    if row.mid_value is not None and row.mid_value > 0:
+        return row.mid_value
+    if (
+        row.bid_value is not None
+        and row.ask_value is not None
+        and row.bid_value > 0
+        and row.ask_value >= row.bid_value
+    ):
+        return (row.bid_value + row.ask_value) / 2
+    raise SyncError("current server-owned cost reference quote is unavailable")
 
 
 def _route_server_analysis_input(

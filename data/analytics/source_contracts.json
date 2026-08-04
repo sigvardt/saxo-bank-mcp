@@ -18,14 +18,35 @@
         },
         {
           "enum_values": [],
+          "name": "Close",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
           "name": "CloseBid",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Open",
+          "nullable": true,
+          "required": false,
           "value_type": "number"
         },
         {
           "enum_values": [],
           "name": "OpenBid",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "High",
           "nullable": true,
           "required": false,
           "value_type": "number"
@@ -39,10 +60,31 @@
         },
         {
           "enum_values": [],
+          "name": "Low",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
           "name": "LowBid",
           "nullable": true,
           "required": false,
           "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Interest",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarketTradingState",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
         },
         {
           "enum_values": [],
@@ -187,7 +229,42 @@
         },
         {
           "enum_values": [],
+          "name": "CurrencyCode",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
           "name": "Description",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "GroupId",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "IssuerCountry",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "PrimaryListing",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "SummaryType",
           "nullable": true,
           "required": false,
           "value_type": "string"
@@ -198,6 +275,18 @@
           "nullable": true,
           "required": false,
           "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "string"
+          },
+          "name": "TradableAs",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
         },
         {
           "enum_values": [],
@@ -565,13 +654,41 @@
         },
         {
           "enum_values": [],
+          "name": "LastUpdated",
+          "nullable": true,
+          "required": false,
+          "value_type": "timestamp"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceSource",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
           "name": "Quote",
           "nullable": true,
           "object_mode": "closed",
           "properties": [
             {
               "enum_values": [],
+              "name": "Amount",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
               "name": "Ask",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "AskSize",
               "nullable": true,
               "required": false,
               "value_type": "number"
@@ -585,10 +702,31 @@
             },
             {
               "enum_values": [],
+              "name": "BidSize",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
               "name": "DelayedByMinutes",
               "nullable": true,
               "required": false,
               "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "ErrorCode",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketState",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
             },
             {
               "enum_values": [],
@@ -599,7 +737,35 @@
             },
             {
               "enum_values": [],
+              "name": "PriceSource",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "PriceSourceType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
               "name": "PriceType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "PriceTypeAsk",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "PriceTypeBid",
               "nullable": true,
               "required": false,
               "value_type": "string"
@@ -834,8 +1000,8 @@
         {
           "enum_values": [],
           "name": "AccountValue",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
           "value_type": "number"
         },
         {
@@ -848,6 +1014,115 @@
         {
           "enum_values": [],
           "name": "TotalCashBalance",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AccumulatedProfitLoss",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "opaque_map",
+            "value_type": "object"
+          },
+          "name": "BenchMarks",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "From",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "InceptionDay",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "LastTradeDay",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "Thru",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "opaque_map",
+            "value_type": "object"
+          },
+          "name": "TotalCashBalancePerCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalOpenPositionsValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "opaque_map",
+            "value_type": "object"
+          },
+          "name": "TotalPositionsValuePerCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "opaque_map",
+            "value_type": "object"
+          },
+          "name": "TotalPositionsValuePerProductPerSecurity",
+          "nullable": true,
+          "required": false,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "TradeSummary",
+          "nullable": true,
+          "object_mode": "opaque_map",
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "WinFraction",
           "nullable": true,
           "required": false,
           "value_type": "number"
@@ -891,31 +1166,235 @@
       "fields": [
         {
           "enum_values": [],
-          "name": "Date",
+          "name": "Balance",
           "nullable": false,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "AccountBalance",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "closed",
+                "properties": [
+                  {
+                    "enum_values": [],
+                    "name": "Date",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "date"
+                  },
+                  {
+                    "enum_values": [],
+                    "name": "Value",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "number"
+                  }
+                ],
+                "value_type": "object"
+              },
+              "name": "AccountValue",
+              "nullable": false,
+              "required": true,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "CashBalance",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "closed",
+                "properties": [
+                  {
+                    "enum_values": [],
+                    "name": "Date",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "date"
+                  },
+                  {
+                    "enum_values": [],
+                    "name": "Value",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "number"
+                  }
+                ],
+                "value_type": "object"
+              },
+              "name": "CashTransfer",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "MonthlyProfitLoss",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "SecurityTransfer",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "TotalAccruals",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "YearlyProfitLoss",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            }
+          ],
           "required": true,
-          "value_type": "date"
+          "value_type": "object"
         },
         {
           "enum_values": [],
-          "name": "EndOfDayBalance",
-          "nullable": false,
-          "required": true,
-          "value_type": "number"
-        },
-        {
-          "enum_values": [],
-          "name": "TimeWeightedReturn",
-          "nullable": true,
-          "required": false,
-          "value_type": "number"
-        },
-        {
-          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "object_mode": "opaque_map",
+            "value_type": "object"
+          },
           "name": "Benchmark",
           "nullable": true,
           "required": false,
-          "value_type": "number"
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "KeyFigures",
+          "nullable": true,
+          "object_mode": "opaque_map",
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "TimeWeighted",
+          "nullable": false,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "closed",
+                "properties": [
+                  {
+                    "enum_values": [],
+                    "name": "Date",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "date"
+                  },
+                  {
+                    "enum_values": [],
+                    "name": "Value",
+                    "nullable": false,
+                    "required": true,
+                    "value_type": "number"
+                  }
+                ],
+                "value_type": "object"
+              },
+              "name": "Accumulated",
+              "nullable": false,
+              "required": true,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "MonthlyReturn",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "object_mode": "opaque_map",
+                "value_type": "object"
+              },
+              "name": "YearlyReturn",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            }
+          ],
+          "required": true,
+          "value_type": "object"
         }
       ],
       "method": "GET",
@@ -925,30 +1404,8 @@
       "path_parameters": [],
       "path_template": "/hist/v4/performance/timeseries",
       "response_envelope": {
-        "row_location": "data",
-        "structural_fields": [
-          {
-            "items": "source_row",
-            "name": "Data",
-            "required": true,
-            "value_type": "array"
-          },
-          {
-            "name": "MaxRows",
-            "nullable": true,
-            "value_type": "integer"
-          },
-          {
-            "name": "__count",
-            "nullable": true,
-            "value_type": "integer"
-          },
-          {
-            "name": "__next",
-            "nullable": true,
-            "value_type": "string"
-          }
-        ]
+        "row_location": "root",
+        "structural_fields": []
       },
       "query_parameters": [
         "AccountGroupKey",
@@ -961,15 +1418,13 @@
         "StandardPeriod",
         "ToDate"
       ],
-      "response_shape": "data_array",
+      "response_shape": "object",
       "retry_attempts": 3,
       "revision_fields": [],
       "schema_version": "1",
       "source_kind": "performance",
-      "stable_key_fields": [
-        "Date"
-      ],
-      "stable_key_policy": "required_unique"
+      "stable_key_fields": [],
+      "stable_key_policy": "unkeyed_snapshot"
     },
     {
       "contract_id": "balances_v1",
@@ -1229,6 +1684,240 @@
           "nullable": true,
           "required": false,
           "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CalculationReliability",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ChangesScheduled",
+          "nullable": true,
+          "required": false,
+          "value_type": "boolean"
+        },
+        {
+          "enum_values": [],
+          "name": "ClosedPositionsCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "CollateralAvailable",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CollateralCreditValue",
+          "nullable": true,
+          "object_mode": "opaque_map",
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "CorporateActionUnrealizedAmounts",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CostToClosePositions",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CurrencyDecimals",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "InitialMargin",
+          "nullable": true,
+          "object_mode": "opaque_map",
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "IsPortfolioMarginModelSimple",
+          "nullable": true,
+          "required": false,
+          "value_type": "boolean"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginAndCollateralUtilizationPct",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginCollateralNotAvailable",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginCollateralNotAvailableDetail",
+          "nullable": true,
+          "object_mode": "opaque_map",
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginCollateralNotAvailableIncludingCostToClosePositions",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginExposureCoveragePct",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginNetExposure",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginUsedByCurrentPositions",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MarginUtilizationPct",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "NetEquityForMargin",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "NetPositionsCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "NonMarginPositionsValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "OpenIpoOrdersCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "OpenPositionsCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "OptionPremiumsMarketValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "OrdersCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "OtherCollateral",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "SettlementValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TriggerOrdersCount",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "UnrealizedMarginClosedProfitLoss",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "UnrealizedMarginOpenProfitLoss",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "UnrealizedMarginProfitLoss",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "UnrealizedPositionsValue",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "UnrealizedPositionsValueExcludingCostToClosePositions",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
         }
       ],
       "method": "GET",
@@ -1273,10 +1962,31 @@
         },
         {
           "enum_values": [],
+          "name": "NetPositionId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
           "name": "PositionBase",
           "nullable": false,
           "object_mode": "closed",
           "properties": [
+            {
+              "enum_values": [],
+              "name": "AccountId",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "AccountKey",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
             {
               "enum_values": [],
               "name": "Amount",
@@ -1293,10 +2003,66 @@
             },
             {
               "enum_values": [],
+              "name": "CanBeClosed",
+              "nullable": true,
+              "required": false,
+              "value_type": "boolean"
+            },
+            {
+              "enum_values": [],
+              "name": "ClientId",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "CloseConversionRateSettled",
+              "nullable": true,
+              "required": false,
+              "value_type": "boolean"
+            },
+            {
+              "enum_values": [],
+              "name": "CorrelationKey",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
               "name": "ExecutionTimeOpen",
               "nullable": true,
               "required": false,
               "value_type": "timestamp"
+            },
+            {
+              "enum_values": [],
+              "name": "IsForceOpen",
+              "nullable": true,
+              "required": false,
+              "value_type": "boolean"
+            },
+            {
+              "enum_values": [],
+              "name": "IsMarketOpen",
+              "nullable": true,
+              "required": false,
+              "value_type": "boolean"
+            },
+            {
+              "enum_values": [],
+              "name": "LockedByBackOffice",
+              "nullable": true,
+              "required": false,
+              "value_type": "boolean"
+            },
+            {
+              "enum_values": [],
+              "name": "OpenBondPoolFactor",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
             },
             {
               "enum_values": [],
@@ -1307,10 +2073,50 @@
             },
             {
               "enum_values": [],
+              "name": "OpenPriceIncludingCosts",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "items": {
+                "enum_values": [],
+                "nullable": false,
+                "value_type": "string"
+              },
+              "name": "RelatedOpenOrders",
+              "nullable": true,
+              "required": false,
+              "value_type": "array"
+            },
+            {
+              "enum_values": [],
+              "name": "SourceOrderId",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Status",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
               "name": "Uic",
               "nullable": true,
               "required": false,
               "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "ValueDate",
+              "nullable": true,
+              "required": false,
+              "value_type": "timestamp"
             }
           ],
           "required": true,
@@ -1324,10 +2130,52 @@
           "properties": [
             {
               "enum_values": [],
+              "name": "CalculationReliability",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "ConversionRateCurrent",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ConversionRateOpen",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CurrentBondPoolFactor",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
               "name": "CurrentPrice",
               "nullable": true,
               "required": false,
               "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "CurrentPriceDelayMinutes",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "CurrentPriceType",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
             },
             {
               "enum_values": [],
@@ -1338,7 +2186,112 @@
             },
             {
               "enum_values": [],
+              "name": "ExposureCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "ExposureInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "InstrumentPriceDayPercentChange",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketState",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketValue",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketValueInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketValueOpen",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "MarketValueOpenInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ProfitLossCurrencyConversion",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
               "name": "ProfitLossOnTrade",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ProfitLossOnTradeInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ProfitLossOnTradeIntraday",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "ProfitLossOnTradeIntradayInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "TradeCostsTotal",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "TradeCostsTotalInBaseCurrency",
+              "nullable": true,
+              "required": false,
+              "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "UnderlyingCurrentPrice",
               "nullable": true,
               "required": false,
               "value_type": "number"
@@ -1730,15 +2683,15 @@
         {
           "enum_values": [],
           "name": "BookingId",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
           "value_type": "string"
         },
         {
           "enum_values": [],
           "name": "BookingDate",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
           "value_type": "timestamp"
         },
         {
@@ -1747,6 +2700,279 @@
           "nullable": true,
           "required": false,
           "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountAccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountClass",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountSubClass",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountUSD",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "BkAmountId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "BkAmountType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "BkAmountTypeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CaMasterRecordId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ConversionRate",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "ConversionRateAccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "ConversionRateClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "ConversionRateUSD",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CostClass",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CostSubClass",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Currency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Date",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentDescription",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSectorName",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSectorTypeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSubType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSymbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "IsCapitalGainAndWithholdingTax",
+          "nullable": true,
+          "required": false,
+          "value_type": "boolean"
+        },
+        {
+          "enum_values": [],
+          "name": "RelatedPositionId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RelatedTradeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RootInstrumentSectorName",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RootInstrumentSectorTypeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentAssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentDescription",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentSectorName",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentSubType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentSymbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentUic",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "ValueDate",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
         }
       ],
       "method": "GET",
@@ -1854,12 +3080,12 @@
       "response_shape": "data_array",
       "retry_attempts": 3,
       "revision_fields": [
-        "BookingDate"
+        "Date"
       ],
       "schema_version": "1",
       "source_kind": "bookings",
       "stable_key_fields": [
-        "BookingId"
+        "BkAmountId"
       ],
       "stable_key_policy": "required_unique"
     },
@@ -1875,14 +3101,14 @@
         {
           "enum_values": [],
           "name": "ClosedPositionId",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
           "value_type": "string"
         },
         {
           "enum_values": [],
           "name": "ClosingPosition",
-          "nullable": false,
+          "nullable": true,
           "object_mode": "closed",
           "properties": [
             {
@@ -1907,7 +3133,7 @@
               "value_type": "integer"
             }
           ],
-          "required": true,
+          "required": false,
           "value_type": "object"
         },
         {
@@ -1933,6 +3159,237 @@
           ],
           "required": false,
           "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountCurrencyDecimals",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountClose",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountOpen",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ClosePositionId",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ClosePrice",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CloseType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ExchangeDescription",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentDescription",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSectorName",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSectorTypeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentSymbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "OpenPositionId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "OpenPrice",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "PnLAccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "PnLClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "PnLUSD",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "RootInstrumentSectorName",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RootInstrumentSectorTypeId",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnClosingLegAccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnClosingLegClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnClosingLegUSD",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnOpeningLegAccountCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnOpeningLegClientCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TotalBookedOnOpeningLegUSD",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TradeDate",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "TradeDateClose",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "TradeDateOpen",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentDescription",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingInstrumentSymbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
         }
       ],
       "method": "GET",
@@ -2019,7 +3476,7 @@
       "schema_version": "1",
       "source_kind": "closed_positions",
       "stable_key_fields": [
-        "ClosedPositionId"
+        "ClosePositionId"
       ],
       "stable_key_policy": "required_unique"
     },
@@ -2058,6 +3515,93 @@
           "nullable": true,
           "required": false,
           "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AverageOpenPrice",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "CalculationReliability",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CanBeClosed",
+          "nullable": true,
+          "required": false,
+          "value_type": "boolean"
+        },
+        {
+          "enum_values": [],
+          "name": "DisplayAndFormat",
+          "nullable": true,
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Currency",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Decimals",
+              "nullable": true,
+              "required": false,
+              "value_type": "integer"
+            },
+            {
+              "enum_values": [],
+              "name": "Description",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Format",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Symbol",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ],
+          "required": false,
+          "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentPriceDayPercentChange",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "NetPositionId",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "ProfitLossOnTrade",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
         }
       ],
       "method": "GET",
@@ -2106,7 +3650,7 @@
         "UpperBarrier",
         "ValueDate"
       ],
-      "response_shape": "data_array",
+      "response_shape": "top_level_array",
       "retry_attempts": 3,
       "revision_fields": [],
       "schema_version": "1",
@@ -2151,6 +3695,130 @@
               "nullable": true,
               "required": false,
               "value_type": "number"
+            },
+            {
+              "enum_values": [],
+              "name": "Long",
+              "nullable": false,
+              "object_mode": "closed",
+              "properties": [
+                {
+                  "enum_values": [],
+                  "name": "BuySell",
+                  "nullable": true,
+                  "required": false,
+                  "value_type": "string"
+                },
+                {
+                  "enum_values": [],
+                  "name": "Currency",
+                  "nullable": false,
+                  "required": true,
+                  "value_type": "string"
+                },
+                {
+                  "enum_values": [],
+                  "name": "TotalCost",
+                  "nullable": false,
+                  "required": true,
+                  "value_type": "number"
+                },
+                {
+                  "enum_values": [],
+                  "name": "TotalCostPct",
+                  "nullable": true,
+                  "required": false,
+                  "value_type": "number"
+                },
+                {
+                  "enum_values": [],
+                  "name": "TradingCost",
+                  "nullable": false,
+                  "object_mode": "closed",
+                  "properties": [
+                    {
+                      "enum_values": [],
+                      "items": {
+                        "enum_values": [],
+                        "nullable": false,
+                        "object_mode": "closed",
+                        "properties": [
+                          {
+                            "enum_values": [],
+                            "name": "Pct",
+                            "nullable": true,
+                            "required": false,
+                            "value_type": "number"
+                          },
+                          {
+                            "enum_values": [],
+                            "name": "Rule",
+                            "nullable": true,
+                            "object_mode": "opaque_map",
+                            "required": false,
+                            "value_type": "object"
+                          },
+                          {
+                            "enum_values": [],
+                            "name": "Value",
+                            "nullable": false,
+                            "required": true,
+                            "value_type": "number"
+                          }
+                        ],
+                        "value_type": "object"
+                      },
+                      "name": "Commissions",
+                      "nullable": false,
+                      "required": true,
+                      "value_type": "array"
+                    },
+                    {
+                      "enum_values": [],
+                      "name": "Spread",
+                      "nullable": false,
+                      "object_mode": "closed",
+                      "properties": [
+                        {
+                          "enum_values": [],
+                          "name": "DisplayDecimals",
+                          "nullable": true,
+                          "required": false,
+                          "value_type": "integer"
+                        },
+                        {
+                          "enum_values": [],
+                          "name": "Pct",
+                          "nullable": true,
+                          "required": false,
+                          "value_type": "number"
+                        },
+                        {
+                          "enum_values": [],
+                          "name": "Rule",
+                          "nullable": true,
+                          "object_mode": "opaque_map",
+                          "required": false,
+                          "value_type": "object"
+                        },
+                        {
+                          "enum_values": [],
+                          "name": "Value",
+                          "nullable": false,
+                          "required": true,
+                          "value_type": "number"
+                        }
+                      ],
+                      "required": true,
+                      "value_type": "object"
+                    }
+                  ],
+                  "required": true,
+                  "value_type": "object"
+                }
+              ],
+              "required": true,
+              "value_type": "object"
             }
           ],
           "required": true,
@@ -2168,6 +3836,67 @@
           "name": "HoldingPeriodInDays",
           "nullable": true,
           "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountCurrency",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "AccountID",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Amount",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "string"
+          },
+          "name": "CostCalculationAssumptions",
+          "nullable": false,
+          "required": true,
+          "value_type": "array"
+        },
+        {
+          "enum_values": [],
+          "name": "Instrument",
+          "nullable": false,
+          "required": true,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Price",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": false,
+          "required": true,
           "value_type": "integer"
         }
       ],

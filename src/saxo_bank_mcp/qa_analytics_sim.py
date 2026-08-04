@@ -273,6 +273,11 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     analysis_id: str | None = Field(default=None, pattern=r"^an_[a-f0-9]{32}$")
     expected_analysis_outcome: ExpectedAnalysisOutcome | None = None
     persisted_result_authenticated: bool = False
+    source_precondition_refused: bool = False
+    source_precondition_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
     state: AnalyticsCaseState
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     mcp_call_observed: Literal[True]
@@ -313,9 +318,9 @@ class AnalyticsCaseReceipt(_StrictReceipt):
             self.state != "failed"
             and self.state not in allowed[self.kind]
             and not (
-                analysis_observation
-                and self.kind == "success"
+                self.kind == "success"
                 and self.state in {"degraded", "refused"}
+                and (analysis_observation or self.source_precondition_refused)
             )
         ):
             raise ValueError("analytics case state does not match its case kind")
@@ -335,6 +340,12 @@ class AnalyticsCaseReceipt(_StrictReceipt):
         }
         if self.state == "refused" and self.result_state not in refusal_states:
             raise ValueError("analytics refusal evidence requires a refused result")
+        if self.source_precondition_refused and (self.kind != "success" or self.state != "refused"):
+            raise ValueError("source precondition evidence must bind a refused success probe")
+        if self.source_precondition_refused != (
+            self.source_precondition_evidence_sha256 is not None
+        ):
+            raise ValueError("source precondition refusal requires exact observed evidence")
         if self.state == "reconciled" and (
             self.reconciles_request_sha256 is None or self.reconciliation_observation_sha256 is None
         ):
@@ -396,6 +407,11 @@ class AnalyticsCaseCall(_StrictReceipt):
         pattern=r"^[a-z][a-z0-9_]{0,127}$",
     )
     expected_analysis_outcome: ExpectedAnalysisOutcome | None = None
+    source_precondition_refused: bool = False
+    source_precondition_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
 
     @model_validator(mode="after")
     def _validate_recovery_strategy(self) -> Self:
@@ -410,6 +426,12 @@ class AnalyticsCaseCall(_StrictReceipt):
             raise ValueError("analysis-kind execution applies only to success calls")
         if (self.analysis_kind is None) != (self.expected_analysis_outcome is None):
             raise ValueError("analysis-kind execution requires one honest expected outcome")
+        if self.source_precondition_refused and self.kind != "success":
+            raise ValueError("source precondition refusal applies only to a success probe")
+        if self.source_precondition_refused != (
+            self.source_precondition_evidence_sha256 is not None
+        ):
+            raise ValueError("source precondition refusal requires exact observed evidence")
         return self
 
 
@@ -432,6 +454,13 @@ class AnalyticsRuntimeResources:
     degraded_dataset_ids: list[str] = field(default_factory=list)
     dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
     degraded_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(default_factory=dict)
+    analysis_input_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(
+        default_factory=dict,
+    )
+    degraded_analysis_input_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(
+        default_factory=dict,
+    )
+    analysis_input_refusals_by_analysis_kind: dict[str, str] = field(default_factory=dict)
     analysis_ids: list[str] = field(default_factory=list)
     degraded_analysis_ids: list[str] = field(default_factory=list)
     analysis_ids_by_kind: dict[str, list[str]] = field(default_factory=dict)
@@ -444,6 +473,7 @@ class AnalyticsRuntimeResources:
     cleanup_verified: bool = False
     source_request_count: int = 0
     source_mcp_call_count: int = 0
+    source_contract_ids: set[str] = field(default_factory=set)
     option_entitlement_state: Literal["available", "denied", "unknown"] = "unknown"
     option_expiries: list[str] = field(default_factory=list)
     pretrade_proposal_price: str | None = None
@@ -839,7 +869,11 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
     }
     calls: dict[str, dict[str, JsonValue]] = {
         "saxo_analytics_capabilities": {},
-        "saxo_resolve_research_universe": {"query": "controlled stock fixture"},
+        "saxo_resolve_research_universe": {
+            "query": "Apple",
+            "asset_types": ["Stock"],
+            "exchanges": ["NASDAQ"],
+        },
         "saxo_manage_research_universe": {"action": "list"},
         "saxo_sync_research_data": {
             "request": {
@@ -847,9 +881,9 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
                     {
                         "data_kind": "price_bars",
                         "handle": _SAFE_INSTRUMENT_HANDLE,
-                        "interval": "1d",
-                        "start": "2026-01-01T00:00:00Z",
-                        "end": "2026-01-31T00:00:00Z",
+                        "interval": "1m",
+                        "start": "2026-01-05T14:30:00Z",
+                        "end": "2026-01-05T15:30:00Z",
                     },
                 ],
             },
@@ -1109,6 +1143,8 @@ def _degradation_schema_arguments(  # noqa: C901, PLR0912 - exact bounded catalo
         items = request.get("items")
         if isinstance(items, list) and items and isinstance(items[0], dict):
             items[0]["interval"] = "1m"
+            items[0]["start"] = "2026-01-01T00:00:00Z"
+            items[0]["end"] = "2026-01-31T00:00:00Z"
     elif tool_id == "saxo_analyze_market":
         request["analysis_kind"] = "market_microstructure"
     elif tool_id == "saxo_analyze_instruments":

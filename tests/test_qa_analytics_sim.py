@@ -399,6 +399,32 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
     assert materialized_pretrade["proposal_price"] == "100"
 
 
+def test_analysis_success_prefers_server_issued_typed_input_over_raw_source() -> None:
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_run_scenario"
+        and item.kind == "success"
+        and item.analysis_kind is None
+    )
+    raw_source_id = "ds_11111111111141118111111111111111"
+    typed_input_id = "ds_22222222222242228222222222222222"
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=["ih_33333333333343338333333333333333"],
+        dataset_ids_by_analysis_kind={
+            "scenario_custom": [raw_source_id, typed_input_id],
+        },
+        analysis_input_dataset_ids_by_analysis_kind={
+            "scenario_custom": [typed_input_id],
+        },
+    )
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", materialized["request"])
+
+    assert request["dataset_id"] == typed_input_id
+
+
 def test_pretrade_price_is_observed_from_one_exact_logical_mcp_quote() -> None:
     quote_row: dict[str, JsonValue] = {
         "row_kind": "quote",
@@ -484,6 +510,7 @@ def test_analysis_runtime_indexes_only_typed_server_issued_handles() -> None:
                         {
                             "dataset_id": dataset_id,
                             "data_kind": "portfolio_performance",
+                            "contract_id": "transactions_v1",
                         },
                         {"dataset_id": untyped_dataset_id},
                     ],
@@ -515,6 +542,7 @@ def test_analysis_runtime_indexes_only_typed_server_issued_handles() -> None:
     assert resources.degraded_analysis_ids_by_kind == {
         "portfolio_performance": [analysis_id],
     }
+    assert resources.source_contract_ids == {"transactions_v1"}
     assert untyped_dataset_id in resources.dataset_ids
 
 
@@ -704,6 +732,65 @@ def test_primary_calls_are_value_free_and_cover_all_analytics_tools() -> None:
         assert forbidden not in serialized
 
 
+def test_matrix_resolves_the_exact_controlled_stock_fixture_query() -> None:
+    primary = dict(analytics_primary_calls())["saxo_resolve_research_universe"]
+    success = next(
+        call
+        for call in analytics_case_calls()
+        if call.tool_id == "saxo_resolve_research_universe" and call.kind == "success"
+    )
+
+    assert primary == {
+        "query": "Apple",
+        "asset_types": ["Stock"],
+        "exchanges": ["NASDAQ"],
+    }
+    assert (
+        materialize_analytics_case_arguments(
+            success,
+            AnalyticsRuntimeResources(),
+        )
+        == primary
+    )
+
+
+def test_matrix_uses_a_continuous_bounded_intraday_chart_window() -> None:
+    primary = dict(analytics_primary_calls())["saxo_sync_research_data"]
+    success = next(
+        call
+        for call in analytics_case_calls()
+        if call.tool_id == "saxo_sync_research_data" and call.kind == "success"
+    )
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=["ih_00000000000040008000000000000000"],
+    )
+
+    expected = {
+        "request": {
+            "items": [
+                {
+                    "data_kind": "price_bars",
+                    "handle": "ih_00000000000040008000000000000000",
+                    "interval": "1m",
+                    "start": "2026-01-05T14:30:00Z",
+                    "end": "2026-01-05T15:30:00Z",
+                },
+            ],
+        },
+    }
+    primary_request = cast("dict[str, JsonValue]", primary["request"])
+    primary_items = cast("list[JsonValue]", primary_request["items"])
+    primary_item = cast("dict[str, JsonValue]", primary_items[0])
+    expected_request = cast("dict[str, JsonValue]", expected["request"])
+    expected_items = cast("list[JsonValue]", expected_request["items"])
+    expected_item = cast("dict[str, JsonValue]", expected_items[0])
+    assert primary_item == {
+        **expected_item,
+        "handle": "ih_00000000000040008000000000000000",
+    }
+    assert materialize_analytics_case_arguments(success, resources) == expected
+
+
 def test_primary_calls_satisfy_the_typed_adapter_input_contracts() -> None:
     calls = dict(analytics_primary_calls())
 
@@ -801,6 +888,126 @@ def test_margin_fire_drill_preserves_its_exact_analysis_kind_in_runtime_argument
     assert materialized_request["analysis_kind"] == "margin_fire_drill"
 
 
+@pytest.mark.parametrize(
+    "analysis_kind",
+    [
+        "margin_fire_drill",
+        "portfolio_scenario",
+        "scenario_combined",
+        "scenario_currency",
+        "scenario_custom",
+        "scenario_rate",
+        "scenario_volatility",
+    ],
+)
+def test_scenario_family_uses_one_exact_server_issued_scenario_context(
+    analysis_kind: str,
+) -> None:
+    call = next(item for item in analytics_case_calls() if item.analysis_kind == analysis_kind)
+    typed_input_id = "ds_44444444444444448444444444444444"
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=["ih_55555555555545558555555555555555"],
+        analysis_input_dataset_ids_by_analysis_kind={
+            "scenario_custom": [typed_input_id],
+        },
+    )
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", materialized["request"])
+
+    assert request["analysis_kind"] == analysis_kind
+    assert request["dataset_id"] == typed_input_id
+
+
+def test_server_observed_input_refusal_binds_an_honest_terminal_refusal() -> None:
+    call = next(item for item in analytics_case_calls() if item.analysis_kind == "position_sizing")
+    resources = AnalyticsRuntimeResources(
+        analysis_input_refusals_by_analysis_kind={
+            "position_sizing": "a" * 64,
+        },
+    )
+
+    observed = matrix_module._bind_observed_source_precondition(  # noqa: SLF001
+        call,
+        resources,
+    )
+    receipt = analytics_case_receipt(
+        observed,
+        ("verified",),
+        MatrixToolObservation(
+            payload={"status": "refused", "reason_code": "analytics_request_invalid"},
+            result_parsed=True,
+            result_state="refused",
+            mcp_is_error=True,
+        ),
+    )
+
+    assert observed.expected_analysis_outcome == "refused"
+    assert observed.source_precondition_refused is True
+    assert receipt.state == "refused"
+    assert receipt.source_precondition_refused is True
+    assert receipt.source_precondition_evidence_sha256 == "a" * 64
+
+
+def test_tool_availability_probe_accepts_only_an_observed_source_refusal() -> None:
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_size_position"
+        and item.kind == "success"
+        and item.analysis_kind is None
+    )
+    refused = MatrixToolObservation(
+        payload={"status": "refused", "reason_code": "analytics_request_invalid"},
+        result_parsed=True,
+        result_state="refused",
+        mcp_is_error=True,
+    )
+
+    unbound = analytics_case_receipt(call, ("verified",), refused)
+    resources = AnalyticsRuntimeResources(
+        analysis_input_refusals_by_analysis_kind={"position_sizing": "b" * 64},
+    )
+    observed = matrix_module._bind_observed_source_precondition(  # noqa: SLF001
+        call,
+        resources,
+    )
+    bound = analytics_case_receipt(observed, ("verified",), refused)
+
+    assert unbound.state == "failed"
+    assert bound.state == "refused"
+    assert bound.source_precondition_evidence_sha256 == "b" * 64
+
+
+def test_controlled_context_coverage_requires_typed_input_or_observed_refusal() -> None:
+    exact_contexts = {
+        "portfolio_performance",
+        "position_sizing",
+        "scenario_custom",
+        "portfolio_minimum_variance",
+        "derivatives_model",
+        "bounded_backtest",
+        "pretrade_impact",
+    }
+    raw_only = AnalyticsRuntimeResources(
+        dataset_ids_by_analysis_kind={
+            kind: [f"ds_{index:032x}"] for index, kind in enumerate(exact_contexts)
+        },
+    )
+    observed = AnalyticsRuntimeResources(
+        analysis_input_dataset_ids_by_analysis_kind={
+            "scenario_custom": ["ds_66666666666646668666666666666666"],
+        },
+        analysis_input_refusals_by_analysis_kind={
+            kind: f"{index + 1:064x}"
+            for index, kind in enumerate(exact_contexts - {"scenario_custom"})
+        },
+    )
+
+    assert matrix_module._controlled_context_coverage(raw_only) == (False, 0)  # noqa: SLF001
+    assert matrix_module._controlled_context_coverage(observed) == (True, 7)  # noqa: SLF001
+
+
 def test_queued_long_job_is_not_a_completed_analysis_receipt() -> None:
     call = sim_module.AnalyticsCaseCall(
         tool_id="saxo_manage_analysis_job",
@@ -893,6 +1100,28 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         errors=(),
     )
     assert receipt.status == "passed"
+
+    lifecycle = receipt.controlled_sim_lifecycle
+    assert lifecycle is not None
+    reduced_cases = list(lifecycle.cases)
+    option_index = CONTROLLED_SIM_CASES.index("options_entitlement")
+    reduced_cases[option_index] = reduced_cases[option_index].model_copy(
+        update={
+            "state": "degraded",
+            "reason_code": "options_entitlement_denied",
+            "entitlement_state": "denied",
+        },
+    )
+    reduced_lifecycle = lifecycle.model_copy(
+        update={"evidence_state": "reduced", "cases": tuple(reduced_cases)},
+    )
+    reduced_receipt = SimToolMatrixReceipt.model_validate(
+        {
+            **receipt.model_dump(mode="python"),
+            "controlled_sim_lifecycle": reduced_lifecycle,
+        },
+    )
+    assert reduced_receipt.status == "passed"
 
     with pytest.raises(ValidationError, match="60-tool"):
         SimToolMatrixReceipt.model_validate(

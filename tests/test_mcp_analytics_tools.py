@@ -24,12 +24,14 @@ from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_costs import CostComponents, SaxoCostIllustration
 from saxo_bank_mcp.analytics_derivatives import DerivativeDataset
 from saxo_bank_mcp.analytics_execution import (
+    StoredAnalysisExecutionError,
     StoredDerivativesExecutionContext,
     StoredOptimizationExecutionContext,
     StoredPortfolioExecutionContext,
     StoredPositionSizingExecutionContext,
     StoredPretradeExecutionContext,
     StoredScenarioExecutionContext,
+    issue_stored_analysis_input,
 )
 from saxo_bank_mcp.analytics_instrument_identity import (
     instrument_handle_for_saxo_identity,
@@ -103,8 +105,14 @@ from saxo_bank_mcp.analytics_store import AnalyticsStore
 from saxo_bank_mcp.analytics_sync import (
     AccountAnalyticsSyncSpec,
     AnalysisInputKind,
+    AnalysisInputSyncSpec,
     DatasetPage,
     IngestionFingerprints,
+    OptionChainSyncSpec,
+    QuoteDatasetRow,
+    QuoteDatasetSummary,
+    SyncResult,
+    SyncStatus,
     sync_price_bars,
 )
 from saxo_bank_mcp.analytics_tool_descriptions import ANALYTICS_TOOL_DESCRIPTIONS
@@ -341,29 +349,31 @@ def _persist_typed_context(
                 "rows": [{"schema": "synthetic_saxo_contract_fixture"}],
             }
 
-        page_ids = tuple(
-            store.put_source_page(
-                source_kind=source_contracts_by_id()[contract_id].source_kind,
-                page_key=f"{context_kind}:{contract_id}",
-                source_revision=source_revision,
-                contract_name=contract_id,
-                contract_sha256=source_contract_fingerprint(
-                    source_contracts_by_id()[contract_id],
-                ),
-                payload=source_payload(contract_id),
-                row_count=1,
-                source_timestamp=at,
-                account_scope=_ACCOUNT_ALIAS,
-                instrument_handle=None,
-            ).page_id
-            for contract_id in contract_ids
-        )
+        page_ids: list[str] = []
+        for contract_id in contract_ids:
+            payload = source_payload(contract_id)
+            page_ids.append(
+                store.put_source_page(
+                    source_kind=source_contracts_by_id()[contract_id].source_kind,
+                    page_key=f"{context_kind}:{contract_id}",
+                    source_revision=source_revision,
+                    contract_name=contract_id,
+                    contract_sha256=source_contract_fingerprint(
+                        source_contracts_by_id()[contract_id],
+                    ),
+                    payload=source_payload(contract_id),
+                    row_count=len(cast("list[object]", payload["rows"])),
+                    source_timestamp=at,
+                    account_scope=_ACCOUNT_ALIAS,
+                    instrument_handle=None,
+                ).page_id,
+            )
         store.create_dataset(
             dataset_id=dataset_id,
             account_scope=_ACCOUNT_ALIAS,
             source_scope="saxo_openapi",
             source_revision=source_revision,
-            source_page_ids=page_ids,
+            source_page_ids=tuple(page_ids),
             created_at=at,
             coverage_start=at,
             coverage_end=at,
@@ -481,6 +491,335 @@ def _persist_position_sizing_source_pages(
     finally:
         store.close()
     return dataset_id, handle
+
+
+def _persist_current_performance_source_pages(
+    config: AnalyticsConfig,
+    *,
+    cash_transfers: tuple[dict[str, object], ...],
+) -> str:
+    """Persist the current nested Saxo performance shape without a typed snapshot."""
+    source_revision = "capture:current-performance-source"
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    payloads: dict[str, dict[str, object]] = {
+        "performance_summary_v4": {
+            "contract_id": "performance_summary_v4",
+            "rows": [
+                {
+                    "AccountValue": 1050,
+                    "AccumulatedProfitLoss": 50,
+                },
+            ],
+        },
+        "performance_timeseries_v4": {
+            "contract_id": "performance_timeseries_v4",
+            "rows": [
+                {
+                    "Balance": {
+                        "AccountValue": [
+                            {"Date": "2026-08-02", "Value": 1000},
+                            {"Date": "2026-08-03", "Value": 1050},
+                        ],
+                        "CashTransfer": list(cash_transfers),
+                    },
+                    "TimeWeighted": {
+                        "Accumulated": [
+                            {"Date": "2026-08-02", "Value": 0},
+                            {"Date": "2026-08-03", "Value": 5},
+                        ],
+                    },
+                },
+            ],
+        },
+        "transactions_v1": {"contract_id": "transactions_v1", "rows": []},
+        "bookings_v1": {"contract_id": "bookings_v1", "rows": []},
+        "balances_v1": {
+            "contract_id": "balances_v1",
+            "rows": [{"Currency": "USD", "TotalValue": 1050}],
+        },
+    }
+    store = AnalyticsStore.open(config)
+    try:
+        pages = tuple(
+            store.put_source_page(
+                source_kind=source_contracts_by_id()[contract_id].source_kind,
+                page_key=f"current-performance-source:{contract_id}",
+                source_revision=source_revision,
+                contract_name=contract_id,
+                contract_sha256=source_contract_fingerprint(
+                    source_contracts_by_id()[contract_id],
+                ),
+                payload=payload,
+                row_count=len(cast("list[object]", payload["rows"])),
+                source_timestamp=_NOW,
+                account_scope=_ACCOUNT_ALIAS,
+                instrument_handle=None,
+            )
+            for contract_id, payload in payloads.items()
+        )
+        store.create_dataset(
+            dataset_id=dataset_id,
+            account_scope=_ACCOUNT_ALIAS,
+            source_scope="saxo_openapi",
+            source_revision=source_revision,
+            source_page_ids=tuple(page.page_id for page in pages),
+            created_at=_NOW,
+            coverage_start=_NOW - timedelta(days=1),
+            coverage_end=_NOW,
+            quality_state=QualityState.COMPLETE,
+        )
+    finally:
+        store.close()
+    return dataset_id
+
+
+def _persist_zero_exposure_scenario_source_pages(
+    config: AnalyticsConfig,
+    *,
+    exposures: tuple[Decimal, ...] = (Decimal(0),),
+) -> tuple[str, str]:
+    source_revision = "capture:zero-exposure-scenario"
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    handle = _seed_chart_instrument(config)
+    payloads: dict[str, dict[str, object]] = {
+        "balances_v1": {
+            "contract_id": "balances_v1",
+            "rows": [{"Currency": "USD", "MarginAvailableForTrading": 1000}],
+        },
+        "positions_v1": {
+            "contract_id": "positions_v1",
+            "rows": [
+                {
+                    "PositionBase": {"Amount": 1, "AssetType": "Stock", "Uic": 1},
+                    "PositionView": {"CurrentPrice": 100, "Exposure": float(exposure)},
+                }
+                for exposure in exposures
+            ],
+        },
+        "exposure_instruments_v1": {
+            "contract_id": "exposure_instruments_v1",
+            "rows": [{"Amount": 1, "AssetType": "Stock", "Currency": "USD", "Uic": 1}],
+        },
+    }
+    store = AnalyticsStore.open(config)
+    try:
+        pages = tuple(
+            store.put_source_page(
+                source_kind=source_contracts_by_id()[contract_id].source_kind,
+                page_key=f"zero-exposure-scenario:{contract_id}",
+                source_revision=source_revision,
+                contract_name=contract_id,
+                contract_sha256=source_contract_fingerprint(
+                    source_contracts_by_id()[contract_id],
+                ),
+                payload=payload,
+                row_count=len(cast("list[object]", payload["rows"])),
+                source_timestamp=_NOW,
+                account_scope=_ACCOUNT_ALIAS,
+                instrument_handle=(handle if contract_id == "exposure_instruments_v1" else None),
+            )
+            for contract_id, payload in payloads.items()
+        )
+        store.create_dataset(
+            dataset_id=dataset_id,
+            account_scope=_ACCOUNT_ALIAS,
+            source_scope="saxo_openapi",
+            source_revision=source_revision,
+            source_page_ids=tuple(page.page_id for page in pages),
+            created_at=_NOW,
+            coverage_start=_NOW,
+            coverage_end=_NOW,
+            quality_state=QualityState.COMPLETE,
+        )
+    finally:
+        store.close()
+    return dataset_id, handle
+
+
+def test_current_performance_flows_reach_explicit_boundary_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    config = tools_module._analytics_config()  # noqa: SLF001
+    source_dataset_id = _persist_current_performance_source_pages(
+        config,
+        cash_transfers=({"Date": "2026-08-03", "Value": 10},),
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        with pytest.raises(StoredAnalysisExecutionError) as caught:
+            issue_stored_analysis_input(
+                analysis_kind="portfolio_performance",
+                source_dataset_ids=(source_dataset_id,),
+                config=config,
+                store=store,
+            )
+    finally:
+        store.close()
+
+    assert caught.value.reason_code == "portfolio_flow_boundary_valuations_unavailable"
+
+
+def test_current_performance_without_flows_issues_typed_portfolio_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    config = tools_module._analytics_config()  # noqa: SLF001
+    source_dataset_id = _persist_current_performance_source_pages(
+        config,
+        cash_transfers=(),
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        issued = issue_stored_analysis_input(
+            analysis_kind="portfolio_performance",
+            source_dataset_ids=(source_dataset_id,),
+            config=config,
+            store=store,
+        )
+        snapshot = store.get_authenticated_snapshot_material(
+            issued.dataset_id,
+            "portfolio_performance_input",
+        )
+        context = StoredPortfolioExecutionContext.model_validate_json(
+            json.dumps(snapshot.payload),
+        )
+        source_revision = store.get_authenticated_dataset(issued.dataset_id).source_revision
+    finally:
+        store.close()
+
+    assert issued.analysis_kind == "portfolio_performance"
+    assert context.dataset.opening_value == Decimal(1000)
+    assert context.dataset.closing_value == Decimal(1050)
+    assert context.dataset.saxo_totals == SaxoPerformanceTotals(
+        closing_value=Decimal(1050),
+        total_profit_loss=Decimal(50),
+        currency="USD",
+    )
+    registry = _active_test_registry(
+        config,
+        analysis_kind="portfolio_performance",
+        metric_ids=("time_weighted_return",),
+        source_revision=source_revision,
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", _registry_resolver(registry))
+    response = tools_module.saxo_analyze_portfolio(
+        tools_module.StoredPortfolioToolRequest(
+            analysis_kind="portfolio_performance",
+            dataset_ids=(issued.dataset_id,),
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        ),
+    )
+    assert isinstance(response, tools_module.VerifiedAnalysisToolResponse), getattr(
+        response,
+        "reason_code",
+        None,
+    )
+
+
+def test_zero_current_exposure_remains_a_valid_zero_shock_scenario_input(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    config = tools_module._analytics_config()  # noqa: SLF001
+    source_dataset_id, handle = _persist_zero_exposure_scenario_source_pages(config)
+    store = AnalyticsStore.open(config)
+    try:
+        issued = issue_stored_analysis_input(
+            analysis_kind="scenario_custom",
+            source_dataset_ids=(source_dataset_id,),
+            config=config,
+            store=store,
+        )
+        source_revision = store.get_authenticated_dataset(issued.dataset_id).source_revision
+    finally:
+        store.close()
+    registry = _active_test_registry(
+        config,
+        analysis_kind="scenario_custom",
+        metric_ids=("custom_shock_effect",),
+        source_revision=source_revision,
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", _registry_resolver(registry))
+
+    response = tools_module.saxo_run_scenario(
+        tools_module.StoredScenarioToolRequest(
+            analysis_kind="scenario_custom",
+            dataset_id=issued.dataset_id,
+            shocks=(
+                tools_module.ExplicitScenarioShock(
+                    instrument_handle=handle,
+                    price_shock_ratio=Decimal(0),
+                ),
+            ),
+            numeric_shocks_echoed_by_caller=True,
+            caller_accepted_numeric_shocks=True,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        ),
+    )
+
+    assert isinstance(response, tools_module.VerifiedAnalysisToolResponse), getattr(
+        response,
+        "reason_code",
+        None,
+    )
+    assert response.result.metrics[0].value == 0
+
+
+def test_repeated_position_rows_are_aggregated_into_one_scenario_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    config = tools_module._analytics_config()  # noqa: SLF001
+    source_dataset_id, handle = _persist_zero_exposure_scenario_source_pages(
+        config,
+        exposures=(Decimal(10), Decimal(20)),
+    )
+    store = AnalyticsStore.open(config)
+    try:
+        issued = issue_stored_analysis_input(
+            analysis_kind="scenario_custom",
+            source_dataset_ids=(source_dataset_id,),
+            config=config,
+            store=store,
+        )
+        source_revision = store.get_authenticated_dataset(issued.dataset_id).source_revision
+    finally:
+        store.close()
+    registry = _active_test_registry(
+        config,
+        analysis_kind="scenario_custom",
+        metric_ids=("custom_shock_effect",),
+        source_revision=source_revision,
+    )
+    monkeypatch.setattr(tools_module, "_proof_registry", _registry_resolver(registry))
+
+    response = tools_module.saxo_run_scenario(
+        tools_module.StoredScenarioToolRequest(
+            analysis_kind="scenario_custom",
+            dataset_id=issued.dataset_id,
+            shocks=(
+                tools_module.ExplicitScenarioShock(
+                    instrument_handle=handle,
+                    price_shock_ratio=Decimal("-0.1"),
+                ),
+            ),
+            numeric_shocks_echoed_by_caller=True,
+            caller_accepted_numeric_shocks=True,
+            visibility=VisibilityMode.PRIVATE_USER_RESULT,
+        ),
+    )
+
+    assert isinstance(response, tools_module.VerifiedAnalysisToolResponse), getattr(
+        response,
+        "reason_code",
+        None,
+    )
+    assert response.result.metrics[0].value == pytest.approx(-3)
 
 
 def _persist_aggregate_quote_source_page(
@@ -729,6 +1068,15 @@ def _active_test_registry_many(
     return ProofRegistry(definitions=definitions, catalog=catalog, config=config)
 
 
+def _registry_resolver(
+    registry: ProofRegistry,
+) -> Callable[[AnalyticsConfig], ProofRegistry]:
+    def resolve(_config: AnalyticsConfig, **_kwargs: object) -> ProofRegistry:
+        return registry
+
+    return resolve
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -960,6 +1308,7 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
     )
     handle = instrument_handle_for_saxo_identity("Stock", 1)
     snapshot_id = new_safe_handle(HandleKind.DATASET_ID)
+    quote_id = new_safe_handle(HandleKind.DATASET_ID)
     calls: list[str] = []
 
     async def capture_snapshot(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -1000,6 +1349,7 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
         )
 
     async def capture_costs(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        assert _kwargs["reference_prices"] == {handle: 50.0}
         calls.append("costs")
         return SimpleNamespace(
             datasets=(
@@ -1016,6 +1366,49 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
                 ),
             ),
             source_request_count=1,
+        )
+
+    async def capture_quote(*_args: object, **_kwargs: object) -> SyncResult:
+        calls.append("quote")
+        return SyncResult(
+            status=SyncStatus.COMPLETE,
+            source_request_count=1,
+            datasets=(
+                QuoteDatasetSummary(
+                    dataset_id=quote_id,
+                    data_kind="quote",
+                    instrument_handle=handle,
+                    quality_state=QualityState.COMPLETE,
+                    coverage_start=_NOW,
+                    coverage_end=_NOW,
+                    row_count=1,
+                    freshness="fresh",
+                    delayed_by_minutes=0,
+                    warnings=(),
+                    fingerprints=fingerprint,
+                ),
+            ),
+        )
+
+    def read_quote(*_args: object, **_kwargs: object) -> DatasetPage:
+        calls.append("quote_read")
+        return DatasetPage(
+            dataset_id=quote_id,
+            page=1,
+            limit=1,
+            total_rows=1,
+            rows=(
+                QuoteDatasetRow(
+                    instrument_handle=handle,
+                    captured_at=_NOW,
+                    bid_value=49.0,
+                    ask_value=51.0,
+                    mid_value=50.0,
+                    freshness="fresh",
+                    warnings=(),
+                ),
+            ),
+            next_page=None,
         )
 
     async def capture_supplemental(
@@ -1054,6 +1447,8 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
     monkeypatch.setattr(tools_module, "_server_account_scope", server_scope)
     monkeypatch.setattr(tools_module, "capture_portfolio_snapshot", capture_snapshot)
     monkeypatch.setattr(tools_module, "sync_account_history", capture_history)
+    monkeypatch.setattr(tools_module, "capture_quote", capture_quote, raising=False)
+    monkeypatch.setattr(tools_module, "get_dataset", read_quote)
     monkeypatch.setattr(tools_module, "sync_cost_sources", capture_costs)
     monkeypatch.setattr(tools_module, "sync_account_analysis_sources", capture_supplemental)
     result = await tools_module._capture_server_account_analytics(  # noqa: SLF001
@@ -1073,8 +1468,9 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
         config=tools_module._analytics_config(),  # noqa: SLF001
     )
 
-    assert calls == ["snapshot", "history", "costs", "supplemental"]
-    assert result.source_request_count == sum((3, 3, 1, 3))
+    assert calls == ["snapshot", "history", "quote", "quote_read", "costs", "supplemental"]
+    assert result.source_request_count == sum((3, 3, 1, 1, 3))
+    assert any(getattr(item, "data_kind", None) == "quote" for item in result.datasets)
     assert {getattr(item, "contract_id", None) for item in result.datasets} >= {
         "costs_v1",
         "exposure_instruments_v1",
@@ -1296,6 +1692,104 @@ async def test_analysis_fastmcp_request_accepts_safe_handles_and_returns_canonic
     assert response.structured_content["status"] == "refused"
     assert response.structured_content["analysis_id"] is None
     assert response.structured_content["broker_write_made"] is False
+
+
+@pytest.mark.anyio
+async def test_sync_fastmcp_accepts_json_arrays_at_every_strict_request_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _state_env(monkeypatch, tmp_path)
+    handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+    dataset_id = new_safe_handle(HandleKind.DATASET_ID)
+    analysis_id = new_safe_handle(HandleKind.ANALYSIS_ID)
+    observed: list[tools_module.SyncResearchRequest] = []
+
+    async def sync(request: tools_module.SyncResearchRequest) -> SyncResult:
+        observed.append(request)
+        return SyncResult(
+            status=SyncStatus.COMPLETE,
+            source_request_count=0,
+            datasets=(),
+        )
+
+    monkeypatch.setattr(tools_module, "_sync_research_request", sync)
+    requests = (
+        {
+            "items": [
+                {
+                    "data_kind": "price_bars",
+                    "handle": handle,
+                    "interval": "1d",
+                    "start": "2026-01-01T00:00:00Z",
+                    "end": "2026-01-31T00:00:00Z",
+                }
+            ]
+        },
+        {
+            "items": [
+                {
+                    "data_kind": "option_chain",
+                    "handle": handle,
+                    "expiries": ["2026-09-18"],
+                }
+            ]
+        },
+        {
+            "items": [
+                {
+                    "data_kind": "account_analytics",
+                    "safe_account_selector": "proc-acct-abcdefghijklmnopqrstuvwx",
+                    "analysis_kinds": ["position_sizing"],
+                    "instrument_handles": [handle],
+                }
+            ]
+        },
+        {
+            "items": [
+                {
+                    "data_kind": "analysis_input",
+                    "analysis_kind": "pretrade_impact",
+                    "source_dataset_ids": [dataset_id],
+                    "origin_analysis_id": analysis_id,
+                }
+            ]
+        },
+    )
+    server = create_mcp_server(allowed_tools=frozenset({"saxo_sync_research_data"}))
+
+    async with Client(server) as client:
+        responses = tuple(
+            [
+                await client.call_tool(
+                    "saxo_sync_research_data",
+                    {"request": request},
+                )
+                for request in requests
+            ]
+        )
+
+    assert all(response.structured_content is not None for response in responses)
+    assert [
+        cast("dict[str, object]", response.structured_content)["status"] for response in responses
+    ] == [
+        "passed",
+        "passed",
+        "passed",
+        "passed",
+    ]
+    assert len(observed) == len(requests)
+    assert all(isinstance(request.items, tuple) for request in observed)
+    option_item = observed[1].items[0]
+    account_item = observed[2].items[0]
+    analysis_input_item = observed[3].items[0]
+    assert isinstance(option_item, OptionChainSyncSpec)
+    assert isinstance(option_item.expiries, tuple)
+    assert isinstance(account_item, AccountAnalyticsSyncSpec)
+    assert isinstance(account_item.analysis_kinds, tuple)
+    assert isinstance(account_item.instrument_handles, tuple)
+    assert isinstance(analysis_input_item, AnalysisInputSyncSpec)
+    assert isinstance(analysis_input_item.source_dataset_ids, tuple)
 
 
 @pytest.mark.anyio

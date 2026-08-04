@@ -152,10 +152,10 @@ def normalize_price_series(
                     instrument_handle=handle,
                     bar_time=bar_time,
                     interval=interval,
-                    open_value=_optional_number(row.get("OpenBid")),
-                    high_value=_optional_number(row.get("HighBid")),
-                    low_value=_optional_number(row.get("LowBid")),
-                    close_value=_required_number(row.get("CloseBid")),
+                    open_value=_optional_number(_chart_price(row, "OpenBid", "Open")),
+                    high_value=_optional_number(_chart_price(row, "HighBid", "High")),
+                    low_value=_optional_number(_chart_price(row, "LowBid", "Low")),
+                    close_value=_required_number(_chart_price(row, "CloseBid", "Close")),
                     volume_value=_optional_number(row.get("Volume")),
                     price_type=_optional_text(row.get("PriceType")),
                 ),
@@ -188,6 +188,11 @@ def normalize_price_series(
         warnings=tuple(sorted(warnings)),
         fingerprint_sha256=fingerprint,
     )
+
+
+def _chart_price(row: Mapping[str, object], bid_field: str, last_field: str) -> object:
+    """Select the exact Saxo chart field family present in this source row."""
+    return row[bid_field] if bid_field in row else row.get(last_field)
 
 
 def normalize_quote(

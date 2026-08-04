@@ -82,6 +82,7 @@ class SourceResponseShape(StrEnum):
 
     DATA_ARRAY = "data_array"
     OBJECT = "object"
+    TOP_LEVEL_ARRAY = "top_level_array"
 
 
 class SourceObjectMode(StrEnum):
@@ -423,7 +424,8 @@ class SourceContract(BaseModel):
     def validate_registered_source(self) -> Self:
         expected_row_location = (
             SourceEnvelopeRowLocation.DATA
-            if self.response_shape is SourceResponseShape.DATA_ARRAY
+            if self.response_shape
+            in {SourceResponseShape.DATA_ARRAY, SourceResponseShape.TOP_LEVEL_ARRAY}
             else SourceEnvelopeRowLocation.ROOT
         )
         if self.response_envelope.row_location is not expected_row_location:
@@ -611,9 +613,8 @@ class SourceQualityProof(BaseModel):
     )
     @classmethod
     def validate_field_paths(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if (
-            tuple(sorted(set(value))) != value
-            or any(_FIELD_PATH_PATTERN.fullmatch(path) is None for path in value)
+        if tuple(sorted(set(value))) != value or any(
+            _FIELD_PATH_PATTERN.fullmatch(path) is None for path in value
         ):
             raise ValueError("source quality field paths must be sorted and unique")
         return value
@@ -632,10 +633,7 @@ class SourceQualityProof(BaseModel):
                 "source_quality_state_invalid",
                 "source quality state does not match its field limitations",
             )
-        if any(
-            path not in _QUOTE_PRICE_TYPE_FIELD_SET
-            for path in self.entitlement_limited_fields
-        ):
+        if any(path not in _QUOTE_PRICE_TYPE_FIELD_SET for path in self.entitlement_limited_fields):
             raise PydanticCustomError(
                 "source_quality_entitlement_field_invalid",
                 "source quality entitlement field is not allowed",
@@ -753,27 +751,22 @@ def aggregate_source_quality(
         raise ValueError("source quality aggregation requires at least one page")
     quality_fields = _QUOTE_QUALITY_FIELDS.get(contract.contract_id)
     expected_state = "complete" if quality_fields is not None else "not_applicable"
-    entitlement_limited = {
-        path for proof in proofs for path in proof.entitlement_limited_fields
-    }
+    entitlement_limited = {path for proof in proofs for path in proof.entitlement_limited_fields}
     delayed = {path for proof in proofs for path in proof.delayed_fields}
     missing = {path for proof in proofs for path in proof.missing_fields}
-    if quality_fields is not None and not (
-        entitlement_limited | delayed | missing
-    ) <= quality_fields:
+    if (
+        quality_fields is not None
+        and not (entitlement_limited | delayed | missing) <= quality_fields
+    ):
         raise ValueError("source quality fields do not match the source contract")
     if expected_state == "not_applicable" and any(
         proof.state != "not_applicable" for proof in proofs
     ):
         raise ValueError("non-quote source quality must be not applicable")
-    if expected_state == "complete" and any(
-        proof.state == "not_applicable" for proof in proofs
-    ):
+    if expected_state == "complete" and any(proof.state == "not_applicable" for proof in proofs):
         raise ValueError("quote source quality must be proved")
     state: Literal["not_applicable", "complete", "limited"] = (
-        "limited"
-        if entitlement_limited or delayed or missing
-        else expected_state
+        "limited" if entitlement_limited or delayed or missing else expected_state
     )
     return SourceQualityProof(
         state=state,

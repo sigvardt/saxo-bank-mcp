@@ -139,6 +139,30 @@ async def test_exchange_filter_selects_one_listing_explicitly(tmp_path: Path) ->
 
 
 @pytest.mark.anyio
+async def test_current_saxo_reference_fields_are_contract_bound_and_resolvable(
+    tmp_path: Path,
+) -> None:
+    row = _instrument(101, symbol="FIXTURE", exchange="XNAS")
+    row.update(
+        {
+            "CurrencyCode": "USD",
+            "GroupId": 10,
+            "IssuerCountry": "US",
+            "PrimaryListing": 101,
+            "SummaryType": "Instrument",
+            "TradableAs": ["Stock"],
+        },
+    )
+    resolver = InstrumentResolver(_provider([[row]]), _config(tmp_path))
+
+    result = await resolver.resolve_instruments("FIXTURE", ("Stock",), ())
+
+    assert result.status == "resolved"
+    assert len(result.matches) == 1
+    assert result.matches[0].symbol == "FIXTURE"
+
+
+@pytest.mark.anyio
 async def test_exchange_filter_ignores_other_listing_saved_by_prior_search(
     tmp_path: Path,
 ) -> None:

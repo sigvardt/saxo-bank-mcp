@@ -61,6 +61,7 @@ _COSTS_CONTRACT: Final = "costs_v1"
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 512
 _SOURCE_PAGE_SIZE: Final = 500
 _MAX_SOURCE_TEXT_LENGTH: Final = 1_000
+_ISO_DATE_LENGTH: Final = 10
 _DUCKDB_ALLOCATION_RESERVE_BYTES: Final = 16 * 1024 * 1024
 _DUCKDB_BLOCK_BYTES: Final = 256 * 1024
 _SOURCE_PAGE_INDEX_OVERHEAD_BYTES: Final = 64 * 1024
@@ -393,6 +394,7 @@ async def sync_cost_sources(  # noqa: PLR0913
     *,
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
+    reference_prices: Mapping[str, float] | None = None,
     visibility: VisibilityMode = VisibilityMode.FINGERPRINT_ONLY,
     trusted_local_host: bool = False,
     clock: Clock = lambda: datetime.now(UTC),
@@ -411,6 +413,14 @@ async def sync_cost_sources(  # noqa: PLR0913
         raise AccountSyncValidationError("cost sync instrument count exceeds its fixed limit")
     if len(set(handles)) != len(handles):
         raise AccountSyncValidationError("cost sync instruments must be unique")
+    price_by_handle = {} if reference_prices is None else dict(reference_prices)
+    if price_by_handle and set(price_by_handle) != set(handles):
+        raise AccountSyncValidationError("cost sync reference price scope is invalid")
+    if any(
+        isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0
+        for value in price_by_handle.values()
+    ):
+        raise AccountSyncValidationError("cost sync reference price is invalid")
     selectors = _instrument_selectors(config, handles)
     budget = _source_budget(config, request_budget)
     request_count_start = budget.used
@@ -419,9 +429,13 @@ async def sync_cost_sources(  # noqa: PLR0913
     for selector in selectors:
         request: dict[str, object] = {
             "AccountKey": validated_scope.account_key.get_secret_value(),
+            "Amount": 1,
             "AssetType": selector.asset_type,
+            "HoldingPeriodInDays": 1,
             "Uic": selector.identifier,
         }
+        if selector.handle in price_by_handle:
+            request["Price"] = price_by_handle[selector.handle]
         capture = build_source_capture_context(
             {_COSTS_CONTRACT: request},
             captured_at=captured_at,
@@ -809,16 +823,16 @@ def _history_request(
             "$top": _SOURCE_PAGE_SIZE,
             "AccountKeys": (account_key,),
             "ClientKey": client_key,
-            "FromDate": start.isoformat(),
-            "ToDate": end.isoformat(),
+            "FromDate": start.date().isoformat(),
+            "ToDate": end.date().isoformat(),
         }
     if contract_id == _BOOKINGS_CONTRACT:
         return {
             "$top": _SOURCE_PAGE_SIZE,
             "AccountKey": account_key,
             "ClientKey": client_key,
-            "FromDate": start.isoformat(),
-            "ToDate": end.isoformat(),
+            "FromDate": start.date().isoformat(),
+            "ToDate": end.date().isoformat(),
         }
     if contract_id == _CLOSED_POSITIONS_CONTRACT:
         return {
@@ -907,14 +921,16 @@ def _normalize_bookings(
     records: list[_NormalizedRecord] = []
     for page in pages:
         for row in page.rows:
-            source_id = _required_text(row.get("BookingId"))
+            source_id = _required_text(row.get("BkAmountId") or row.get("BookingId"))
             records.append(
                 _NormalizedRecord(
                     data_kind="bookings",
                     category="booking",
                     source_identity_sha256=_identity_fingerprint(alias, source_id),
                     source_row_sha256=_fingerprint(_thaw_mapping(row)),
-                    effective_at=_required_timestamp(row.get("BookingDate")),
+                    effective_at=_required_date_or_timestamp(
+                        row.get("Date") or row.get("BookingDate"),
+                    ),
                     amount_value=_optional_number(row.get("Amount")),
                     currency=None,
                     instrument_handle=None,
@@ -931,18 +947,27 @@ def _normalize_closed_positions(
     records: list[_NormalizedRecord] = []
     for page in pages:
         for row in page.rows:
-            source_id = _required_text(row.get("ClosedPositionId"))
+            source_id = _required_text(row.get("ClosePositionId") or row.get("ClosedPositionId"))
             closing = _optional_mapping(row.get("ClosingPosition"))
             closed = _optional_mapping(row.get("ClosedPosition"))
-            asset_type = _optional_text(closing.get("AssetType")) or "Unknown"
+            asset_type = (
+                _optional_text(row.get("AssetType"))
+                or _optional_text(closing.get("AssetType"))
+                or "Unknown"
+            )
             identifier = _optional_integer(closing.get("Uic"))
             instrument_handle = (
                 None
                 if identifier is None
                 else instrument_handle_for_saxo_identity(asset_type, identifier)
             )
-            closed_at_value = closed.get("ExecutionTimeClose")
-            closed_at = None if closed_at_value is None else _required_timestamp(closed_at_value)
+            closed_at_value = row.get("TradeDateClose") or closed.get("ExecutionTimeClose")
+            closed_at = (
+                None if closed_at_value is None else _required_date_or_timestamp(closed_at_value)
+            )
+            profit_loss = row.get("PnLAccountCurrency")
+            if profit_loss is None:
+                profit_loss = closed.get("ClosedProfitLoss")
             records.append(
                 _NormalizedRecord(
                     data_kind="closed_positions",
@@ -950,8 +975,8 @@ def _normalize_closed_positions(
                     source_identity_sha256=_identity_fingerprint(alias, source_id),
                     source_row_sha256=_fingerprint(_thaw_mapping(row)),
                     effective_at=closed_at,
-                    amount_value=_optional_number(closed.get("ClosedProfitLoss")),
-                    currency=None,
+                    amount_value=_optional_number(profit_loss),
+                    currency=_optional_text(row.get("AccountCurrency")),
                     instrument_handle=instrument_handle,
                     page_number=page.page_number,
                 ),
@@ -967,9 +992,10 @@ def _normalize_costs(
     records: list[_NormalizedRecord] = []
     for page in pages:
         for row in page.rows:
-            cost = _optional_mapping(row.get("Cost"))
+            raw_cost = _optional_mapping(row.get("Cost"))
+            cost = _current_cost_side(raw_cost)
             total = _optional_number(cost.get("TotalCost"))
-            commission = _optional_number(cost.get("Commission"))
+            commission = _cost_commission(cost)
             tax = _optional_number(cost.get("StampDuty"))
             source_id = _fingerprint(
                 {"account_alias": alias, "instrument_handle": instrument_handle},
@@ -982,7 +1008,11 @@ def _normalize_costs(
                     source_row_sha256=_fingerprint(_thaw_mapping(row)),
                     effective_at=page.source_timestamp,
                     amount_value=total,
-                    currency=_optional_text(row.get("Currency")),
+                    currency=(
+                        _optional_text(cost.get("Currency"))
+                        or _optional_text(row.get("Currency"))
+                        or _optional_text(row.get("AccountCurrency"))
+                    ),
                     instrument_handle=instrument_handle,
                     page_number=page.page_number,
                     fee_value=commission,
@@ -1745,6 +1775,25 @@ def _optional_mapping(value: object) -> Mapping[str, FrozenSourceJsonValue]:
     return cast("Mapping[str, FrozenSourceJsonValue]", value)
 
 
+def _current_cost_side(
+    cost: Mapping[str, FrozenSourceJsonValue],
+) -> Mapping[str, FrozenSourceJsonValue]:
+    current = cost.get("Long")
+    return _optional_mapping(current) if current is not None else cost
+
+
+def _cost_commission(cost: Mapping[str, FrozenSourceJsonValue]) -> float | None:
+    direct = _optional_number(cost.get("Commission"))
+    if direct is not None:
+        return direct
+    trading = _optional_mapping(cost.get("TradingCost"))
+    commissions = trading.get("Commissions")
+    if not isinstance(commissions, Sequence) or isinstance(commissions, str | bytes):
+        return None
+    values = tuple(_optional_number(_optional_mapping(item).get("Value")) for item in commissions)
+    return sum(value for value in values if value is not None)
+
+
 def _required_timestamp(value: object) -> datetime:
     if not isinstance(value, str):
         raise AccountSyncError("validated account source timestamp is invalid")
@@ -1755,6 +1804,16 @@ def _required_timestamp(value: object) -> datetime:
     if timestamp.tzinfo is None:
         raise AccountSyncError("validated account source timestamp has no offset")
     return timestamp.astimezone(UTC)
+
+
+def _required_date_or_timestamp(value: object) -> datetime:
+    if isinstance(value, str) and len(value) == _ISO_DATE_LENGTH:
+        try:
+            timestamp = datetime.fromisoformat(f"{value}T00:00:00+00:00")
+        except ValueError as error:
+            raise AccountSyncError("validated account source date is invalid") from error
+        return timestamp
+    return _required_timestamp(value)
 
 
 def _require_utc_range(start: datetime, end: datetime) -> None:

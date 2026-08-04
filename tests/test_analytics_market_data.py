@@ -42,6 +42,38 @@ def test_chart_time_uses_its_exchange_offset_and_labels_price_return() -> None:
     assert series.adjustment_status == "unadjusted"
 
 
+def test_current_saxo_last_traded_chart_fields_normalize_without_inventing_price_type() -> None:
+    handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
+
+    series = normalize_price_series(
+        rows=(
+            {
+                "Close": 101.0,
+                "High": 102.0,
+                "Interest": 0.0,
+                "Low": 99.0,
+                "MarketTradingState": "Open",
+                "Open": 100.0,
+                "Time": "2026-01-02T00:00:00Z",
+                "Volume": 12.0,
+            },
+        ),
+        instrument_handle=handle,
+        interval=ChartInterval.ONE_DAY,
+        start=datetime(2026, 1, 2, tzinfo=UTC),
+        end=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    bar = series.bars[0]
+    assert (bar.open_value, bar.high_value, bar.low_value, bar.close_value) == (
+        100.0,
+        102.0,
+        99.0,
+        101.0,
+    )
+    assert bar.price_type is None
+
+
 def test_chart_gap_and_missing_volume_remain_explicit() -> None:
     handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
 

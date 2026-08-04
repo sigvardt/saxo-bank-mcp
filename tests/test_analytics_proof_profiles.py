@@ -106,7 +106,7 @@ def _active_registry(
     source_binding = SourceContractProofBinding(
         contract_id=contract.contract_id,
         contract_sha256=source_contract_fingerprint(contract),
-        field_paths=("CloseBid", "Time"),
+        field_paths=("Close", "CloseBid", "Time"),
     )
     profile = ProofProfile(
         proof_profile_id="vp_unit_test_analysis_v1",
@@ -559,7 +559,7 @@ def test_active_profile_rejects_an_overbroad_metric_source_field() -> None:
         update={
             "source_contracts": (
                 profile.source_contracts[0].model_copy(
-                    update={"field_paths": ("CloseBid", "Time", "UnexpectedField")},
+                    update={"field_paths": ("Close", "CloseBid", "Time", "UnexpectedField")},
                 ),
             ),
         },

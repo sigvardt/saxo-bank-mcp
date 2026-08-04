@@ -100,6 +100,31 @@ _TERMINAL_JOB_STATES: Final = frozenset(
         "job_interrupted_restart_required",
     },
 )
+_ANALYSIS_INPUT_ALIASES: Final[dict[str, tuple[str, ...]]] = {
+    "portfolio_performance": ("portfolio_performance",),
+    "position_sizing": ("position_sizing",),
+    "scenario_custom": (
+        "margin_fire_drill",
+        "portfolio_scenario",
+        "scenario_combined",
+        "scenario_currency",
+        "scenario_custom",
+        "scenario_rate",
+        "scenario_volatility",
+    ),
+    "portfolio_minimum_variance": (
+        "portfolio_minimum_variance",
+        "portfolio_risk_parity",
+    ),
+    "derivatives_model": ("derivatives_model",),
+    "bounded_backtest": ("bounded_backtest",),
+    "pretrade_impact": ("pretrade_impact",),
+}
+_ANALYSIS_INPUT_ROUTE_BY_KIND: Final = {
+    analysis_kind: route
+    for route, analysis_kinds in _ANALYSIS_INPUT_ALIASES.items()
+    for analysis_kind in analysis_kinds
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,7 +496,10 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
             case_call,
             state.analytics_resources,
         )
-        observed_call = case_call.model_copy(update={"arguments": arguments})
+        observed_call = _bind_observed_source_precondition(
+            case_call.model_copy(update={"arguments": arguments}),
+            state.analytics_resources,
+        )
         if (
             controlled_fixtures is not None
             and ghost_observation is None
@@ -548,7 +576,7 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
                 observed_call.tool_id,
                 result,
                 observed_call.arguments,
-                status="completed",
+                status=("expected_refusal" if case_receipt.state == "refused" else "completed"),
             )
         elif observed_call.tool_id not in state.receipts and case_receipt.state in {
             "degraded",
@@ -739,6 +767,7 @@ async def _prepare_server_owned_analysis_inputs(
     ):
         source_dataset_ids = _source_datasets_for_execution(resources, analysis_kind)
         if not source_dataset_ids:
+            _remember_analysis_input_refusal(resources, analysis_kind)
             continue
         routed = await call_tool(
             client,
@@ -763,6 +792,8 @@ async def _prepare_server_owned_analysis_inputs(
             input_strategy="sync_issued_instrument",
         )
         _remember_analytics_handles(resources, auxiliary_call, routed)
+        if not resources.analysis_input_dataset_ids_by_analysis_kind.get(analysis_kind):
+            _remember_analysis_input_refusal(resources, analysis_kind, routed)
 
 
 async def _prepare_server_owned_pretrade_input(
@@ -771,9 +802,12 @@ async def _prepare_server_owned_pretrade_input(
 ) -> None:
     """Bind a proposal context to one replayable result and the exact current source set."""
     resources = state.analytics_resources
+    if resources.analysis_input_dataset_ids_by_analysis_kind.get("pretrade_impact"):
+        return
     origins = resources.analysis_ids_by_kind.get("instrument_price_return", [])
     source_dataset_ids = _source_datasets_for_execution(resources, "pretrade_impact")
     if len(origins) != 1 or not source_dataset_ids:
+        _remember_analysis_input_refusal(resources, "pretrade_impact")
         return
     routed = await call_tool(
         client,
@@ -802,6 +836,8 @@ async def _prepare_server_owned_pretrade_input(
         ),
         routed,
     )
+    if not resources.analysis_input_dataset_ids_by_analysis_kind.get("pretrade_impact"):
+        _remember_analysis_input_refusal(resources, "pretrade_impact", routed)
 
 
 def _source_datasets_for_execution(
@@ -828,6 +864,60 @@ def _source_datasets_for_execution(
             resources.dataset_ids_by_analysis_kind.get(route, []),
         )
     return selected[:25]
+
+
+def _remember_analysis_input_refusal(
+    resources: AnalyticsRuntimeResources,
+    analysis_kind: str,
+    observation: MatrixToolObservation | None = None,
+) -> None:
+    """Record only the server-observed absence of one typed source precondition."""
+    evidence_sha256 = digest(
+        {
+            "analysis_kind": analysis_kind,
+            "result_state": (
+                observation.result_state if observation is not None else "source_scope_missing"
+            ),
+            "response": (redact_json(observation.payload) if observation is not None else None),
+        },
+    )
+    for exact_kind in _ANALYSIS_INPUT_ALIASES.get(analysis_kind, (analysis_kind,)):
+        resources.analysis_input_refusals_by_analysis_kind[exact_kind] = evidence_sha256
+
+
+def _bind_observed_source_precondition(
+    case_call: AnalyticsCaseCall,
+    resources: AnalyticsRuntimeResources,
+) -> AnalyticsCaseCall:
+    """Bind a current source refusal without changing the production capability claim."""
+    if case_call.kind != "success":
+        return case_call
+    route = _ANALYSIS_INPUT_ROUTE_BY_KIND.get(
+        case_call.analysis_kind or "",
+        {
+            "saxo_analyze_portfolio": "portfolio_performance",
+            "saxo_size_position": "position_sizing",
+            "saxo_run_scenario": "scenario_custom",
+            "saxo_optimize_portfolio": "portfolio_minimum_variance",
+            "saxo_model_derivatives": "derivatives_model",
+            "saxo_backtest_strategy": "bounded_backtest",
+            "saxo_propose_trade_from_analysis": "pretrade_impact",
+        }.get(case_call.tool_id, ""),
+    )
+    exact_kind = case_call.analysis_kind or route
+    evidence_sha256 = resources.analysis_input_refusals_by_analysis_kind.get(
+        exact_kind,
+        resources.analysis_input_refusals_by_analysis_kind.get(route),
+    )
+    if evidence_sha256 is None:
+        return case_call
+    updates: dict[str, object] = {
+        "source_precondition_refused": True,
+        "source_precondition_evidence_sha256": evidence_sha256,
+    }
+    if case_call.expected_analysis_outcome == "persisted":
+        updates["expected_analysis_outcome"] = "refused"
+    return case_call.model_copy(update=updates)
 
 
 def _observed_option_expiries(payload: JsonValue) -> tuple[str, ...]:  # noqa: C901
@@ -1266,17 +1356,8 @@ def _controlled_sim_lifecycle_receipt(
         receipt = successful.get(tool)
         return receipt is not None and receipt.state == "passed" and receipt.result_parsed
 
-    exact_contexts = {
-        "portfolio_performance",
-        "position_sizing",
-        "scenario_custom",
-        "portfolio_minimum_variance",
-        "derivatives_model",
-        "bounded_backtest",
-        "pretrade_impact",
-    }
-    transaction_ok = passed("saxo_analyze_portfolio")
-    context_ok = exact_contexts <= set(resources.dataset_ids_by_analysis_kind)
+    transaction_ok = {"transactions_v1", "bookings_v1"} <= resources.source_contract_ids
+    context_ok, context_observation_count = _controlled_context_coverage(resources)
     options_ok = (
         passed("saxo_model_derivatives") and resources.option_entitlement_state == "available"
     )
@@ -1299,7 +1380,7 @@ def _controlled_sim_lifecycle_receipt(
             context_ok,
             "typed_execution_context_incomplete",
             resources.source_request_count,
-            len(exact_contexts & set(resources.dataset_ids_by_analysis_kind)),
+            context_observation_count,
             0,
             "not_applicable",
         ),
@@ -1347,10 +1428,17 @@ def _controlled_sim_lifecycle_receipt(
     ) in case_specs:
         analysis_tool = analysis_tool_by_case.get(case_id)
         observed_analysis = successful.get(analysis_tool) if analysis_tool is not None else None
+        case_state: Literal["passed", "degraded", "refused"] = (
+            "passed"
+            if ok
+            else "degraded"
+            if case_id == "options_entitlement" and entitlement == "denied"
+            else "refused"
+        )
         case_receipts.append(
             ControlledSimCaseReceipt(
                 case_id=case_id,
-                state="passed" if ok else "refused",
+                state=case_state,
                 reason_code="passed" if ok else reason,
                 source_request_count=source_count,
                 mcp_call_count=mcp_count,
@@ -1376,8 +1464,12 @@ def _controlled_sim_lifecycle_receipt(
             ),
         )
     cases = tuple(case_receipts)
-    state_value: Literal["passed", "refused"] = (
-        "passed" if all(case.state == "passed" for case in cases) else "refused"
+    state_value: Literal["passed", "reduced", "refused"] = (
+        "refused"
+        if any(case.state == "refused" for case in cases)
+        else "reduced"
+        if any(case.state == "degraded" for case in cases)
+        else "passed"
     )
     return ControlledSimLifecycleReceipt(
         evidence_state=state_value,
@@ -1401,7 +1493,18 @@ def _controlled_sim_lifecycle_receipt(
     )
 
 
-def analytics_case_receipt(  # noqa: C901, PLR0913
+def _controlled_context_coverage(
+    resources: AnalyticsRuntimeResources,
+) -> tuple[bool, int]:
+    required = set(_ANALYSIS_INPUT_ALIASES)
+    observed = (
+        set(resources.analysis_input_dataset_ids_by_analysis_kind)
+        | set(resources.analysis_input_refusals_by_analysis_kind)
+    ) & required
+    return required <= observed, len(observed)
+
+
+def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
     case_call: AnalyticsCaseCall,
     expected_states: tuple[str, ...],
     result: MatrixToolObservation,
@@ -1446,6 +1549,8 @@ def analytics_case_receipt(  # noqa: C901, PLR0913
             case_state = "passed"
         else:
             case_state = "failed"
+    elif case_call.source_precondition_refused and refusal_state:
+        case_state = "refused"
     elif case_call.kind == "timeout" and result.timed_out:
         case_state = cast(
             "Literal['passed', 'degraded', 'refused', 'timed_out', 'reconciled', 'failed']",
@@ -1466,6 +1571,10 @@ def analytics_case_receipt(  # noqa: C901, PLR0913
         case_state = "refused"
     else:
         case_state = "reconciled"
+    source_precondition_refused = case_call.source_precondition_refused and case_state == "refused"
+    source_precondition_evidence_sha256 = (
+        case_call.source_precondition_evidence_sha256 if source_precondition_refused else None
+    )
     evidence_material: dict[str, JsonValue] = {
         "tool_id": case_call.tool_id,
         "kind": case_call.kind,
@@ -1473,6 +1582,8 @@ def analytics_case_receipt(  # noqa: C901, PLR0913
         "request_sha256": digest(case_call.arguments),
         "response_sha256": digest(result.payload),
         "reconciles_request_sha256": reconciles_request_sha256,
+        "source_precondition_refused": source_precondition_refused,
+        "source_precondition_evidence_sha256": source_precondition_evidence_sha256,
     }
     return AnalyticsCaseReceipt(
         kind=case_call.kind,
@@ -1482,6 +1593,8 @@ def analytics_case_receipt(  # noqa: C901, PLR0913
         analysis_id=analysis_id,
         expected_analysis_outcome=expected_outcome,
         persisted_result_authenticated=persisted_result_authenticated,
+        source_precondition_refused=source_precondition_refused,
+        source_precondition_evidence_sha256=source_precondition_evidence_sha256,
         state=case_state,
         reason_code="observed" if case_state != "failed" else "unexpected_case_result",
         mcp_call_observed=True,
@@ -1523,9 +1636,9 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
         return {}
     if case_call.tool_id == "saxo_resolve_research_universe":
         return {
-            "query": (
-                "controlled stock fixture" if case_call.kind == "success" else "controlled fixture"
-            ),
+            "query": "Apple" if case_call.kind == "success" else "controlled fixture",
+            **({"asset_types": ["Stock"]} if case_call.kind == "success" else {}),
+            **({"exchanges": ["NASDAQ"]} if case_call.kind == "success" else {}),
         }
     if case_call.tool_id == "saxo_manage_research_universe":
         return {"action": "list"}
@@ -1540,9 +1653,13 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
         item: dict[str, JsonValue] = {
             "data_kind": "price_bars",
             "handle": handle,
-            "interval": "1d" if case_call.kind == "success" else "1m",
-            "start": "2026-01-01T00:00:00Z",
-            "end": "2026-01-31T00:00:00Z",
+            "interval": "1m",
+            "start": (
+                "2026-01-05T14:30:00Z" if case_call.kind == "success" else "2026-01-01T00:00:00Z"
+            ),
+            "end": (
+                "2026-01-05T15:30:00Z" if case_call.kind == "success" else "2026-01-31T00:00:00Z"
+            ),
         }
         return {"request": {"items": [item]}}
     if case_call.tool_id == "saxo_get_research_dataset":
@@ -1628,11 +1745,10 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         "saxo_model_derivatives": "derivatives_model",
         "saxo_backtest_strategy": "bounded_backtest",
     }[case_call.tool_id]
-    route = {
-        "portfolio_risk_parity": "portfolio_minimum_variance",
-        "margin_fire_drill": "scenario_custom",
-        "portfolio_scenario": "scenario_custom",
-    }.get(case_call.analysis_kind or "", case_call.analysis_kind or default_route)
+    route = _ANALYSIS_INPUT_ROUTE_BY_KIND.get(
+        case_call.analysis_kind or "",
+        case_call.analysis_kind or default_route,
+    )
     if case_call.tool_id in {"saxo_analyze_market", "saxo_analyze_instruments"}:
         route = "price_bars"
     elif case_call.tool_id == "saxo_analyze_portfolio":
@@ -1644,7 +1760,12 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         if degraded
         else resources.dataset_ids_by_analysis_kind
     )
-    dataset_ids = routed.get(route, [])
+    analysis_inputs = (
+        resources.degraded_analysis_input_dataset_ids_by_analysis_kind
+        if degraded
+        else resources.analysis_input_dataset_ids_by_analysis_kind
+    )
+    dataset_ids = analysis_inputs.get(route, routed.get(route, []))
     if degraded and not dataset_ids and route == "price_bars":
         dataset_ids = resources.dataset_ids_by_analysis_kind.get(route, [])
     dataset_id = dataset_ids[0] if dataset_ids else None
@@ -1814,6 +1935,11 @@ def _remember_typed_resources(  # noqa: C901
     analysis_routes = (
         resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
     )
+    analysis_input_routes = (
+        resources.degraded_analysis_input_dataset_ids_by_analysis_kind
+        if degraded
+        else resources.analysis_input_dataset_ids_by_analysis_kind
+    )
 
     def visit(value: JsonValue) -> None:  # noqa: C901, PLR0912
         if isinstance(value, list):
@@ -1825,8 +1951,24 @@ def _remember_typed_resources(  # noqa: C901
         dataset_id = value.get("dataset_id")
         data_kind = value.get("data_kind")
         analysis_kind = value.get("analysis_kind")
+        contract_id = value.get("contract_id")
+        if isinstance(contract_id, str):
+            resources.source_contract_ids.add(contract_id)
         if isinstance(dataset_id, str):
-            if data_kind != "analysis_input":
+            if data_kind == "analysis_input" and isinstance(analysis_kind, str):
+                _extend_unique(
+                    analysis_input_routes.setdefault(analysis_kind, []),
+                    [dataset_id],
+                )
+                for exact_kind in _ANALYSIS_INPUT_ALIASES.get(
+                    analysis_kind,
+                    (analysis_kind,),
+                ):
+                    resources.analysis_input_refusals_by_analysis_kind.pop(
+                        exact_kind,
+                        None,
+                    )
+            else:
                 _extend_unique(resources.source_dataset_ids, [dataset_id])
             route = (
                 analysis_kind
@@ -2253,7 +2395,7 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
         state.uncleaned = max(state.uncleaned, 1)
     if (
         state.controlled_sim_lifecycle is None
-        or state.controlled_sim_lifecycle.evidence_state != "passed"
+        or state.controlled_sim_lifecycle.evidence_state == "refused"
     ):
         state.errors.append("controlled_sim_lifecycle_unverified")
     if state.live_events:

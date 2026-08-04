@@ -856,6 +856,39 @@ def test_terminal_analysis_selection_rejects_self_declared_outcome_or_tool_relab
         )
 
 
+def test_terminal_analysis_selection_accepts_exact_server_observed_source_refusal() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    catalog, _contracts, bundle = _complete_bundle()
+    receipts = bundle.sim_tool_matrix.analysis_execution_receipts
+    index = next(
+        position
+        for position, receipt in enumerate(receipts)
+        if receipt.analysis_kind == "position_sizing"
+    )
+    refused = receipts[index].model_copy(
+        update={
+            "analysis_id": None,
+            "expected_analysis_outcome": "refused",
+            "persisted_result_authenticated": False,
+            "returned_analysis_kind": None,
+            "source_precondition_refused": True,
+            "source_precondition_evidence_sha256": "a" * 64,
+            "state": "refused",
+            "result_state": "refused",
+        },
+    )
+    changed = (*receipts[:index], refused, *receipts[index + 1 :])
+
+    selected = producer._exact_terminal_analysis_receipts(  # noqa: SLF001
+        bundle.sim_tool_matrix.model_copy(
+            update={"analysis_execution_receipts": changed},
+        ),
+        expected_kinds=set(catalog.analysis_kinds),
+    )
+
+    assert selected["position_sizing"] == refused
+
+
 def test_installed_producer_requires_executed_nodes_for_every_proof_category() -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
 
