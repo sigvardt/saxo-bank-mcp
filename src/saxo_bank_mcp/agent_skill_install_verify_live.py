@@ -10,6 +10,7 @@ from typing import cast
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.agent_skill_command_runner import CommandResult
 from saxo_bank_mcp.agent_skill_install_env import (
     build_isolated_env,
     cleanup_verify_scratch_state,
@@ -33,7 +34,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     publishable_tracked_files,
     tree_digest,
 )
-from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
+from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio, reuse_probe
 
 _JSON_OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
@@ -280,18 +281,26 @@ def startup_probe_errors_for_caches(
             run_root=run_root,
             probe_env=probe_env,
         )
+        started: dict[Path, CommandResult] = {}
         for label, root in (
             ("source", clone),
             ("codex_cache", codex_cache),
             ("claude_cache", claude_cache),
         ):
-            errors.extend(_one_startup(label, root, env=env, probe_env=probe_env))
+            errors.extend(_one_startup(label, root, env=env, probe_env=probe_env, started=started))
+        # list_tools claims cover the same exact caches, so they reuse the started result.
         for name, cache in (
             ("codex", codex_cache),
             ("claude", claude_cache),
         ):
             errors.extend(
-                _one_startup(f"{name}_list_tools", cache, env=env, probe_env=probe_env),
+                _one_startup(
+                    f"{name}_list_tools",
+                    cache,
+                    env=env,
+                    probe_env=probe_env,
+                    started=started,
+                ),
             )
     except Exception:  # noqa: BLE001
         errors.append("verify_env_invalid")
@@ -310,9 +319,17 @@ def _one_startup(
     *,
     env: dict[str, str],
     probe_env: Path,
+    started: dict[Path, CommandResult],
 ) -> list[str]:
     try:
-        result = probe_root_stdio(f"verify_{label}_stdio", root, env=env, probe_env=probe_env)
+        result = reuse_probe(
+            started,
+            f"verify_{label}_stdio",
+            root,
+            env=env,
+            probe_env=probe_env,
+            probe=probe_root_stdio,
+        )
     except Exception:  # noqa: BLE001
         return [f"{label}_startup_probe_failed"]
     payload = _probe_payload(result.stdout)

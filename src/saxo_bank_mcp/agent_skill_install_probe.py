@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult, run_command
-from saxo_bank_mcp.agent_skill_install_models import StartupCheck, StartupEvidence
+from saxo_bank_mcp.agent_skill_install_models import (
+    CommandReceipt,
+    StartupCheck,
+    StartupEvidence,
+)
 from saxo_bank_mcp.agent_skill_install_paths import PLUGIN_NAME, scrub_runtime_artifacts
 
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
@@ -81,6 +86,41 @@ anyio.run(main)
     )
     scrub_runtime_artifacts(root)
     return result
+
+
+def reuse_probe(  # noqa: PLR0913
+    started: dict[Path, CommandResult],
+    name: str,
+    root: Path,
+    *,
+    env: dict[str, str],
+    probe_env: Path,
+    probe: Callable[..., CommandResult] | None = None,
+) -> CommandResult:
+    """Start each distinct root once and reuse that result for duplicate claims.
+
+    Independent proof is preserved: distinct roots are always started separately. A second
+    claim about the same exact root (for example a list_tools claim about an already started
+    cache) reuses the first successful result instead of starting the same root again.
+    """
+    key = root.resolve()
+    existing = started.get(key)
+    if existing is not None:
+        return existing
+    start = probe_root_stdio if probe is None else probe
+    result = start(name, root, env=env, probe_env=probe_env)
+    started[key] = result
+    return result
+
+
+def distinct_probe_receipts(*results: CommandResult) -> tuple[CommandReceipt, ...]:
+    """Receipts for the given probes, keeping one receipt per actually started process."""
+    ordered: list[CommandReceipt] = []
+    for result in results:
+        if any(result.receipt is seen for seen in ordered):
+            continue
+        ordered.append(result.receipt)
+    return tuple(ordered)
 
 
 def startup_from_probes(

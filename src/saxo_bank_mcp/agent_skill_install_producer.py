@@ -62,7 +62,9 @@ from saxo_bank_mcp.agent_skill_install_privacy import (
 )
 from saxo_bank_mcp.agent_skill_install_probe import (
     ProbePayloadError,
+    distinct_probe_receipts,
     probe_root_stdio,
+    reuse_probe,
     startup_from_probes,
 )
 from saxo_bank_mcp.agent_skill_install_qa import (
@@ -162,36 +164,48 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         ensure_owner_only(codex_cache)
         ensure_owner_only(claude_cache)
 
-        source_probe = probe_root_stdio(
+        # Independent proof per distinct root: source tree, Codex cache, and Claude cache are
+        # each started once. list_tools claims about an already started cache reuse that result.
+        started_probes: dict[Path, CommandResult] = {}
+        source_probe = reuse_probe(
+            started_probes,
             "source_mcp_probe",
             clone,
             env=codex_env,
             probe_env=probe_env,
+            probe=probe_root_stdio,
         )
-        codex_probe = probe_root_stdio(
+        codex_probe = reuse_probe(
+            started_probes,
             "codex_cache_mcp_probe",
             codex_cache,
             env=codex_env,
             probe_env=probe_env,
+            probe=probe_root_stdio,
         )
-        claude_probe = probe_root_stdio(
+        claude_probe = reuse_probe(
+            started_probes,
             "claude_cache_mcp_probe",
             claude_cache,
             env=claude_env,
             probe_env=probe_env,
+            probe=probe_root_stdio,
         )
-        # Independent list_tools probes (not a duplicated cache payload claim).
-        codex_list_tools = probe_root_stdio(
+        codex_list_tools = reuse_probe(
+            started_probes,
             "codex_list_tools_probe",
             codex_cache,
             env=codex_env,
             probe_env=probe_env,
+            probe=probe_root_stdio,
         )
-        claude_list_tools = probe_root_stdio(
+        claude_list_tools = reuse_probe(
+            started_probes,
             "claude_list_tools_probe",
             claude_cache,
             env=claude_env,
             probe_env=probe_env,
+            probe=probe_root_stdio,
         )
         codex_startup = startup_from_probes(
             source_probe,
@@ -211,11 +225,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             *help_receipts,
             *codex_receipts,
             *claude_receipts,
-            source_probe,
-            codex_probe,
-            claude_probe,
-            codex_list_tools,
-            claude_list_tools,
+            *started_probes.values(),
         )
         command_receipts = (
             *git_receipts,
@@ -323,9 +333,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         receipts=(
             *git_receipts,
             *(result.receipt for result in codex_receipts),
-            source_probe.receipt,
-            codex_probe.receipt,
-            codex_list_tools.receipt,
+            *distinct_probe_receipts(source_probe, codex_probe, codex_list_tools),
         ),
         inventory=codex_inventory,
         details_skill_count=None,
@@ -337,9 +345,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         receipts=(
             *git_receipts,
             *(result.receipt for result in claude_receipts),
-            source_probe.receipt,
-            claude_probe.receipt,
-            claude_list_tools.receipt,
+            *distinct_probe_receipts(source_probe, claude_probe, claude_list_tools),
         ),
         inventory=claude_inventory,
         details_skill_count=details_count,
