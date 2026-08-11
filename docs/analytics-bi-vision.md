@@ -4,7 +4,10 @@ Status: research and product architecture
 Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
-Implementation status: proposal only
+Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
+catalog to 60. Final SIM validation for the frozen candidate is recorded in
+`docs/analytics-bi-validation.md`, including the Saxo SIM authentication limitation that leaves the
+executable SIM legs refused rather than passed.
 
 ## Executive conclusion
 
@@ -2305,12 +2308,18 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-Keep the frozen offline process-boundary artifacts available for inspection. Phase 0 real SIM
-acceptance is blocked until ready authentication and separate authorization exist. Once both are
-available, run the normal installed command exactly once and exercise the relevant Saxo endpoints
-for chart bars, closed positions, transactions, bookings, performance, balances, costs, instrument
-details, entitlements, and options. Record actual coverage and schema behavior before implementing
-storage and rendering.
+The suite is implemented, and every gate that does not need a broker session or an agent CLI login
+has passed for the frozen candidate. The one remaining blocker is authentication, not code.
+
+Restore a usable owner-only Saxo SIM session, then run the installed 60-tool SIM matrix, the
+per-analysis proof matrix, and the matched Codex and Claude hard-task evaluation exactly once each
+for the recorded candidate. Restoring the session needs a registered SIM redirect URI and an
+authorization code returned to it; the retained token caches are expired and their refresh was
+rejected, and the retained headless profile holds no session cookies. The installed evaluation
+additionally needs file-backed agent CLI credentials.
+
+Until then, `docs/analytics-bi-validation.md` records those legs as honest refusals. Do not report
+them as passes, and do not substitute non-Saxo data for missing broker responses.
 
 In parallel, write the source-controlled definitions, exact tolerances, known-answer datasets,
 independent reference methods, and Saxo reconciliation targets for the first-slice metrics. Do not
