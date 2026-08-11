@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import re
+import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue, write_json
@@ -73,6 +75,22 @@ from saxo_bank_mcp.agent_skill_install_qa import (
     planning_error,
 )
 
+_STAGE_TRACE_ENV: Final = "SAXO_MCP_INSTALL_STAGE_TRACE"
+
+
+def _stage(name: str) -> None:
+    """Emit a value-free flushed stage marker when stage tracing is requested.
+
+    Diagnostic only, and off unless the caller opts in. Stage names carry no paths,
+    identifiers, or private values, and markers go to unpublished stderr so published
+    evidence bytes stay unchanged. Flushing per stage means a caller that kills this
+    process on timeout still sees the last stage that started.
+    """
+    if os.environ.get(_STAGE_TRACE_ENV) != "1":
+        return
+    sys.stderr.write(f"install-stage {name}\n")
+    sys.stderr.flush()
+
 
 def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915
     error = planning_error(options)
@@ -113,10 +131,13 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     claude_receipts: tuple[CommandResult, ...] = ()
     update_receipts: tuple[CommandReceipt, ...] = ()
     try:
+        _stage("clone")
         git_receipts = clone_candidate(options.repo, clone, commit)
         version = project_version(clone)
+        _stage("export-publishable-tree")
         export_publishable_tree(clone, marketplace)
         ensure_owner_only(marketplace)
+        _stage("copy-auth-files")
         auth_files, auth_targets = copy_auth_files(home)
         codex_env = isolated_env(
             home=home,
@@ -132,9 +153,13 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             probe_env=probe_env,
             auth_targets=auth_targets,
         )
+        _stage("discover-cli-help")
         help_receipts = discover_cli_help(clone, codex_env, claude_env)
+        _stage("codex-install")
         codex_receipts = run_codex_install(marketplace, codex_env)
+        _stage("claude-install")
         claude_receipts = run_claude_install(marketplace, claude_env)
+        _stage("discover-caches")
         codex_cache, codex_cache_source = discover_codex_cache(
             codex_receipts,
             run_root=run_root,
@@ -151,6 +176,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         ensure_owner_only(codex_cache)
         ensure_owner_only(claude_cache)
 
+        _stage("update-probe")
         update_probe, update_receipts, codex_cache, claude_cache = run_update_probe(
             marketplace,
             codex_env,
@@ -166,6 +192,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
 
         # Independent proof per distinct root: source tree, Codex cache, and Claude cache are
         # each started once. list_tools claims about an already started cache reuse that result.
+        _stage("startup-probes")
         started_probes: dict[Path, CommandResult] = {}
         source_probe = reuse_probe(
             started_probes,
@@ -217,6 +244,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             claude_probe,
             claude_list_tools,
         )
+        _stage("installed-inventory")
         details_count, _ = parse_claude_details_skills(claude_receipts[-1])
         codex_inventory = installed_inventory_check(clone, codex_cache)
         claude_inventory = installed_inventory_check(clone, claude_cache)
@@ -502,6 +530,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         ),
     }
     write_json(options.out, report)
+    _stage("privacy-evidence")
     try:
         produce_privacy_evidence(
             install_report_path=options.out,
@@ -519,6 +548,7 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
             {"status": "failed", "reason": "privacy_pipeline_failed", "error": exc.reason},
         )
         return 1
+    _stage("verify-installed-report")
     # Homes already narrowed to Path by the early isolated_home_invalid return.
     verified, errors = load_verified_install_report(
         options.out,
@@ -598,6 +628,9 @@ class _PathPublishRoots:
 
 
 _PRIVATE_ROOT_RE = re.compile(r"(?:/Users/|/private/|/Volumes/)")
+# Any residual absolute filesystem path, whatever the host layout. A leading "/" that is not
+# part of a URL (no preceding ":" or "/") starts the match; whitespace and quotes end it.
+_RESIDUAL_ABSOLUTE_PATH_RE = re.compile(r"(?<![\w:/])/[^\s\"'<>]*")
 _LIVE_BOUND_UPDATE_PATH_FIELDS: Final = frozenset(
     {"cache_root", "registration_cache_root"},
 )
@@ -666,9 +699,24 @@ def _sanitize_text(value: str, roots: _PathPublishRoots) -> str:
     scrubbed = value
     for absolute, label in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
         scrubbed = scrubbed.replace(absolute, label)
-    if _PRIVATE_ROOT_RE.search(scrubbed):
-        scrubbed = _PRIVATE_ROOT_RE.sub("<redacted-root>/", scrubbed)
-    return scrubbed
+    return _RESIDUAL_ABSOLUTE_PATH_RE.sub(_redact_residual_path, scrubbed)
+
+
+def _redact_residual_path(match: re.Match[str]) -> str:
+    """Reduce a residual absolute host path to a value-free basename reference.
+
+    Redaction must never depend on the host layout: a private run root under /tmp, /home, or
+    /srv leaks exactly as much as one under /Users, /private, or /Volumes.
+    """
+    raw = match.group(0)
+    trailing = ""
+    while raw and raw[-1] in ".,;:)]}":
+        trailing = raw[-1] + trailing
+        raw = raw[:-1]
+    if not raw or raw == "/":
+        return match.group(0)
+    name = PurePosixPath(raw).name
+    return (f"<redacted-path>/{name}" if name else "<redacted-path>") + trailing
 
 
 def _sanitize_json_paths(value: JsonValue, roots: _PathPublishRoots) -> JsonValue:

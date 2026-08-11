@@ -285,7 +285,13 @@ def test_install_normal_mode_runs_instrumented_real_producer_path(tmp_path: Path
         str(ledger),
         "--out",
         str(out.relative_to(source)) if out.is_relative_to(source) else str(out),
-        env={"PATH": f"{fake_bin}:{os.environ['PATH']}", "FAKE_RUN_ROOT": str(run_root)},
+        env={
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FAKE_RUN_ROOT": str(run_root),
+            # Flushed value-free stage markers on stderr so a timeout kill still reports
+            # the last stage that started instead of an empty diagnostic.
+            "SAXO_MCP_INSTALL_STAGE_TRACE": "1",
+        },
         cwd=source,
         timeout_seconds=360,
     )

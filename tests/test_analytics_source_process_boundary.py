@@ -32,6 +32,7 @@ from analytics_source_matrix_support import (
     build_fixture_candidate,
     canonical_digest,
     expected_matrix_events,
+    frozen_candidate_runtime_mismatch,
     matrix_payloads,
     recursive_scalar_values,
 )
@@ -77,6 +78,8 @@ _SEALED_FILE_MODE: Final = 0o400
 _SHA256_HEX_LENGTH: Final = 64
 _SOURCE_MATRIX_CHILD_TOOL_COUNT: Final = 6
 _ROOT: Final = Path(__file__).parents[1]
+# None on the recording runtime, where every sealed-runtime proof below stays fully active.
+_FROZEN_RUNTIME_MISMATCH: Final = frozen_candidate_runtime_mismatch()
 _FIXTURE_EXECUTABLE: Final = Path(sys.executable).resolve(strict=True)
 _MATRIX_FIXTURE_SERVER: Final = (
     _ROOT / "tests/fixtures/analytics/source_matrix_fixture_server.py"
@@ -387,6 +390,8 @@ class PreparedRuntimeFixture:
 def two_prepared_runtimes(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[PreparedRuntimeFixture, PreparedRuntimeFixture]]:
+    if _FROZEN_RUNTIME_MISMATCH is not None:
+        pytest.skip(_FROZEN_RUNTIME_MISMATCH)
     temp_root = tmp_path_factory.mktemp("two-sealed-runtimes")
     source_root = temp_root / "source"
     shutil.copytree(
@@ -1305,6 +1310,10 @@ def test_fresh_final_runtimes_remove_exact_dynamic_installer_metadata(
         assert safe_target.read_text(encoding="utf-8") == "safe"
 
 
+@pytest.mark.skipif(
+    _FROZEN_RUNTIME_MISMATCH is not None,
+    reason=_FROZEN_RUNTIME_MISMATCH or "",
+)
 def test_installed_launcher_runs_sealed_deterministic_child_boundary(tmp_path: Path) -> None:
     uv_command = shutil.which("uv")
     assert uv_command is not None

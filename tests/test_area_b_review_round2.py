@@ -17,7 +17,11 @@ from typing import cast
 
 import httpx2
 import pytest
-from analytics_source_matrix_support import REPOSITORY_COPY_IGNORE, ScriptedMatrixSession
+from analytics_source_matrix_support import (
+    REPOSITORY_COPY_IGNORE,
+    ScriptedMatrixSession,
+    frozen_candidate_runtime_mismatch,
+)
 
 import saxo_bank_mcp.analytics_provider as provider_module
 import saxo_bank_mcp.analytics_source_contracts as contracts_module
@@ -110,6 +114,9 @@ async def _chart_pages(
 def test_candidate_identity_rejects_mutation_anywhere_in_installed_executable(
     tmp_path: Path,
 ) -> None:
+    mismatch = frozen_candidate_runtime_mismatch()
+    if mismatch is not None:
+        pytest.skip(mismatch)
     repository_root = Path(__file__).parents[1]
     build_root = tmp_path / "source"
     shutil.copytree(

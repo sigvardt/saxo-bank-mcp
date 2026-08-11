@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -64,6 +65,45 @@ BOUNDARY_FORBIDDEN_SCALARS: Final[frozenset[str | int]] = frozenset(
     },
 )
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
+FROZEN_CANDIDATE_MANIFEST: Final = REPOSITORY_ROOT / "data/analytics/source_matrix_candidate.json"
+
+
+def frozen_candidate_runtime_mismatch() -> str | None:
+    """Exact reason the checked-in sealed candidate cannot be rebuilt on this runtime.
+
+    The frozen manifest pins one exact interpreter and its complete dependency closure,
+    including platform-tagged extension modules. Rebuilding it byte-identically is only
+    possible on the recording runtime, so callers skip with this reason elsewhere. Returns
+    None on the recording runtime, where the sealed proofs stay fully active.
+    """
+    try:
+        identity = json.loads(FROZEN_CANDIDATE_MANIFEST.read_text(encoding="utf-8"))[
+            "runtime_identity"
+        ]
+    except (OSError, ValueError, KeyError):
+        return "frozen sealed candidate manifest is unavailable or unreadable"
+    recorded_platform = str(identity["platform"])
+    expected_system = recorded_platform.split("-", 1)[0]
+    actual_system = "macOS" if sys.platform == "darwin" else platform.system()
+    checks = (
+        (actual_system, expected_system, "operating system"),
+        (sys.implementation.name, str(identity["implementation"]), "interpreter implementation"),
+        (platform.python_version(), str(identity["python_version"]), "python version"),
+        (sys.implementation.cache_tag or "", str(identity["cache_tag"]), "interpreter cache tag"),
+    )
+    for actual, expected, label in checks:
+        if actual != expected:
+            return (
+                f"sealed candidate is frozen for {label} {expected!r}; "
+                f"this runtime reports {actual!r}"
+            )
+    machine = platform.machine()
+    if machine and machine not in recorded_platform:
+        return (
+            f"sealed candidate is frozen for platform {recorded_platform!r}; "
+            f"this runtime reports machine {machine!r}"
+        )
+    return None
 REPOSITORY_COPY_EXCLUDE_PATTERNS: Final[tuple[str, ...]] = (
     ".git",
     ".venv",

@@ -113,11 +113,19 @@ def test_test_subprocess_inherits_external_temp_environment() -> None:
         text=True,
     )
 
+    # Child-process inheritance is proven on every platform.
     assert json.loads(result.stdout) == expected
-    assert all(
-        Path(value).resolve(strict=False).is_relative_to(_EXTERNAL_TEMP_ROOT)
-        for value in expected.values()
-    )
+    if sys.platform == "darwin":
+        # The recording platform keeps the strict external-volume requirement.
+        assert all(
+            Path(value).resolve(strict=False).is_relative_to(_EXTERNAL_TEMP_ROOT)
+            for value in expected.values()
+        )
+        return
+    # The external volume cannot exist off the recording platform. Still require one shared
+    # explicit absolute temp root, never the untracked per-variable system default.
+    assert len(set(expected.values())) == 1
+    assert Path(next(iter(expected.values()))).is_absolute()
 
 
 def test_repository_copy_excludes_runtime_build_cache_and_evidence_trees(

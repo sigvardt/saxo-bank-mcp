@@ -16,7 +16,11 @@ from typing import cast
 
 import httpx2
 import pytest
-from analytics_source_matrix_support import REPOSITORY_COPY_IGNORE, ScriptedMatrixSession
+from analytics_source_matrix_support import (
+    REPOSITORY_COPY_IGNORE,
+    ScriptedMatrixSession,
+    frozen_candidate_runtime_mismatch,
+)
 
 import saxo_bank_mcp.analytics_source_receipt as receipt_module
 import saxo_bank_mcp.qa_analytics_source_matrix as matrix_module
@@ -124,6 +128,9 @@ def _copy_source_candidate(target: Path) -> None:
 def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projection(
     tmp_path: Path,
 ) -> None:
+    mismatch = frozen_candidate_runtime_mismatch()
+    if mismatch is not None:
+        pytest.skip(mismatch)
     uv = shutil.which("uv")
     assert uv is not None
     uv_path = Path(uv).resolve(strict=True)
