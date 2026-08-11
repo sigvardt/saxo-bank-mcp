@@ -19,9 +19,11 @@ balances, holdings, money values, local paths, or raw broker payloads.
 | Plugin/project version | `0.1.0` |
 | Base | `origin/main` at `0c5b4bbab6e25d257b3ce703debdd97fdc48d067` |
 
-The predecessor candidate `a9c4f242d4c1d0dcf2fa85a6b28e07b189ad01f8` passed the complete
-deterministic suite (2593 tests). The only source change after it is a validator correction that
-stops starting the same MCP root twice; see [Candidate history](#candidate-history).
+The complete deterministic suite passed for this candidate: **2596 collected, 2596 executed, 2596
+passed, 0 failed**. The predecessor candidate `a9c4f242d4c1d0dcf2fa85a6b28e07b189ad01f8` passed the
+same suite at 2593 tests; the only source change after it is a validator correction that stops
+starting the same MCP root twice, plus its three new tests. See
+[Candidate history](#candidate-history).
 
 ## Headline safety result
 
@@ -44,8 +46,10 @@ SIM needs no human approval.
 
 | Gate | Result |
 | --- | --- |
-| Full deterministic suite (`scripts/run-pytest`, guarded launcher) | 2593 passed, 0 failed at `a9c4f24`; executed total equals collected total |
-| Suite collection at this candidate | 2596 tests (3 new validator-reuse tests) |
+| Complete deterministic suite (`scripts/run-pytest`, guarded launcher) | **2596 collected, 2596 executed, 2596 passed, 0 failed, 0 errors, 0 skipped** |
+| Suite coverage identity | executed total equals collected total; all 170 test files ran exactly once across 8 serial partitions |
+| Suite wall time | 1124.6 s |
+| Predecessor candidate `a9c4f24` | 2593 passed, 0 failed |
 | Focused validation for the validator change | 82 passed (install validator, fail-closed, paths, update probe, evidence fail-closed, new reuse tests) |
 | Privacy, redaction, and secret-scan suites | 234 passed |
 | Artifact render and export suites | 83 passed |
@@ -54,9 +58,18 @@ SIM needs no human approval.
 | `basedpyright` | 0 errors, 0 warnings, 0 notes |
 | `git diff --check` | clean |
 
-Every pytest invocation ran through `scripts/run-pytest`. The launcher refuses unless the resolved
-temporary root is on the external volume and the system disk has at least 50 GiB free; at the final
-check the system disk had 88.4 GiB free and the external volume 1725.3 GiB free.
+Per-partition totals: 352, 234, 339, 335, 351, 323, 637, and 25 tests, each partition passing with
+no failures. The slowest module was isolated into its own partition. A partition manifest asserted
+before execution that no test file appeared in two partitions and that the partition sum equalled
+the collected total.
+
+Every pytest invocation ran through `scripts/run-pytest`; direct `pytest` was never used. The
+launcher refuses unless the resolved temporary root is on the external volume and the system disk has
+at least 50 GiB free. Across the complete suite the system disk went from 92,654,156 KiB to
+92,630,968 KiB free, a change of 22.6 MiB, leaving 88.3 GiB free. The system temporary area under
+`/var/folders` grew by 64 KiB, which is not material, and this run created no pytest directory there:
+the count stayed at the one pre-existing directory. The external temporary root held 44 KiB
+afterwards with no leftover pytest run roots.
 
 `ruff format` is not a CI or plan gate for this repository and reports pre-existing drift in 60
 baseline files; it is recorded here as a style observation only and was not applied to the frozen
@@ -262,4 +275,8 @@ schema, broker behaviour, or public contract.
 
 This document and the vision-status update are committed on top of the candidate as a
 documentation-only change. They do not alter the validated bytes, so the evidence above stays bound
-to `b2b9872` and was not regenerated for them.
+to `b2b9872` and was not regenerated for them. The complete 2596-test suite was executed at
+documentation-only HEAD `f71042e9ee15b6ec011cc93d67a5ca0007e90d17`. Its `src`, `tests`,
+`pyproject.toml`, and `uv.lock` git objects are byte-identical to `b2b9872`, and the only tracked
+differences between the two commits are the two documentation files, so the suite result applies to
+both.
