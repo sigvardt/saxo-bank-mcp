@@ -2308,18 +2308,26 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The suite is implemented, and every gate that does not need a broker session or an agent CLI login
-has passed for the frozen candidate. The one remaining blocker is authentication, not code.
+The suite is implemented, every gate that does not need a broker session or an agent CLI login has
+passed for the frozen candidate, and the independent review of that work is approved with no
+reproducible blocker.
 
-Restore a usable owner-only Saxo SIM session, then run the installed 60-tool SIM matrix, the
-per-analysis proof matrix, and the matched Codex and Claude hard-task evaluation exactly once each
-for the recorded candidate. Restoring the session needs a registered SIM redirect URI and an
-authorization code returned to it; the retained token caches are expired and their refresh was
-rejected, and the retained headless profile holds no session cookies. The installed evaluation
-additionally needs file-backed agent CLI credentials.
+Authentication is **not** the only remaining step. Two separate things remain, in order:
 
-Until then, `docs/analytics-bi-validation.md` records those legs as honest refusals. Do not report
-them as passes, and do not substitute non-Saxo data for missing broker responses.
+1. **Restore credentials and run the external proofs.** Restore a usable owner-only Saxo SIM session,
+   then run the installed 60-tool SIM matrix, the per-analysis proof matrix, and the matched Codex and
+   Claude hard-task evaluation exactly once each for the recorded candidate. Restoring the session
+   needs a registered SIM redirect URI and an authorization code returned to it; the retained token
+   caches are expired and their refresh was rejected, and the retained headless profile holds no
+   session cookies. The installed evaluation additionally needs file-backed agent CLI credentials.
+2. **Activate the proof catalog.** All 54 shipped proof profiles are checked in as `quarantined` with
+   reason `implementation_pending`, so the eight analysis-producing tools refuse in a normal server
+   even with a working session. After the SIM proof run succeeds, the checked-in proof catalog must be
+   regenerated and re-frozen as a new candidate. Activation is a source change with its own validation
+   pass, not a runtime toggle.
+
+Until both steps complete, `docs/analytics-bi-validation.md` records those legs as honest refusals.
+Do not report them as passes, and do not substitute non-Saxo data for missing broker responses.
 
 In parallel, write the source-controlled definitions, exact tolerances, known-answer datasets,
 independent reference methods, and Saxo reconciliation targets for the first-slice metrics. Do not

@@ -1,9 +1,13 @@
 # Saxo Analytics and BI Suite — Final Candidate Validation
 
 Status: final SIM validation for the frozen candidate
-Date: 2026-08-11
+Date: 2026-08-12
 Scope: Task 24 of `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
 Result: **partially validated — offline and installed gates passed, Saxo SIM execution refused**
+Independent review: **APPROVED, no reproducible blocker**
+Runtime state: **all 54 proof profiles quarantined (`implementation_pending`); the 8
+analysis-producing tools refuse until the SIM proof run succeeds and the proof catalog is regenerated
+as a new candidate**
 
 All values below are redacted. This document contains no credentials, account identifiers,
 balances, holdings, money values, local paths, or raw broker payloads.
@@ -125,12 +129,19 @@ One isolated dual-client installation and one separate verification ran for this
 | `execution_performed` | false |
 | `live_mutation_calls` during the attempt | 0 |
 | `broker_write_made` during the attempt | false |
+| Shipped `activation_state` for all 54 profiles | `quarantined` |
+| Shipped `quarantine_reason` for all 54 profiles | `implementation_pending` |
+| Analysis kinds active in a normal server | 0 of 54 |
 
 The installed candidate itself verified successfully, so the refusal is bound to the absent Saxo
 SIM session rather than to the candidate. Deterministic numerical correctness (known answers,
 properties, metamorphic cases, independent reference paths, mutation kills, accounting identities,
 and artifact parity) is exercised by the deterministic suite above; the Saxo reconciliation and
 executable SIM legs of each proof profile remain unexecuted.
+
+No profile is active. The catalog ships every one of the 54 profiles quarantined as
+`implementation_pending`, so no analysis kind is production-eligible yet and the analysis-producing
+tools refuse at runtime. See [Runtime state of the analytics tools](#runtime-state-of-the-analytics-tools).
 
 ## 60-tool SIM matrix (refused)
 
@@ -238,16 +249,56 @@ them was worked around with non-Saxo data.
 
 ## Independent review
 
-The final independent review of this exact candidate and its redacted evidence has **not** been
-performed in this session. It is scheduled as a separate persistent review session. This document
-therefore records no final independent verdict.
+**Verdict: APPROVED.** The final independent review of this exact candidate and its redacted evidence
+found **no reproducible safety, correctness, privacy, or agent-use blocker**.
+
+The approval covers the candidate as reviewed. It does not convert any refused external-validation
+leg into a pass, and it does not activate the shipped proof profiles; see
+[Runtime state of the analytics tools](#runtime-state-of-the-analytics-tools).
+
+## Runtime state of the analytics tools
+
+This section exists to prevent a specific misreading: **authentication is not the only remaining
+step.**
+
+All **54** shipped proof profiles are checked in with `activation_state = "quarantined"` and
+`quarantine_reason = "implementation_pending"`. Because the runtime registers an analysis kind only
+when its checked-in profile is active, the following **8** analysis-producing tools **refuse** in a
+normal server today, and would do so even with a fully working Saxo SIM session:
+
+1. `saxo_analyze_market`
+2. `saxo_analyze_instruments`
+3. `saxo_analyze_portfolio`
+4. `saxo_size_position`
+5. `saxo_run_scenario`
+6. `saxo_optimize_portfolio`
+7. `saxo_model_derivatives`
+8. `saxo_backtest_strategy`
+
+Each returns a value-free canonical refusal carrying the reason `implementation_pending`, the
+statement that the checked-in proof profile is not active so no analytical claim was produced, and
+`saxo_analytics_capabilities` as the exact next tool. The ninth canonical analysis tool,
+`saxo_propose_trade_from_analysis`, is precheck-only and does not pass through this gate; it still
+cannot execute a broker action.
+
+Lifting the quarantine requires **both** of the following, in order:
+
+1. The executable SIM proof run must succeed, which requires the Saxo SIM authentication described
+   under [External Saxo limitations](#external-saxo-limitations-encountered).
+2. The checked-in proof catalog must then be regenerated and re-frozen as a **new candidate**. The
+   catalog is a checked-in data resource that is also packaged into the distributed wheel, so
+   activation is a source change requiring its own validation pass — it is not a runtime toggle, a
+   configuration flag, or a side effect of authenticating.
+
+Until both steps complete, the analytics catalog is installable, discoverable, and honest about its
+own immaturity, but it produces no analytical claims.
 
 ## Full-suite completion status
 
 | Completion gate | State |
 | --- | --- |
 | Every one of the 60 MCP tools passes the actual SIM matrix | **not met** — refused at authentication |
-| Every in-scope analysis kind has a current source-bound proof profile | met for definition and contract coverage; executable SIM leg **not met** |
+| Every in-scope analysis kind has a current source-bound proof profile | met for definition and contract coverage; executable SIM leg **not met**; all 54 shipped profiles remain quarantined as `implementation_pending` |
 | Material metrics pass known-answer, property, metamorphic, mutation, numerical, and independent-reference checks | met |
 | Applicable Saxo reconciliation checks | **not met** — no session |
 | All accounting identities pass | met |
@@ -256,12 +307,23 @@ therefore records no final independent verdict.
 | Missing Saxo data and entitlements produce the proved degradation or refusal | met |
 | Cleanup succeeds and SIM account state is unchanged after controlled activity | not applicable — no controlled activity occurred; nothing required cleanup |
 | Public evidence contains no credentials, identifiers, private values, paths, raw URLs, or raw payloads | met |
-| Final independent review finds no reproducible blocker | pending |
+| Final independent review finds no reproducible blocker | **met** — APPROVED, no reproducible blocker |
 | No LIVE endpoint called, no LIVE mutation, no purchase | met |
+| Analysis-producing tools return verified results in a normal server | **not met** — 54 profiles quarantined, so 8 tools refuse |
 
-Task 24 is complete for every gate that does not require a Saxo SIM session or an agent CLI login.
-The remaining gates are blocked on external credentials and are recorded above as honest refusals
-rather than as passes.
+Task 24 is complete for every gate that does not require a Saxo SIM session or an agent CLI login,
+and the independent review of that work is approved. Two distinct things still stand between this
+candidate and a production-useful analytics surface, and neither is satisfied by the approval:
+
+1. **External credentials.** The Saxo SIM session and the agent CLI login are unavailable, so the
+   60-tool SIM matrix, the executed per-analysis proof matrix, the Saxo reconciliation legs, and the
+   installed hard-task evaluation are recorded above as honest refusals rather than passes.
+2. **Proof activation.** Even after those credentials exist and the SIM proof run succeeds, the
+   checked-in proof catalog must be regenerated and re-frozen as a new candidate before any analysis
+   kind leaves quarantine.
+
+No refused leg should be reported as passing, and no non-Saxo data was substituted for a missing
+broker response.
 
 ## Candidate history
 
