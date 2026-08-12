@@ -230,22 +230,42 @@ I cannot take secrets in chat. Use the local browser login or configured owner-o
 
 ## External Saxo limitations encountered
 
-1. The owner-only SIM token cache is expired. A refresh of the most recent retained token was
-   rejected by the SIM token endpoint with HTTP 401. Saxo SIM refresh tokens are short-lived, and
-   both retained caches are more than seven days old.
-2. Completing a fresh PKCE authorization requires a registered redirect URI and an authorization
-   code returned to that redirect. The remaining machine-completable blocker is
-   `sim_redirect_uri_missing`, and the missing material is a registered redirect URI plus an
-   authorization code from the Saxo redirect.
-3. The retained isolated headless browser profile holds zero cookies, so no single-sign-on session
-   survives for a headless replay; a replay would land on the interactive login form.
-4. The only login-credential source wired into the retained headless login script is the macOS
-   Keychain, which is out of bounds for this run. It was not invoked.
-5. Saxo SIM entitlement and fixture references could not be resolved without a session, so
+A dedicated SIM recovery attempt was run through the logical MCP tools, in order, and exhausted
+every safe in-scope path.
+
+1. `saxo_auth_status` proved the local state without any network call: requested and effective
+   environment `SIM`, `live_reads=false`, `live_writes=false`. SIM credentials are present from a
+   file source, and the token cache is present and readable but expired, with refresh reported as
+   supported and a pending PKCE authorization present.
+2. Because refresh material was reported, `saxo_refresh_token` was called **exactly once**. The SIM
+   token endpoint rejected it with **HTTP 401**. No blind retry was made. Saxo SIM refresh tokens
+   are short-lived and both retained caches are more than seven days old, so the refresh material is
+   dead.
+3. `saxo_cache_sim_access_token` can accept a Saxo developer portal 24-hour SIM token, but a bounded
+   search of the known local locations found **no portal token**. The SIM credential file carries
+   PKCE application configuration only: application key, grant type, and the authorization and token
+   endpoints. It contains no user login and no bearer token. No `SAXO_*` environment override is set.
+4. Completing a fresh PKCE authorization needs an authorization code returned to the registered
+   redirect. Obtaining that code requires completing the SIM login form. The only credential source
+   wired into the retained headless login script is the macOS Keychain, which is out of bounds; it
+   was not invoked, and no `security` or `osascript` path was used.
+5. Both retained isolated headless browser profiles hold **zero cookies**, so no single-sign-on
+   session survives for a headless replay; a replay would land on the interactive login form.
+6. The only other Saxo bearer material on the host belongs to a separate LIVE session keeper. It is
+   categorically out of bounds for this plan and was never read or used.
+7. Saxo SIM entitlement and fixture references could not be resolved without a session, so
    entitlement-dependent degradation paths were exercised only by their deterministic tests.
 
+**Irreducible blocker.** No SIM bearer material can be obtained without a human Saxo login. Either of
+the following unblocks every refused leg:
+
+- Provide a fresh Saxo developer portal 24-hour SIM access token, which can then be cached through
+  `saxo_cache_sim_access_token`; or
+- Complete one SIM login so an authorization code and its state reach the registered redirect, which
+  can then be exchanged through `saxo_exchange_pkce_code`.
+
 These are environment and credential limitations. They are not defects in the candidate, and none of
-them was worked around with non-Saxo data.
+them was worked around with non-Saxo data. No refused leg was reported as a pass.
 
 ## Independent review
 
