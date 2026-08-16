@@ -129,13 +129,14 @@ class DisposableCleanupError(ValueError):
         self.residual_paths = tuple(residual_paths)
 
 
-def build_isolated_env(  # noqa: C901, PLR0912
+def build_isolated_env(  # noqa: C901, PLR0912, PLR0913, PLR0915
     *,
     home: Path,
     codex_home: Path,
     run_root: Path,
     probe_env: Path,
     auth_targets: dict[str, Path] | None = None,
+    include_claude_client: bool = True,
 ) -> dict[str, str]:
     """Build an explicit allowlisted environment rooted under run_root."""
     root = run_root.resolve()
@@ -159,7 +160,7 @@ def build_isolated_env(  # noqa: C901, PLR0912
     xdg_state = home_r / ".local" / "state"
     claude_config = home_r / ".claude"
     command_guard = _ensure_client_command_guard(root)
-    for path in (
+    required_paths = [
         tmp,
         uv_cache,
         uv_python,
@@ -167,17 +168,17 @@ def build_isolated_env(  # noqa: C901, PLR0912
         xdg_cache,
         xdg_data,
         xdg_state,
-        claude_config,
         probe_r,
-    ):
+    ]
+    if include_claude_client:
+        required_paths.append(claude_config)
+    for path in required_paths:
         path.mkdir(parents=True, exist_ok=True)
         path.chmod(0o700)
 
     env: dict[str, str] = {
         "HOME": str(home_r),
         "CODEX_HOME": str(codex_r),
-        "CLAUDE_CONFIG_DIR": str(claude_config),
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR": str(claude_config),
         "XDG_CONFIG_HOME": str(xdg_config),
         "XDG_CACHE_HOME": str(xdg_cache),
         "XDG_DATA_HOME": str(xdg_data),
@@ -196,6 +197,9 @@ def build_isolated_env(  # noqa: C901, PLR0912
         "SAXO_MCP_ENABLE_LIVE_READS": "0",
         "SAXO_MCP_ENABLE_LIVE_WRITES": "",
     }
+    if include_claude_client:
+        env["CLAUDE_CONFIG_DIR"] = str(claude_config)
+        env["CLAUDE_SECURESTORAGE_CONFIG_DIR"] = str(claude_config)
     for key in (*_PATH_KEYS, *_RUNTIME_KEYS):
         value = os.environ.get(key)
         if value:
@@ -211,7 +215,12 @@ def build_isolated_env(  # noqa: C901, PLR0912
     # the CLI is launched by absolute path and the shebang is `#!/usr/bin/env node`.
     # Keep which() parent dirs (symlink locations), not realpath package bins:
     # Claude Code's brew entry is a symlink to claude.exe and must stay the launcher.
-    for binary in ("uv", "codex", "claude", "git", "node"):
+    client_binaries = (
+        ("uv", "codex", "claude", "git", "node")
+        if include_claude_client
+        else ("uv", "codex", "git", "node")
+    )
+    for binary in client_binaries:
         located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
         if located:
             located_path = Path(located).expanduser()
@@ -226,7 +235,8 @@ def build_isolated_env(  # noqa: C901, PLR0912
     # Pin absolute CLI paths under a non-SAXO_ prefix so model children keep a
     # stable argv0 without tripping parent-secret strip (SAXO_* is blocked).
     # Do not follow symlinks to realpath (Claude Code brew wrapper).
-    for binary in ("uv", "codex", "claude"):
+    eval_binaries = ("uv", "codex", "claude") if include_claude_client else ("uv", "codex")
+    for binary in eval_binaries:
         located = shutil.which(binary, path=env["PATH"]) or shutil.which(binary)
         if not located:
             continue

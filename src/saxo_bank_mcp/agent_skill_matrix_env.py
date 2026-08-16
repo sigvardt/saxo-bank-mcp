@@ -19,6 +19,7 @@ from saxo_bank_mcp.agent_skill_install_env import (
 from saxo_bank_mcp.agent_skill_install_paths import ensure_owner_only
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config_credentials import DEFAULT_SIM_CREDENTIAL_FILE
+from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.token_cache import (
     TokenCachePathError,
     default_token_cache_path,
@@ -192,6 +193,7 @@ def prepare_matrix_isolated_runtime(
     evidence_root: Path,
     *,
     runtime_name: str = MATRIX_RUNTIME_NAME,
+    include_claude_client: bool = True,
 ) -> MatrixIsolatedRuntime:
     """Create owner-only disposable roots and SIM-only auth copies under evidence_root."""
     run_root = isolated_runtime_root(evidence_root, runtime_name)
@@ -232,6 +234,7 @@ def prepare_matrix_isolated_runtime(
             run_root=run_root,
             probe_env=probe_env,
             auth_targets=auth_targets,
+            include_claude_client=include_claude_client,
         )
         env["SAXO_MCP_ENVIRONMENT"] = "SIM"
         env["SAXO_MCP_ENABLE_LIVE_READS"] = "0"
@@ -271,6 +274,7 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
     retained_codex_home: Path | None = None,
     retained_claude_home: Path | None = None,
     retained_codex_plugin_root: Path | None = None,
+    harness_policy: HarnessPolicy = "dual_v1",
 ) -> MatrixIsolatedRuntime:
     """SIM-only eval runtime under evidence_root with task-created CLI homes.
 
@@ -280,19 +284,32 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
     promoted optimistically after child cleanup so one-time refresh material is not lost.
     Account discovery remains inside the logical FastMCP matrix call path.
     """
+    if harness_policy not in ("dual_v1", "codex_native_v1"):
+        raise MatrixEnvError("eval_harness_policy_unknown")
     runtime = prepare_matrix_isolated_runtime(
         evidence_root,
         runtime_name=EVAL_RUNTIME_NAME,
+        include_claude_client=harness_policy != "codex_native_v1",
     )
     try:
-        claude_auth_source, claude_auth_source_digest = seed_isolated_cli_homes(
-            runtime,
-            source_codex_home=source_codex_home,
-            source_claude_home=source_claude_home,
-            retained_codex_home=retained_codex_home,
-            retained_claude_home=retained_claude_home,
-            retained_codex_plugin_root=retained_codex_plugin_root,
-        )
+        if harness_policy == "codex_native_v1":
+            _seed_codex_native_cli_home(
+                runtime,
+                source_codex_home=source_codex_home,
+                retained_codex_home=retained_codex_home,
+                retained_codex_plugin_root=retained_codex_plugin_root,
+            )
+            claude_auth_source = None
+            claude_auth_source_digest = None
+        elif harness_policy == "dual_v1":
+            claude_auth_source, claude_auth_source_digest = seed_isolated_cli_homes(
+                runtime,
+                source_codex_home=source_codex_home,
+                source_claude_home=source_claude_home,
+                retained_codex_home=retained_codex_home,
+                retained_claude_home=retained_claude_home,
+                retained_codex_plugin_root=retained_codex_plugin_root,
+            )
     except MatrixEnvError:
         cleanup_matrix_isolated_runtime(runtime.run_root)
         raise
@@ -304,6 +321,34 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
         claude_auth_source=claude_auth_source,
         claude_auth_source_digest=claude_auth_source_digest,
     )
+
+
+def _seed_codex_native_cli_home(
+    runtime: MatrixIsolatedRuntime,
+    *,
+    source_codex_home: Path | None,
+    retained_codex_home: Path | None,
+    retained_codex_plugin_root: Path | None,
+) -> None:
+    """Seed only Codex auth and retained Codex plugin state."""
+    codex_auth = _resolve_codex_source_home(source_codex_home)
+    for name in _CODEX_AUTH_SEED_FILES:
+        copied = _copy_optional_owner_only_file(
+            codex_auth / name,
+            runtime.codex_home / name,
+            copy_reason="codex_auth_copy_failed",
+        )
+        if copied is None:
+            raise MatrixEnvError("codex_file_auth_missing")
+    _seed_retained_plugin_registration(runtime, retained_codex_home, None)
+    if retained_codex_plugin_root is not None:
+        _seed_codex_plugin_tree(
+            runtime,
+            retained_codex_home=retained_codex_home,
+            retained_plugin_root=retained_codex_plugin_root,
+        )
+    for path in (runtime.home, runtime.codex_home):
+        path.chmod(OWNER_DIR_MODE)
 
 
 def apply_case_eval_allowlists(env: dict[str, str], *, case_id: str) -> dict[str, str]:

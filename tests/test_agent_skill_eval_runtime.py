@@ -12,6 +12,7 @@ import pytest
 
 import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
+import saxo_bank_mcp.agent_skill_matrix_env as matrix_env
 import saxo_bank_mcp.agent_skill_router_eval_execution as router_execution
 from saxo_bank_mcp.agent_skill_command_runner import (
     process_group_members,
@@ -394,6 +395,43 @@ def test_prepare_eval_runtime_strips_parent_secrets_and_is_owner_only(
     finally:
         require_matrix_runtime_cleanup(runtime.run_root)
         assert not runtime.run_root.exists()
+
+
+def test_prepare_codex_native_eval_runtime_never_reads_or_copies_claude_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, _claude_src = _seed_cli_auth_sources(tmp_path)
+    retained_codex, _retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+
+    def reject_claude_lookup(_preferred: Path | None) -> Path:
+        raise AssertionError("native runtime resolved Claude state")
+
+    monkeypatch.setattr(matrix_env, "_resolve_claude_source_home", reject_claude_lookup)
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=codex_src,
+        source_claude_home=None,
+        retained_codex_home=retained_codex,
+        retained_claude_home=None,
+        retained_codex_plugin_root=plugin_root,
+        harness_policy="codex_native_v1",
+    )
+    try:
+        assert (runtime.codex_home / "auth.json").is_file()
+        assert (runtime.codex_home / "config.toml").is_file()
+        assert not (runtime.home / ".claude").exists()
+        assert "CLAUDE_CONFIG_DIR" not in runtime.env
+        assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in runtime.env
+        assert "EVAL_CLI_CLAUDE_BIN" not in runtime.env
+        assert runtime.claude_auth_source is None
+        assert runtime.claude_auth_source_digest is None
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
 
 
 def test_prepare_eval_runtime_rejects_symlink_cli_auth(
