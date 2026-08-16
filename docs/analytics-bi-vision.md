@@ -6,8 +6,10 @@ Scope: market research, portfolio analytics, quantitative modeling, visualizatio
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
 catalog to 60. Final SIM validation for the frozen candidate is recorded in
-`docs/analytics-bi-validation.md`, including the Saxo SIM authentication limitation that leaves the
-executable SIM legs refused rather than passed.
+`docs/analytics-bi-validation.md`. The 60-tool SIM run produced all receipts, cleaned controlled
+activity, and proved account state unchanged. Full completion is still blocked: all 54 proof
+profiles remain quarantined, the per-analysis proof did not execute, and the original dual-agent
+producer is unavailable under the owner's native-only policy.
 
 ## Executive conclusion
 
@@ -2308,26 +2310,20 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The suite is implemented, every gate that does not need a broker session or an agent CLI login has
-passed for the frozen candidate, and the independent review of that work is approved with no
-reproducible blocker.
+The suite is implemented and the controlled SIM run is safe: 60 of 60 tool receipts and 21 of 21
+analytics receipts were captured, cleanup completed, and account state was unchanged. That run is
+not a full pass because eight analytics or dependent tools returned the expected quarantine refusal.
 
-Authentication is **not** the only remaining step. Two separate things remain, in order:
+The next implementation is a new, explicitly Codex-only proof producer. It must remove the frozen
+producer's mandatory dual-agent auth dependency without weakening receipt provenance, tool coverage,
+Saxo reconciliation, cleanup, privacy, or source binding. That change creates a new candidate and
+requires one new installation, per-analysis proof, 60-tool matrix, cleanup, privacy, and separate
+native review cycle. Claude must not be invoked.
 
-1. **Restore credentials and run the external proofs.** Restore a usable owner-only Saxo SIM session,
-   then run the installed 60-tool SIM matrix, the per-analysis proof matrix, and the matched Codex and
-   Claude hard-task evaluation exactly once each for the recorded candidate. Restoring the session
-   needs a registered SIM redirect URI and an authorization code returned to it; the retained token
-   caches are expired and their refresh was rejected, and the retained headless profile holds no
-   session cookies. The installed evaluation additionally needs file-backed agent CLI credentials.
-2. **Activate the proof catalog.** All 54 shipped proof profiles are checked in as `quarantined` with
-   reason `implementation_pending`, so the eight analysis-producing tools refuse in a normal server
-   even with a working session. After the SIM proof run succeeds, the checked-in proof catalog must be
-   regenerated and re-frozen as a new candidate. Activation is a source change with its own validation
-   pass, not a runtime toggle.
-
-Until both steps complete, `docs/analytics-bi-validation.md` records those legs as honest refusals.
-Do not report them as passes, and do not substitute non-Saxo data for missing broker responses.
+Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
+active. Activation is a source change, not a runtime toggle. Until that happens, the existing
+structured refusals are the correct product behavior. Do not report them as passes and do not
+substitute non-Saxo data for missing broker results.
 
 In parallel, write the source-controlled definitions, exact tolerances, known-answer datasets,
 independent reference methods, and Saxo reconciliation targets for the first-slice metrics. Do not
