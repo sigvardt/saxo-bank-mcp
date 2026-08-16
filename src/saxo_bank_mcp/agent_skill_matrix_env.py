@@ -43,7 +43,9 @@ MAX_CLAUDE_CREDENTIAL_BYTES: Final = 1_048_576
 MIN_CLAUDE_OAUTH_MATERIAL_LENGTH: Final = 20
 # Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
-_CLAUDE_AUTH_SEED_RELATIVES: Final = (Path(".claude") / ".credentials.json",)
+_CLAUDE_CREDENTIAL_NAME: Final = ".credentials.json"
+_CLAUDE_CREDENTIAL_RELATIVE: Final = Path(".claude") / _CLAUDE_CREDENTIAL_NAME
+_CLAUDE_AUTH_SEED_RELATIVES: Final = (_CLAUDE_CREDENTIAL_RELATIVE,)
 # Retained install plugin registration/artifacts only (options.codex_home / options.claude_home).
 _CODEX_PLUGIN_SEED_FILES: Final = ("config.toml",)
 _CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
@@ -348,7 +350,6 @@ def _seed_auth_files(
     source_claude_home: Path | None,
 ) -> tuple[Path, str]:
     codex_auth = _resolve_codex_source_home(source_codex_home)
-    claude_auth = _resolve_claude_source_home(source_claude_home)
     for name in _CODEX_AUTH_SEED_FILES:
         copied = _copy_optional_owner_only_file(
             codex_auth / name,
@@ -358,7 +359,8 @@ def _seed_auth_files(
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
-        declared = claude_auth / relative
+        # Source honours a custom CLAUDE_CONFIG_DIR; destination stays the runtime layout.
+        declared = _resolve_claude_credential_source(source_claude_home)
         if declared.is_symlink():
             raise MatrixEnvError("cli_auth_source_symlink")
         if not os.path.lexists(declared):
@@ -719,6 +721,23 @@ def _resolve_claude_source_home(preferred: Path | None) -> Path:
     if raw:
         return Path(raw).expanduser().parent
     return Path.home()
+
+
+def _resolve_claude_credential_source(preferred: Path | None) -> Path:
+    """Actual credential file for the real Claude CLI login.
+
+    A wrapper launcher may point CLAUDE_CONFIG_DIR at a dedicated directory, and the
+    credential then lives directly inside it. Deriving the parent and re-appending
+    ``.claude`` would look in the wrong directory for any non-standard config dir, so the
+    configured directory is used as given. The standard ``<home>/.claude`` layout resolves
+    to the same path as before.
+    """
+    if preferred is not None:
+        return preferred.expanduser() / _CLAUDE_CREDENTIAL_RELATIVE
+    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser() / _CLAUDE_CREDENTIAL_NAME
+    return Path.home() / _CLAUDE_CREDENTIAL_RELATIVE
 
 
 def resolve_actual_codex_auth_home(preferred: Path | None = None) -> Path:

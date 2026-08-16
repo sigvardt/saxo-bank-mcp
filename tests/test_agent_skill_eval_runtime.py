@@ -989,6 +989,50 @@ def test_install_report_omitted_source_flags_use_actual_auth_roots(
         require_matrix_runtime_cleanup(runtime.run_root)
 
 
+def test_custom_claude_config_dir_seeds_credentials_from_that_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-standard CLAUDE_CONFIG_DIR holds its credential directly, not under <parent>/.claude.
+
+    Wrapper launchers point CLAUDE_CONFIG_DIR at a dedicated directory. The credential then
+    lives at <CLAUDE_CONFIG_DIR>/.credentials.json, so resolving <parent>/.claude/... looks in
+    the wrong place and fails closed even though a real credential is present.
+    """
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    actual_codex, _ = _seed_cli_auth_sources(tmp_path)
+    retained_codex, retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    # Home deliberately has no ~/.claude/.credentials.json; only the custom dir carries it.
+    isolated_home = tmp_path / "wrapper-home"
+    isolated_home.mkdir()
+    config_dir = isolated_home / ".claude-power-team"
+    config_dir.mkdir()
+    credential = config_dir / ".credentials.json"
+    credential.write_text('{"token":"claude-config-dir-fixture"}\n', encoding="utf-8")
+    credential.chmod(0o600)
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("CODEX_HOME", str(actual_codex))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    assert not (isolated_home / ".claude" / ".credentials.json").exists()
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=None,
+        source_claude_home=None,
+        retained_codex_home=retained_codex,
+        retained_claude_home=retained_claude,
+        retained_codex_plugin_root=plugin_root,
+    )
+    try:
+        seeded = runtime.home / ".claude" / ".credentials.json"
+        assert seeded.is_file()
+        assert seeded.read_text(encoding="utf-8") == credential.read_text(encoding="utf-8")
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+
+
 def test_eval_auth_seed_excludes_global_settings_hooks_mcp_project_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
