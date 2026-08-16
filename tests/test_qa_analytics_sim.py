@@ -380,13 +380,10 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
         assert selected == dataset_id
 
     pretrade_resources = AnalyticsRuntimeResources()
-    assert (
-        materialize_analytics_case_arguments(
-            calls[("saxo_propose_trade_from_analysis", "success")],
-            pretrade_resources,
-        )
-        == {}
-    )
+    assert materialize_analytics_case_arguments(
+        calls[("saxo_propose_trade_from_analysis", "success")],
+        pretrade_resources,
+    ) == dict(analytics_primary_calls())["saxo_propose_trade_from_analysis"]
     pretrade_resources.instrument_handles.append("ih_22222222222242228222222222222222")
     pretrade_resources.analysis_ids_by_kind["instrument_price_return"] = [
         "an_33333333333343338333333333333333"
@@ -397,6 +394,48 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
         pretrade_resources,
     )
     assert materialized_pretrade["proposal_price"] == "100"
+
+
+def test_missing_analysis_handles_still_exercise_downstream_refusal_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.delenv("SAXO_MCP_ENABLE_LIVE_READS", raising=False)
+    monkeypatch.delenv("SAXO_MCP_ENABLE_LIVE_WRITES", raising=False)
+    tool_ids = (
+        "saxo_explain_analysis",
+        "saxo_export_analysis",
+        "saxo_manage_analysis_job",
+        "saxo_propose_trade_from_analysis",
+        "saxo_render_analysis",
+    )
+    calls = {
+        call.tool_id: call
+        for call in analytics_case_calls()
+        if call.kind == "success" and call.analysis_kind is None and call.tool_id in tool_ids
+    }
+    resources = AnalyticsRuntimeResources()
+
+    async def exercise() -> list[tuple[str, dict[str, JsonValue], MatrixToolObservation]]:
+        observations: list[tuple[str, dict[str, JsonValue], MatrixToolObservation]] = []
+        async with Client(matrix_module.mcp) as client:
+            for tool_id in tool_ids:
+                arguments = materialize_analytics_case_arguments(calls[tool_id], resources)
+                observation = await matrix_module.call_tool(client, tool_id, arguments)
+                observations.append((tool_id, arguments, observation))
+        return observations
+
+    with isolated_analytics_state(tmp_path / "matrix-state"):
+        observations = anyio.run(exercise)
+
+    assert len(observations) == len(tool_ids)
+    for _tool_id, arguments, observation in observations:
+        assert arguments
+        assert observation.result_parsed is True
+        assert observation.result_state == "refused"
+        assert observation.mcp_is_error is False
+        assert observation.payload.get("network_call_made") is not True
 
 
 def test_analysis_success_prefers_server_issued_typed_input_over_raw_source() -> None:

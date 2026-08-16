@@ -186,6 +186,7 @@ def oauth_error(tool_name: str, error: OAuthRequestError) -> ToolResult:
         "http_status": error.http_status,
         "detail": error.detail,
         "scope_used": False,
+        "network_call_made": error.code != "token_not_refreshable",
         "next_action": auth_next_action(error.code),
         "verifies": [],
         "does_not_verify": list(AUTH_DOES_NOT_VERIFY),

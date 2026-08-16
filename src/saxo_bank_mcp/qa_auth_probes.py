@@ -93,6 +93,7 @@ async def call_sim_auth_flow() -> dict[str, JsonValue]:
             **base_event("sim-auth", "passed", "SIM session capabilities read through FastMCP"),
             "auth": _safe_auth_status(auth),
             "capabilities": capabilities,
+            "network_call_made": _network_call_observed(capabilities),
         }
 
     start_result = await call_tool_payload(
@@ -114,7 +115,7 @@ async def call_sim_auth_flow() -> dict[str, JsonValue]:
         "machine_completion_blocker": _machine_completion_blocker(capabilities, start_result),
         "machine_completion_possible": False,
         "prompted_user": False,
-        "network_call_made": False,
+        "network_call_made": _network_call_observed(capabilities, start_result),
         "missing_auth_material": _missing_auth_material(auth, capabilities, start_result),
         "official_saxo_auth_constraints": [
             (
@@ -130,6 +131,16 @@ async def call_sim_auth_flow() -> dict[str, JsonValue]:
             "account, or trading verification until saxo_get_session_capabilities passes"
         ),
     }
+
+
+def _network_call_observed(*payloads: dict[str, JsonValue]) -> bool:
+    for payload in payloads:
+        if payload.get("network_call_made") is True:
+            return True
+        http_status = payload.get("http_status")
+        if isinstance(http_status, int) and not isinstance(http_status, bool):
+            return True
+    return False
 
 
 def handle_token_cache(out: Path) -> int:

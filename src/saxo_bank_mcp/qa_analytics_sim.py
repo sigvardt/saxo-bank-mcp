@@ -1001,9 +1001,10 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
 def analytics_case_calls() -> tuple[AnalyticsCaseCall, ...]:
     """Return every applicable case as a real FastMCP call contract.
 
-    The static arguments are schema examples only. The matrix materializes every stateful call
-    from handles issued earlier in the same FastMCP session. Refusal and privacy cases use a
-    guaranteed schema-extra rejection and never enter a domain service.
+    The matrix prefers handles issued earlier in the same FastMCP session. If an upstream
+    analysis is refused and therefore issues no handle, its downstream local-only probes use
+    these schema-valid synthetic handles to exercise the structured refusal boundary. Refusal
+    and privacy cases use a guaranteed schema-extra rejection and never enter a domain service.
     """
     primary = dict(analytics_primary_calls())
     calls: list[AnalyticsCaseCall] = []

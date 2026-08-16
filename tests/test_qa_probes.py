@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
+from http import HTTPStatus
 from pathlib import Path
 
 import pytest
 
-from saxo_bank_mcp import evidence_publication, qa
+from saxo_bank_mcp import evidence_publication, mcp_auth_tools, qa
+from saxo_bank_mcp.auth import SaxoTokenSet
+from saxo_bank_mcp.config import SimAuthSettings, resolve_sim_auth_settings
+from saxo_bank_mcp.oauth import OAuthRequestError
+from saxo_bank_mcp.token_cache import save_token_cache
 
 EXPECTED_STREAMING_CONNECTIONS = 4
 EXPECTED_PRICE_INSTRUMENTS = 200
@@ -74,6 +80,48 @@ def test_sim_auth_probe_reports_external_auth_block_without_token(
         report["official_saxo_auth_references"],
     )
     assert "client-id-value" not in json.dumps(report)
+
+
+def test_sim_auth_probe_preserves_network_provenance_from_oauth_401(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "client-id-value")
+    settings = resolve_sim_auth_settings(require_redirect=False)
+    save_token_cache(
+        settings.cache_path,
+        SaxoTokenSet(
+            access_token="expired-access-token",  # noqa: S106
+            refresh_token="refresh-token-value",  # noqa: S106
+            code_verifier="verifier-value",
+            environment="SIM",
+            expires_at=datetime.now(UTC) - timedelta(minutes=5),
+        ),
+    )
+
+    async def rejected_refresh(
+        _settings: SimAuthSettings,
+        _token: SaxoTokenSet,
+    ) -> SaxoTokenSet:
+        raise OAuthRequestError(
+            "http_error",
+            "Saxo token endpoint rejected the PKCE request",
+            401,
+        )
+
+    monkeypatch.setattr(mcp_auth_tools, "refresh_access_token", rejected_refresh)
+    out = tmp_path / "sim-auth.json"
+
+    result = qa.main(["sim-auth", "--out", str(out)])
+
+    report = json.loads(out.read_text(encoding="utf-8"))
+    capabilities = report["capabilities_attempt"]
+    assert result == 1
+    assert capabilities["http_status"] == HTTPStatus.UNAUTHORIZED
+    assert capabilities["network_call_made"] is True
+    assert report["network_call_made"] is True
 
 
 def test_stream_probe_writes_incomplete_auth_required_evidence(

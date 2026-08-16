@@ -1665,7 +1665,7 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
     case_call: AnalyticsCaseCall,
     resources: AnalyticsRuntimeResources,
 ) -> dict[str, JsonValue]:
-    """Bind one case to handles issued earlier in the same FastMCP session."""
+    """Bind one case to issued handles or a schema-valid local refusal fallback."""
     if case_call.kind in {"refusal", "privacy"}:
         return dict(case_call.arguments)
     if case_call.kind == "recovery":
@@ -1753,7 +1753,7 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
             return {"action": "check", "job_id": job_id} if job_id is not None else {}
         analysis_id = resources.analysis_ids[0] if resources.analysis_ids else None
         if analysis_id is None:
-            return {}
+            return _clone_arguments(case_call.arguments)
         return {
             "action": "start",
             "request": {
@@ -1867,7 +1867,7 @@ def _materialize_analysis_consumer_arguments(
         analysis_id = analysis_ids[0] if analysis_ids else None
         instrument = resources.instrument_handles[0] if resources.instrument_handles else None
         if analysis_id is None or instrument is None or resources.pretrade_proposal_price is None:
-            return {}
+            return _clone_arguments(case_call.arguments)
         return {
             "analysis_id": analysis_id,
             "instrument_handle": instrument,
@@ -1885,7 +1885,7 @@ def _materialize_analysis_consumer_arguments(
         require_degraded=degraded,
     )
     if analysis_id is None:
-        return {}
+        return _clone_arguments(case_call.arguments)
     if case_call.tool_id == "saxo_render_analysis":
         return {
             "analysis_id": analysis_id,
