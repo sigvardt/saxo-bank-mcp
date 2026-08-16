@@ -2312,7 +2312,11 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 The suite is implemented and the controlled SIM run is safe: 60 of 60 tool receipts and 21 of 21
 analytics receipts were captured, cleanup completed, and account state was unchanged. That run is
-not a full pass because eight analytics or dependent tools returned the expected quarantine refusal.
+not a full pass. Three analytics tools returned parsed quarantine refusals. Five dependent tools
+instead received empty arguments and returned FastMCP `invalid_arguments`, so the historical run did
+not prove their intended refusal behavior. The corrected harness now exercises those five local-only
+boundaries with schema-valid synthetic handles and focused tests observe structured refusal, but the
+full SIM matrix still requires a new run.
 
 The next implementation is a new, explicitly Codex-only proof producer. It must remove the frozen
 producer's mandatory dual-agent auth dependency without weakening receipt provenance, tool coverage,
@@ -2321,9 +2325,10 @@ requires one new installation, per-analysis proof, 60-tool matrix, cleanup, priv
 native review cycle. Claude must not be invoked.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
-active. Activation is a source change, not a runtime toggle. Until that happens, the existing
-structured refusals are the correct product behavior. Do not report them as passes and do not
-substitute non-Saxo data for missing broker results.
+active. Activation is a source change, not a runtime toggle. Until that happens, structured
+refusal is the correct product behavior for valid unavailable handles. Do not report it as a pass,
+do not count input-validation errors as proof of that behavior, and do not substitute non-Saxo data
+for missing broker results.
 
 In parallel, write the source-controlled definitions, exact tolerances, known-answer datasets,
 independent reference methods, and Saxo reconciliation targets for the first-slice metrics. Do not

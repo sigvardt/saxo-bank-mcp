@@ -1,11 +1,11 @@
-# Saxo Analytics and BI Suite - Final Candidate Validation
+# Saxo Analytics and BI Suite - Task 24 Partial Validation
 
 Status: Task 24 partially validated; analytics activation is not approved
 Date: 2026-08-16
 Scope: Task 24 of `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
-Result: **60-tool SIM execution is complete and safe, but the per-analysis proof and activation
-gates are not met**
-Independent review: **pending separate native Codex review**
+Result: **the preserved 60-tool SIM execution is safe; the corrected runtime still needs a fresh
+install, full matrix, per-analysis proof, and activation gates**
+Independent review: **initial native review required changes; corrected-candidate re-review pending**
 
 All public values below are redacted. This document contains no credentials, account identifiers,
 balances, holdings, money values, local private paths, raw broker payloads, or raw private URLs.
@@ -14,8 +14,10 @@ balances, holdings, money values, local private paths, raw broker payloads, or r
 
 | Item | Value |
 | --- | --- |
-| Frozen runtime candidate | `97472e4720b44f31a623e0da6d96f18370186fca` |
-| Candidate tree | `2d1834543223f1ef1ea4e7f3d83f0a5f4e255097` |
+| Preserved controlled-run candidate | `97472e4720b44f31a623e0da6d96f18370186fca` |
+| Preserved candidate tree | `2d1834543223f1ef1ea4e7f3d83f0a5f4e255097` |
+| Corrected runtime candidate | `8f8b00b4055612c8d957e50555a712af23c7d4be` |
+| Corrected candidate tree | `9c2df3693a70ce0f75c9e7dad26f8c0117f3d16a` |
 | Dependency lock fingerprint | `uv.lock` SHA-256 `eb4584bf6f712062fac281b6ff1d2ba8205d91f026e115abae7fae201baa3482` |
 | Plugin/project version | `0.1.0` |
 | Tool catalog | 60 tools, including 21 analytics tools |
@@ -24,6 +26,10 @@ balances, holdings, money values, local private paths, raw broker payloads, or r
 The later Claude-launcher experiment was stopped by the owner. Corrective commit `134771d` removes
 that experiment and has the exact same Git tree as the frozen candidate. It therefore restores the
 already installed and tested candidate bytes rather than creating a new analytics candidate.
+
+Native review then identified the two evidence defects corrected at `8f8b00b`. That commit changes
+runtime and test bytes, so it is a new candidate. Its focused tests and static gates pass, but the
+preserved installation and full SIM receipts remain evidence for `97472e4`, not `8f8b00b`.
 
 The controlled SIM matrix used the installed `ea1f8f3` fixture. Its `src`, `tests`,
 `pyproject.toml`, and `uv.lock` objects are byte-identical to `97472e4`; only this validation document
@@ -56,15 +62,20 @@ skipped with their recorded-runtime guards. Ruff, BasedPyright, plugin validatio
 catalog checks, eval-manifest checks, public secret scanning, and LIVE refusal probes passed in that
 workflow.
 
-Before the final candidate, the recording host ran 2,596 tests with no failures for `b2b9872`; the
-only later source change was the install-evidence path-redaction correction in `ea1f8f3` and its
-three focused tests. No analytics formula, schema, tool behavior, artifact renderer, or proof
-contract changed after that run.
+Before the preserved candidate, the recording host ran 2,596 tests with no failures for `b2b9872`;
+the only later source change before `97472e4` was the install-evidence path-redaction correction in
+`ea1f8f3` and its three focused tests. The current `8f8b00b` correction changes only QA provenance
+and matrix argument materialization; it does not change analytics formulas, schemas, renderers, or
+proof contracts.
 
 The native-only resume removed the stopped launcher experiment and reran the directly affected
 eval-runtime suite twice through `scripts/run-pytest`: 22 of 22 tests passed in each run. Fresh Ruff
 and BasedPyright checks then passed with 0 errors, 0 warnings, and 0 notes. The system disk had 85 GiB
 free, above the 50 GiB guard. Direct `pytest` was not used.
+
+For `8f8b00b`, three regression tests first failed for the expected missing-provenance and
+empty-argument reasons. The focused tests then passed twice, 101 related auth and matrix tests
+passed, Ruff passed, and BasedPyright reported 0 errors, 0 warnings, and 0 notes.
 
 The historical `claude plugin validate` and dual-client installation were completed before the
 owner stopped all Claude usage. They were not rerun and are not presented as a new native-only pass.
@@ -72,6 +83,7 @@ owner stopped all Claude usage. They were not rerun and are not presented as a n
 ## Isolated installation
 
 The preserved exact-candidate installation report for `97472e4` is passed and contains no errors.
+No installed-artifact claim is made yet for the changed `8f8b00b` runtime.
 
 | Gate | Result |
 | --- | --- |
@@ -114,17 +126,21 @@ claims.
 | Disclaimer response made | false |
 
 The session reported authenticated, standard-data, orders-only SIM capability. The overall matrix
-status remained blocked because these eight analytics or analysis-dependent tools returned
-well-formed structured refusals while all proof profiles were quarantined:
+status remained blocked with eight tool-state mismatches, but the preserved receipt does not support
+one common classification for all eight:
 
-1. `saxo_analyze_market`
-2. `saxo_analyze_instruments`
-3. `saxo_backtest_strategy`
-4. `saxo_propose_trade_from_analysis`
-5. `saxo_render_analysis`
-6. `saxo_export_analysis`
-7. `saxo_explain_analysis`
-8. `saxo_manage_analysis_job`
+- `saxo_analyze_market`, `saxo_analyze_instruments`, and `saxo_backtest_strategy` returned parsed
+  structured refusals with `mcp_is_error=false` while their proof profiles were quarantined.
+- `saxo_propose_trade_from_analysis`, `saxo_render_analysis`, `saxo_export_analysis`,
+  `saxo_explain_analysis`, and `saxo_manage_analysis_job` received empty arguments after no analysis
+  handle was issued. FastMCP returned `invalid_arguments` with `mcp_is_error=true`. The preserved run
+  therefore did not prove their intended quarantine, refusal, or reduced behavior.
+
+Commit `8f8b00b` changes the harness to use schema-valid synthetic handles only for this isolated,
+local-only negative coverage when no upstream analysis handle exists. Focused real-FastMCP tests
+prove that all five calls now reach parsed structured refusal with `mcp_is_error=false` and no Saxo
+network call. The full 60-tool SIM matrix was not rerun, so this local correction does not rewrite the
+historical receipt or turn any expected success state into a pass.
 
 The receipt also carries `controlled_sim_lifecycle_unverified` as an overall blocking error. This is
 not reported as a pass. Separately, the same receipt proves `cleanup_complete=true`,
@@ -183,10 +199,17 @@ The controlled SIM run created bounded activity only in SIM. It captured 22 life
 proved account state unchanged, cleanup complete, and zero uncleaned resources. It made no LIVE
 call, purchase, or disclaimer response.
 
-The native resume performed local auth preflight only. It proved the configured environment was
-SIM with LIVE reads and writes disabled. The current token was expired, so both guarded SIM-auth
-preflights stopped with `blocked_external_auth_material` and `network_call_made=false`. There was no
-refresh attempt, browser launch, Saxo request, or controlled resource to clean during the resume.
+The native resume proved the configured environment was SIM with LIVE reads and writes disabled.
+The expired cached token caused `saxo_get_session_capabilities` to attempt a refresh at Saxo's SIM
+OAuth endpoint, which returned HTTP 401. The earlier preflight receipt incorrectly recorded
+`network_call_made=false`; the HTTP response proves that statement false. Commit `8f8b00b` propagates
+OAuth network provenance, and a fresh clean-tree receipt records `network_call_made=true` both on the
+capabilities attempt and the enclosing SIM-auth event.
+
+The attempt made one SIM OAuth request. It did not launch a browser, reach the session-capabilities
+or account endpoint, create an order, subscription, or analytics job, answer a disclaimer, make a
+purchase, or make any LIVE call. The rejected refresh saved no token and created no controlled broker
+resource to clean.
 
 The exact-candidate install fixture remains in owner-only local storage under its evidence ledger.
 It is deliberately retained for the registered final consumers and has a recorded teardown owner;
@@ -230,7 +253,7 @@ permissions remain reduced or refused.
 
 | Completion gate | State |
 | --- | --- |
-| All 60 tools produce their expected passing SIM state | **not met**; 60 receipts exist, but 8 tools refused under quarantine |
+| All 60 tools produce their expected passing SIM state | **not met**; the preserved run has 3 structured quarantine refusals and 5 invalid-argument coverage gaps; the corrected five-tool local refusal coverage is not a full matrix rerun |
 | Every analysis kind has an executed source-bound proof profile | **not met**; 54 contracts exist, 0 active profiles |
 | Deterministic numerical and accounting checks | met |
 | Applicable Saxo reconciliation in the per-analysis producer | **not met** |
@@ -239,13 +262,13 @@ permissions remain reduced or refused.
 | Missing-data and permission behavior | met by structured reduction or refusal |
 | Controlled SIM cleanup and unchanged account state | met |
 | Public privacy | met; preserved scans and the native closeout scan passed |
-| Separate native Codex review | pending |
+| Separate native Codex review | first review required these two corrections; re-review pending |
 | No LIVE call, LIVE mutation, purchase, or disclaimer response | met |
 | Analysis claims enabled in normal runtime | **not met**; all profiles remain quarantined |
 
-Task 24 is closed as a truthful partial validation, not as full-suite completion. The implementation
-is installable and its refusal boundary is safe, but the analytics-producing surface is not approved
-for activation.
+Task 24 remains a truthful partial validation, not full-suite completion. The preserved candidate is
+installable; the corrected runtime's focused refusal boundary is safe, but its installation and full
+SIM matrix are pending and the analytics-producing surface is not approved for activation.
 
 ## Candidate history
 
@@ -257,6 +280,7 @@ for activation.
 | `97472e4` | Frozen runtime candidate and exhausted-auth documentation |
 | `181ad08`, `d010df0` | Later Claude credential and launcher experiments; not accepted as final evidence |
 | `134771d` | Removes the stopped experiments and restores the exact `97472e4` tree |
+| `8f8b00b` | Preserves SIM OAuth provenance and gives five downstream tools valid local refusal coverage |
 
-Documentation and the Task 24 report are committed on top of the frozen runtime candidate. They do
-not change `src`, `tests`, `pyproject.toml`, or `uv.lock` candidate bytes.
+The corrected candidate changes four QA/runtime modules and two test files. `pyproject.toml` and
+`uv.lock` are unchanged. Documentation and the Task 24 report describe this new partial state.
