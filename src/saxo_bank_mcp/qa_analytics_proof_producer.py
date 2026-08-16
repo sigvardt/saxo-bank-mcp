@@ -12,11 +12,14 @@ import stat
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal, Self, cast
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_codex_install import CodexInstallEvidenceReport
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
@@ -41,6 +44,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
+from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, EnvironmentName
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
     ArtifactVisualIntegrityReceipt,
@@ -63,12 +67,14 @@ from saxo_bank_mcp.qa_analytics_sim import (
     PostSendTimeoutReceipt,
     analytics_case_calls,
 )
+from saxo_bank_mcp.qa_auth_probes import call_saxo_auth_status, call_tool_payload
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.qa_installed_matrix_envelope import InstalledMatrixEnvelope
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
+_SAFE_REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _PRODUCER_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _COMMAND_NAME = "analytics_proof_producer"
 _AGENT_EVAL_COMMAND_NAME = "analytics_installed_dual_evaluation"
@@ -377,16 +383,55 @@ class VerifiedInstalledProofValidation(_StrictModel):
     disclaimer_response_made: Literal[False] = False
 
 
+class CodexNativeSimPreflightReceipt(_StrictModel):
+    """Redacted SIM session gate that must pass before native proof work."""
+
+    status: Literal["passed", "blocked"]
+    requested_environment: EnvironmentName
+    effective_read_environment: EffectiveReadEnvironment
+    live_reads: bool
+    live_writes: Literal[False]
+    capabilities_status: str = Field(min_length=1, max_length=64)
+    reason: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    network_call_made: bool | None
+    session_capabilities_proven: bool
+    redacted_publication: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _validate_preflight(self) -> Self:
+        if self.http_status is not None and self.network_call_made is not True:
+            raise ValueError("native preflight HTTP provenance is inconsistent")
+        if self.status == "passed":
+            if (
+                self.requested_environment != "SIM"
+                or self.effective_read_environment != "SIM"
+                or self.live_reads
+                or self.live_writes
+                or self.capabilities_status != "passed"
+                or self.reason is not None
+                or self.network_call_made is not True
+                or not self.session_capabilities_proven
+            ):
+                raise ValueError("native preflight pass requires current SIM capabilities")
+        elif self.session_capabilities_proven or self.capabilities_status == "passed":
+            raise ValueError("blocked native preflight cannot prove session capabilities")
+        return self
+
+
 class CodexNativeInstalledProofProducerResult(InstalledProofProducerResult):
     """Process-owned proof result under the explicit native Codex policy."""
 
     harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    sim_preflight: CodexNativeSimPreflightReceipt
     network_call_made: bool | None = None
 
     @model_validator(mode="after")
     def _validate_network_provenance(self) -> Self:
-        if (self.status == "validated") == (self.network_call_made is None):
+        if self.network_call_made != self.sim_preflight.network_call_made:
             raise ValueError("native proof network provenance does not match proof state")
+        if self.status == "validated" and self.sim_preflight.status != "passed":
+            raise ValueError("validated native proof requires passed SIM preflight")
         return self
 
 
@@ -407,14 +452,17 @@ class CodexNativeVerifiedInstalledProofValidation(_StrictModel):
     bundle_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     validation_errors: tuple[str, ...]
     harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    sim_preflight: CodexNativeSimPreflightReceipt
     network_call_made: bool | None = None
     broker_write_made: Literal[False] = False
     disclaimer_response_made: Literal[False] = False
 
     @model_validator(mode="after")
     def _validate_network_provenance(self) -> Self:
-        if (self.status == "validated") == (self.network_call_made is None):
+        if self.network_call_made != self.sim_preflight.network_call_made:
             raise ValueError("native proof network provenance does not match proof state")
+        if self.status == "validated" and self.sim_preflight.status != "passed":
+            raise ValueError("validated native proof requires passed SIM preflight")
         return self
 
 
@@ -587,6 +635,98 @@ def produce_installed_result(
     )
 
 
+def _run_codex_native_sim_preflight() -> CodexNativeSimPreflightReceipt:
+    """Prove a current SIM session before any native model or offline proof work."""
+    auth = anyio.run(call_saxo_auth_status)
+    if (
+        auth["requested_environment"] != "SIM"
+        or auth["effective_read_environment"] != "SIM"
+        or auth["live_reads"]
+        or auth["live_writes"]
+    ):
+        return CodexNativeSimPreflightReceipt(
+            status="blocked",
+            requested_environment=auth["requested_environment"],
+            effective_read_environment=auth["effective_read_environment"],
+            live_reads=auth["live_reads"],
+            live_writes=auth["live_writes"],
+            capabilities_status="not_called",
+            reason="native_preflight_environment_unsafe",
+            network_call_made=False,
+            session_capabilities_proven=False,
+        )
+
+    capability_arguments: dict[str, JsonValue] = {}
+    capabilities = anyio.run(
+        call_tool_payload,
+        "saxo_get_session_capabilities",
+        capability_arguments,
+    )
+    raw_status = capabilities.get("status")
+    capabilities_status = raw_status if isinstance(raw_status, str) else "invalid"
+    raw_http_status = capabilities.get("http_status")
+    http_status = (
+        raw_http_status
+        if isinstance(raw_http_status, int) and not isinstance(raw_http_status, bool)
+        else None
+    )
+    network_call_made = _native_preflight_network_call_made(
+        capabilities,
+        http_status=http_status,
+    )
+    capability_receipt_valid = (
+        capabilities_status == "passed"
+        and capabilities.get("tool_name") == "saxo_get_session_capabilities"
+        and capabilities.get("environment") == "SIM"
+        and network_call_made is True
+    )
+    if capability_receipt_valid:
+        return CodexNativeSimPreflightReceipt(
+            status="passed",
+            requested_environment="SIM",
+            effective_read_environment="SIM",
+            live_reads=False,
+            live_writes=False,
+            capabilities_status="passed",
+            reason=None,
+            http_status=http_status,
+            network_call_made=True,
+            session_capabilities_proven=True,
+        )
+
+    raw_reason = capabilities.get("reason")
+    reason = (
+        raw_reason
+        if isinstance(raw_reason, str) and _SAFE_REASON_PATTERN.fullmatch(raw_reason) is not None
+        else "native_preflight_capabilities_invalid"
+    )
+    return CodexNativeSimPreflightReceipt(
+        status="blocked",
+        requested_environment="SIM",
+        effective_read_environment="SIM",
+        live_reads=False,
+        live_writes=False,
+        capabilities_status=(
+            capabilities_status if capabilities_status != "passed" else "invalid"
+        ),
+        reason=reason,
+        http_status=http_status,
+        network_call_made=network_call_made,
+        session_capabilities_proven=False,
+    )
+
+
+def _native_preflight_network_call_made(
+    capabilities: Mapping[str, object],
+    *,
+    http_status: int | None,
+) -> bool | None:
+    if http_status is not None:
+        return True
+    observed = capabilities.get("network_call_made")
+    return observed if isinstance(observed, bool) else None
+
+
 def produce_codex_native_installed_result(
     *,
     candidate_commit: str,
@@ -601,36 +741,33 @@ def produce_codex_native_installed_result(
     contracts = build_proof_execution_contracts(catalog=catalog)
     catalog_sha256, contract_sha256 = _installed_contract_digests()
     producer_module_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
-    try:
-        bundle = _execute_installed_proof_bundle(
-            candidate_commit=candidate_commit,
-            installed_cache_sha256=installed_cache_sha256,
-            harness_policy="codex_native_v1",
-        )
-    except ProofProducerError as error:
-        reason = str(error)
-        return CodexNativeInstalledProofProducerResult(
+    sim_preflight = _run_codex_native_sim_preflight()
+    if sim_preflight.status != "passed":
+        return _blocked_codex_native_result(
             candidate_commit=candidate_commit,
             installed_cache_sha256=installed_cache_sha256,
             producer_module_sha256=producer_module_sha256,
             catalog_sha256=catalog_sha256,
             contract_sha256=contract_sha256,
-            status="blocked",
-            execution_performed=False,
-            process_local_activation=False,
-            executed_receipt_count=0,
-            proof_execution_sha256=_digest(
-                {
-                    "candidate_commit": candidate_commit,
-                    "harness_policy": "codex_native_v1",
-                    "installed_cache_sha256": installed_cache_sha256,
-                    "network_call_made": None,
-                    "producer_module_sha256": producer_module_sha256,
-                    "reason": reason,
-                },
-            ),
-            network_call_made=None,
-            validation_errors=(reason,),
+            sim_preflight=sim_preflight,
+            reason="proof_sim_session_preflight_failed",
+        )
+    try:
+        bundle = _execute_installed_proof_bundle(
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=installed_cache_sha256,
+            harness_policy="codex_native_v1",
+            native_sim_preflight=sim_preflight,
+        )
+    except ProofProducerError as error:
+        return _blocked_codex_native_result(
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=installed_cache_sha256,
+            producer_module_sha256=producer_module_sha256,
+            catalog_sha256=catalog_sha256,
+            contract_sha256=contract_sha256,
+            sim_preflight=sim_preflight,
+            reason=str(error),
         )
     active_contracts = tuple(
         contract.model_copy(
@@ -647,7 +784,9 @@ def produce_codex_native_installed_result(
     if validation_errors:
         raise ProofProducerError("installed_proof_bundle_invalid")
     bundle_sha256 = _digest(bundle.model_dump(mode="json"))
-    network_call_made = _bundle_network_call_made(bundle)
+    network_call_made = sim_preflight.network_call_made is True or _bundle_network_call_made(
+        bundle,
+    )
     return CodexNativeInstalledProofProducerResult(
         candidate_commit=candidate_commit,
         installed_cache_sha256=installed_cache_sha256,
@@ -666,11 +805,49 @@ def produce_codex_native_installed_result(
                 "installed_cache_sha256": installed_cache_sha256,
                 "network_call_made": network_call_made,
                 "producer_module_sha256": producer_module_sha256,
+                "sim_preflight": sim_preflight.model_dump(mode="json"),
             },
         ),
         bundle_sha256=bundle_sha256,
+        sim_preflight=sim_preflight,
         network_call_made=network_call_made,
         validation_errors=(),
+    )
+
+
+def _blocked_codex_native_result(  # noqa: PLR0913
+    *,
+    candidate_commit: str,
+    installed_cache_sha256: str,
+    producer_module_sha256: str,
+    catalog_sha256: str,
+    contract_sha256: str,
+    sim_preflight: CodexNativeSimPreflightReceipt,
+    reason: str,
+) -> CodexNativeInstalledProofProducerResult:
+    material = {
+        "candidate_commit": candidate_commit,
+        "harness_policy": "codex_native_v1",
+        "installed_cache_sha256": installed_cache_sha256,
+        "network_call_made": sim_preflight.network_call_made,
+        "producer_module_sha256": producer_module_sha256,
+        "reason": reason,
+        "sim_preflight": sim_preflight.model_dump(mode="json"),
+    }
+    return CodexNativeInstalledProofProducerResult(
+        candidate_commit=candidate_commit,
+        installed_cache_sha256=installed_cache_sha256,
+        producer_module_sha256=producer_module_sha256,
+        catalog_sha256=catalog_sha256,
+        contract_sha256=contract_sha256,
+        status="blocked",
+        execution_performed=False,
+        process_local_activation=False,
+        executed_receipt_count=0,
+        proof_execution_sha256=_digest(material),
+        sim_preflight=sim_preflight,
+        network_call_made=sim_preflight.network_call_made,
+        validation_errors=(reason,),
     )
 
 
@@ -768,6 +945,7 @@ def _execute_installed_proof_bundle(
     candidate_commit: str,
     installed_cache_sha256: str,
     harness_policy: HarnessPolicy = "dual_v1",
+    native_sim_preflight: CodexNativeSimPreflightReceipt | None = None,
 ) -> AnalyticsProofMatrixBundle:
     """Execute the fixed offline suite and actual logical-MCP SIM matrix in this child.
 
@@ -775,6 +953,11 @@ def _execute_installed_proof_bundle(
     owner-only workspace, runs the checked-in guarded suite, executes the matrix in process, and
     converts only those process-owned results into the strict typed bundle.
     """
+    if harness_policy == "codex_native_v1":
+        if native_sim_preflight is None or native_sim_preflight.status != "passed":
+            raise ProofProducerError("native_sim_preflight_required")
+    elif native_sim_preflight is not None:
+        raise ProofProducerError("native_sim_preflight_not_allowed")
     catalog = load_analysis_kind_catalog()
     contracts = build_proof_execution_contracts(catalog=catalog)
     skill_receipts = _run_installed_agent_evaluation(
@@ -1856,6 +2039,7 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
             "installed_cache_sha256": installed_cache_sha256,
             "network_call_made": produced.network_call_made,
             "producer_module_sha256": producer_module_sha256,
+            "sim_preflight": produced.sim_preflight.model_dump(mode="json"),
         }
     else:
         expected_count = 0
@@ -1863,9 +2047,10 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
             "candidate_commit": candidate_commit,
             "harness_policy": "codex_native_v1",
             "installed_cache_sha256": installed_cache_sha256,
-            "network_call_made": None,
+            "network_call_made": produced.network_call_made,
             "producer_module_sha256": producer_module_sha256,
             "reason": produced.validation_errors[0],
+            "sim_preflight": produced.sim_preflight.model_dump(mode="json"),
         }
     if (
         produced.executed_receipt_count != expected_count
@@ -1884,6 +2069,7 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
         executed_receipt_count=produced.executed_receipt_count,
         proof_execution_sha256=produced.proof_execution_sha256,
         bundle_sha256=produced.bundle_sha256,
+        sim_preflight=produced.sim_preflight,
         network_call_made=produced.network_call_made,
         validation_errors=produced.validation_errors,
     )

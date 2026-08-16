@@ -21,6 +21,7 @@ from saxo_bank_mcp.analytics_chart_semantics import core_template_bindings
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_proof_profiles import load_proof_profile_catalog
 from saxo_bank_mcp.analytics_source_contracts import load_source_contract_catalog
+from saxo_bank_mcp.auth_status import AuthStatusInputs, SaxoAuthStatus, build_auth_status
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
     ArtifactVisualIntegrityReceipt,
@@ -74,6 +75,31 @@ SHA256_HEX_LENGTH: Final = 64
 FIXED_INCOME_PROPERTY_CASES: Final = 40
 RETURN_PROPERTY_CASES: Final = 60
 MATRIX_CHILD_TIMEOUT_SECONDS: Final = 1800
+
+
+def _sim_auth_status(
+    *,
+    requested_environment: Literal["SIM", "LIVE"] = "SIM",
+    effective_read_environment: Literal["SIM", "LIVE", "LIVE_READ_DISABLED"] = "SIM",
+) -> SaxoAuthStatus:
+    return build_auth_status(
+        AuthStatusInputs(
+            requested_environment=requested_environment,
+            effective_read_environment=effective_read_environment,
+            live_reads_enabled=effective_read_environment == "LIVE",
+            sim_credentials_present=True,
+            sim_credential_source="file",
+            live_credentials_present=effective_read_environment == "LIVE",
+            sim_redirect_uri_present=False,
+            pending_pkce_authorization_present=True,
+            token_cache_path_refused=False,
+            token_cache_present=True,
+            token_cache_readable=True,
+            token_cache_expired=True,
+            token_cache_refresh_supported=True,
+            token_cache_environment=requested_environment,
+        ),
+    )
 
 
 def _case_receipt(kind: ProofExecutionKind, *, applicable: bool = True) -> ProofCaseReceipt:
@@ -782,15 +808,160 @@ def test_installed_producer_privately_validates_a_complete_executed_typed_bundle
     )
 
 
-def test_codex_native_blocker_does_not_claim_no_network_request(
+def test_codex_native_cli_auth_preflight_blocks_before_proof_work(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    observed_phases: list[str] = []
+
+    async def auth_status() -> SaxoAuthStatus:
+        observed_phases.append("auth_status")
+        return _sim_auth_status()
+
+    async def capabilities(
+        name: str,
+        arguments: dict[str, object],
+    ) -> dict[str, object]:
+        observed_phases.append("session_capabilities")
+        assert name == "saxo_get_session_capabilities"
+        assert arguments == {}
+        return {
+            "status": "auth_required",
+            "tool_name": "saxo_get_session_capabilities",
+            "environment": "SIM",
+            "reason": "http_error",
+            "http_status": 401,
+            "network_call_made": True,
+        }
+
+    def proof_bundle(**_kwargs: object) -> NoReturn:
+        observed_phases.append("proof_bundle")
+        raise producer.ProofProducerError("proof_work_must_not_start")
+
+    monkeypatch.setattr(producer, "call_saxo_auth_status", auth_status, raising=False)
+    monkeypatch.setattr(producer, "call_tool_payload", capabilities, raising=False)
+    monkeypatch.setattr(producer, "_execute_installed_proof_bundle", proof_bundle)
+
+    exit_code = producer.main(
+        [
+            "--candidate-commit",
+            "1" * 40,
+            "--installed-cache-sha256",
+            "2" * 64,
+            "--harness-policy",
+            "codex_native_v1",
+        ],
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert observed_phases == ["auth_status", "session_capabilities"]
+    assert payload["status"] == "blocked"
+    assert payload["execution_performed"] is False
+    assert payload["executed_receipt_count"] == 0
+    assert payload["network_call_made"] is True
+    assert payload["validation_errors"] == ["proof_sim_session_preflight_failed"]
+    assert payload["sim_preflight"] == {
+        "capabilities_status": "auth_required",
+        "effective_read_environment": "SIM",
+        "http_status": 401,
+        "live_reads": False,
+        "live_writes": False,
+        "network_call_made": True,
+        "reason": "http_error",
+        "redacted_publication": True,
+        "requested_environment": "SIM",
+        "session_capabilities_proven": False,
+        "status": "blocked",
+    }
+
+
+def test_codex_native_preflight_refuses_live_before_capability_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    observed_phases: list[str] = []
+
+    async def auth_status() -> SaxoAuthStatus:
+        observed_phases.append("auth_status")
+        return _sim_auth_status(
+            requested_environment="LIVE",
+            effective_read_environment="LIVE",
+        )
+
+    async def capabilities(
+        _name: str,
+        _arguments: dict[str, object],
+    ) -> dict[str, object]:
+        observed_phases.append("session_capabilities")
+        return {}
+
+    monkeypatch.setattr(producer, "call_saxo_auth_status", auth_status, raising=False)
+    monkeypatch.setattr(producer, "call_tool_payload", capabilities, raising=False)
+
+    receipt = producer._run_codex_native_sim_preflight()  # noqa: SLF001
+
+    assert observed_phases == ["auth_status"]
+    assert receipt.status == "blocked"
+    assert receipt.capabilities_status == "not_called"
+    assert receipt.reason == "native_preflight_environment_unsafe"
+    assert receipt.network_call_made is False
+    assert receipt.session_capabilities_proven is False
+
+
+def test_codex_native_preflight_blocks_malformed_pass_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
 
-    def blocked_bundle(**_kwargs: object) -> NoReturn:
-        raise producer.ProofProducerError("proof_sim_auth_lease_unavailable")
+    async def capabilities(
+        _name: str,
+        _arguments: dict[str, object],
+    ) -> dict[str, object]:
+        return {
+            "status": "passed",
+            "tool_name": "saxo_get_session_capabilities",
+            "environment": "SIM",
+        }
 
-    monkeypatch.setattr(producer, "_execute_installed_proof_bundle", blocked_bundle)
+    async def auth_status() -> SaxoAuthStatus:
+        return _sim_auth_status()
+
+    monkeypatch.setattr(producer, "call_saxo_auth_status", auth_status, raising=False)
+    monkeypatch.setattr(producer, "call_tool_payload", capabilities, raising=False)
+
+    receipt = producer._run_codex_native_sim_preflight()  # noqa: SLF001
+
+    assert receipt.status == "blocked"
+    assert receipt.capabilities_status == "invalid"
+    assert receipt.reason == "native_preflight_capabilities_invalid"
+    assert receipt.network_call_made is None
+    assert receipt.session_capabilities_proven is False
+
+
+def test_codex_native_later_failure_retains_passed_preflight_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    preflight = producer.CodexNativeSimPreflightReceipt(
+        status="passed",
+        requested_environment="SIM",
+        effective_read_environment="SIM",
+        capabilities_status="passed",
+        reason=None,
+        http_status=200,
+        live_reads=False,
+        live_writes=False,
+        network_call_made=True,
+        session_capabilities_proven=True,
+    )
+
+    def later_failure(**_kwargs: object) -> NoReturn:
+        raise producer.ProofProducerError("installed_offline_proof_suite_failed")
+
+    monkeypatch.setattr(producer, "_run_codex_native_sim_preflight", lambda: preflight)
+    monkeypatch.setattr(producer, "_execute_installed_proof_bundle", later_failure)
 
     result = producer.produce_codex_native_installed_result(
         candidate_commit="1" * 40,
@@ -798,7 +969,11 @@ def test_codex_native_blocker_does_not_claim_no_network_request(
     )
 
     assert result.status == "blocked"
-    assert result.network_call_made is None
+    assert result.execution_performed is False
+    assert result.executed_receipt_count == 0
+    assert result.sim_preflight == preflight
+    assert result.network_call_made is True
+    assert result.validation_errors == ("installed_offline_proof_suite_failed",)
 
 
 def test_codex_native_producer_propagates_observed_network_request(
@@ -832,6 +1007,23 @@ def test_codex_native_producer_propagates_observed_network_request(
         producer,
         "_execute_installed_proof_bundle",
         executed_bundle,
+    )
+    monkeypatch.setattr(
+        producer,
+        "_run_codex_native_sim_preflight",
+        lambda: producer.CodexNativeSimPreflightReceipt(
+            status="passed",
+            requested_environment="SIM",
+            effective_read_environment="SIM",
+            capabilities_status="passed",
+            reason=None,
+            http_status=None,
+            live_reads=False,
+            live_writes=False,
+            network_call_made=True,
+            session_capabilities_proven=True,
+        ),
+        raising=False,
     )
 
     result = producer.produce_codex_native_installed_result(
