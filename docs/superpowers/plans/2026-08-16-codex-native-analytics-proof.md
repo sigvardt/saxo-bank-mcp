@@ -96,18 +96,20 @@ git commit -m "feat: add Codex-native proof policy"
 - Create: `tests/test_agent_skill_codex_install.py`
 
 **Interfaces:**
-- Produces: `CodexInstallEvidenceReport`, which has no Claude property.
+- Produces: `CodexInstallEvidenceReport`, which has no Claude runtime-state property, command,
+  account, process, or receipt. Its exact installed-byte inventory may contain shared packaging
+  metadata such as `.claude-plugin/plugin.json`; that is not Claude execution.
 - Produces: `produce_codex_install_report(options) -> int`.
 - Produces: `load_verified_codex_install_report(path, codex_global_home) -> tuple[CodexInstallEvidenceReport | None, tuple[str, ...]]`.
 
 - [ ] **Step 1: Write failing tests for exact install evidence**
 
 ```python
-def test_codex_install_report_has_no_claude_surface(...) -> None:
+def test_codex_install_report_has_no_claude_runtime_state_surface(...) -> None:
     report = run_fake_codex_install(...)
     assert report.harness_policy == "codex_native_v1"
     assert report.codex.tool_count == 60
-    assert "claude" not in report.model_dump(mode="json")
+    assert "claude" not in set(report.model_dump(mode="json"))
 
 def test_codex_install_rejects_changed_cache_bytes(...) -> None:
     ...

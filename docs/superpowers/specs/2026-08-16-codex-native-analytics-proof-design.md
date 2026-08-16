@@ -32,7 +32,9 @@ plugin cache. Its typed report binds the exact candidate commit to:
 - complete process cleanup;
 - a clean privacy scan.
 
-The report has no Claude field, path, command, state, or receipt. The proof producer independently
+The report has no Claude runtime-state field, command, account, process, or receipt. Its exact byte
+inventory may include `.claude-plugin/plugin.json` as shared packaging metadata; that path proves
+installed-byte parity and is not Claude runtime state or execution. The proof producer independently
 rechecks the candidate commit, clean source tree, installed inventory, cache digest, registration,
 and owner-only modes before it trusts the installation.
 

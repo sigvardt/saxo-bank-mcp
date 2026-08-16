@@ -5,9 +5,11 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Native candidate `9c94bf1` adds the explicit `codex_native_v1` install and proof path
-without relabeling the historical dual-agent evidence. Its exact Codex-only installation, guarded
-deterministic suite, static, type, catalog, and privacy gates pass. Fresh broker-bound validation
+catalog to 60. Evidence candidate `9c94bf1` adds the explicit `codex_native_v1` install and proof
+path without relabeling the historical dual-agent evidence. Its exact Codex-only installation,
+guarded deterministic suite, static, type, catalog, and privacy gates pass. Corrective source
+`9c5945e` now requires a current SIM capability receipt before any native model or offline proof
+work and retains truthful network provenance when that gate blocks. Fresh broker-bound validation
 stopped when the expired SIM cache's single refresh received HTTP 401, so the new 60-tool matrix,
 per-analysis Saxo proof, hard model workflow, and activation did not run. All 54 proof profiles
 remain quarantined. The exact result is recorded in `docs/analytics-bi-validation.md`.
@@ -1891,14 +1893,18 @@ Run once per stable candidate:
 2. All independent reference comparisons.
 3. All accounting identities and Saxo reconciliation cases.
 4. The executable Saxo SIM analytics matrix.
-5. Isolated Codex and Claude installation checks.
-6. Matched dual-agent signature-experience evaluations.
+5. Isolated installation checks for every harness required by the candidate's selected model
+   policy. `codex_native_v1` requires Codex only; historical or alternative `dual_v1` candidates
+   require both Codex and Claude.
+6. Policy-matched signature-experience evaluations. `codex_native_v1` requires one real Codex
+   evaluation; `dual_v1` requires matched Codex and Claude evaluations.
 7. Artifact parity and visual integrity checks.
 8. Subscription, job, cache, and temporary-state cleanup.
 9. Before and after brokerage-state equality.
 10. Secret, identifier, private-value, and evidence-publication scans.
-11. One separate Grok review focused only on reproducible correctness, safety, privacy, and
-    agent-usability blockers.
+11. One separate independent review using a reviewer allowed by the candidate's model policy and
+    current operator restrictions, focused only on reproducible correctness, safety, privacy, and
+    agent-usability blockers. Under the current native-only restriction, that reviewer is Codex.
 
 After the complete SIM implementation loop, LIVE read-only validation is a separate, explicitly
 started phase. It may calculate privately over LIVE reads, but it must not place, change, cancel,
@@ -2200,7 +2206,8 @@ end point for the implementation loop:
 10. `saxo_explain_analysis`
 11. Full correctness loop for every first-slice metric, including independent reference,
     accounting identities, exact tolerances, mutation tests, Saxo reconciliation, executable SIM,
-    artifact parity, privacy, and dual-agent tasks
+    artifact parity, privacy, and hard-model tasks for every harness required by the selected
+    candidate policy
 12. One source-bound evidence pack and runtime proof-profile registration for every enabled
     first-slice `analysis_kind`
 

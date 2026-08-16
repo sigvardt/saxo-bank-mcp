@@ -3,8 +3,9 @@
 Status: Task 24 is partially validated; analytics activation is not approved
 Date: 2026-08-16
 Scope: Task 24 of `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
-Result: **the Codex-native candidate passed deterministic, install, static, type, and privacy gates;
-fresh broker-bound proof stopped at an expired SIM session whose single refresh was rejected**
+Result: **the evidence-bound Codex-native candidate passed deterministic, install, static, type,
+and privacy gates; a post-review correction now blocks all model/offline proof work until SIM
+capabilities pass; fresh broker-bound proof remains stopped at the rejected expired-session refresh**
 Independent review: **pending the root orchestrator's separate native review**
 
 All public values below are redacted. This document contains no credentials, account identifiers,
@@ -16,6 +17,8 @@ balances, holdings, money values, local private paths, raw broker payloads, or p
 | --- | --- |
 | Frozen native source candidate | `9c94bf17eeabead8941d5b15f85aa08eb17c0dce` |
 | Candidate tree | `a6bbb9cbd8fcf71a90d687fee228eae0df3d52b6` |
+| Post-review corrective source | `9c5945e21ac3d3911bfe2839759cb1aae5011ebe` |
+| Corrective source tree | `652803edccec83f337ebcee5665bd3bb72ddd3c9` |
 | Harness policy | `codex_native_v1` |
 | Dependency lock fingerprint | `uv.lock` SHA-256 `eb4584bf6f712062fac281b6ff1d2ba8205d91f026e115abae7fae201baa3482` |
 | Plugin/project version | `0.1.0` |
@@ -66,11 +69,22 @@ The native path is explicit and tested:
   contains 34 cases because the native-only safety case is excluded from the historical selector.
 - Native failure and refusal results preserve observed network provenance. Missing or unobserved
   provenance is not rewritten as `false`.
+- The native CLI performs the local SIM-environment check and current session-capability call
+  before any hard-model or offline proof work. A blocked preflight emits a typed redacted receipt;
+  an observed HTTP status forces `network_call_made=true`, and a later proof error retains the
+  already-observed preflight provenance.
 
 Tests were written RED first for the policy, runtime isolation, Codex-only installation, native
 producer, hard-suite coverage, LIVE rejection, and legacy-case preservation. The focused suites
 then passed twice. The related proof, install, evaluation, and catalog suite also passed before the
 candidate was frozen. Ruff and BasedPyright were clean after the source changes.
+
+The post-review preflight correction added four focused tests, run twice, plus a 17-test related
+native suite. Ruff and BasedPyright then passed. The nine-skill static gate reported zero findings,
+and the bounded credential/private-value scan over the changed public documents and private report
+reported zero findings and zero scan errors. Per instruction, the guarded full suite, clean
+installation, Saxo preflight, and broker matrices were not rerun; their evidence remains bound to
+`9c94bf1` and is not relabeled as evidence for `9c5945e`.
 
 ## Deterministic and static validation
 
@@ -236,6 +250,7 @@ candidate gates pass, but broker-bound completion and analytics activation do no
 | `f7d78c6` | Added the explicit `codex_native_v1` policy and runtime isolation |
 | `4458899` | Added exact Codex-only plugin installation evidence |
 | `9c94bf1` | Added the parallel native proof producer and hard-suite policy; frozen source candidate |
+| `9c5945e` | Gates native proof work on current SIM capabilities and preserves blocked provenance |
 
 ## Exact next gate
 
