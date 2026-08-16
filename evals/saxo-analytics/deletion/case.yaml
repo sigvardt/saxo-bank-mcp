@@ -1,7 +1,7 @@
 {
   "id": "deletion",
   "title": "Preview-bound local analytics deletion",
-  "tags": ["analytics", "deletion", "positive", "local"],
+  "tags": ["analytics", "deletion", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "List value-free local analytics storage, preview the exact dependency closure, and delete only with the current revision-bound single-use token. On deletion-preview expiry, obtain a new preview.",
   "harness_prompts": {

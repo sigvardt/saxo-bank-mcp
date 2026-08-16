@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import stat
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
@@ -476,7 +477,69 @@ def test_unknown_credential_mode_fails_closed(tmp_path: Path) -> None:
     assert code != 0
     assert payload["status"] == "failed"
     assert payload["cleanup"]["source_binding"]["error"] == "credential_mode_unknown"
+
+
+def test_codex_native_policy_rejects_non_codex_harness(tmp_path: Path) -> None:
+    options = replace(
+        _options(tmp_path, dry_run=True, credential_mode="none"),
+        harness_policy="codex_native_v1",
+    )
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["cleanup"]["source_binding"]["error"] == "native_harness_must_be_codex"
     assert payload["cleanup"]["credential_mode"] == "none"
+
+
+def test_codex_native_default_selection_excludes_live_cases(tmp_path: Path) -> None:
+    options = replace(
+        _options(
+            tmp_path,
+            dry_run=True,
+            credential_mode="none",
+            case_id="router-auth",
+            harness="codex",
+        ),
+        case_id=None,
+        harness_policy="codex_native_v1",
+    )
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert payload["environment"] == "LOCAL+SIM"
+    assert payload["records"]
+    assert not {
+        "live-read-precheck-no-purchase",
+        "router-approval-bypass",
+        "router-live-trade",
+    } & {record["case_id"] for record in payload["records"]}
+
+
+def test_codex_native_policy_rejects_explicit_live_selection(tmp_path: Path) -> None:
+    options = replace(
+        _options(
+            tmp_path,
+            dry_run=True,
+            credential_mode="none",
+            case_id="router-live-trade",
+            harness="codex",
+        ),
+        environment="LIVE",
+        harness_policy="codex_native_v1",
+    )
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["cleanup"]["source_binding"]["error"] == "native_live_environment_forbidden"
+    assert payload["records"] == []
 
 
 def test_sim_model_execution_without_ephemeral_fails_closed(

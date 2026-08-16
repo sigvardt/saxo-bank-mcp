@@ -1,7 +1,7 @@
 {
   "id": "optimization",
   "title": "Caller-constrained portfolio optimization",
-  "tags": ["analytics", "optimization", "positive", "local"],
+  "tags": ["analytics", "optimization", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Run my stated minimum-variance objective and bounds on the current stored dataset. Report target deltas, feasibility, residuals, stability, and an expired-handle refusal if replay fails.",
   "harness_prompts": {

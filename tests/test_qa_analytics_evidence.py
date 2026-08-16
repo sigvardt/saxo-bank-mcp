@@ -782,6 +782,67 @@ def test_installed_producer_privately_validates_a_complete_executed_typed_bundle
     )
 
 
+def test_codex_native_blocker_does_not_claim_no_network_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    def blocked_bundle(**_kwargs: object) -> NoReturn:
+        raise producer.ProofProducerError("proof_sim_auth_lease_unavailable")
+
+    monkeypatch.setattr(producer, "_execute_installed_proof_bundle", blocked_bundle)
+
+    result = producer.produce_codex_native_installed_result(
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+    )
+
+    assert result.status == "blocked"
+    assert result.network_call_made is None
+
+
+def test_codex_native_producer_propagates_observed_network_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    catalog, contracts, bundle = _complete_bundle()
+    first_tool = bundle.sim_tool_matrix.tool_receipts[0].model_copy(
+        update={"network_call_made": True},
+    )
+    matrix = bundle.sim_tool_matrix.model_copy(
+        update={
+            "tool_receipts": (first_tool, *bundle.sim_tool_matrix.tool_receipts[1:]),
+        },
+    )
+    observed_bundle = bundle.model_copy(update={"sim_tool_matrix": matrix})
+
+    def selected_contracts(**_kwargs: object) -> tuple[AnalysisProofExecutionContract, ...]:
+        return contracts
+
+    def executed_bundle(**_kwargs: object) -> AnalyticsProofMatrixBundle:
+        return observed_bundle
+
+    monkeypatch.setattr(producer, "load_analysis_kind_catalog", lambda: catalog)
+    monkeypatch.setattr(
+        producer,
+        "build_proof_execution_contracts",
+        selected_contracts,
+    )
+    monkeypatch.setattr(
+        producer,
+        "_execute_installed_proof_bundle",
+        executed_bundle,
+    )
+
+    result = producer.produce_codex_native_installed_result(
+        candidate_commit=bundle.candidate_commit,
+        installed_cache_sha256="2" * 64,
+    )
+
+    assert result.status == "validated"
+    assert result.network_call_made is True
+
+
 def test_private_proof_selection_accepts_an_exact_honest_nonpersisted_sim_kind() -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     _catalog, contracts, bundle = _complete_bundle()
@@ -1684,6 +1745,88 @@ def _agent_evaluation_report(
     )
 
 
+def _codex_native_agent_evaluation_report(*, candidate_commit: str) -> EvalRunReport:
+    dual = _agent_evaluation_report(candidate_commit=candidate_commit)
+    records = tuple(record for record in dual.records if record.harness == "codex")
+    return dual.model_copy(
+        update={
+            "harness": "codex",
+            "selected_case_count": len(records),
+            "case_count": len(records),
+            "records": records,
+        },
+    )
+
+
+def test_codex_native_agent_policy_accepts_exact_real_codex_quorum() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    report = _codex_native_agent_evaluation_report(candidate_commit="1" * 40)
+
+    producer._require_agent_evaluation_harness_policy(  # noqa: SLF001
+        report,
+        harness_policy="codex_native_v1",
+    )
+
+
+def test_codex_native_agent_policy_rejects_non_codex_record() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    report = _agent_evaluation_report(candidate_commit="1" * 40)
+
+    with pytest.raises(producer.ProofProducerError, match="native_agent_harness_forbidden"):
+        producer._require_agent_evaluation_harness_policy(  # noqa: SLF001
+            report,
+            harness_policy="codex_native_v1",
+        )
+
+
+def test_codex_native_agent_policy_rejects_unbounded_environment() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    report = _codex_native_agent_evaluation_report(candidate_commit="1" * 40).model_copy(
+        update={"environment": "ALL"},
+    )
+
+    with pytest.raises(producer.ProofProducerError, match="native_agent_environment_untrusted"):
+        producer._require_agent_evaluation_harness_policy(  # noqa: SLF001
+            report,
+            harness_policy="codex_native_v1",
+        )
+
+
+def test_codex_native_agent_command_contains_no_claude_inputs(tmp_path: Path) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    command = producer._codex_native_agent_evaluation_command(  # noqa: SLF001
+        candidate_commit="1" * 40,
+        codex_cache_root=tmp_path / "cache",
+        codex_home=tmp_path / "home",
+        source_repo=tmp_path / "source",
+        report_path=tmp_path / "report.json",
+    )
+
+    assert command[command.index("--harness") + 1] == "codex"
+    assert command[command.index("--harness-policy") + 1] == "codex_native_v1"
+    assert command[command.index("--tag") + 1] == "codex-native-proof"
+    assert all("claude" not in value.lower() for value in command)
+
+
+def test_codex_native_hard_suite_covers_all_tools_without_live_cases() -> None:
+    eval_models = import_module("saxo_bank_mcp.agent_skill_eval_models")
+    cases = eval_models.select_cases(
+        eval_models.load_eval_cases(Path("evals")),
+        case_id=None,
+        tag="codex-native-proof",
+        environment=None,
+    )
+    covered = {
+        tool_id
+        for case in cases
+        for tool_id in (*case.required_logical_tools, *case.forbidden_logical_tools)
+    }
+
+    assert cases
+    assert {case.environment for case in cases} <= {"LOCAL", "SIM"}
+    assert covered == set(ALL_LOGICAL_TOOL_IDS)
+
+
 def _fake_agent_evaluation_command(
     report: EvalRunReport,
 ) -> Callable[..., CommandResult]:
@@ -1856,6 +1999,42 @@ def test_authentic_process_agent_evaluation_issues_exact_tool_receipts(
         load_analysis_kind_catalog().skill_scenario_tools
     )
     assert all(receipt.evaluation_state == "passed" for receipt in receipts)
+
+
+def test_codex_native_process_evaluation_issues_exact_tool_receipts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    codex_home = tmp_path / "codex-home"
+    source_repo = tmp_path / "source-repo"
+    for path in (codex_home, source_repo):
+        path.mkdir(mode=0o700)
+    monkeypatch.setenv("SAXO_ANALYTICS_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("SAXO_ANALYTICS_SOURCE_REPO", str(source_repo))
+    monkeypatch.delenv("SAXO_ANALYTICS_CLAUDE_CACHE_ROOT", raising=False)
+    monkeypatch.delenv("SAXO_ANALYTICS_CLAUDE_HOME", raising=False)
+    report = _codex_native_agent_evaluation_report(candidate_commit="1" * 40)
+    execute = _fake_agent_evaluation_command(report)
+    observed_commands: list[tuple[str, ...]] = []
+
+    def inspect_command(*args: object, **kwargs: object) -> CommandResult:
+        command = cast("tuple[str, ...]", args[1])
+        observed_commands.append(command)
+        return execute(*args, **kwargs)
+
+    monkeypatch.setattr(producer, "run_command", inspect_command)
+    receipts = producer._run_installed_agent_evaluation(  # noqa: SLF001
+        candidate_commit="1" * 40,
+        installed_cache_sha256="2" * 64,
+        harness_policy="codex_native_v1",
+    )
+
+    assert tuple(receipt.tool_id for receipt in receipts) == (
+        load_analysis_kind_catalog().skill_scenario_tools
+    )
+    assert len(observed_commands) == 1
+    assert all("claude" not in value.lower() for value in observed_commands[0])
 
 
 def test_agent_evaluation_uses_the_verified_source_clone_not_the_plugin_cache(

@@ -1,7 +1,7 @@
 {
   "id": "backtest-limitations",
   "title": "Declarative backtest limitations",
-  "tags": ["analytics", "backtest", "negative", "local"],
+  "tags": ["analytics", "backtest", "negative", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Run only the declarative backtest fixture and explain look-ahead, survivorship, warm-up, costs, fill, split, delisting, and missing-bar limitations. Do not call it verified without controlled SIM ghost proof.",
   "harness_prompts": {

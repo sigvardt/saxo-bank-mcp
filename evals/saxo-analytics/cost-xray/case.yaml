@@ -1,7 +1,7 @@
 {
   "id": "cost-xray",
   "title": "Cost X-ray with corrected bookings",
-  "tags": ["analytics", "cost", "positive", "local"],
+  "tags": ["analytics", "cost", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Explain a stored Cost X-ray with component signs, currencies, partial fills, corrected bookings, quote availability, approximations, and named Saxo reconciliation differences.",
   "harness_prompts": {

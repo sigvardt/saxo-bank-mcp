@@ -10,6 +10,7 @@ import re
 import sys
 from pathlib import Path
 
+from saxo_bank_mcp.agent_skill_codex_install import load_verified_codex_install_report
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_evidence import (
@@ -20,6 +21,7 @@ from saxo_bank_mcp.qa_analytics_evidence import (
 )
 from saxo_bank_mcp.qa_analytics_proof_producer import (
     ProofProducerError,
+    run_verified_codex_native_producer,
     run_verified_installed_producer,
 )
 
@@ -46,6 +48,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     parser.add_argument("--codex-global-home", type=Path, default=None)
     parser.add_argument("--claude-global-home", type=Path, default=None)
     parser.add_argument("--fixture-cleanup-ledger", type=Path, default=None)
+    parser.add_argument(
+        "--harness-policy",
+        choices=("dual_v1", "codex_native_v1"),
+        default="dual_v1",
+    )
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -72,25 +79,33 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             },
             success=True,
         )
-    if (
+    shared_missing = (
         args.install_report is None
         or args.codex_global_home is None
-        or args.claude_global_home is None
-        or args.fixture_cleanup_ledger is None
         or not isinstance(args.candidate_commit, str)
         or _COMMIT_PATTERN.fullmatch(args.candidate_commit) is None
-    ):
+    )
+    dual_missing = args.harness_policy == "dual_v1" and (
+        args.claude_global_home is None or args.fixture_cleanup_ledger is None
+    )
+    if shared_missing or dual_missing:
         return _publish(
             args.out,
             {"status": "refused", "reason": "proof_producer_execution_context_missing"},
             success=False,
         )
-    install, install_errors = load_verified_install_report(
-        args.install_report,
-        codex_global_home=args.codex_global_home,
-        claude_global_home=args.claude_global_home,
-        fixture_cleanup_ledger=args.fixture_cleanup_ledger,
-    )
+    if args.harness_policy == "codex_native_v1":
+        install, install_errors = load_verified_codex_install_report(
+            args.install_report,
+            codex_global_home=args.codex_global_home,
+        )
+    else:
+        install, install_errors = load_verified_install_report(
+            args.install_report,
+            codex_global_home=args.codex_global_home,
+            claude_global_home=args.claude_global_home,
+            fixture_cleanup_ledger=args.fixture_cleanup_ledger,
+        )
     if install is None:
         return _publish(
             args.out,
@@ -108,9 +123,16 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             success=False,
         )
     try:
-        validated = run_verified_installed_producer(
-            install,
-            candidate_commit=args.candidate_commit,
+        validated = (
+            run_verified_codex_native_producer(
+                install,
+                candidate_commit=args.candidate_commit,
+            )
+            if args.harness_policy == "codex_native_v1"
+            else run_verified_installed_producer(
+                install,
+                candidate_commit=args.candidate_commit,
+            )
         )
     except ProofProducerError as error:
         return _publish(

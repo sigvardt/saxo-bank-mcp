@@ -36,8 +36,10 @@ from saxo_bank_mcp.agent_skill_router_eval_execution import (
     RouterBindingRequest,
     RouterSourceBinding,
     client_versions,
+    codex_client_version,
     resolve_router_source_binding,
 )
+from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.server_eval_tool_filter import EvalToolFilterError
 
 CREDENTIAL_MODE_NONE: Final = "none"
@@ -66,6 +68,7 @@ class EvalRunOptions:
     credential_mode: str = CREDENTIAL_MODE_NONE
     source_codex_home: Path | None = None
     source_claude_home: Path | None = None
+    harness_policy: HarnessPolicy = "dual_v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         tag=options.tag,
         environment=options.environment,
     )
+    cases, native_selection_error = _apply_harness_case_policy(options, cases)
     roots = HarnessRoots(
         codex_plugin_root=options.codex_plugin_root,
         claude_plugin_root=options.claude_plugin_root,
@@ -99,7 +103,11 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         claude_home=options.claude_home,
     )
 
-    mode_error = _credential_mode_error(options.credential_mode)
+    mode_error = (
+        _credential_mode_error(options.credential_mode)
+        or _harness_policy_error(options)
+        or native_selection_error
+    )
     binding: RouterSourceBinding | None = None
     binding_error = mode_error
     if (
@@ -185,7 +193,11 @@ def run_eval_suite(options: EvalRunOptions) -> int:
     report = EvalRunReport(
         status=status,
         harness=options.harness,
-        environment=options.environment or "ALL",
+        environment=(
+            "LOCAL+SIM"
+            if options.harness_policy == "codex_native_v1" and options.environment is None
+            else options.environment or "ALL"
+        ),
         execution_mode="manifest_validation" if options.dry_run else "model_execution",
         selected_case_count=len(cases),
         case_count=len(records),
@@ -354,6 +366,7 @@ def _execute_with_ephemeral_runtime(
             retained_codex_plugin_root=(
                 options.codex_plugin_root if options.codex_home is not None else None
             ),
+            harness_policy=options.harness_policy,
         )
     except MatrixEnvError as exc:
         return _RuntimeOutcome(
@@ -389,7 +402,16 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
     records: tuple[EvalRunRecord, ...] = ()
     versions: dict[str, str] = {}
     try:
-        versions = client_versions(env=runtime.env, process_manager=process_manager)
+        versions = (
+            {
+                "codex": codex_client_version(
+                    env=runtime.env,
+                    process_manager=process_manager,
+                ),
+            }
+            if options.harness_policy == "codex_native_v1"
+            else client_versions(env=runtime.env, process_manager=process_manager)
+        )
         records = _execute_selected_cases(
             options,
             cases=cases,
@@ -410,10 +432,11 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
             promote_rotated_sim_token_cache(runtime)
         except MatrixEnvError as exc:
             promote_error = exc
-        try:
-            promote_rotated_claude_credentials(runtime)
-        except MatrixEnvError as exc:
-            promote_error = _combine_promotion_errors(promote_error, exc)
+        if options.harness_policy == "dual_v1":
+            try:
+                promote_rotated_claude_credentials(runtime)
+            except MatrixEnvError as exc:
+                promote_error = _combine_promotion_errors(promote_error, exc)
         try:
             require_matrix_runtime_cleanup(runtime.run_root)
         except MatrixEnvError as exc:
@@ -626,6 +649,26 @@ def _credential_mode_error(mode: str) -> str:
     if mode not in ALLOWED_CREDENTIAL_MODES:
         return "credential_mode_unknown"
     return ""
+
+
+def _harness_policy_error(options: EvalRunOptions) -> str:
+    if options.harness_policy == "codex_native_v1" and options.harness != "codex":
+        return "native_harness_must_be_codex"
+    if options.harness_policy not in ("dual_v1", "codex_native_v1"):
+        return "harness_policy_unknown"
+    return ""
+
+
+def _apply_harness_case_policy(
+    options: EvalRunOptions,
+    cases: tuple[SkillEvalCase, ...],
+) -> tuple[tuple[SkillEvalCase, ...], str]:
+    if options.harness_policy == "dual_v1":
+        return tuple(case for case in cases if "codex-native-only" not in case.tags), ""
+    safe_cases = tuple(case for case in cases if case.environment in {"LOCAL", "SIM"})
+    if options.environment == "LIVE" or (cases and not safe_cases):
+        return safe_cases, "native_live_environment_forbidden"
+    return safe_cases, ""
 
 
 def _sim_execution_required(

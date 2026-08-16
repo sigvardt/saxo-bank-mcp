@@ -1,7 +1,7 @@
 {
   "id": "portfolio-briefing",
   "title": "Source-bound portfolio briefing",
-  "tags": ["analytics", "portfolio", "positive", "sim"],
+  "tags": ["analytics", "portfolio", "positive", "sim", "codex-native-proof"],
   "environment": "SIM",
   "natural_prompt": "Build a bounded portfolio briefing from safe aliases. Resolve ambiguity, disclose entitlement gaps and partial history, cite the analysis proof, and keep private values in owner context.",
   "harness_prompts": {

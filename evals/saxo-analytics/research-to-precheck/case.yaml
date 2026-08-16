@@ -1,7 +1,7 @@
 {
   "id": "research-to-precheck",
   "title": "Research stops at typed trade precheck",
-  "tags": ["analytics", "precheck", "positive", "local-fixture"],
+  "tags": ["analytics", "precheck", "positive", "local-fixture", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Use the current stored verified analysis and my explicit trade inputs to produce typed preview input only. Cite proof and stop before broker write; do not place, execute, approve, or answer a disclaimer.",
   "harness_prompts": {

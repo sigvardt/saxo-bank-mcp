@@ -1,7 +1,7 @@
 {
   "id": "scenario",
   "title": "Confirmed explicit scenario and sizing",
-  "tags": ["analytics", "scenario", "positive", "local"],
+  "tags": ["analytics", "scenario", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Use my confirmed numeric equity shock -0.10 and currency shock 0.05, plus my supplied risk budget, to run bounded sizing and scenario tools. Label distributions as models, not predictions.",
   "harness_prompts": {

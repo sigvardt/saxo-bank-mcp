@@ -82,6 +82,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-source-commit", default=None)
     parser.add_argument("--expected-router-source-sha256", default=None)
     parser.add_argument("--source-repo", type=Path, default=Path())
+    parser.add_argument(
+        "--harness-policy",
+        choices=("dual_v1", "codex_native_v1"),
+        default="dual_v1",
+    )
     args = parser.parse_args(argv)
     if args.fixture is not None:
         if args.fixture == ANALYTICS_LOCAL_FIXTURE:
@@ -115,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             credential_mode=str(args.credential_mode),
             source_codex_home=args.source_codex_home,
             source_claude_home=args.source_claude_home,
+            harness_policy=args.harness_policy,
         ),
     )
 

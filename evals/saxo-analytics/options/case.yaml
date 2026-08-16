@@ -1,7 +1,7 @@
 {
   "id": "options",
   "title": "Entitled bounded options model",
-  "tags": ["analytics", "options", "positive", "local"],
+  "tags": ["analytics", "options", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Model a supported European option fixture, compare entitled Saxo Greeks without averaging disagreement, and refuse exact unsupported products or entitlement gaps.",
   "harness_prompts": {

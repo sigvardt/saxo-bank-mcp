@@ -1,7 +1,7 @@
 {
   "id": "artifact-delivery",
   "title": "Verified artifact delivery and bounded job",
-  "tags": ["analytics", "artifact", "positive", "local"],
+  "tags": ["analytics", "artifact", "positive", "local", "codex-native-proof"],
   "environment": "LOCAL",
   "natural_prompt": "Render and export the exact stored analysis. Use a bounded job if needed, preserve every stamp and warning, deliver directly within the limit, and use owner-only fallback only above it.",
   "harness_prompts": {

@@ -1,7 +1,7 @@
 {
   "id": "market-comparison",
   "title": "Bounded market and instrument comparison",
-  "tags": ["analytics", "market", "positive", "sim"],
+  "tags": ["analytics", "market", "positive", "sim", "codex-native-proof"],
   "environment": "SIM",
   "natural_prompt": "Compare an explicit saved Saxo universe without calling it the whole market. Preserve stale-data warnings, entitlement gaps, source cutoff, and schema quarantine.",
   "harness_prompts": {

@@ -278,6 +278,16 @@ def client_versions(
     }
 
 
+def codex_client_version(
+    *,
+    env: dict[str, str],
+    process_manager: EvalProcessManager | None = None,
+) -> str:
+    """Read only the Codex client version for a Codex-native run."""
+    manager = process_manager or EvalProcessManager()
+    return _client_version("codex", env, process_manager=manager)
+
+
 def _router_command(
     spec: _RouterCommandSpec,
     *,
