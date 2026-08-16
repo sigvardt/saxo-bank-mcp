@@ -6,7 +6,6 @@ import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -44,10 +43,7 @@ MAX_CLAUDE_CREDENTIAL_BYTES: Final = 1_048_576
 MIN_CLAUDE_OAUTH_MATERIAL_LENGTH: Final = 20
 # Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
-CLAUDE_POWER_LAUNCHER_ENV: Final = "SAXO_MCP_CLAUDE_POWER_LAUNCHER"
-_CLAUDE_CREDENTIAL_NAME: Final = ".credentials.json"
-_CLAUDE_CREDENTIAL_RELATIVE: Final = Path(".claude") / _CLAUDE_CREDENTIAL_NAME
-_CLAUDE_AUTH_SEED_RELATIVES: Final = (_CLAUDE_CREDENTIAL_RELATIVE,)
+_CLAUDE_AUTH_SEED_RELATIVES: Final = (Path(".claude") / ".credentials.json",)
 # Retained install plugin registration/artifacts only (options.codex_home / options.claude_home).
 _CODEX_PLUGIN_SEED_FILES: Final = ("config.toml",)
 _CODEX_PLUGIN_SEED_RELATIVES: Final = (Path("plugins") / "index.json",)
@@ -326,7 +322,7 @@ def seed_isolated_cli_homes(  # noqa: PLR0913
     retained_codex_home: Path | None = None,
     retained_claude_home: Path | None = None,
     retained_codex_plugin_root: Path | None = None,
-) -> tuple[Path | None, str | None]:
+) -> tuple[Path, str]:
     """Seed auth from actual CLI roots; seed plugin state from retained install homes."""
     claude_auth_source, claude_auth_source_digest = _seed_auth_files(
         runtime,
@@ -350,8 +346,9 @@ def _seed_auth_files(
     runtime: MatrixIsolatedRuntime,
     source_codex_home: Path | None,
     source_claude_home: Path | None,
-) -> tuple[Path | None, str | None]:
+) -> tuple[Path, str]:
     codex_auth = _resolve_codex_source_home(source_codex_home)
+    claude_auth = _resolve_claude_source_home(source_claude_home)
     for name in _CODEX_AUTH_SEED_FILES:
         copied = _copy_optional_owner_only_file(
             codex_auth / name,
@@ -360,12 +357,8 @@ def _seed_auth_files(
         )
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
-    if claude_power_launcher_enabled():
-        # The authenticated wrapper CLI carries its own login; nothing is copied or exported.
-        return None, None
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
-        # Source honours a custom CLAUDE_CONFIG_DIR; destination stays the runtime layout.
-        declared = _resolve_claude_credential_source(source_claude_home)
+        declared = claude_auth / relative
         if declared.is_symlink():
             raise MatrixEnvError("cli_auth_source_symlink")
         if not os.path.lexists(declared):
@@ -726,33 +719,6 @@ def _resolve_claude_source_home(preferred: Path | None) -> Path:
     if raw:
         return Path(raw).expanduser().parent
     return Path.home()
-
-
-def claude_power_launcher_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Report whether the matched Claude evaluation uses the authenticated wrapper CLI.
-
-    In this mode the wrapper CLI supplies its own already-established login, so no
-    credential file is required, copied, read, or exported. Codex file auth is unaffected.
-    """
-    source: Mapping[str, str] = os.environ if env is None else env
-    return source.get(CLAUDE_POWER_LAUNCHER_ENV, "").strip() == "1"
-
-
-def _resolve_claude_credential_source(preferred: Path | None) -> Path:
-    """Actual credential file for the real Claude CLI login.
-
-    A wrapper launcher may point CLAUDE_CONFIG_DIR at a dedicated directory, and the
-    credential then lives directly inside it. Deriving the parent and re-appending
-    ``.claude`` would look in the wrong directory for any non-standard config dir, so the
-    configured directory is used as given. The standard ``<home>/.claude`` layout resolves
-    to the same path as before.
-    """
-    if preferred is not None:
-        return preferred.expanduser() / _CLAUDE_CREDENTIAL_RELATIVE
-    raw = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    if raw:
-        return Path(raw).expanduser() / _CLAUDE_CREDENTIAL_NAME
-    return Path.home() / _CLAUDE_CREDENTIAL_RELATIVE
 
 
 def resolve_actual_codex_auth_home(preferred: Path | None = None) -> Path:
