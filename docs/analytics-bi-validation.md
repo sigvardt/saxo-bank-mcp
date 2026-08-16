@@ -1,286 +1,246 @@
-# Saxo Analytics and BI Suite - Task 24 Partial Validation
+# Saxo Analytics and BI Suite - Task 24 Native Validation
 
-Status: Task 24 partially validated; analytics activation is not approved
+Status: Task 24 is partially validated; analytics activation is not approved
 Date: 2026-08-16
 Scope: Task 24 of `docs/superpowers/plans/2026-07-30-saxo-analytics-bi-suite.md`
-Result: **the preserved 60-tool SIM execution is safe; the corrected runtime still needs a fresh
-install, full matrix, per-analysis proof, and activation gates**
-Independent review: **initial native review required changes; corrected-candidate re-review pending**
+Result: **the Codex-native candidate passed deterministic, install, static, type, and privacy gates;
+fresh broker-bound proof stopped at an expired SIM session whose single refresh was rejected**
+Independent review: **pending the root orchestrator's separate native review**
 
 All public values below are redacted. This document contains no credentials, account identifiers,
-balances, holdings, money values, local private paths, raw broker payloads, or raw private URLs.
+balances, holdings, money values, local private paths, raw broker payloads, or private URLs.
 
 ## Candidate identity
 
 | Item | Value |
 | --- | --- |
-| Preserved controlled-run candidate | `97472e4720b44f31a623e0da6d96f18370186fca` |
-| Preserved candidate tree | `2d1834543223f1ef1ea4e7f3d83f0a5f4e255097` |
-| Corrected runtime candidate | `8f8b00b4055612c8d957e50555a712af23c7d4be` |
-| Corrected candidate tree | `9c2df3693a70ce0f75c9e7dad26f8c0117f3d16a` |
+| Frozen native source candidate | `9c94bf17eeabead8941d5b15f85aa08eb17c0dce` |
+| Candidate tree | `a6bbb9cbd8fcf71a90d687fee228eae0df3d52b6` |
+| Harness policy | `codex_native_v1` |
 | Dependency lock fingerprint | `uv.lock` SHA-256 `eb4584bf6f712062fac281b6ff1d2ba8205d91f026e115abae7fae201baa3482` |
 | Plugin/project version | `0.1.0` |
 | Tool catalog | 60 tools, including 21 analytics tools |
 | Proof catalog | 54 analysis kinds, all quarantined as `implementation_pending` |
 
-The later Claude-launcher experiment was stopped by the owner. Corrective commit `134771d` removes
-that experiment and has the exact same Git tree as the frozen candidate. It therefore restores the
-already installed and tested candidate bytes rather than creating a new analytics candidate.
+This candidate adds a parallel native policy, Codex-only installed-candidate report, sealed native
+proof child, and Codex-only hard-workflow selection. It does not change, relabel, or consume the old
+dual-agent report types or evidence. Only the allowed model quorum changes: the native path requires
+exactly one real Codex harness record. Numerical proof, source binding, Saxo reconciliation,
+artifact parity, cleanup, privacy, SIM-only execution, and no-write requirements are unchanged.
 
-Native review then identified the two evidence defects corrected at `8f8b00b`. That commit changes
-runtime and test bytes, so it is a new candidate. Its focused tests and static gates pass, but the
-preserved installation and full SIM receipts remain evidence for `97472e4`, not `8f8b00b`.
-
-The controlled SIM matrix used the installed `ea1f8f3` fixture. Its `src`, `tests`,
-`pyproject.toml`, and `uv.lock` objects are byte-identical to `97472e4`; only this validation document
-changed between those commits. A separate exact `97472e4` installation report also passed. No
-runtime or analytics implementation difference is being hidden by that evidence binding.
+The evidence ledger uses a new candidate-specific namespace. Historical receipts remain bound to
+their historical commits and cannot satisfy `codex_native_v1`.
 
 ## Headline safety result
 
 | Claim | Value |
 | --- | --- |
-| Effective broker environment | SIM |
-| `live_events` | 0 |
-| `live_mutation_calls` | 0 |
+| Requested and effective broker environment | SIM |
+| LIVE reads enabled | false |
+| LIVE writes enabled | false |
+| SIM OAuth requests in the native preflight | 1 |
+| SIM account, market, order, subscription, or analytics-job calls | 0 |
+| `live_events` / `live_mutation_calls` | 0 / 0 |
 | `purchase_occurred` | false |
 | `disclaimer_response_made` | false |
-| LIVE endpoint called | no |
-| LIVE write performed | no |
-| Visible browser automated by this work | no |
-| Keychain used by this work | no |
-| Account state after controlled activity | unchanged |
-| Controlled resources after cleanup | 0 |
+| Visible browser opened by this work | no |
+| Account mutation calls | 0 |
+| Current account-state readback | unavailable because session capabilities did not pass |
+| Checked-in proof profiles activated | 0 of 54 |
 
 SIM needs no human approval.
 
+## Native implementation and TDD
+
+The native path is explicit and tested:
+
+- `codex_native_v1` requires exactly the `codex` harness and a one-model quorum.
+- Native runtime preparation copies only the minimum Codex file-backed authentication and SIM
+  material; it does not resolve, copy, launch, or promote any second-client state.
+- The Codex-only install report has no second-client field, command, process, state, or receipt.
+- The native proof producer rejects a non-Codex record, a skipped model call, LIVE scope, incomplete
+  catalog coverage, failed numerical or Saxo proof, cleanup residue, state change, privacy finding,
+  broker write, purchase, or disclaimer response.
+- Eleven tagged native hard cases cover the 60-tool logical catalog contract using only LOCAL or
+  SIM scope. The historical 33-case dual selection remains unchanged; the complete manifest now
+  contains 34 cases because the native-only safety case is excluded from the historical selector.
+- Native failure and refusal results preserve observed network provenance. Missing or unobserved
+  provenance is not rewritten as `false`.
+
+Tests were written RED first for the policy, runtime isolation, Codex-only installation, native
+producer, hard-suite coverage, LIVE rejection, and legacy-case preservation. The focused suites
+then passed twice. The related proof, install, evaluation, and catalog suite also passed before the
+candidate was frozen. Ruff and BasedPyright were clean after the source changes.
+
 ## Deterministic and static validation
-
-The frozen candidate completed the repository CI workflow successfully. The GitHub run for
-`97472e4` collected 2,599 tests: 2,592 passed and 7 sealed-runtime or platform-specific tests were
-skipped with their recorded-runtime guards. Ruff, BasedPyright, plugin validation, static gates,
-catalog checks, eval-manifest checks, public secret scanning, and LIVE refusal probes passed in that
-workflow.
-
-Before the preserved candidate, the recording host ran 2,596 tests with no failures for `b2b9872`;
-the only later source change before `97472e4` was the install-evidence path-redaction correction in
-`ea1f8f3` and its three focused tests. The current `8f8b00b` correction changes only QA provenance
-and matrix argument materialization; it does not change analytics formulas, schemas, renderers, or
-proof contracts.
-
-The native-only resume removed the stopped launcher experiment and reran the directly affected
-eval-runtime suite twice through `scripts/run-pytest`: 22 of 22 tests passed in each run. Fresh Ruff
-and BasedPyright checks then passed with 0 errors, 0 warnings, and 0 notes. The system disk had 85 GiB
-free, above the 50 GiB guard. Direct `pytest` was not used.
-
-For `8f8b00b`, three regression tests first failed for the expected missing-provenance and
-empty-argument reasons. The focused tests then passed twice, 101 related auth and matrix tests
-passed, Ruff passed, and BasedPyright reported 0 errors, 0 warnings, and 0 notes.
-
-The historical `claude plugin validate` and dual-client installation were completed before the
-owner stopped all Claude usage. They were not rerun and are not presented as a new native-only pass.
-
-## Isolated installation
-
-The preserved exact-candidate installation report for `97472e4` is passed and contains no errors.
-No installed-artifact claim is made yet for the changed `8f8b00b` runtime.
 
 | Gate | Result |
 | --- | --- |
-| Codex installed tools and skills | 60 tools, 9 skills, 1 MCP server |
-| Historical second-client installation | 60 tools, 9 skills, 1 MCP server |
-| Installed byte comparison | 1,166 files compared, exact inventory, no mismatches |
-| Required files and annotations | present |
-| Update and restore probe | passed |
-| Client global state | unchanged |
-| Process cleanup | complete, 0 remaining processes and process groups |
-| Evidence privacy | clean, 0 findings, 0 scan errors |
+| Guarded full repository suite | 2,618 collected; reached 100%; exit 0 |
+| Pytest launcher | `scripts/run-pytest` only, with the required external temp root |
+| Ruff | passed |
+| BasedPyright | 0 errors, 0 warnings, 0 notes |
+| Agent skill static gates | passed, 9 skills, 0 findings |
+| Generated catalogs | passed: 60 tools, 21 analytics tools, 294 operations, 10 analytics scenarios |
+| Eval manifest validation | passed: 34 cases, 60 tools, 9 skills, 0 errors |
+| Focused public-redaction/privacy tests | 214 passed |
+| System disk guard | approximately 84 GiB free after validation; requirement at least 50 GiB |
 
-This installation evidence predates the native-only instruction. No Claude command or process was
-started during the 2026-08-16 native resume.
+The guarded full suite was run once for this frozen candidate. No direct `pytest` invocation was
+used, no active pytest directory was deleted, and expensive final gates were not repeated.
 
-## 60-tool SIM matrix
+The deterministic suite covers known answers, properties, metamorphic relations, seeded mutations,
+independent references, accounting identities, schemas, artifact value parity, render/export
+integrity, and structured reduced/refusal behavior. These checks do not replace broker-bound Saxo
+reconciliation.
 
-The controlled matrix did execute against a fresh owner-authenticated SIM session. It did not pass
-the full completion gate because the checked-in proof catalog deliberately refused analytical
-claims.
+## Codex-only isolated installation
 
-| Item | Value |
+The one clean installation run is bound to the exact frozen commit and passed with no errors.
+
+| Gate | Result |
 | --- | --- |
-| Environment | SIM |
-| Matrix status | blocked |
-| Tool receipts | 60 of 60 |
-| Analytics tool receipts | 21 of 21 |
-| Analysis execution receipts | 54 |
-| Controlled lifecycle calls | 22 |
-| Registered trading-write operations covered | 38 |
-| Account allowlist resolved | yes |
-| Fixture references validated | yes |
-| Session capability read | passed |
-| Account state unchanged | true |
-| Cleanup complete | true |
-| Uncleaned resources | 0 |
-| `live_events` / `live_mutation_calls` | 0 / 0 |
-| `purchase_occurred` | false |
-| Disclaimer refusal observed | yes |
-| Disclaimer response made | false |
+| Execution mode | `codex_installed_verification` |
+| Harness policy | `codex_native_v1` |
+| Installed surface | 60 tools, 9 skills, 1 MCP server |
+| Startup probes | source, installed cache, and registered tool list each passed with 60 tools |
+| Installed byte comparison | 591 files compared, exact inventory, no mismatches |
+| Required files and annotations | present; no missing annotations |
+| Forbidden files | absent |
+| Caller Codex state | unchanged |
+| Process cleanup | complete, no remaining run-owned processes or process groups |
+| Evidence ownership and privacy | owner-only and clean |
 
-The session reported authenticated, standard-data, orders-only SIM capability. The overall matrix
-status remained blocked with eight tool-state mismatches, but the preserved receipt does not support
-one common classification for all eight:
+This work did not start a Claude CLI, model, evaluation, launcher, or process. No historical
+second-client result is presented as native evidence.
 
-- `saxo_analyze_market`, `saxo_analyze_instruments`, and `saxo_backtest_strategy` returned parsed
-  structured refusals with `mcp_is_error=false` while their proof profiles were quarantined.
-- `saxo_propose_trade_from_analysis`, `saxo_render_analysis`, `saxo_export_analysis`,
-  `saxo_explain_analysis`, and `saxo_manage_analysis_job` received empty arguments after no analysis
-  handle was issued. FastMCP returned `invalid_arguments` with `mcp_is_error=true`. The preserved run
-  therefore did not prove their intended quarantine, refusal, or reduced behavior.
+## Guarded SIM authentication
 
-Commit `8f8b00b` changes the harness to use schema-valid synthetic handles only for this isolated,
-local-only negative coverage when no upstream analysis handle exists. Focused real-FastMCP tests
-prove that all five calls now reach parsed structured refusal with `mcp_is_error=false` and no Saxo
-network call. The full 60-tool SIM matrix was not rerun, so this local correction does not rewrite the
-historical receipt or turn any expected success state into a pass.
+The network-free local status read first proved:
 
-The receipt also carries `controlled_sim_lifecycle_unverified` as an overall blocking error. This is
-not reported as a pass. Separately, the same receipt proves `cleanup_complete=true`,
-`account_state_unchanged=true`, and `uncleaned_resources=0`.
+- requested environment `SIM`;
+- effective read environment `SIM`;
+- LIVE reads and writes disabled;
+- a readable SIM cache with refresh support;
+- expired bearer material;
+- no configured registered redirect URI.
 
-## Per-analysis proof and activation
+The single permitted capability call attempted to refresh the expired bearer at Saxo's SIM OAuth
+endpoint. Saxo returned HTTP 401. The nested capability result and enclosing preflight both record
+`network_call_made=true`; an HTTP response is never described as no request. Session capabilities,
+account access, and trading readiness are therefore unproved.
+
+The local PKCE-start fallback stopped at the missing redirect-URI gate. It did not open a browser.
+A second network-free status read matched the first status metadata exactly. No successful token
+refresh or save was observed.
+
+The attempt did not reach a session, account, market-data, order, subscription, or analytics-job
+endpoint. It created no controlled broker resource and made no account mutation. Because current
+account access was unavailable, this candidate does not claim a fresh broker account-state
+readback. The older controlled SIM run retains its own unchanged-state proof, but that historical
+receipt is not relabeled for this candidate.
+
+Per the frozen plan's fail-closed rule, all remaining Saxo and model proof activity stopped after
+the rejected refresh. There was no blind retry and no browser flow.
+
+## Fresh 60-tool SIM matrix
+
+The fresh matrix was **not run** for `9c94bf1` because SIM session capabilities did not pass.
+
+The historical controlled run at `97472e4` remains useful only as historical safety evidence: it
+captured 60 tool receipts, cleaned its controlled activity, and proved its own account state
+unchanged. Native review correctly reclassified that historical run as three structured quarantine
+refusals plus five invalid-argument coverage gaps. Commit `8f8b00b`, included in the native
+candidate, gives those five downstream tools schema-valid local arguments; focused real-FastMCP
+tests prove their intended structured refusal path with `mcp_is_error=false` and no Saxo request.
+Those focused tests are not a fresh broker matrix and are not reported as one.
+
+## Per-analysis proof, reconciliation, and activation
 
 | Item | Value |
 | --- | --- |
 | Production analysis kinds | 54 |
-| Proof contracts and receipts defined | 54 |
-| Proof contract digest | `d1052988772301f8e3b6bbd0a3fd0e9fddc793610b6c1cab3b35286904a3f0af` |
-| Executed per-analysis proof | no |
-| Reported refusal | `proof_sim_auth_lease_unavailable` |
-| Actual inner blocker | missing file-backed Claude CLI auth in a producer that hardcodes both harnesses |
-| Codex file-backed auth | present and owner-only |
-| Broker write made by refused proof | false |
-| LIVE mutation calls | 0 |
+| Proof contracts defined | 54 |
+| Native producer implemented | yes |
+| Native producer executed against Saxo SIM | no |
+| Fresh per-analysis proof receipts | 0 |
+| Fresh Saxo reconciliation | not run |
 | Profiles activated | 0 of 54 |
 
-The outer refusal label is misleading: the fresh SIM session was available. The proof producer
-failed earlier while preparing both agent CLI homes. Codex auth resolved correctly; the missing
-input was Claude-only file-backed auth.
+The producer retains the existing known-answer, property, independent-reference, mutation,
+numerical-tolerance, accounting, Saxo-reconciliation, artifact, recovery, privacy, and agent-use
+requirements. The auth refusal occurred before those broker-bound receipts could be generated.
+Deterministic formula coverage does not authorize activation.
 
-The owner has now prohibited all Claude CLI, model, evaluation, and process use. That instruction
-supersedes the original dual-agent execution method, but it does not turn the unexecuted proof into a
-pass. A compliant future attempt must first implement and validate a Codex-only proof producer as a
-new candidate. Until then, activation would be invented evidence and is forbidden.
+No checked-in proof catalog changed. Activation remains forbidden until all 54 receipts pass for
+one exact installed candidate. Any activation commit would itself be a new candidate and would need
+the affected install, proof, SIM, cleanup, privacy, and review gates again.
 
-## Agent evaluation and final review
+## Native hard workflow and final review
 
 | Gate | State |
 | --- | --- |
-| Earlier offline matched fixture | historically passed before the native-only instruction |
-| Installed matched hard-task evaluation | not met |
-| Original dual-agent requirement | superseded as an allowed method by the owner's native-only instruction |
-| Codex-only replacement hard-task evaluation | not implemented for this frozen candidate |
-| Separate final Codex review | pending orchestrator review |
+| Native hard-suite policy and manifest coverage | validated |
+| Real installed Codex model evaluation | not run after SIM auth refusal |
+| Historical matched model evidence | unchanged and not accepted for `codex_native_v1` |
+| Separate final Codex review | pending root orchestrator |
 
-No Claude pass is claimed. No Claude command, model, evaluation, launcher, or process was invoked in
-the native resume. The stopped launcher work was removed rather than relabeled as evidence.
+No Claude pass is claimed. The native hard-workflow harness exists and is structurally validated,
+but a real model run is not invented from unit tests or manifest coverage.
 
-## Artifact and numerical QA
-
-The successful deterministic suite covers known-answer, property, metamorphic, mutation,
-independent-reference, accounting-identity, schema, artifact-value-parity, render, export, and
-visual-integrity checks. The prior focused artifact run passed 83 render and export tests. No
-analytics or artifact implementation changed after those results.
-
-Saxo reconciliation inside the unexecuted per-analysis producer is still not met. Deterministic
-coverage does not substitute for that broker-bound proof.
-
-## Cleanup and unchanged-state proof
-
-The controlled SIM run created bounded activity only in SIM. It captured 22 lifecycle calls, then
-proved account state unchanged, cleanup complete, and zero uncleaned resources. It made no LIVE
-call, purchase, or disclaimer response.
-
-The native resume proved the configured environment was SIM with LIVE reads and writes disabled.
-The expired cached token caused `saxo_get_session_capabilities` to attempt a refresh at Saxo's SIM
-OAuth endpoint, which returned HTTP 401. The earlier preflight receipt incorrectly recorded
-`network_call_made=false`; the HTTP response proves that statement false. Commit `8f8b00b` propagates
-OAuth network provenance, and a fresh clean-tree receipt records `network_call_made=true` both on the
-capabilities attempt and the enclosing SIM-auth event.
-
-The attempt made one SIM OAuth request. It did not launch a browser, reach the session-capabilities
-or account endpoint, create an order, subscription, or analytics job, answer a disclaimer, make a
-purchase, or make any LIVE call. The rejected refresh saved no token and created no controlled broker
-resource to clean.
-
-The exact-candidate install fixture remains in owner-only local storage under its evidence ledger.
-It is deliberately retained for the registered final consumers and has a recorded teardown owner;
-it is not a leaked broker resource or an untracked temporary test directory.
-
-## Privacy result
+## Privacy and storage
 
 | Scan | Result |
 | --- | --- |
-| Exact-candidate installed-evidence scan | clean, 0 findings, 0 scan errors |
-| Exact-candidate privacy self-scan | clean, 0 findings |
-| GitHub CI public secret scan | passed |
-| Native closeout scan over public docs and the Task 24 report | passed, 0 findings, 0 scan errors |
-| Account identifiers or private financial values in this document | none |
-| Credentials, raw URLs, raw broker payloads, or private paths in this document | none |
+| Codex-only installation privacy self-scan | passed |
+| Focused redaction/privacy suite | 214 passed |
+| Public documentation and Task 24 report scan | passed, 0 findings, 0 scan errors |
+| Credentials, account identifiers, or private financial values in this document | none |
 | Private evidence storage | owner-only ignored evidence root |
 
 Private receipts remain outside publication. Public material contains only redacted counts,
-digests, aliases, safety booleans, and status labels.
+digests, safety booleans, and status labels.
 
 Secrets are never accepted through a chat channel:
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
 
-## External and policy limitations
-
-The successful SIM matrix used a fresh owner-driven login. That session is not assumed to remain
-fresh. Current local preflight reports expired bearer material and does not justify another broker
-run without a new owner login.
-
-The remaining proof blocker is not Saxo market data. It is the frozen producer's mandatory
-dual-agent auth path combined with the owner's newer native-only policy. Fixing that correctly means
-creating a new Codex-only producer and a new candidate, then repeating the install, proof,
-reconciliation, matrix, cleanup, privacy, and review gates once. The frozen candidate cannot be
-silently activated or reinterpreted.
-
-No non-Saxo market or account data was substituted for missing broker results. Missing proof or
-permissions remain reduced or refused.
-
 ## Full-suite completion status
 
 | Completion gate | State |
 | --- | --- |
-| All 60 tools produce their expected passing SIM state | **not met**; the preserved run has 3 structured quarantine refusals and 5 invalid-argument coverage gaps; the corrected five-tool local refusal coverage is not a full matrix rerun |
-| Every analysis kind has an executed source-bound proof profile | **not met**; 54 contracts exist, 0 active profiles |
-| Deterministic numerical and accounting checks | met |
-| Applicable Saxo reconciliation in the per-analysis producer | **not met** |
-| Artifact value parity and visual QA | met in deterministic validation |
-| Matched installed hard workflows | **not met**; original method is now disallowed |
-| Missing-data and permission behavior | met by structured reduction or refusal |
-| Controlled SIM cleanup and unchanged account state | met |
-| Public privacy | met; preserved scans and the native closeout scan passed |
-| Separate native Codex review | first review required these two corrections; re-review pending |
-| No LIVE call, LIVE mutation, purchase, or disclaimer response | met |
+| Exact 60-tool catalog | met |
+| Deterministic numerical, accounting, artifact, static, type, and privacy checks | met |
+| Exact Codex-only install | met |
+| Fresh 60-tool SIM matrix | **not met**; stopped at SIM OAuth HTTP 401 |
+| Every analysis kind has executed source-bound proof | **not met**; 0 of 54 active |
+| Applicable Saxo reconciliation | **not met** |
+| Real installed native hard workflow | **not met** |
+| Controlled cleanup and current account-state readback | no resource existed to clean; account readback unavailable |
+| No LIVE call, broker mutation, purchase, or disclaimer response | met |
+| Separate native review | pending |
 | Analysis claims enabled in normal runtime | **not met**; all profiles remain quarantined |
 
-Task 24 remains a truthful partial validation, not full-suite completion. The preserved candidate is
-installable; the corrected runtime's focused refusal boundary is safe, but its installation and full
-SIM matrix are pending and the analytics-producing surface is not approved for activation.
+Task 24 remains a truthful partial validation. The native-only implementation and its deterministic
+candidate gates pass, but broker-bound completion and analytics activation do not.
 
 ## Candidate history
 
 | Commit | Meaning |
 | --- | --- |
-| `a9c4f24` | Complete local deterministic candidate, 2,593 tests passed |
-| `b2b9872` | Install-validator startup reuse correction, then 2,596 local tests passed |
-| `ea1f8f3` | Host-independent private-path redaction plus three focused tests |
-| `97472e4` | Frozen runtime candidate and exhausted-auth documentation |
-| `181ad08`, `d010df0` | Later Claude credential and launcher experiments; not accepted as final evidence |
-| `134771d` | Removes the stopped experiments and restores the exact `97472e4` tree |
-| `8f8b00b` | Preserves SIM OAuth provenance and gives five downstream tools valid local refusal coverage |
+| `97472e4` | Historical controlled SIM candidate; evidence stays historical |
+| `134771d` | Removed the stopped Claude-launcher experiment and restored the historical tree |
+| `8f8b00b` | Preserved OAuth provenance and added valid five-tool local refusal coverage |
+| `59b5dbb` | Approved the parallel Codex-native proof design |
+| `0dbc4d9` | Added the native proof implementation plan |
+| `f7d78c6` | Added the explicit `codex_native_v1` policy and runtime isolation |
+| `4458899` | Added exact Codex-only plugin installation evidence |
+| `9c94bf1` | Added the parallel native proof producer and hard-suite policy; frozen source candidate |
 
-The corrected candidate changes four QA/runtime modules and two test files. `pyproject.toml` and
-`uv.lock` are unchanged. Documentation and the Task 24 report describe this new partial state.
+## Exact next gate
+
+A fresh owner-local SIM login or valid owner-only SIM cache must make
+`saxo_get_session_capabilities` pass. Only then may one new controlled run execute the native hard
+workflow, full per-analysis proof and Saxo reconciliation, fresh 60-tool SIM matrix, cleanup,
+account readback, privacy, and activation decision. No browser is opened by this task and no
+non-Saxo market or account data may substitute for missing broker results.

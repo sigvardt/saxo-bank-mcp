@@ -5,11 +5,12 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Final SIM validation for the frozen candidate is recorded in
-`docs/analytics-bi-validation.md`. The 60-tool SIM run produced all receipts, cleaned controlled
-activity, and proved account state unchanged. Full completion is still blocked: all 54 proof
-profiles remain quarantined, the per-analysis proof did not execute, and the original dual-agent
-producer is unavailable under the owner's native-only policy.
+catalog to 60. Native candidate `9c94bf1` adds the explicit `codex_native_v1` install and proof path
+without relabeling the historical dual-agent evidence. Its exact Codex-only installation, guarded
+deterministic suite, static, type, catalog, and privacy gates pass. Fresh broker-bound validation
+stopped when the expired SIM cache's single refresh received HTTP 401, so the new 60-tool matrix,
+per-analysis Saxo proof, hard model workflow, and activation did not run. All 54 proof profiles
+remain quarantined. The exact result is recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -1501,8 +1502,10 @@ Each production `analysis_kind` has a machine-readable proof profile covering:
    receipts, output validation, cleanup, and unchanged brokerage state.
 8. **Artifact parity proof**: every displayed value and chart series comes from the same verified
    result object without renderer-side recalculation.
-9. **Agent-use proof**: matched Codex and Claude tasks select the right tools, report the right
-   numbers, preserve warnings, and do not invent unsupported conclusions.
+9. **Agent-use proof**: tasks executed under the candidate's explicit model policy select the right
+   tools, report the right numbers, preserve warnings, and do not invent unsupported conclusions.
+   The current `codex_native_v1` policy requires exactly one real Codex harness record and rejects
+   every other harness; historical dual-agent evidence remains historical.
 10. **Privacy and safety proof**: no secret, raw account identifier, disallowed private value, or
     broker write enters evidence or an unauthorized response.
 
@@ -1654,7 +1657,8 @@ Differences must be categorized, not ignored.
 
 ### Agent evaluation
 
-Build a fixture portfolio with known answers and evaluate Codex and Claude on tasks such as:
+Build a fixture portfolio with known answers and evaluate every harness required by the candidate's
+explicit model policy. Under `codex_native_v1`, that is exactly one real Codex run on tasks such as:
 
 - Explain YTD performance versus a benchmark.
 - Produce a Cost X-ray with the exact expected total and component sum.
@@ -1859,7 +1863,8 @@ For every user-facing signature experience:
 1. Verify the structured result first.
 2. Render every supported artifact from that exact result.
 3. Prove chart and table parity against sampled values and fingerprints.
-4. Run matched Codex and Claude tasks from isolated installations with exact logical tool grants.
+4. Run the exact harness set required by the candidate policy from isolated installations with
+   exact logical tool grants. `codex_native_v1` requires Codex only.
 5. Grade tool choice, numeric claims, verification-state reporting, warning handling, privacy,
    refusal behavior, and absence of broker writes.
 6. Give agents hard compound tasks with expected answers, not merely "call this tool" prompts.
@@ -1932,7 +1937,7 @@ Every production `analysis_kind` ships with a proof receipt containing:
 - Saxo reconciliation results and named differences.
 - SIM execution receipts.
 - Artifact parity results.
-- Codex and Claude evaluation results.
+- Model-evaluation policy ID and the evaluation results for every harness that policy requires.
 - Privacy and unchanged-state results.
 - Independent review verdict.
 - Known limitations, expiration, and invalidation triggers.
@@ -1970,7 +1975,8 @@ An `analysis_kind` is production-ready only when:
 - Saxo comparisons have no unexplained difference outside tolerance.
 - Executable SIM MCP cases pass all success, degradation, and refusal paths.
 - Artifacts contain the same verified values as structured output.
-- Codex and Claude complete hard tasks without inventing numbers or causing a broker write.
+- Every harness required by the candidate's explicit model policy completes hard tasks without
+  inventing numbers or causing a broker write.
 - Cleanup succeeds and brokerage state is unchanged.
 - Privacy and publication scans are clean.
 - The final independent review finds no real blocker.
@@ -2156,7 +2162,7 @@ Goal: make all supported Saxo analytics continuously useful.
 - Saved Saxo research universes.
 - On-demand portfolio, risk, cost, and market reports.
 - Storage inspection, deletion preview, and deletion controls.
-- Complete Codex and Claude skills, examples, and hard-task evaluations.
+- Complete installed agent skills, examples, and hard-task evaluations for the active model policy.
 - Generated source, metric, proof-profile, tool, artifact, and agent-evaluation coverage catalogs.
 
 Exit criteria:
@@ -2310,19 +2316,23 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The suite is implemented and the controlled SIM run is safe: 60 of 60 tool receipts and 21 of 21
-analytics receipts were captured, cleanup completed, and account state was unchanged. That run is
-not a full pass. Three analytics tools returned parsed quarantine refusals. Five dependent tools
-instead received empty arguments and returned FastMCP `invalid_arguments`, so the historical run did
-not prove their intended refusal behavior. The corrected harness now exercises those five local-only
-boundaries with schema-valid synthetic handles and focused tests observe structured refusal, but the
-full SIM matrix still requires a new run.
+The explicit Codex-only producer now exists in frozen candidate `9c94bf1`. Its policy requires
+exactly the Codex harness, preserves the historical dual path unchanged, and retains every numerical,
+Saxo reconciliation, cleanup, privacy, source-binding, and no-write gate. Its exact one-client
+installation and deterministic validation pass.
 
-The next implementation is a new, explicitly Codex-only proof producer. It must remove the frozen
-producer's mandatory dual-agent auth dependency without weakening receipt provenance, tool coverage,
-Saxo reconciliation, cleanup, privacy, or source binding. That change creates a new candidate and
-requires one new installation, per-analysis proof, 60-tool matrix, cleanup, privacy, and separate
-native review cycle. Claude must not be invoked.
+The immediate blocker is fresh SIM authentication, not another producer change. A network-free
+status read proved requested and effective SIM with LIVE reads and writes disabled. The cache was
+expired and refresh-capable; the single permitted capability attempt reached Saxo's SIM OAuth
+endpoint and received HTTP 401. No browser, account, market, order, subscription, analytics-job,
+purchase, disclaimer-response, or LIVE call followed.
+
+After an owner-local login or valid owner-only cache makes `saxo_get_session_capabilities` pass,
+run one controlled native hard workflow, per-analysis proof and Saxo reconciliation, fresh 60-tool
+SIM matrix, cleanup, account readback, privacy, and activation decision. The historical matrix
+remains historical: its three structured quarantine refusals and five invalid-argument coverage
+gaps are not relabeled. The corrected candidate's focused real-FastMCP tests prove schema-valid
+structured refusal for the five downstream tools, but they are not a fresh broker matrix.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
