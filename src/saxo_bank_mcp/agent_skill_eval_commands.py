@@ -9,6 +9,7 @@ from typing import Final
 
 from saxo_bank_mcp.agent_skill_eval_models import Harness
 from saxo_bank_mcp.agent_skill_install_env import CODEX_FILE_CREDENTIAL_STORE_OVERRIDES
+from saxo_bank_mcp.agent_skill_matrix_env import claude_power_launcher_enabled
 from saxo_bank_mcp.agent_skill_router_eval_protocol import configured_codex_mcp_server_names
 from saxo_bank_mcp.server_eval_tool_filter import derive_eval_tool_filter_env
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
@@ -22,6 +23,8 @@ SAXO_CODEX_MCP_SERVER_NAMES: Final = frozenset(
     },
 )
 CLAUDE_STDIO_SERVER_NAME: Final = "saxo-bank-mcp"
+# Wrapper launcher that carries its own authenticated CLI login.
+CLAUDE_POWER_LAUNCHER_NAME: Final = "claude-power"
 # Claude 2.1.x: `--tools ""` disables built-ins but also leaves MCP tools unusable
 # (init tools=[], server pending). Exhaustive disallowedTools is the working containment.
 CLAUDE_DISALLOWED_BUILTINS: Final = (
@@ -174,9 +177,41 @@ def claude_non_router_command(
     allowed = ",".join(resolved_grants)
     disallowed = ",".join(CLAUDE_DISALLOWED_BUILTINS)
     path_env = enrich_eval_cli_env(env or {})
+    if claude_power_launcher_enabled(env or {}):
+        # Authenticated wrapper CLI supplies its own login. It sets its own config dir, so
+        # user/project/local settings and hooks are excluded by loading no setting sources.
+        return (
+            resolve_cli_executable(CLAUDE_POWER_LAUNCHER_NAME, path_env),
+            "--setting-sources",
+            "",
+            *_claude_containment_arguments(
+                prompt,
+                mcp_config_path=mcp_config_path,
+                allowed=allowed,
+                disallowed=disallowed,
+            ),
+        )
     claude_bin = resolve_cli_executable("claude", path_env)
     return (
         claude_bin,
+        *_claude_containment_arguments(
+            prompt,
+            mcp_config_path=mcp_config_path,
+            allowed=allowed,
+            disallowed=disallowed,
+        ),
+    )
+
+
+def _claude_containment_arguments(
+    prompt: str,
+    *,
+    mcp_config_path: Path,
+    allowed: str,
+    disallowed: str,
+) -> tuple[str, ...]:
+    """Containment arguments shared by the plain and wrapper Claude launchers."""
+    return (
         "--no-session-persistence",
         "--no-chrome",
         "--disable-slash-commands",

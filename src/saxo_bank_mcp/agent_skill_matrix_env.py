@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import tempfile
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -43,6 +44,7 @@ MAX_CLAUDE_CREDENTIAL_BYTES: Final = 1_048_576
 MIN_CLAUDE_OAUTH_MATERIAL_LENGTH: Final = 20
 # Actual CLI auth sources only — never settings, hooks, MCP config, projects/history, or sessions.
 _CODEX_AUTH_SEED_FILES: Final = ("auth.json",)
+CLAUDE_POWER_LAUNCHER_ENV: Final = "SAXO_MCP_CLAUDE_POWER_LAUNCHER"
 _CLAUDE_CREDENTIAL_NAME: Final = ".credentials.json"
 _CLAUDE_CREDENTIAL_RELATIVE: Final = Path(".claude") / _CLAUDE_CREDENTIAL_NAME
 _CLAUDE_AUTH_SEED_RELATIVES: Final = (_CLAUDE_CREDENTIAL_RELATIVE,)
@@ -324,7 +326,7 @@ def seed_isolated_cli_homes(  # noqa: PLR0913
     retained_codex_home: Path | None = None,
     retained_claude_home: Path | None = None,
     retained_codex_plugin_root: Path | None = None,
-) -> tuple[Path, str]:
+) -> tuple[Path | None, str | None]:
     """Seed auth from actual CLI roots; seed plugin state from retained install homes."""
     claude_auth_source, claude_auth_source_digest = _seed_auth_files(
         runtime,
@@ -348,7 +350,7 @@ def _seed_auth_files(
     runtime: MatrixIsolatedRuntime,
     source_codex_home: Path | None,
     source_claude_home: Path | None,
-) -> tuple[Path, str]:
+) -> tuple[Path | None, str | None]:
     codex_auth = _resolve_codex_source_home(source_codex_home)
     for name in _CODEX_AUTH_SEED_FILES:
         copied = _copy_optional_owner_only_file(
@@ -358,6 +360,9 @@ def _seed_auth_files(
         )
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
+    if claude_power_launcher_enabled():
+        # The authenticated wrapper CLI carries its own login; nothing is copied or exported.
+        return None, None
     for relative in _CLAUDE_AUTH_SEED_RELATIVES:
         # Source honours a custom CLAUDE_CONFIG_DIR; destination stays the runtime layout.
         declared = _resolve_claude_credential_source(source_claude_home)
@@ -721,6 +726,16 @@ def _resolve_claude_source_home(preferred: Path | None) -> Path:
     if raw:
         return Path(raw).expanduser().parent
     return Path.home()
+
+
+def claude_power_launcher_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Report whether the matched Claude evaluation uses the authenticated wrapper CLI.
+
+    In this mode the wrapper CLI supplies its own already-established login, so no
+    credential file is required, copied, read, or exported. Codex file auth is unaffected.
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    return source.get(CLAUDE_POWER_LAUNCHER_ENV, "").strip() == "1"
 
 
 def _resolve_claude_credential_source(preferred: Path | None) -> Path:

@@ -19,6 +19,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     remaining_live_pgids,
     remaining_live_pids,
 )
+from saxo_bank_mcp.agent_skill_eval_commands import claude_non_router_command
 from saxo_bank_mcp.agent_skill_eval_execution import HarnessRoots, execute_model_case
 from saxo_bank_mcp.agent_skill_eval_models import (
     EvalRunRecord,
@@ -29,6 +30,7 @@ from saxo_bank_mcp.agent_skill_eval_models import (
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
 from saxo_bank_mcp.agent_skill_matrix_env import (
+    CLAUDE_POWER_LAUNCHER_ENV,
     OWNER_DIR_MODE,
     OWNER_FILE_MODE,
     MatrixEnvError,
@@ -1031,6 +1033,106 @@ def test_custom_claude_config_dir_seeds_credentials_from_that_directory(
         assert seeded.read_text(encoding="utf-8") == credential.read_text(encoding="utf-8")
     finally:
         require_matrix_runtime_cleanup(runtime.run_root)
+
+
+def test_power_launcher_mode_seeds_without_a_claude_credential_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The authenticated wrapper CLI holds its own login, so no credential file is required.
+
+    Codex file auth stays mandatory: the wrapper mode only removes the Claude credential-file
+    requirement, and it never reads, copies, or exports secure storage.
+    """
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    actual_codex, _ = _seed_cli_auth_sources(tmp_path)
+    retained_codex, retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    bare_home = tmp_path / "no-claude-credential-home"
+    bare_home.mkdir()
+    monkeypatch.setenv("HOME", str(bare_home))
+    monkeypatch.setenv("CODEX_HOME", str(actual_codex))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv(CLAUDE_POWER_LAUNCHER_ENV, "1")
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=None,
+        source_claude_home=None,
+        retained_codex_home=retained_codex,
+        retained_claude_home=retained_claude,
+        retained_codex_plugin_root=plugin_root,
+    )
+    try:
+        # Codex auth still seeded; no Claude credential copied anywhere.
+        assert (runtime.codex_home / "auth.json").is_file()
+        assert not (runtime.home / ".claude" / ".credentials.json").exists()
+        assert runtime.claude_auth_source is None
+        assert runtime.claude_auth_source_digest is None
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+
+
+def test_power_launcher_mode_still_requires_codex_file_auth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex isolation and file-auth behaviour must not be weakened by the wrapper mode."""
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    retained_codex, retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    empty_codex = tmp_path / "codex-without-auth"
+    empty_codex.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "irrelevant-home"))
+    monkeypatch.setenv("CODEX_HOME", str(empty_codex))
+    monkeypatch.setenv(CLAUDE_POWER_LAUNCHER_ENV, "1")
+
+    with pytest.raises(MatrixEnvError, match="codex_file_auth_missing"):
+        prepare_eval_isolated_runtime(
+            evidence,
+            source_codex_home=None,
+            source_claude_home=None,
+            retained_codex_home=retained_codex,
+            retained_claude_home=retained_claude,
+            retained_codex_plugin_root=plugin_root,
+        )
+
+
+def test_power_launcher_command_uses_wrapper_and_excludes_setting_sources() -> None:
+    """Wrapper mode swaps the executable and excludes user/project/local settings and hooks."""
+    command = claude_non_router_command(
+        "probe",
+        mcp_config_path=Path("/tmp/mcp.json"),  # noqa: S108
+        resolved_grants=("mcp__saxo__saxo_health",),
+        env={CLAUDE_POWER_LAUNCHER_ENV: "1", "PATH": os.environ.get("PATH", "")},
+    )
+    assert Path(command[0]).name == "claude-power"
+    assert "--setting-sources" in command
+    assert command[command.index("--setting-sources") + 1] == ""
+    # Containment is preserved exactly as in normal mode.
+    for flag in (
+        "--no-session-persistence",
+        "--no-chrome",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--disallowedTools",
+        "--print",
+    ):
+        assert flag in command, flag
+
+
+def test_normal_claude_mode_is_unchanged_without_the_wrapper_flag() -> None:
+    """Default mode keeps the plain claude executable and adds no settings-source flag."""
+    command = claude_non_router_command(
+        "probe",
+        mcp_config_path=Path("/tmp/mcp.json"),  # noqa: S108
+        resolved_grants=("mcp__saxo__saxo_health",),
+        env={"PATH": os.environ.get("PATH", "")},
+    )
+    assert Path(command[0]).name != "claude-power"
+    assert "--setting-sources" not in command
 
 
 def test_eval_auth_seed_excludes_global_settings_hooks_mcp_project_history(
