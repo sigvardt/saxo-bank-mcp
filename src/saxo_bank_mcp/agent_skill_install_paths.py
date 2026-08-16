@@ -230,6 +230,24 @@ def global_state_fingerprint(
     }
 
 
+def codex_global_state_fingerprint(codex_global_home: Path) -> dict[str, JsonValue]:
+    """Privacy-safe fingerprint of only the caller's Codex plugin state."""
+    targets = _codex_fingerprint_targets(codex_global_home)
+    return {
+        "codex": _fingerprint_scope(targets),
+        "scope": {
+            "codex": [
+                f"${{CODEX_GLOBAL_HOME}}/{path.relative_to(codex_global_home)}"
+                if path != codex_global_home
+                else "${CODEX_GLOBAL_HOME}"
+                for path in targets
+            ],
+            "fields": ["path", "type", "size", "mode", "target", "sha256"],
+            "roots": {"CODEX_GLOBAL_HOME": "caller_codex_global_home"},
+        },
+    }
+
+
 def owner_only_mode(path: Path) -> str:
     return oct(path.stat().st_mode & 0o777)
 
