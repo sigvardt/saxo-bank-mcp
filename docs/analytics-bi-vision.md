@@ -5,14 +5,13 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Evidence candidate `9c94bf1` adds the explicit `codex_native_v1` install and proof
-path without relabeling the historical dual-agent evidence. Its exact Codex-only installation,
-guarded deterministic suite, static, type, catalog, and privacy gates pass. Corrective source
-`9c5945e` now requires a current SIM capability receipt before any native model or offline proof
-work and retains truthful network provenance when that gate blocks. Fresh broker-bound validation
-stopped when the expired SIM cache's single refresh received HTTP 401, so the new 60-tool matrix,
-per-analysis Saxo proof, hard model workflow, and activation did not run. All 54 proof profiles
-remain quarantined. The exact result is recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Evidence candidate `04241a5` adds the privacy-safe native child-failure envelope
+without relabeling the historical dual-agent evidence. Its exact Codex-only installation, guarded
+2,667-test suite, static, type, catalog, and privacy gates pass. The one sealed native proof child
+exited 1 without an authenticated envelope. The outer receipt now reports the missing evidence and
+every unproved execution, network, event, mutation, purchase, disclaimer, and child-cleanup fact as
+unknown. No proof retry or activation ran. All 54 proof profiles remain quarantined. The exact
+result is recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2323,25 +2322,21 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The current Codex-only candidate is `d23d24f`. It binds the disposable native runtime to the exact
-contained plugin and gives analytics hard cases schema-valid synthetic handles. Its focused,
-related, static, privacy, and exact 60-tool installation checks pass. The historical dual policy and
-evidence remain unchanged.
+The current Codex-only candidate is `04241a5`. It preserves failed native child output only in
+memory, authenticates strict candidate-bound envelopes, and publishes unknown rather than false
+when an envelope is missing or untrusted. Its focused, related, full-suite, static, privacy, and
+exact 60-tool installation checks pass. The historical dual policy and evidence remain unchanged.
 
-The one sealed proof attempt stopped at `proof_producer_command_failed`. Its outer receipt did not
-retain the child phase, SIM preflight, network provenance, child exit detail, or partial execution
-state. Do not retry this candidate. First correct that failure envelope so every failed child emits
-a typed, safe receipt with the exact phase and truthful observed provenance.
+The one sealed proof child exited 1 without emitting an authenticated envelope. The redacted outer
+receipt retains the child exit and command digests, proves outer cleanup with zero remaining
+processes, and marks phase, SIM preflight, network, event counts, execution, mutation, purchase,
+disclaimer response, and child cleanup unknown. Do not retry this candidate.
 
-A network-free status check after the attempt proved requested and effective SIM with LIVE reads
-and writes disabled and a fresh readable local cache. That check does not prove server-side session
-capabilities or account access. No extra account read was made because the failed attempt has no
-bound before fingerprint, so an after-only read could not prove equality.
-
-After a new candidate passes TDD, focused checks twice, related checks, Ruff, BasedPyright, privacy,
-and exact installation, a newly authorized sealed run must prove the native hard workflow, all 54
-per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account equality,
-and the activation decision. The historical matrix remains historical and is not relabeled.
+The next local candidate must diagnose the child startup boundary without model or Saxo activity
+and preserve a safe authenticated startup cause when possible. Only after another complete local
+gate set and new authorization may a sealed run prove the native hard workflow, all 54 per-analysis
+receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account equality, and the
+activation decision. The historical matrix remains historical and is not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured

@@ -82,27 +82,27 @@ the proof-matrix CLI publishes only verified fields. Missing or untrusted eviden
 - [x] Run the broader related proof, auth/session, command-runner, static, and privacy tests.
 - [x] Run Ruff format/check and BasedPyright.
 - [x] Review the diff for raw output, secret, account, handle, and payload fields.
-- [ ] Commit source, tests, design, plan, and corrected documentation.
+- [x] Commit source, tests, design, plan, and corrected documentation.
 
 ### Task 6: Freeze and validate one candidate
 
-- [ ] Confirm the worktree is clean and record the exact commit.
-- [ ] Run one exact-candidate Codex-only install and verify 60 tools and 9 skills.
-- [ ] Run one guarded exact-candidate full suite with the disk guard.
-- [ ] Re-run required static, catalog, and privacy readbacks against that candidate.
+- [x] Confirm the worktree is clean and record the exact commit.
+- [x] Run one exact-candidate Codex-only install and verify 60 tools and 9 skills.
+- [x] Run one guarded exact-candidate full suite with the disk guard.
+- [x] Re-run required static, catalog, and privacy readbacks against that candidate.
 
 ### Task 7: Run one sealed native proof attempt
 
-- [ ] Start exactly one `codex_native_v1` proof attempt only after local gates pass.
-- [ ] If it fails, retain the typed receipt and stop without retry.
+- [x] Start exactly one `codex_native_v1` proof attempt only after local gates pass.
+- [x] If it fails, retain the typed receipt and stop without retry.
 - [ ] If it passes, continue the 54 numerical receipts, Saxo reconciliation, current 60-tool SIM
       matrix, controlled cleanup, unchanged account proof, and activation gate.
 - [ ] Activate profiles only if every required receipt and safety gate passes.
 
 ### Task 8: Close out evidence and documentation
 
-- [ ] Correct Task 24 report, progress, validation docs, and evidence claims.
-- [ ] Update the existing Saxo Project and proof-failure Learning in the Knowledge Base.
-- [ ] Read back repository documentation, private evidence permissions, and Knowledge Base rows.
+- [x] Correct Task 24 report, progress, validation docs, and evidence claims.
+- [x] Update the existing Saxo Project and proof-failure Learning in the Knowledge Base.
+- [x] Read back repository documentation, private evidence permissions, and Knowledge Base rows.
 - [ ] Report the exact candidate, commits, tests, proof result, activation count, blockers, and
       unpushed state.
