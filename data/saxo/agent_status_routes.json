@@ -195,6 +195,10 @@
         "reason": "SIM browser login helper status, not production MCP tool response truth."
       },
       {
+        "module": "src/saxo_bank_mcp/sim_token_refresh.py",
+        "reason": "Internal SIM session-keeper refresh state, converted to auth-tool results before any registered MCP response."
+      },
+      {
         "module": "src/saxo_bank_mcp/streaming_transport.py",
         "reason": "Streaming transport helper has internal snapshot status; final tool statuses are in streaming_execution."
       },
