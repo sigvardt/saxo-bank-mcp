@@ -17,9 +17,15 @@ has more than five minutes left. Inside that margin, it calls Saxo's SIM token e
 atomically saves the complete returned token, including any rotated refresh token and the existing
 PKCE verifier.
 
-If Saxo rejects the refresh, the command stores only the cache revision in an owner-only marker.
-Later runs make no network request while that revision is unchanged. A successful browser login or
-other legitimate cache update changes the revision and permits one new attempt. Missing, unreadable,
+Before the refresh request, the command durably stores only the current cache revision in an
+owner-only attempt marker. If the marker cannot be made durable, the command stops before network
+work. The marker remains after Saxo rejection, an interrupted or unknown request result, cache-save
+failure, or marker-clear failure, so an unchanged cache cannot issue a blind request every minute.
+After the response and before saving, the command compares the current cache revision with the
+original revision. A concurrent browser login or tool update wins: the command never overwrites the
+changed cache, and the marker remains tied to the superseded revision. Only a durable save of the
+complete rotated token permits marker removal. A legitimate cache update changes the revision and
+permits one later attempt when that new token reaches the refresh margin. Missing, unreadable,
 wrong-environment, or non-refreshable caches fail closed without a network call.
 
 Install the exact committed package into a dedicated owner-only runtime outside the repository and
@@ -30,10 +36,11 @@ repository and common cloud folders.
 
 ## Verification
 
-Tests first prove fresh-cache no-op behavior, near-expiry refresh and atomic rotated-token save,
-rejection-marker suppression, cache-change recovery, SIM-only refusal, owner-only marker mode, and
-secret-safe command output. Run the focused tests twice through `scripts/run-pytest`, then Ruff and
-BasedPyright.
+Tests first prove fresh-cache no-op behavior, a durable owner-only marker before network work,
+near-expiry refresh and atomic rotated-token save, ordinary rejection/success, marker-write and
+cache-save failure suppression, concurrent-cache preservation, cache-change recovery, SIM-only
+refusal, and secret-safe command output. Run the focused tests twice through `scripts/run-pytest`,
+then Ruff and BasedPyright.
 
 After installation, run one authorized SIM refresh and one session-capability read. Verify the
 launchd definition, loaded process state, one label only, runtime and log permissions, restart

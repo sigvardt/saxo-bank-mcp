@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx2
 import pytest
 
+from saxo_bank_mcp import sim_token_refresh
 from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.config import SimAuthSettings
 from saxo_bank_mcp.sim_token_refresh import (
@@ -52,6 +53,10 @@ def _token(
     )
 
 
+def _attempt_marker(cache_path: Path) -> Path:
+    return cache_path.with_name(f"{cache_path.name}.sim-refresh-attempt")
+
+
 @pytest.mark.anyio
 async def test_fresh_sim_cache_does_not_call_network(tmp_path: Path) -> None:
     settings = _settings(tmp_path / "token.json")
@@ -82,6 +87,9 @@ async def test_near_expiry_refresh_saves_complete_rotated_token(tmp_path: Path) 
         nonlocal requests
         requests += 1
         assert request.url == settings.token_url
+        marker = _attempt_marker(settings.cache_path)
+        assert marker.exists()
+        assert stat.S_IMODE(marker.stat().st_mode) == OWNER_FILE_MODE
         return httpx2.Response(
             200,
             json={
@@ -106,6 +114,7 @@ async def test_near_expiry_refresh_saves_complete_rotated_token(tmp_path: Path) 
     assert saved.code_verifier == "v" * 43
     assert saved.environment == "SIM"
     assert stat.S_IMODE(settings.cache_path.stat().st_mode) == OWNER_FILE_MODE
+    assert _attempt_marker(settings.cache_path).exists() is False
 
 
 @pytest.mark.anyio
@@ -166,23 +175,184 @@ async def test_rejection_marker_suppresses_unchanged_cache_retry(tmp_path: Path)
     def reject(_request: httpx2.Request) -> httpx2.Response:
         nonlocal requests
         requests += 1
+        assert _attempt_marker(settings.cache_path).exists()
         return httpx2.Response(401, json={"error": "invalid_grant"})
 
     transport = httpx2.MockTransport(reject)
     first = await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
     second = await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
 
-    marker = settings.cache_path.with_name(
-        f"{settings.cache_path.name}.sim-refresh-rejected",
-    )
+    marker = _attempt_marker(settings.cache_path)
     assert first == SimRefreshOutcome(status="refresh_rejected", network_call_made=True)
     assert second == SimRefreshOutcome(
-        status="refresh_rejected_unchanged",
+        status="refresh_attempt_suppressed",
         network_call_made=False,
     )
     assert requests == 1
-    assert marker.read_text(encoding="utf-8").strip().isdigit()
+    assert marker.read_text(encoding="utf-8").strip()
     assert stat.S_IMODE(marker.stat().st_mode) == OWNER_FILE_MODE
+
+
+@pytest.mark.anyio
+async def test_attempt_marker_failure_stops_before_network_and_cannot_blind_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path / "token.json")
+    save_token_cache(
+        settings.cache_path,
+        _token(expires_at=FIXED_NOW + timedelta(minutes=1)),
+    )
+    marker_writes = 0
+
+    def failed_marker(path: Path, revision: str) -> None:
+        nonlocal marker_writes
+        marker_writes += 1
+        path.write_text(f"{revision}\n", encoding="utf-8")
+        path.chmod(OWNER_FILE_MODE)
+        raise OSError("injected marker durability failure")
+
+    def unexpected_request(_request: httpx2.Request) -> httpx2.Response:
+        pytest.fail("refresh must not start without a durable attempt marker")
+
+    monkeypatch.setattr(sim_token_refresh, "_write_attempt_revision", failed_marker)
+
+    first = await refresh_sim_token_if_needed(
+        settings,
+        now=FIXED_NOW,
+        transport=httpx2.MockTransport(unexpected_request),
+    )
+    second = await refresh_sim_token_if_needed(
+        settings,
+        now=FIXED_NOW,
+        transport=httpx2.MockTransport(unexpected_request),
+    )
+
+    assert first == SimRefreshOutcome(status="attempt_marker_failed", network_call_made=False)
+    assert second == SimRefreshOutcome(
+        status="refresh_attempt_suppressed",
+        network_call_made=False,
+    )
+    assert marker_writes == 1
+    assert _attempt_marker(settings.cache_path).exists()
+
+
+@pytest.mark.anyio
+async def test_unknown_refresh_result_retains_attempt_marker_and_suppresses_retry(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "token.json")
+    save_token_cache(
+        settings.cache_path,
+        _token(expires_at=FIXED_NOW + timedelta(minutes=1)),
+    )
+    requests = 0
+
+    def unknown_result(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal requests
+        requests += 1
+        raise RuntimeError("injected crash-equivalent result")
+
+    transport = httpx2.MockTransport(unknown_result)
+    with pytest.raises(RuntimeError, match="crash-equivalent"):
+        await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
+    second = await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
+
+    assert second == SimRefreshOutcome(
+        status="refresh_attempt_suppressed",
+        network_call_made=False,
+    )
+    assert requests == 1
+    assert _attempt_marker(settings.cache_path).exists()
+
+
+@pytest.mark.anyio
+async def test_cache_save_failure_retains_attempt_marker_and_suppresses_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path / "token.json")
+    original = _token(expires_at=FIXED_NOW + timedelta(minutes=1))
+    save_token_cache(settings.cache_path, original)
+    requests = 0
+
+    def rotate(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal requests
+        requests += 1
+        return httpx2.Response(
+            200,
+            json={
+                "access_token": ROTATED_ACCESS_VALUE,
+                "refresh_token": ROTATED_REFRESH_VALUE,
+                "expires_in": 1200,
+            },
+        )
+
+    def failed_save(_path: Path, _token_to_save: SaxoTokenSet) -> None:
+        raise OSError("injected cache save failure")
+
+    monkeypatch.setattr(sim_token_refresh, "save_token_cache", failed_save)
+    transport = httpx2.MockTransport(rotate)
+
+    first = await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
+    second = await refresh_sim_token_if_needed(settings, now=FIXED_NOW, transport=transport)
+
+    assert first == SimRefreshOutcome(status="cache_save_failed", network_call_made=True)
+    assert second == SimRefreshOutcome(
+        status="refresh_attempt_suppressed",
+        network_call_made=False,
+    )
+    assert requests == 1
+    assert load_token_cache(settings.cache_path) == original
+    assert _attempt_marker(settings.cache_path).exists()
+
+
+@pytest.mark.anyio
+async def test_concurrent_cache_change_is_never_overwritten_by_refresh_result(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path / "token.json")
+    save_token_cache(
+        settings.cache_path,
+        _token(expires_at=FIXED_NOW + timedelta(minutes=1)),
+    )
+    concurrent = _token(
+        expires_at=FIXED_NOW + timedelta(minutes=30),
+        refresh_value=NEW_REFRESH_VALUE,
+    )
+    requests = 0
+
+    def concurrent_login(_request: httpx2.Request) -> httpx2.Response:
+        nonlocal requests
+        requests += 1
+        save_token_cache(settings.cache_path, concurrent)
+        return httpx2.Response(
+            200,
+            json={
+                "access_token": ROTATED_ACCESS_VALUE,
+                "refresh_token": ROTATED_REFRESH_VALUE,
+                "expires_in": 1200,
+            },
+        )
+
+    changed = await refresh_sim_token_if_needed(
+        settings,
+        now=FIXED_NOW,
+        transport=httpx2.MockTransport(concurrent_login),
+    )
+    next_run = await refresh_sim_token_if_needed(
+        settings,
+        now=FIXED_NOW,
+        transport=httpx2.MockTransport(
+            lambda _request: pytest.fail("fresh concurrent token must not be refreshed"),
+        ),
+    )
+
+    assert changed == SimRefreshOutcome(status="cache_changed", network_call_made=True)
+    assert next_run == SimRefreshOutcome(status="fresh", network_call_made=False)
+    assert requests == 1
+    assert load_token_cache(settings.cache_path) == concurrent
+    assert _attempt_marker(settings.cache_path).exists()
 
 
 @pytest.mark.anyio
@@ -223,9 +393,7 @@ async def test_cache_change_allows_one_new_refresh_attempt(tmp_path: Path) -> No
         ),
     )
 
-    marker = settings.cache_path.with_name(
-        f"{settings.cache_path.name}.sim-refresh-rejected",
-    )
+    marker = _attempt_marker(settings.cache_path)
     assert rejected == SimRefreshOutcome(status="refresh_rejected", network_call_made=True)
     assert recovered == SimRefreshOutcome(status="refreshed", network_call_made=True)
     assert marker.exists() is False

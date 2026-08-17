@@ -4,7 +4,7 @@
 
 **Goal:** Keep the owner-local Saxo SIM token refreshed through one safe launchd interval job while Saxo continues to accept its refresh token.
 
-**Architecture:** A one-shot CLI checks the SIM cache under a process lock. It refreshes only inside a five-minute margin, atomically saves the full rotated token, and records a cache-revision marker after rejection so later scheduled runs do not retry unchanged credentials. launchd runs the installed command every 60 seconds from a dedicated owner-only runtime.
+**Architecture:** A one-shot CLI checks the SIM cache under a process lock. It refreshes only inside a five-minute margin, durably records the cache revision before network work, refuses to overwrite a concurrently changed cache, and clears the marker only after the full rotated token is durably saved. launchd runs the installed command every 60 seconds from a dedicated owner-only runtime.
 
 **Tech stack:** Python 3.12+, AnyIO, httpx transport injection, Pydantic token models, macOS launchd, Notion Automations registry.
 
@@ -42,14 +42,15 @@ assert await refresh_sim_token_if_needed(settings, now=fixed_now) == SimRefreshO
 )
 assert saved.refresh_token == "rotated-refresh"
 assert second_rejected_run == SimRefreshOutcome(
-    status="refresh_rejected_unchanged",
+    status="refresh_attempt_suppressed",
     network_call_made=False,
 )
 ```
 
 Use a real temporary token cache and an `httpx.MockTransport` only at the Saxo token endpoint.
 Prove fresh-cache no-op, near-expiry refresh, rotated-token save, wrong-environment refusal,
-non-refreshable refusal, owner-only marker mode, rejection suppression, and cache-change recovery.
+non-refreshable refusal, owner-only attempt-marker mode, rejection suppression, marker-write and
+cache-save failure, concurrent-cache preservation, and cache-change recovery.
 
 - [ ] **Step 2: Run RED**
 
@@ -76,14 +77,20 @@ type SimRefreshStatus = Literal[
     "wrong_environment",
     "login_required",
     "refresh_rejected",
-    "refresh_rejected_unchanged",
+    "refresh_attempt_suppressed",
+    "attempt_marker_failed",
+    "cache_save_failed",
+    "cache_changed",
+    "marker_clear_failed",
 ]
 ```
 
 Acquire an owner-only `flock` beside the cache. Read only through `inspect_token_cache`. Compare the
-expiry to `now + minimum_validity`. Before a network call, stop if the rejection marker contains the
-current cache revision. On success, call `save_token_cache` with the complete refreshed token and
-remove the marker. On `OAuthRequestError`, atomically write only the current revision to the marker.
+expiry to `now + minimum_validity`. Before a network call, stop if the attempt marker contains the
+current cache revision; otherwise durably write that revision before the request. Retain it for
+rejection, unknown result, or save failure. After the response, compare the cache revision again and
+never overwrite a concurrent update. On success, call `save_token_cache` with the complete refreshed
+token, sync and verify the cache, and only then remove the marker.
 
 - [ ] **Step 4: Run GREEN twice**
 
