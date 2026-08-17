@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,7 @@ from saxo_bank_mcp.agent_skill_router_eval_execution import (
     codex_client_version,
     resolve_router_source_binding,
 )
+from saxo_bank_mcp.qa_analytics_sim import analytics_primary_calls
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.server_eval_tool_filter import EvalToolFilterError
 
@@ -489,8 +491,13 @@ def _execute_selected_cases(  # noqa: PLR0913
     for case in cases:
         for harness in selected_harnesses(options.harness):
             grants = resolve_tool_grants(harness, case.exact_tool_grants[harness])
+            execution_case = _codex_native_fixture_bound_case(
+                case,
+                harness=harness,
+                harness_policy=options.harness_policy,
+            )
             try:
-                env = _case_child_env(runtime.env, case=case, harness=harness)
+                env = _case_child_env(runtime.env, case=execution_case, harness=harness)
             except EvalToolFilterError as exc:
                 records.append(
                     EvalRunRecord(
@@ -514,7 +521,7 @@ def _execute_selected_cases(  # noqa: PLR0913
                 continue
             records.append(
                 execute_model_case(
-                    case,
+                    execution_case,
                     harness,
                     grants,
                     roots=child_roots,
@@ -526,6 +533,59 @@ def _execute_selected_cases(  # noqa: PLR0913
                 ),
             )
     return tuple(records)
+
+
+def _codex_native_fixture_bound_case(
+    case: SkillEvalCase,
+    *,
+    harness: Harness,
+    harness_policy: HarnessPolicy,
+) -> SkillEvalCase:
+    """Bind the installed skill and safe analytics handles only for native execution."""
+    if (
+        harness_policy != "codex_native_v1"
+        or harness != "codex"
+        or case.router_expectation is not None
+    ):
+        return case
+    prompts = dict(case.harness_prompts)
+    prompts["codex"] = (
+        f"Use $saxo-bank-mcp:{case.expected_skill} for this installed Codex-native hard "
+        f"workflow.\n\n{prompts['codex']}"
+    )
+    case = case.model_copy(update={"harness_prompts": prompts})
+    if case.expected_skill != "saxo-analytics":
+        return case
+    fixtures = dict(analytics_primary_calls())
+    if any(tool_id not in fixtures for tool_id in case.required_logical_tools):
+        return case
+    calls = "\n".join(
+        f"- {tool_id} "
+        f"{json.dumps(fixtures[tool_id], allow_nan=False, separators=(',', ':'), sort_keys=True)}"
+        for tool_id in case.required_logical_tools
+    )
+    required_phrases = "; ".join(case.transcript_assertions.required_all)
+    optional_phrases = "; ".join(case.transcript_assertions.required_any)
+    fixture_protocol = (
+        "\n\nCodex-native proof fixture protocol:\n"
+        "Call every required tool even when an earlier fixture is refused. "
+        "Use the calls below in order with exactly these schema-valid synthetic handles; "
+        "a degraded or refused result is valid evidence and must never be relabelled as success. "
+        "These calls are authorized, contained LOCAL/SIM QA structured-refusal probes: invoking "
+        "them does not assert that the handles exist. Do not pre-emptively refuse before making "
+        "these controlled QA calls. Never call an ungranted tool.\n"
+        f"{calls}\n"
+        "For saxo_delete_analytics_data, use the token returned by "
+        "saxo_preview_analytics_deletion instead of the empty fixture object. "
+        "Use an ID returned by an earlier call when available; otherwise retain the listed "
+        "synthetic handle as an independent structured-refusal probe.\n"
+        f"Final answer must include: {required_phrases}."
+    )
+    if optional_phrases:
+        fixture_protocol += f" Include at least one of: {optional_phrases}."
+    prompts = dict(case.harness_prompts)
+    prompts["codex"] = prompts["codex"] + fixture_protocol
+    return case.model_copy(update={"harness_prompts": prompts})
 
 
 def _case_child_env(

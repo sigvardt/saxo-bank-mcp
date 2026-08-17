@@ -342,11 +342,12 @@ def _seed_codex_native_cli_home(
             raise MatrixEnvError("codex_file_auth_missing")
     _seed_retained_plugin_registration(runtime, retained_codex_home, None)
     if retained_codex_plugin_root is not None:
-        _seed_codex_plugin_tree(
+        contained_plugin = _seed_codex_plugin_tree(
             runtime,
             retained_codex_home=retained_codex_home,
             retained_plugin_root=retained_codex_plugin_root,
         )
+        _write_codex_native_plugin_config(runtime, contained_plugin)
     for path in (runtime.home, runtime.codex_home):
         path.chmod(OWNER_DIR_MODE)
 
@@ -779,7 +780,7 @@ def _seed_codex_plugin_tree(
     *,
     retained_codex_home: Path | None,
     retained_plugin_root: Path,
-) -> None:
+) -> Path:
     """Byte-exact owner-only copy of retained installed plugin into disposable CODEX_HOME."""
     plugin = retained_plugin_root.expanduser()
     if plugin.is_symlink():
@@ -794,11 +795,85 @@ def _seed_codex_plugin_tree(
         home = retained_codex_home.expanduser().resolve()
         if plugin_resolved.is_relative_to(home):
             relative = plugin_resolved.relative_to(home)
-            _copy_owner_only_tree(plugin_resolved, runtime.codex_home / relative)
-            return
+            target = runtime.codex_home / relative
+            _copy_owner_only_tree(plugin_resolved, target)
+            return target
     # Fallback placement preserves plugins/cache layout without absolute path leakage.
     target = runtime.codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
     _copy_owner_only_tree(plugin_resolved, target)
+    return target
+
+
+def _write_codex_native_plugin_config(
+    runtime: MatrixIsolatedRuntime,
+    contained_plugin: Path,
+) -> None:
+    """Bind native Codex registration to the contained exact plugin, never deleted install input."""
+    try:
+        plugin = contained_plugin.resolve(strict=True)
+        if not plugin.is_relative_to(runtime.codex_home.resolve(strict=True)):
+            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
+        marketplace_raw: object = json.loads(
+            (plugin / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+        )
+        plugin_raw: object = json.loads(
+            (plugin / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(marketplace_raw, dict) or not isinstance(plugin_raw, dict):
+            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
+        marketplace = cast("dict[str, object]", marketplace_raw)
+        plugin_document = cast("dict[str, object]", plugin_raw)
+        marketplace_name = marketplace.get("name")
+        plugin_name = plugin_document.get("name")
+        listed = marketplace.get("plugins")
+        if (
+            not isinstance(marketplace_name, str)
+            or not marketplace_name
+            or not isinstance(plugin_name, str)
+            or not plugin_name
+            or not isinstance(listed, list)
+            or not any(
+                isinstance(entry, dict)
+                and cast("dict[str, object]", entry).get("name") == plugin_name
+                for entry in cast("list[object]", listed)
+            )
+        ):
+            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
+        config = (
+            f"[marketplaces.{json.dumps(marketplace_name)}]\n"
+            'source_type = "local"\n'
+            f"source = {json.dumps(str(plugin))}\n\n"
+            f"[plugins.{json.dumps(f'{plugin_name}@{marketplace_name}')}]\n"
+            "enabled = true\n"
+        ).encode()
+        config_path = runtime.codex_home / "config.toml"
+        if config_path.is_symlink():
+            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
+        descriptor, pending_raw = tempfile.mkstemp(
+            prefix=".config-native-",
+            dir=runtime.codex_home,
+        )
+        pending = Path(pending_raw)
+        try:
+            os.fchmod(descriptor, OWNER_FILE_MODE)
+            _write_all_and_fsync(descriptor, config)
+            os.close(descriptor)
+            descriptor = -1
+            pending.replace(config_path)
+            directory = os.open(runtime.codex_home, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            with suppress(OSError):
+                pending.unlink(missing_ok=True)
+    except MatrixEnvError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise MatrixEnvError("codex_plugin_config_failed") from exc
 
 
 def _copy_owner_only_tree(source: Path, target: Path) -> None:

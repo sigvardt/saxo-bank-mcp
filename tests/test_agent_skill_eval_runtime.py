@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import stat
+import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -181,6 +182,29 @@ def _seed_retained_plugin_homes(tmp_path: Path) -> tuple[Path, Path, Path]:
     skill.parent.mkdir(parents=True)
     skill.write_text("# retained plugin\n", encoding="utf-8")
     skill.chmod(0o600)
+    marketplace_manifest = plugin_root / ".agents" / "plugins" / "marketplace.json"
+    marketplace_manifest.parent.mkdir(parents=True)
+    marketplace_manifest.write_text(
+        json.dumps(
+            {
+                "name": "sigvardt",
+                "plugins": [
+                    {
+                        "name": "saxo-bank-mcp",
+                        "source": {"source": "local", "path": "."},
+                        "version": "0.1.0",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    plugin_manifest = plugin_root / ".codex-plugin" / "plugin.json"
+    plugin_manifest.parent.mkdir()
+    plugin_manifest.write_text(
+        json.dumps({"name": "saxo-bank-mcp", "version": "0.1.0"}),
+        encoding="utf-8",
+    )
     (plugin_root / "history.jsonl").write_text("raw-transcript\n", encoding="utf-8")
     claude_cfg = claude / ".claude"
     claude_cfg.mkdir()
@@ -425,6 +449,13 @@ def test_prepare_codex_native_eval_runtime_never_reads_or_copies_claude_state(
     try:
         assert (runtime.codex_home / "auth.json").is_file()
         assert (runtime.codex_home / "config.toml").is_file()
+        config_path = runtime.codex_home / "config.toml"
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        marketplace = config["marketplaces"]["sigvardt"]
+        contained_marketplace = Path(marketplace["source"]).resolve()
+        assert contained_marketplace.is_relative_to(runtime.codex_home.resolve())
+        assert (contained_marketplace / ".agents/plugins/marketplace.json").is_file()
+        assert str(retained_codex.resolve()) not in config_path.read_text(encoding="utf-8")
         assert not (runtime.home / ".claude").exists()
         assert "CLAUDE_CONFIG_DIR" not in runtime.env
         assert "CLAUDE_SECURESTORAGE_CONFIG_DIR" not in runtime.env
@@ -518,6 +549,72 @@ def test_codex_native_default_selection_excludes_live_cases(tmp_path: Path) -> N
         "router-approval-bypass",
         "router-live-trade",
     } & {record["case_id"] for record in payload["records"]}
+
+
+def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, _claude_src = _seed_cli_auth_sources(tmp_path)
+    captured_prompts: list[str] = []
+
+    def fake_execute_model_case(  # noqa: PLR0913
+        case: SkillEvalCase,
+        harness: str,
+        grants: tuple[str, ...],
+        *,
+        roots: HarnessRoots,
+        env: dict[str, str],
+        expected_router_source_sha256: str | None = None,
+        process_manager: object | None = None,
+    ) -> EvalRunRecord:
+        _ = (grants, roots, env, expected_router_source_sha256, process_manager)
+        captured_prompts.append(case.harness_prompts["codex"])
+        return _passed_record(case, harness)
+
+    def fake_codex_client_version(**_kwargs: object) -> str:
+        return "codex-test"
+
+    monkeypatch.setattr(eval_runner, "codex_client_version", fake_codex_client_version)
+    monkeypatch.setattr(eval_runner, "execute_model_case", fake_execute_model_case)
+    options = EvalRunOptions(
+        harness="codex",
+        case_id="artifact-delivery",
+        tag=None,
+        environment=None,
+        case_root=ROOT / "evals",
+        codex_plugin_root=ROOT,
+        claude_plugin_root=ROOT,
+        codex_home=None,
+        claude_home=None,
+        out=tmp_path / "out" / "evals.json",
+        dry_run=False,
+        nonzero_on_skip=True,
+        credential_mode="ephemeral-owner-only-copy",
+        source_codex_home=codex_src,
+        source_claude_home=None,
+        harness_policy="codex_native_v1",
+    )
+
+    code = run_eval_suite(options)
+
+    assert code == 0
+    assert len(captured_prompts) == 1
+    prompt = captured_prompts[0]
+    assert prompt.startswith(
+        "Use $saxo-bank-mcp:saxo-analytics for this installed Codex-native hard workflow."
+    )
+    assert (
+        'saxo_render_analysis {"analysis_id":"an_00000000000040008000000000000000",'
+        '"template_id":"relative_performance"}'
+    ) in prompt
+    assert (
+        'saxo_manage_analysis_job {"action":"check","job_id":"jb_00000000000040008000000000000000"}'
+    ) in prompt
+    assert "Call every required tool even when an earlier fixture is refused" in prompt
+    assert "Do not pre-emptively refuse before making these controlled QA calls" in prompt
+    assert "Final answer must include: analysis_id; owner-only; quality warnings" in prompt
 
 
 def test_codex_native_policy_rejects_explicit_live_selection(tmp_path: Path) -> None:
