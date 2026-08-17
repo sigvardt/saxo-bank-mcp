@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import tempfile
-from dataclasses import dataclass
+from collections.abc import AsyncGenerator, Generator
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, TypedDict
 
+from anyio.to_thread import run_sync
 from pydantic import TypeAdapter, ValidationError
 
 from saxo_bank_mcp.auth import SaxoPendingAuthorization, SaxoTokenSet
@@ -23,6 +27,7 @@ _SYNC_DIR_NAMES: Final = (
 _APPLE_ICLOUD_DIR: Final = Path("Library/Mobile Documents")
 _TOKEN_ADAPTER: Final = TypeAdapter(SaxoTokenSet)
 _PENDING_ADAPTER: Final = TypeAdapter(SaxoPendingAuthorization)
+_WRITE_LOCK_FLAGS: Final = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +38,18 @@ class TokenCachePathError(Exception):
     def __str__(self) -> str:
         """Return a safe cache-path refusal message."""
         return f"refusing token cache path: {self.reason}"
+
+
+@dataclass(slots=True)
+class TokenCacheWriteLease:
+    _cache_path: Path = field(repr=False)
+    _active: bool = field(default=True, repr=False)
+
+    def deactivate(self) -> None:
+        self._active = False
+
+    def permits(self, path: Path) -> bool:
+        return self._active and self._cache_path == _canonical_cache_path(path)
 
 
 class TokenCacheInspection(TypedDict):
@@ -68,8 +85,62 @@ def token_cache_path(path: Path | None = None, *, repo_root: Path | None = None)
     return resolved
 
 
-def save_token_cache(path: Path, token: SaxoTokenSet) -> None:
+def save_token_cache(
+    path: Path,
+    token: SaxoTokenSet,
+    *,
+    lease: TokenCacheWriteLease | None = None,
+) -> None:
+    if lease is None:
+        with token_cache_write_lock(path) as acquired:
+            save_token_cache(path, token, lease=acquired)
+        return
+    _require_active_write_lease(path, lease)
     _write_owner_only(path, token.model_dump_json())
+
+
+@contextmanager
+def token_cache_write_lock(path: Path) -> Generator[TokenCacheWriteLease]:
+    lock_fd = _open_token_cache_write_lock(path)
+    acquired = False
+    lease: TokenCacheWriteLease | None = None
+    try:
+        _lock_exclusive(lock_fd)
+        acquired = True
+        lease = TokenCacheWriteLease(_canonical_cache_path(path))
+        yield lease
+    finally:
+        if lease is not None:
+            lease.deactivate()
+        if acquired:
+            _unlock_and_close(lock_fd)
+        else:
+            os.close(lock_fd)
+
+
+@asynccontextmanager
+async def async_token_cache_write_lock(
+    path: Path,
+) -> AsyncGenerator[TokenCacheWriteLease]:
+    lock_fd = _open_token_cache_write_lock(path)
+    acquired = False
+    lease: TokenCacheWriteLease | None = None
+    try:
+        await run_sync(_lock_exclusive, lock_fd)
+        acquired = True
+        lease = TokenCacheWriteLease(_canonical_cache_path(path))
+        yield lease
+    finally:
+        if lease is not None:
+            lease.deactivate()
+        if acquired:
+            _unlock_and_close(lock_fd)
+        else:
+            os.close(lock_fd)
+
+
+def token_cache_write_lock_path(cache_path: Path) -> Path:
+    return cache_path.with_name(f"{cache_path.name}.write.lock")
 
 
 def load_token_cache(path: Path) -> SaxoTokenSet | None:
@@ -153,6 +224,35 @@ def _write_owner_only(path: Path, text: str) -> None:
             tmp_path.unlink(missing_ok=True)
         raise
     path.chmod(0o600)
+
+
+def _open_token_cache_write_lock(cache_path: Path) -> int:
+    lock_path = token_cache_write_lock_path(cache_path)
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path.parent.chmod(0o700)
+    lock_fd = os.open(lock_path, _WRITE_LOCK_FLAGS, 0o600)
+    os.fchmod(lock_fd, 0o600)
+    return lock_fd
+
+
+def _canonical_cache_path(path: Path) -> Path:
+    return path.resolve(strict=False)
+
+
+def _require_active_write_lease(path: Path, lease: TokenCacheWriteLease) -> None:
+    if not lease.permits(path):
+        raise ValueError("token cache write lease unavailable")
+
+
+def _lock_exclusive(lock_fd: int) -> None:
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+
+
+def _unlock_and_close(lock_fd: int) -> None:
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 
 def _common_sync_roots() -> tuple[Path, ...]:

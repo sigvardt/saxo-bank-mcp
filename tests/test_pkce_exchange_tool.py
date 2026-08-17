@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from saxo_bank_mcp.token_cache import (
     load_token_cache,
     pending_authorization_path,
     save_pending_authorization,
+    save_token_cache,
 )
 
 
@@ -258,3 +260,68 @@ async def test_refresh_treats_corrupt_token_cache_as_auth_required(
     assert payload is not None
     assert payload["status"] == "auth_required"
     assert payload["reason"] == "token_cache_unreadable"
+
+
+@pytest.mark.anyio
+async def test_refresh_does_not_overwrite_writer_started_during_token_post(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = configure_sim_auth(tmp_path, monkeypatch)
+    expired = SaxoTokenSet(
+        access_token="expired-access",  # noqa: S106
+        refresh_token="expired-refresh",  # noqa: S106
+        code_verifier="v" * 43,
+        environment="SIM",
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+    concurrent = SaxoTokenSet(
+        access_token="later-login-access",  # noqa: S106
+        refresh_token="later-login-refresh",  # noqa: S106
+        code_verifier="v" * 43,
+        environment="SIM",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    rotated = SaxoTokenSet(
+        access_token="rotated-access",  # noqa: S106
+        refresh_token="rotated-refresh",  # noqa: S106
+        code_verifier="v" * 43,
+        environment="SIM",
+        expires_at=datetime.now(UTC) + timedelta(minutes=20),
+    )
+    save_token_cache(settings.cache_path, expired)
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer_errors: list[Exception] = []
+    writer: threading.Thread | None = None
+
+    def write_concurrent_token() -> None:
+        writer_started.set()
+        try:
+            save_token_cache(settings.cache_path, concurrent)
+        except Exception as error:  # noqa: BLE001  # pragma: no cover
+            writer_errors.append(error)
+        finally:
+            writer_done.set()
+
+    async def interleaved_refresh(
+        _settings: SimAuthSettings,
+        _token: SaxoTokenSet,
+    ) -> SaxoTokenSet:
+        nonlocal writer
+        writer = threading.Thread(target=write_concurrent_token, daemon=True)
+        writer.start()
+        assert writer_started.wait(timeout=1)
+        writer_done.wait(timeout=0.25)
+        return rotated
+
+    monkeypatch.setattr(mcp_auth_tools, "refresh_access_token", interleaved_refresh)
+
+    result = await mcp_auth_tools.saxo_refresh_token()
+
+    assert writer is not None
+    writer.join(timeout=2)
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert result["status"] == "token_refreshed"
+    assert load_token_cache(settings.cache_path) == concurrent

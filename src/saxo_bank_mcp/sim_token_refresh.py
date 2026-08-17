@@ -16,7 +16,12 @@ from anyio.to_thread import run_sync
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import SimAuthSettings
 from saxo_bank_mcp.oauth import OAuthRequestError, refresh_access_token
-from saxo_bank_mcp.token_cache import inspect_token_cache, save_token_cache
+from saxo_bank_mcp.token_cache import (
+    TokenCacheWriteLease,
+    async_token_cache_write_lock,
+    inspect_token_cache,
+    save_token_cache,
+)
 
 type SimRefreshStatus = Literal[
     "fresh",
@@ -55,49 +60,52 @@ async def refresh_sim_token_if_needed(
     async with _REFRESH_LOCK:
         lock_fd = await _acquire_refresh_process_lock(settings.cache_path)
         try:
-            checked_at = datetime.now(UTC) if now is None else now
-            inspection = inspect_token_cache(settings.cache_path)
-            token = inspection["token"]
-            if token is None:
-                return SimRefreshOutcome("token_missing", network_call_made=False)
-            no_network_status = _cached_token_no_network_status(
-                token,
-                checked_at=checked_at,
-                minimum_validity=minimum_validity,
-            )
-            if no_network_status is not None:
-                return SimRefreshOutcome(no_network_status, network_call_made=False)
-
-            revision = _cache_revision(settings.cache_path)
-            if revision is None:
-                return SimRefreshOutcome("attempt_marker_failed", network_call_made=False)
-            marker_path = _attempt_marker_path(settings.cache_path)
-            if _read_attempt_revision(marker_path) == revision:
-                return SimRefreshOutcome(
-                    "refresh_attempt_suppressed",
-                    network_call_made=False,
+            async with async_token_cache_write_lock(settings.cache_path) as write_lease:
+                checked_at = datetime.now(UTC) if now is None else now
+                inspection = inspect_token_cache(settings.cache_path)
+                token = inspection["token"]
+                if token is None:
+                    return SimRefreshOutcome("token_missing", network_call_made=False)
+                no_network_status = _cached_token_no_network_status(
+                    token,
+                    checked_at=checked_at,
+                    minimum_validity=minimum_validity,
                 )
-            try:
-                _write_attempt_revision(marker_path, revision)
-            except OSError:
-                return SimRefreshOutcome("attempt_marker_failed", network_call_made=False)
-            return await _refresh_after_attempt_marker(
-                settings,
-                token=token,
-                original_revision=revision,
-                marker_path=marker_path,
-                transport=transport,
-            )
+                if no_network_status is not None:
+                    return SimRefreshOutcome(no_network_status, network_call_made=False)
+
+                revision = _cache_revision(settings.cache_path)
+                if revision is None:
+                    return SimRefreshOutcome("attempt_marker_failed", network_call_made=False)
+                marker_path = _attempt_marker_path(settings.cache_path)
+                if _read_attempt_revision(marker_path) == revision:
+                    return SimRefreshOutcome(
+                        "refresh_attempt_suppressed",
+                        network_call_made=False,
+                    )
+                try:
+                    _write_attempt_revision(marker_path, revision)
+                except OSError:
+                    return SimRefreshOutcome("attempt_marker_failed", network_call_made=False)
+                return await _refresh_after_attempt_marker(
+                    settings,
+                    token=token,
+                    original_revision=revision,
+                    marker_path=marker_path,
+                    write_lease=write_lease,
+                    transport=transport,
+                )
         finally:
             _unlock_and_close(lock_fd)
 
 
-async def _refresh_after_attempt_marker(
+async def _refresh_after_attempt_marker(  # noqa: PLR0913
     settings: SimAuthSettings,
     *,
     token: SaxoTokenSet,
     original_revision: CacheRevision,
     marker_path: Path,
+    write_lease: TokenCacheWriteLease,
     transport: httpx2.AsyncBaseTransport | None,
 ) -> SimRefreshOutcome:
     try:
@@ -107,7 +115,7 @@ async def _refresh_after_attempt_marker(
 
     if _cache_revision(settings.cache_path) != original_revision:
         return SimRefreshOutcome("cache_changed", network_call_made=True)
-    save_failure = _save_refreshed_token(settings.cache_path, refreshed)
+    save_failure = _save_refreshed_token(settings.cache_path, refreshed, write_lease)
     if save_failure is not None:
         return SimRefreshOutcome(save_failure, network_call_made=True)
     try:
@@ -120,9 +128,10 @@ async def _refresh_after_attempt_marker(
 def _save_refreshed_token(
     cache_path: Path,
     refreshed: SaxoTokenSet,
+    write_lease: TokenCacheWriteLease,
 ) -> Literal["cache_save_failed", "cache_changed"] | None:
     try:
-        save_token_cache(cache_path, refreshed)
+        save_token_cache(cache_path, refreshed, lease=write_lease)
         _sync_file_and_parent(cache_path)
     except OSError:
         return "cache_save_failed"

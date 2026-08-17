@@ -14,6 +14,8 @@ from saxo_bank_mcp.token_cache import (
     delete_pending_authorization,
     save_token_cache,
     token_cache_path,
+    token_cache_write_lock,
+    token_cache_write_lock_path,
 )
 
 OWNER_FILE_MODE = 0o600
@@ -85,7 +87,27 @@ def test_token_cache_save_uses_owner_only_file_mode(
 
     assert stat.S_IMODE(cache.stat().st_mode) == OWNER_FILE_MODE
     assert stat.S_IMODE(cache.parent.stat().st_mode) == OWNER_DIR_MODE
+    assert stat.S_IMODE(token_cache_write_lock_path(cache).stat().st_mode) == OWNER_FILE_MODE
     assert list(cache.parent.glob(f".{cache.name}.*.tmp")) == []
+
+
+def test_token_cache_write_lease_cannot_be_reused_after_unlock(tmp_path: Path) -> None:
+    cache = tmp_path / "state/token.json"
+    first = SaxoTokenSet(
+        access_token="first-access",  # noqa: S106
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    replacement = SaxoTokenSet(
+        access_token="replacement-access",  # noqa: S106
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+    with token_cache_write_lock(cache) as lease:
+        assert str(cache) not in repr(lease)
+        save_token_cache(cache, first, lease=lease)
+
+    with pytest.raises(ValueError, match="write lease unavailable"):
+        save_token_cache(cache, replacement, lease=lease)
 
 
 @pytest.mark.anyio

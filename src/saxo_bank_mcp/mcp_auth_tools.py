@@ -57,6 +57,7 @@ from saxo_bank_mcp.session import (
     read_session_capabilities,
 )
 from saxo_bank_mcp.token_cache import (
+    async_token_cache_write_lock,
     delete_pending_authorization,
     pending_authorization_path,
     save_pending_authorization,
@@ -163,8 +164,9 @@ async def saxo_exchange_pkce_code(
         )
     except OAuthRequestError as error:
         return oauth_error("saxo_exchange_pkce_code", error)
-    save_token_cache(settings.cache_path, token)
-    delete_pending_authorization(pending_authorization_path(settings.cache_path))
+    async with async_token_cache_write_lock(settings.cache_path) as write_lease:
+        save_token_cache(settings.cache_path, token, lease=write_lease)
+        delete_pending_authorization(pending_authorization_path(settings.cache_path))
     return {
         "status": "token_cached",
         "tool_name": "saxo_exchange_pkce_code",
@@ -181,19 +183,20 @@ async def saxo_refresh_token() -> ToolResult:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
         return settings_error("saxo_refresh_token", error)
-    cache_check = cached_token_for_tool("saxo_refresh_token", settings.cache_path)
-    match cache_check:
-        case CachedTokenBlocked(result=result):
-            return result
-        case CachedTokenReady(token=token):
-            pass
-    if token.refresh_material() is None:
-        return auth_required("saxo_refresh_token", "token_not_refreshable")
-    try:
-        refreshed = await refresh_access_token(settings, token)
-    except OAuthRequestError as error:
-        return oauth_error("saxo_refresh_token", error)
-    save_token_cache(settings.cache_path, refreshed)
+    async with async_token_cache_write_lock(settings.cache_path) as write_lease:
+        cache_check = cached_token_for_tool("saxo_refresh_token", settings.cache_path)
+        match cache_check:
+            case CachedTokenBlocked(result=result):
+                return result
+            case CachedTokenReady(token=token):
+                pass
+        if token.refresh_material() is None:
+            return auth_required("saxo_refresh_token", "token_not_refreshable")
+        try:
+            refreshed = await refresh_access_token(settings, token)
+        except OAuthRequestError as error:
+            return oauth_error("saxo_refresh_token", error)
+        save_token_cache(settings.cache_path, refreshed, lease=write_lease)
     return {
         "status": "token_refreshed",
         "tool_name": "saxo_refresh_token",
@@ -221,22 +224,26 @@ async def _read_sim_session_capabilities() -> ToolResult:
         settings = resolve_sim_auth_settings(require_redirect=False)
     except SimAuthSettingsError as error:
         return settings_error("saxo_get_session_capabilities", error)
-    cache_check = cached_token_for_tool("saxo_get_session_capabilities", settings.cache_path)
-    match cache_check:
-        case CachedTokenBlocked(result=result):
-            return result
-        case CachedTokenReady(token=token):
-            pass
-    refreshed = False
-    if token.redacted_status()["is_expired"]:
-        if token.refresh_material() is None:
-            return auth_required("saxo_get_session_capabilities", "token_not_refreshable")
-        try:
-            token = await refresh_access_token(settings, token)
-        except OAuthRequestError as error:
-            return oauth_error("saxo_get_session_capabilities", error)
-        save_token_cache(settings.cache_path, token)
-        refreshed = True
+    async with async_token_cache_write_lock(settings.cache_path) as write_lease:
+        cache_check = cached_token_for_tool(
+            "saxo_get_session_capabilities",
+            settings.cache_path,
+        )
+        match cache_check:
+            case CachedTokenBlocked(result=result):
+                return result
+            case CachedTokenReady(token=token):
+                pass
+        refreshed = False
+        if token.redacted_status()["is_expired"]:
+            if token.refresh_material() is None:
+                return auth_required("saxo_get_session_capabilities", "token_not_refreshable")
+            try:
+                token = await refresh_access_token(settings, token)
+            except OAuthRequestError as error:
+                return oauth_error("saxo_get_session_capabilities", error)
+            save_token_cache(settings.cache_path, token, lease=write_lease)
+            refreshed = True
     try:
         capabilities = await read_session_capabilities(settings, token)
     except SessionRequestError as error:

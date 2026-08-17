@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -288,7 +289,11 @@ async def test_cache_save_failure_retains_attempt_marker_and_suppresses_retry(
             },
         )
 
-    def failed_save(_path: Path, _token_to_save: SaxoTokenSet) -> None:
+    def failed_save(
+        _path: Path,
+        _token_to_save: SaxoTokenSet,
+        **_kwargs: object,
+    ) -> None:
         raise OSError("injected cache save failure")
 
     monkeypatch.setattr(sim_token_refresh, "save_token_cache", failed_save)
@@ -322,10 +327,14 @@ async def test_concurrent_cache_change_is_never_overwritten_by_refresh_result(
     )
     requests = 0
 
-    def concurrent_login(_request: httpx2.Request) -> httpx2.Response:
+    def uncoordinated_external_write(_request: httpx2.Request) -> httpx2.Response:
         nonlocal requests
         requests += 1
-        save_token_cache(settings.cache_path, concurrent)
+        settings.cache_path.write_text(
+            f"{concurrent.model_dump_json()}\n",
+            encoding="utf-8",
+        )
+        settings.cache_path.chmod(OWNER_FILE_MODE)
         return httpx2.Response(
             200,
             json={
@@ -338,7 +347,7 @@ async def test_concurrent_cache_change_is_never_overwritten_by_refresh_result(
     changed = await refresh_sim_token_if_needed(
         settings,
         now=FIXED_NOW,
-        transport=httpx2.MockTransport(concurrent_login),
+        transport=httpx2.MockTransport(uncoordinated_external_write),
     )
     next_run = await refresh_sim_token_if_needed(
         settings,
@@ -353,6 +362,77 @@ async def test_concurrent_cache_change_is_never_overwritten_by_refresh_result(
     assert requests == 1
     assert load_token_cache(settings.cache_path) == concurrent
     assert _attempt_marker(settings.cache_path).exists()
+
+
+@pytest.mark.anyio
+async def test_late_legitimate_writer_is_not_overwritten_after_revision_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path / "token.json")
+    save_token_cache(
+        settings.cache_path,
+        _token(expires_at=FIXED_NOW + timedelta(minutes=1)),
+    )
+    concurrent = _token(
+        expires_at=FIXED_NOW + timedelta(minutes=30),
+        refresh_value=NEW_REFRESH_VALUE,
+    )
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer_errors: list[Exception] = []
+    writer: threading.Thread | None = None
+    real_save = sim_token_refresh._save_refreshed_token  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    def write_concurrent_token() -> None:
+        writer_started.set()
+        try:
+            save_token_cache(settings.cache_path, concurrent)
+        except Exception as error:  # noqa: BLE001  # pragma: no cover
+            writer_errors.append(error)
+        finally:
+            writer_done.set()
+
+    def interleave_after_revision_check(
+        cache_path: Path,
+        refreshed: SaxoTokenSet,
+        *args: object,
+        **kwargs: object,
+    ) -> str | None:
+        nonlocal writer
+        writer = threading.Thread(target=write_concurrent_token, daemon=True)
+        writer.start()
+        assert writer_started.wait(timeout=1)
+        writer_done.wait(timeout=0.25)
+        return real_save(cache_path, refreshed, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        sim_token_refresh,
+        "_save_refreshed_token",
+        interleave_after_revision_check,
+    )
+
+    outcome = await refresh_sim_token_if_needed(
+        settings,
+        now=FIXED_NOW,
+        transport=httpx2.MockTransport(
+            lambda _request: httpx2.Response(
+                200,
+                json={
+                    "access_token": ROTATED_ACCESS_VALUE,
+                    "refresh_token": ROTATED_REFRESH_VALUE,
+                    "expires_in": 1200,
+                },
+            ),
+        ),
+    )
+
+    assert writer is not None
+    writer.join(timeout=2)
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert outcome == SimRefreshOutcome(status="refreshed", network_call_made=True)
+    assert load_token_cache(settings.cache_path) == concurrent
 
 
 @pytest.mark.anyio

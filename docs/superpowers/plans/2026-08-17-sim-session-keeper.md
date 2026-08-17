@@ -4,7 +4,7 @@
 
 **Goal:** Keep the owner-local Saxo SIM token refreshed through one safe launchd interval job while Saxo continues to accept its refresh token.
 
-**Architecture:** A one-shot CLI checks the SIM cache under a process lock. It refreshes only inside a five-minute margin, durably records the cache revision before network work, refuses to overwrite a concurrently changed cache, and clears the marker only after the full rotated token is durably saved. launchd runs the installed command every 60 seconds from a dedicated owner-only runtime.
+**Architecture:** A one-shot CLI checks the SIM cache under its process lock and the shared token-cache write lock. It refreshes only inside a five-minute margin, durably records the cache revision before network work, refuses to overwrite a concurrently changed cache, and clears the marker only after the full rotated token is durably saved. All legitimate SIM cache writers use the same owner-only cross-process lock, with an explicit non-reusable lease for saves already inside the lock. launchd runs the installed command every 60 seconds from a dedicated owner-only runtime.
 
 **Tech stack:** Python 3.12+, AnyIO, httpx transport injection, Pydantic token models, macOS launchd, Notion Automations registry.
 
@@ -16,6 +16,7 @@
 - Preserve rotated refresh tokens by saving the complete Saxo token response through `save_token_cache`.
 - Use `scripts/run-pytest` only, with `TMPDIR`, `TMP`, and `TEMP` set to `/Volumes/ssd_1/codex/tmp/saxo-bank-mcp-analytics`.
 - Keep runtime, logs, marker, lock, pending state, and token cache owner-only and outside the repository and cloud folders.
+- Keep the keeper process lock outermost. No other writer may acquire it after taking the shared cache-write lock.
 - Do not invoke Claude, codex-power, or subagents.
 
 ---
@@ -91,6 +92,12 @@ current cache revision; otherwise durably write that revision before the request
 rejection, unknown result, or save failure. After the response, compare the cache revision again and
 never overwrite a concurrent update. On success, call `save_token_cache` with the complete refreshed
 token, sync and verify the cache, and only then remove the marker.
+
+The keeper must hold the shared token-cache write lock across that complete transaction. Generic
+`save_token_cache` calls acquire the lock automatically; callers already holding it pass the active,
+path-bound lease to avoid re-entrant `flock`. The local SIM login callback, PKCE exchange, explicit
+refresh, session-capability refresh, entitlement refresh, and portal-token decision/write path all
+participate in the same lock protocol.
 
 - [ ] **Step 4: Run GREEN twice**
 
@@ -199,3 +206,37 @@ redacted status, network provenance, environment, capability-field names, and no
 Unload and load the exact label once. Verify the definition remains present, one label is loaded,
 the keeper exits cleanly when fresh, logs contain no secret findings, and there are zero LIVE or
 write calls. Read back the Knowledge Base project update and report the refresh-token limitation.
+
+---
+
+### Task 4: Close the post-check/pre-replace writer race
+
+**Files:**
+- Modify: `src/saxo_bank_mcp/token_cache.py`
+- Modify: `src/saxo_bank_mcp/sim_token_refresh.py`
+- Modify: SIM cache-writer modules and focused auth/session tests.
+
+- [ ] **Step 1: Reproduce the late window**
+
+Deterministically start a legitimate cache writer after the keeper's final revision check but before
+its replacement. RED must show the keeper overwriting the newer token.
+
+- [ ] **Step 2: Add the shared write-lock protocol**
+
+Add one owner-only cross-process cache-write lock. Hold it across the keeper transaction and across
+every read/refresh/write or read/decision/write path that can race. Use an explicit path-bound lease
+for saves already inside the lock; reject an expired lease rather than attempting a nested lock.
+Keep the existing keeper refresh lock and fixed lock order.
+
+- [ ] **Step 3: Prove all writer classes**
+
+Prove the late keeper window, portal decision/write, explicit refresh, local SIM login callback,
+ordinary PKCE/auth saves, keeper success/rejection, stale-lease refusal, owner-only permissions,
+thread completion without deadlock, and unchanged secret-safe output.
+
+- [ ] **Step 4: Verify and reinstall**
+
+Run focused tests twice, the broader auth/session suite, Ruff, BasedPyright, and privacy checks.
+Install the exact committed candidate, reload exactly one launchd label, and prove a local fresh
+RunAtLoad plus one real interval without a network request. Update and read back Automations and the
+Saxo project Knowledge Base row.

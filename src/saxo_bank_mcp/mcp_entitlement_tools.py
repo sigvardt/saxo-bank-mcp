@@ -34,7 +34,7 @@ from saxo_bank_mcp.mcp_tool_results import (
     settings_error,
 )
 from saxo_bank_mcp.oauth import OAuthRequestError, refresh_access_token
-from saxo_bank_mcp.token_cache import save_token_cache
+from saxo_bank_mcp.token_cache import async_token_cache_write_lock, save_token_cache
 
 ENTITLEMENTS_TOOL_DESCRIPTION: Final = (
     "Reads /port/v1/users/me/entitlements with EntitlementFieldSet=Default in SIM, "
@@ -99,24 +99,25 @@ async def _read_sim_entitlements() -> ToolResult:
             settings_error("saxo_get_entitlements", error),
             does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
         )
-    cache_check = cached_token_for_tool("saxo_get_entitlements", settings.cache_path)
-    if isinstance(cache_check, CachedTokenBlocked):
-        return entitlement_auth_result(
-            cache_check.result,
-            does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
-        )
-    token = cache_check.token
-    refreshed = False
-    if token.redacted_status()["is_expired"]:
-        try:
-            token = await refresh_access_token(settings, token)
-        except OAuthRequestError as error:
+    async with async_token_cache_write_lock(settings.cache_path) as write_lease:
+        cache_check = cached_token_for_tool("saxo_get_entitlements", settings.cache_path)
+        if isinstance(cache_check, CachedTokenBlocked):
             return entitlement_auth_result(
-                oauth_error("saxo_get_entitlements", error),
+                cache_check.result,
                 does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
             )
-        save_token_cache(settings.cache_path, token)
-        refreshed = True
+        token = cache_check.token
+        refreshed = False
+        if token.redacted_status()["is_expired"]:
+            try:
+                token = await refresh_access_token(settings, token)
+            except OAuthRequestError as error:
+                return entitlement_auth_result(
+                    oauth_error("saxo_get_entitlements", error),
+                    does_not_verify=ENTITLEMENTS_DOES_NOT_VERIFY,
+                )
+            save_token_cache(settings.cache_path, token, lease=write_lease)
+            refreshed = True
     try:
         entitlements = await read_user_entitlements(settings, token)
     except EntitlementsRequestError as error:

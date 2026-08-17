@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -8,7 +9,7 @@ import httpx2
 import pytest
 from fastmcp import Client
 
-from saxo_bank_mcp import mcp_auth_tools
+from saxo_bank_mcp import mcp_auth_tools, mcp_portal_token_tools
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import SIM_ENDPOINTS, SimAuthSettings
 from saxo_bank_mcp.server import mcp
@@ -78,6 +79,63 @@ async def test_cache_sim_access_token_writes_redacted_access_only_cache(
     assert payload["pending_authorization_deleted"] is False
     assert "inline access_token arguments" in str(payload["does_not_verify"])
     assert PORTAL_ACCESS_FIXTURE not in serialized
+
+
+def test_portal_cache_write_does_not_overwrite_later_legitimate_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
+    cache_path = tmp_path / ".local/state/saxo-bank-mcp/token-cache.json"
+    concurrent = SaxoTokenSet(
+        access_token="later-login-access",  # noqa: S106
+        refresh_token="later-login-refresh",  # noqa: S106
+        code_verifier="v" * 43,
+        environment="SIM",
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    writer_started = threading.Event()
+    writer_done = threading.Event()
+    writer_errors: list[Exception] = []
+    writer: threading.Thread | None = None
+    real_load = mcp_portal_token_tools.load_token_cache
+
+    def write_concurrent_token() -> None:
+        writer_started.set()
+        try:
+            save_token_cache(cache_path, concurrent)
+        except Exception as error:  # noqa: BLE001  # pragma: no cover
+            writer_errors.append(error)
+        finally:
+            writer_done.set()
+
+    def interleave_after_portal_read(path: Path) -> SaxoTokenSet | None:
+        nonlocal writer
+        existing = real_load(path)
+        writer = threading.Thread(target=write_concurrent_token, daemon=True)
+        writer.start()
+        assert writer_started.wait(timeout=1)
+        writer_done.wait(timeout=0.25)
+        return existing
+
+    monkeypatch.setattr(
+        mcp_portal_token_tools,
+        "load_token_cache",
+        interleave_after_portal_read,
+    )
+
+    result = mcp_portal_token_tools.saxo_cache_sim_access_token(
+        PORTAL_ACCESS_FIXTURE,
+        expires_in_seconds=300,
+    )
+
+    assert writer is not None
+    writer.join(timeout=2)
+    assert writer.is_alive() is False
+    assert writer_errors == []
+    assert result["status"] == "token_cached"
+    assert load_token_cache(cache_path) == concurrent
 
 
 @pytest.mark.anyio

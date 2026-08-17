@@ -18,6 +18,7 @@ from saxo_bank_mcp.token_cache import (
     load_token_cache,
     pending_authorization_path,
     save_token_cache,
+    token_cache_write_lock,
 )
 
 SIM_ACCESS_CACHE_TOOL_DESCRIPTION: Final = (
@@ -66,38 +67,42 @@ def saxo_cache_sim_access_token(
         environment="SIM",
         expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_seconds),
     )
-    existing = load_token_cache(settings.cache_path)
-    pending_path = pending_authorization_path(settings.cache_path)
-    pending_deleted = pending_path.exists()
-    existing_refresh_capable = (
-        existing.refresh_material() is not None if existing is not None else False
-    )
-    if not replace_existing_cache and (existing_refresh_capable or pending_deleted):
-        return {
-            "status": "cache_replace_blocked",
-            "tool_name": "saxo_cache_sim_access_token",
-            "environment": "SIM",
-            "scope_used": False,
-            "token_source": "sim_24_hour_portal_token",
-            "existing_refresh_capable_cache": existing_refresh_capable,
-            "pending_authorization_present": pending_deleted,
-            "network_call_made": False,
-            "next_action": (
-                "call saxo_cache_sim_access_token with replace_existing_cache=true only "
-                "after deciding to discard the existing SIM PKCE cache or pending login"
-            ),
-            "verifies": [
-                "existing token cache and pending PKCE state were left unchanged",
-                "raw access token was not echoed in the tool result",
-            ],
-            "does_not_verify": [
-                *EXCHANGED_DOES_NOT_VERIFY,
-                "inline access_token arguments may pass through agent context and MCP transcripts",
-                "portal token expiry is caller-asserted and Saxo may reject it earlier",
-            ],
-        }
-    save_token_cache(settings.cache_path, token)
-    delete_pending_authorization(pending_path)
+    with token_cache_write_lock(settings.cache_path) as write_lease:
+        existing = load_token_cache(settings.cache_path)
+        pending_path = pending_authorization_path(settings.cache_path)
+        pending_deleted = pending_path.exists()
+        existing_refresh_capable = (
+            existing.refresh_material() is not None if existing is not None else False
+        )
+        if not replace_existing_cache and (existing_refresh_capable or pending_deleted):
+            return {
+                "status": "cache_replace_blocked",
+                "tool_name": "saxo_cache_sim_access_token",
+                "environment": "SIM",
+                "scope_used": False,
+                "token_source": "sim_24_hour_portal_token",
+                "existing_refresh_capable_cache": existing_refresh_capable,
+                "pending_authorization_present": pending_deleted,
+                "network_call_made": False,
+                "next_action": (
+                    "call saxo_cache_sim_access_token with replace_existing_cache=true only "
+                    "after deciding to discard the existing SIM PKCE cache or pending login"
+                ),
+                "verifies": [
+                    "existing token cache and pending PKCE state were left unchanged",
+                    "raw access token was not echoed in the tool result",
+                ],
+                "does_not_verify": [
+                    *EXCHANGED_DOES_NOT_VERIFY,
+                    (
+                        "inline access_token arguments may pass through agent context "
+                        "and MCP transcripts"
+                    ),
+                    "portal token expiry is caller-asserted and Saxo may reject it earlier",
+                ],
+            }
+        save_token_cache(settings.cache_path, token, lease=write_lease)
+        delete_pending_authorization(pending_path)
     return {
         "status": "token_cached",
         "tool_name": "saxo_cache_sim_access_token",
