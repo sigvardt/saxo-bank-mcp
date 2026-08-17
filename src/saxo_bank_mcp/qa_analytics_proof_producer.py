@@ -44,7 +44,6 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
 )
-from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, EnvironmentName
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
     ArtifactVisualIntegrityReceipt,
@@ -61,6 +60,14 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     exact_analysis_measurement_node_id,
     load_analysis_kind_catalog,
     validate_proof_matrix_bundle,
+)
+from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeProofProgress,
+    CodexNativeSimPreflightReceipt,
+    CodexNativeVerifiedChildFailure,
+    build_child_failure_envelope,
+    safe_failure_reason,
+    verify_child_failure_envelope,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
     AnalyticsCaseReceipt,
@@ -135,6 +142,15 @@ _MEASURED_OPERATION_BY_CASE: Final[dict[ProofExecutionKind, MeasuredProofOperati
 
 class ProofProducerError(RuntimeError):
     """Fail-closed reason from the private installed-producer boundary."""
+
+
+class CodexNativeProofFailureError(ProofProducerError):
+    """A failed native child with one parent-verified redacted receipt."""
+
+    def __init__(self, receipt: CodexNativeVerifiedChildFailure) -> None:
+        """Retain only the verified redacted receipt."""
+        self.receipt = receipt
+        super().__init__(receipt.reason)
 
 
 class _StrictModel(BaseModel):
@@ -383,42 +399,6 @@ class VerifiedInstalledProofValidation(_StrictModel):
     disclaimer_response_made: Literal[False] = False
 
 
-class CodexNativeSimPreflightReceipt(_StrictModel):
-    """Redacted SIM session gate that must pass before native proof work."""
-
-    status: Literal["passed", "blocked"]
-    requested_environment: EnvironmentName
-    effective_read_environment: EffectiveReadEnvironment
-    live_reads: bool
-    live_writes: Literal[False]
-    capabilities_status: str = Field(min_length=1, max_length=64)
-    reason: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,127}$")
-    http_status: int | None = Field(default=None, ge=100, le=599)
-    network_call_made: bool | None
-    session_capabilities_proven: bool
-    redacted_publication: Literal[True] = True
-
-    @model_validator(mode="after")
-    def _validate_preflight(self) -> Self:
-        if self.http_status is not None and self.network_call_made is not True:
-            raise ValueError("native preflight HTTP provenance is inconsistent")
-        if self.status == "passed":
-            if (
-                self.requested_environment != "SIM"
-                or self.effective_read_environment != "SIM"
-                or self.live_reads
-                or self.live_writes
-                or self.capabilities_status != "passed"
-                or self.reason is not None
-                or self.network_call_made is not True
-                or not self.session_capabilities_proven
-            ):
-                raise ValueError("native preflight pass requires current SIM capabilities")
-        elif self.session_capabilities_proven or self.capabilities_status == "passed":
-            raise ValueError("blocked native preflight cannot prove session capabilities")
-        return self
-
-
 class CodexNativeInstalledProofProducerResult(InstalledProofProducerResult):
     """Process-owned proof result under the explicit native Codex policy."""
 
@@ -534,12 +514,23 @@ def run_verified_codex_native_producer(
         raise ProofProducerError("proof_installed_cache_digest_mismatch")
     expected_module_sha256 = _installed_producer_module_sha256(install.codex.cache_root)
     command = _codex_native_producer_command(candidate_commit, codex_digest)
-    result = _execute_codex_native_installed_child(
-        install.codex.cache_root,
-        command,
-        source_repo=install.clone.path,
-        retained_codex_home=install.run_root / "codex-home",
-    )
+    try:
+        result = _execute_codex_native_installed_child(
+            install.codex.cache_root,
+            command,
+            source_repo=install.clone.path,
+            retained_codex_home=install.run_root / "codex-home",
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=codex_digest,
+            producer_module_sha256=expected_module_sha256,
+        )
+    except CodexNativeProofFailureError:
+        _require_clean_source_commit(install.repo, candidate_commit)
+        if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
+            raise ProofProducerError("proof_installed_cache_changed_during_execution") from None
+        if _installed_producer_module_sha256(install.codex.cache_root) != expected_module_sha256:
+            raise ProofProducerError("proof_installed_producer_changed_during_execution") from None
+        raise
     _require_clean_source_commit(install.repo, candidate_commit)
     if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
         raise ProofProducerError("proof_installed_cache_changed_during_execution")
@@ -706,9 +697,7 @@ def _run_codex_native_sim_preflight() -> CodexNativeSimPreflightReceipt:
         effective_read_environment="SIM",
         live_reads=False,
         live_writes=False,
-        capabilities_status=(
-            capabilities_status if capabilities_status != "passed" else "invalid"
-        ),
+        capabilities_status=(capabilities_status if capabilities_status != "passed" else "invalid"),
         reason=reason,
         http_status=http_status,
         network_call_made=network_call_made,
@@ -731,17 +720,37 @@ def produce_codex_native_installed_result(
     *,
     candidate_commit: str,
     installed_cache_sha256: str,
+    progress: CodexNativeProofProgress | None = None,
 ) -> CodexNativeInstalledProofProducerResult:
     """Issue process-owned receipts using only the Codex-native model quorum."""
     if _COMMIT_PATTERN.fullmatch(candidate_commit) is None:
         raise ProofProducerError("proof_candidate_commit_invalid")
     if _SHA256_PATTERN.fullmatch(installed_cache_sha256) is None:
         raise ProofProducerError("proof_installed_cache_digest_invalid")
-    catalog = load_analysis_kind_catalog()
-    contracts = build_proof_execution_contracts(catalog=catalog)
     catalog_sha256, contract_sha256 = _installed_contract_digests()
     producer_module_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    if progress is None:
+        progress = CodexNativeProofProgress(
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=installed_cache_sha256,
+            producer_module_sha256=producer_module_sha256,
+            catalog_sha256=catalog_sha256,
+            contract_sha256=contract_sha256,
+        )
+    elif (
+        progress.candidate_commit != candidate_commit
+        or progress.installed_cache_sha256 != installed_cache_sha256
+        or progress.producer_module_sha256 != producer_module_sha256
+        or progress.catalog_sha256 != catalog_sha256
+        or progress.contract_sha256 != contract_sha256
+    ):
+        raise ProofProducerError("proof_failure_progress_binding_mismatch")
+    catalog = load_analysis_kind_catalog()
+    contracts = build_proof_execution_contracts(catalog=catalog)
+    progress.begin_phase("sim_preflight")
     sim_preflight = _run_codex_native_sim_preflight()
+    progress.record_preflight(sim_preflight)
+    progress.complete_phase("sim_preflight")
     if sim_preflight.status != "passed":
         return _blocked_codex_native_result(
             candidate_commit=candidate_commit,
@@ -752,23 +761,13 @@ def produce_codex_native_installed_result(
             sim_preflight=sim_preflight,
             reason="proof_sim_session_preflight_failed",
         )
-    try:
-        bundle = _execute_installed_proof_bundle(
-            candidate_commit=candidate_commit,
-            installed_cache_sha256=installed_cache_sha256,
-            harness_policy="codex_native_v1",
-            native_sim_preflight=sim_preflight,
-        )
-    except ProofProducerError as error:
-        return _blocked_codex_native_result(
-            candidate_commit=candidate_commit,
-            installed_cache_sha256=installed_cache_sha256,
-            producer_module_sha256=producer_module_sha256,
-            catalog_sha256=catalog_sha256,
-            contract_sha256=contract_sha256,
-            sim_preflight=sim_preflight,
-            reason=str(error),
-        )
+    bundle = _execute_installed_proof_bundle(
+        candidate_commit=candidate_commit,
+        installed_cache_sha256=installed_cache_sha256,
+        harness_policy="codex_native_v1",
+        native_sim_preflight=sim_preflight,
+        progress=progress,
+    )
     active_contracts = tuple(
         contract.model_copy(
             update={"proof_activation_state": "active", "quarantine_reason": None},
@@ -940,12 +939,13 @@ def _run_installed_matrix_proof_session(
     return matrix
 
 
-def _execute_installed_proof_bundle(
+def _execute_installed_proof_bundle(  # noqa: C901
     *,
     candidate_commit: str,
     installed_cache_sha256: str,
     harness_policy: HarnessPolicy = "dual_v1",
     native_sim_preflight: CodexNativeSimPreflightReceipt | None = None,
+    progress: CodexNativeProofProgress | None = None,
 ) -> AnalyticsProofMatrixBundle:
     """Execute the fixed offline suite and actual logical-MCP SIM matrix in this child.
 
@@ -956,31 +956,52 @@ def _execute_installed_proof_bundle(
     if harness_policy == "codex_native_v1":
         if native_sim_preflight is None or native_sim_preflight.status != "passed":
             raise ProofProducerError("native_sim_preflight_required")
+        if progress is None:
+            raise ProofProducerError("native_failure_progress_required")
     elif native_sim_preflight is not None:
         raise ProofProducerError("native_sim_preflight_not_allowed")
+    elif progress is not None:
+        raise ProofProducerError("native_failure_progress_not_allowed")
     catalog = load_analysis_kind_catalog()
     contracts = build_proof_execution_contracts(catalog=catalog)
+    if progress is not None:
+        progress.begin_phase("agent_evaluation")
     skill_receipts = _run_installed_agent_evaluation(
         candidate_commit=candidate_commit,
         installed_cache_sha256=installed_cache_sha256,
         harness_policy=harness_policy,
+        progress=progress,
     )
+    if progress is not None:
+        progress.complete_phase("agent_evaluation")
+        progress.begin_phase("offline_proof")
     suite_evidence = _run_installed_offline_proof_suite()
+    if progress is not None:
+        progress.complete_phase("offline_proof")
+        progress.begin_phase("sim_matrix")
     matrix = SimToolMatrixReceipt.model_validate(
         _run_installed_matrix_proof_session(
             candidate_commit,
             catalog.analysis_kinds,
         ),
     )
+    if progress is not None:
+        progress.record_matrix(matrix)
     if matrix.status != "passed":
         raise ProofProducerError("installed_sim_matrix_not_passed")
-    return _bundle_from_process_executions(
+    if progress is not None:
+        progress.complete_phase("sim_matrix")
+        progress.begin_phase("bundle_validation")
+    bundle = _bundle_from_process_executions(
         candidate_commit=candidate_commit,
         suite_evidence=suite_evidence,
         matrix=matrix,
         contracts=contracts,
         skill_receipts=skill_receipts,
     )
+    if progress is not None:
+        progress.complete_phase("bundle_validation")
+    return bundle
 
 
 def _bundle_network_call_made(bundle: AnalyticsProofMatrixBundle) -> bool:
@@ -1264,6 +1285,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
     candidate_commit: str,
     installed_cache_sha256: str,
     harness_policy: HarnessPolicy = "dual_v1",
+    progress: CodexNativeProofProgress | None = None,
 ) -> tuple[SkillScenarioEvidenceReceipt, ...]:
     """Execute the policy-selected harness and authenticate its process-owned report."""
 
@@ -1419,6 +1441,8 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
                     private_values_published=False,
                 ),
             )
+        if progress is not None:
+            _record_agent_report_progress(progress, report)
         return tuple(receipts)
 
     codex_cache_root = Path.cwd().resolve()
@@ -1489,6 +1513,12 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
                 timeout_seconds=7200,
             )
         except CommandFailureError as error:
+            if progress is not None:
+                _record_failed_agent_report_progress(
+                    progress,
+                    report_path=report_path,
+                    candidate_commit=candidate_commit,
+                )
             raise ProofProducerError("installed_agent_evaluation_command_failed") from error
         return consume_process_report(
             result,
@@ -1524,6 +1554,60 @@ def _require_agent_evaluation_harness_policy(
         or any(record.no_model_call for record in report.records)
     ):
         raise ProofProducerError("native_agent_model_quorum_invalid")
+
+
+def _record_agent_report_progress(
+    progress: CodexNativeProofProgress,
+    report: EvalRunReport,
+) -> None:
+    """Retain only redacted event counts from one typed native report."""
+    if report.harness != "codex" or any(record.harness != "codex" for record in report.records):
+        return
+    progress.record_agent_activity(
+        model_event_count=sum(not record.no_model_call for record in report.records),
+        mcp_event_count=_sum_optional_counts(
+            tuple(record.model_mcp_event_count for record in report.records),
+        ),
+        saxo_event_count=_sum_optional_counts(
+            tuple(record.model_saxo_event_count for record in report.records),
+        ),
+    )
+
+
+def _record_failed_agent_report_progress(
+    progress: CodexNativeProofProgress,
+    *,
+    report_path: Path,
+    candidate_commit: str,
+) -> None:
+    """Observe safe partial event counts without trusting a failed report as proof."""
+    try:
+        metadata = report_path.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or report_path.is_symlink()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            return
+        raw = json.loads(report_path.read_bytes())
+        if not isinstance(raw, dict):
+            return
+        payload = dict(cast("dict[str, object]", raw))
+        payload.pop("run_cleanup", None)
+        payload.pop("installation_fixture_preserved", None)
+        report = EvalRunReport.model_validate(payload)
+    except (OSError, TypeError, ValidationError, ValueError):
+        return
+    if report.source_commit != candidate_commit:
+        return
+    _record_agent_report_progress(progress, report)
+
+
+def _sum_optional_counts(values: tuple[int | None, ...]) -> int | None:
+    return (
+        sum(cast("tuple[int, ...]", values)) if all(value is not None for value in values) else None
+    )
 
 
 def _codex_native_agent_evaluation_command(
@@ -2008,10 +2092,8 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
         or receipt.exit_code != 0
         or receipt.timed_out
         or not receipt.cleanup_attempted
-        or receipt.stdout_sha256
-        != hashlib.sha256(command_result.stdout.encode()).hexdigest()
-        or receipt.stderr_sha256
-        != hashlib.sha256(command_result.stderr.encode()).hexdigest()
+        or receipt.stdout_sha256 != hashlib.sha256(command_result.stdout.encode()).hexdigest()
+        or receipt.stderr_sha256 != hashlib.sha256(command_result.stderr.encode()).hexdigest()
     ):
         raise ProofProducerError("proof_producer_command_untrusted")
     try:
@@ -2186,12 +2268,15 @@ def _execute_installed_child(  # noqa: C901, PLR0912, PLR0913
         return result
 
 
-def _execute_codex_native_installed_child(
+def _execute_codex_native_installed_child(  # noqa: PLR0913
     cache_root: Path,
     command: tuple[str, ...],
     *,
     source_repo: Path,
     retained_codex_home: Path,
+    candidate_commit: str,
+    installed_cache_sha256: str,
+    producer_module_sha256: str,
 ) -> CommandResult:
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw:
@@ -2240,10 +2325,43 @@ def _execute_codex_native_installed_child(
                 require_matrix_runtime_cleanup(runtime.run_root)
             except MatrixEnvError as error:
                 cleanup_error = error
+        if command_error is not None:
+            command_receipt = command_error.receipt
+            command_trusted = (
+                command_receipt.name == _COMMAND_NAME
+                and command_receipt.argv == command
+                and Path(command_receipt.cwd).resolve() == cache_root.resolve()
+                and command_receipt.pid is not None
+                and command_receipt.pgid is not None
+                and command_receipt.exit_code != 0
+                and command_receipt.cleanup_attempted
+                and command_receipt.stdout_sha256
+                == hashlib.sha256(command_error.stdout.encode()).hexdigest()
+                and command_receipt.stderr_sha256
+                == hashlib.sha256(command_error.stderr.encode()).hexdigest()
+            )
+            catalog_sha256, contract_sha256 = _installed_contract_digests()
+            verified_failure = verify_child_failure_envelope(
+                raw_stdout=command_error.stdout if command_trusted else "",
+                candidate_commit=candidate_commit,
+                installed_cache_sha256=installed_cache_sha256,
+                producer_module_sha256=producer_module_sha256,
+                catalog_sha256=catalog_sha256,
+                contract_sha256=contract_sha256,
+                child_exit_code=command_receipt.exit_code,
+                command_timed_out=command_receipt.timed_out,
+                command_cleanup_attempted=command_receipt.cleanup_attempted,
+                command_stdout_sha256=command_receipt.stdout_sha256,
+                command_stderr_sha256=command_receipt.stderr_sha256,
+                remaining_process_count=command_error.remaining_process_count,
+                remaining_process_group_count=command_error.remaining_process_group_count,
+                runtime_cleanup_status=(
+                    "complete" if promotion_error is None and cleanup_error is None else "failed"
+                ),
+            )
+            raise CodexNativeProofFailureError(verified_failure) from command_error
         if promotion_error is not None:
             raise ProofProducerError("proof_sim_token_promotion_failed") from promotion_error
-        if command_error is not None:
-            raise ProofProducerError("proof_producer_command_failed") from command_error
         if cleanup_error is not None:
             raise ProofProducerError("proof_sim_auth_lease_cleanup_failed") from cleanup_error
         if result is None:
@@ -2324,20 +2442,39 @@ def main(argv: list[str] | None = None) -> int:
         default="dual_v1",
     )
     args = parser.parse_args(argv)
-    try:
-        result = (
-            produce_codex_native_installed_result(
+    if args.harness_policy == "codex_native_v1":
+        progress: CodexNativeProofProgress | None = None
+        try:
+            catalog_sha256, contract_sha256 = _installed_contract_digests()
+            progress = CodexNativeProofProgress(
+                candidate_commit=str(args.candidate_commit),
+                installed_cache_sha256=str(args.installed_cache_sha256),
+                producer_module_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                catalog_sha256=catalog_sha256,
+                contract_sha256=contract_sha256,
+            )
+            result = produce_codex_native_installed_result(
+                candidate_commit=str(args.candidate_commit),
+                installed_cache_sha256=str(args.installed_cache_sha256),
+                progress=progress,
+            )
+        except Exception as error:  # noqa: BLE001
+            if progress is not None:
+                envelope = build_child_failure_envelope(
+                    progress,
+                    child_exit_code=1,
+                    reason=safe_failure_reason(str(error)),
+                )
+                sys.stdout.write(envelope.model_dump_json())
+            return 1
+    else:
+        try:
+            result = produce_installed_result(
                 candidate_commit=str(args.candidate_commit),
                 installed_cache_sha256=str(args.installed_cache_sha256),
             )
-            if args.harness_policy == "codex_native_v1"
-            else produce_installed_result(
-                candidate_commit=str(args.candidate_commit),
-                installed_cache_sha256=str(args.installed_cache_sha256),
-            )
-        )
-    except (OSError, ProofProducerError, ValidationError, ValueError):
-        return 1
+        except (OSError, ProofProducerError, ValidationError, ValueError):
+            return 1
     sys.stdout.write(result.model_dump_json())
     return 0
 

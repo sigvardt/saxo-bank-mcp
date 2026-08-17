@@ -8,9 +8,16 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
-from saxo_bank_mcp.agent_skill_codex_install import load_verified_codex_install_report
+from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.agent_skill_codex_install import (
+    CodexInstallEvidenceReport,
+    load_verified_codex_install_report,
+)
+from saxo_bank_mcp.agent_skill_install_models import InstallEvidenceReport
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_evidence import (
@@ -20,6 +27,7 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     load_analysis_kind_catalog,
 )
 from saxo_bank_mcp.qa_analytics_proof_producer import (
+    CodexNativeProofFailureError,
     ProofProducerError,
     run_verified_codex_native_producer,
     run_verified_installed_producer,
@@ -34,7 +42,7 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     parser = argparse.ArgumentParser(
         description="Plan or validate the complete Saxo analytics proof matrix.",
     )
@@ -96,15 +104,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
         )
     if args.harness_policy == "codex_native_v1":
         install, install_errors = load_verified_codex_install_report(
-            args.install_report,
-            codex_global_home=args.codex_global_home,
+            cast("Path", args.install_report),
+            codex_global_home=cast("Path", args.codex_global_home),
         )
     else:
         install, install_errors = load_verified_install_report(
-            args.install_report,
-            codex_global_home=args.codex_global_home,
-            claude_global_home=args.claude_global_home,
-            fixture_cleanup_ledger=args.fixture_cleanup_ledger,
+            cast("Path", args.install_report),
+            codex_global_home=cast("Path", args.codex_global_home),
+            claude_global_home=cast("Path", args.claude_global_home),
+            fixture_cleanup_ledger=cast("Path", args.fixture_cleanup_ledger),
         )
     if install is None:
         return _publish(
@@ -125,16 +133,34 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     try:
         validated = (
             run_verified_codex_native_producer(
-                install,
+                cast("CodexInstallEvidenceReport", install),
                 candidate_commit=args.candidate_commit,
             )
             if args.harness_policy == "codex_native_v1"
             else run_verified_installed_producer(
-                install,
+                cast("InstallEvidenceReport", install),
                 candidate_commit=args.candidate_commit,
             )
         )
+    except CodexNativeProofFailureError as error:
+        payload = error.receipt.model_dump(mode="json")
+        payload.update(
+            {
+                "analysis_kind_count": len(contracts),
+                "evidence_receipt_count": len(catalog.evidence_receipt_ids),
+            },
+        )
+        return _publish(args.out, payload, success=False)
     except ProofProducerError as error:
+        if args.harness_policy == "codex_native_v1":
+            return _publish(
+                args.out,
+                _unknown_native_failure_payload(
+                    candidate_commit=args.candidate_commit,
+                    reason="proof_producer_native_boundary_failed",
+                ),
+                success=False,
+            )
         return _publish(
             args.out,
             {
@@ -148,6 +174,15 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
             success=False,
         )
     except (OSError, ValueError):
+        if args.harness_policy == "codex_native_v1":
+            return _publish(
+                args.out,
+                _unknown_native_failure_payload(
+                    candidate_commit=args.candidate_commit,
+                    reason="proof_producer_local_boundary_failed",
+                ),
+                success=False,
+            )
         return _publish(
             args.out,
             {
@@ -176,8 +211,40 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911
     )
 
 
-def _publish(path: Path, payload: dict[str, object], *, success: bool) -> int:
+def _publish(path: Path, payload: Mapping[str, JsonValue], *, success: bool) -> int:
     return 0 if write_scanned_json(path, payload) and success else 1
+
+
+def _unknown_native_failure_payload(
+    *,
+    candidate_commit: str,
+    reason: str,
+) -> dict[str, JsonValue]:
+    return {
+        "schema_version": "1",
+        "status": "refused",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": candidate_commit,
+        "failure_evidence_status": "missing",
+        "producer_authenticated": False,
+        "completed_phases": None,
+        "current_phase": None,
+        "sim_preflight_status": "unknown",
+        "sim_preflight": None,
+        "network_call_made": None,
+        "model_event_count": None,
+        "mcp_event_count": None,
+        "saxo_event_count": None,
+        "execution_performed": None,
+        "broker_write_made": None,
+        "live_mutation_calls": None,
+        "purchase_occurred": None,
+        "disclaimer_response_made": None,
+        "child_cleanup_status": "unknown",
+        "outer_runtime_cleanup_status": "unknown",
+        "reason": reason,
+        "redacted_publication": True,
+    }
 
 
 if __name__ == "__main__":

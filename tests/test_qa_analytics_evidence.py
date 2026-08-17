@@ -962,18 +962,31 @@ def test_codex_native_later_failure_retains_passed_preflight_provenance(
 
     monkeypatch.setattr(producer, "_run_codex_native_sim_preflight", lambda: preflight)
     monkeypatch.setattr(producer, "_execute_installed_proof_bundle", later_failure)
-
-    result = producer.produce_codex_native_installed_result(
+    catalog_sha256, contract_sha256 = producer._installed_contract_digests()  # noqa: SLF001
+    producer_file = producer.__file__
+    assert isinstance(producer_file, str)
+    progress = producer.CodexNativeProofProgress(
         candidate_commit="1" * 40,
         installed_cache_sha256="2" * 64,
+        producer_module_sha256=hashlib.sha256(Path(producer_file).read_bytes()).hexdigest(),
+        catalog_sha256=catalog_sha256,
+        contract_sha256=contract_sha256,
     )
 
-    assert result.status == "blocked"
-    assert result.execution_performed is False
-    assert result.executed_receipt_count == 0
-    assert result.sim_preflight == preflight
-    assert result.network_call_made is True
-    assert result.validation_errors == ("installed_offline_proof_suite_failed",)
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_offline_proof_suite_failed",
+    ):
+        producer.produce_codex_native_installed_result(
+            candidate_commit="1" * 40,
+            installed_cache_sha256="2" * 64,
+            progress=progress,
+        )
+
+    assert progress.sim_preflight == preflight
+    assert progress.network_call_made is True
+    assert progress.execution_performed is True
+    assert progress.completed_phases == ["sim_preflight"]
 
 
 def test_codex_native_producer_propagates_observed_network_request(

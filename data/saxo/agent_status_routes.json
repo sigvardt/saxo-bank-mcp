@@ -131,6 +131,10 @@
         "reason": "Internal token refresh state, converted to auth_required before tool response."
       },
       {
+        "module": "src/saxo_bank_mcp/qa_analytics_proof_failure.py",
+        "reason": "Analytics proof child-failure evidence status, not production MCP tool response truth."
+      },
+      {
         "module": "src/saxo_bank_mcp/qa_analytics_proof_producer.py",
         "reason": "Analytics proof producer evidence status, not production MCP tool response truth."
       },

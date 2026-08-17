@@ -7,7 +7,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -44,6 +44,10 @@ class CommandResult:
 @dataclass(frozen=True, slots=True)
 class CommandFailureError(Exception):
     receipt: CommandReceipt
+    stdout: str = field(default="", repr=False)
+    stderr: str = field(default="", repr=False)
+    remaining_process_count: int | None = None
+    remaining_process_group_count: int | None = None
 
 
 def run_command(  # noqa: C901, PLR0915
@@ -145,7 +149,13 @@ def run_command(  # noqa: C901, PLR0915
                 timed_out=True,
                 cleanup_attempted=True,
             )
-            raise CommandFailureError(receipt)
+            raise CommandFailureError(
+                receipt,
+                stdout,
+                stderr,
+                len(remaining_live_pids(pids)),
+                len(remaining_live_pgids(pgids)),
+            )
         exit_code = int(process.returncode if process.returncode is not None else 124)
     except OSError as exc:
         with watch_lock:
@@ -164,7 +174,13 @@ def run_command(  # noqa: C901, PLR0915
             timed_out=False,
             cleanup_attempted=True,
         )
-        raise CommandFailureError(receipt) from exc
+        raise CommandFailureError(
+            receipt,
+            "",
+            type(exc).__name__,
+            len(remaining_live_pids(pids)),
+            len(remaining_live_pgids(pgids)),
+        ) from exc
     finally:
         stop_watch.set()
         if watcher is not None:
@@ -188,7 +204,16 @@ def run_command(  # noqa: C901, PLR0915
     )
     result = CommandResult(receipt=receipt, stdout=stdout, stderr=stderr)
     if exit_code != 0:
-        raise CommandFailureError(result.receipt)
+        with watch_lock:
+            final_pids = tuple(tracked_pids)
+            final_pgids = tuple(tracked_pgids)
+        raise CommandFailureError(
+            result.receipt,
+            result.stdout,
+            result.stderr,
+            len(remaining_live_pids(final_pids)),
+            len(remaining_live_pgids(final_pgids)),
+        )
     return result
 
 
