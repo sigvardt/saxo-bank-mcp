@@ -269,22 +269,22 @@ async def test_refresh_does_not_overwrite_writer_started_during_token_post(
 ) -> None:
     settings = configure_sim_auth(tmp_path, monkeypatch)
     expired = SaxoTokenSet(
-        access_token="expired-access",  # noqa: S106
-        refresh_token="expired-refresh",  # noqa: S106
+        access_token="expired-access-token",  # noqa: S106
+        refresh_token="existing-refresh-token",  # noqa: S106
         code_verifier="v" * 43,
         environment="SIM",
         expires_at=datetime.now(UTC) - timedelta(minutes=1),
     )
     concurrent = SaxoTokenSet(
-        access_token="later-login-access",  # noqa: S106
-        refresh_token="later-login-refresh",  # noqa: S106
+        access_token="new-access-token",  # noqa: S106
+        refresh_token="new-refresh-token",  # noqa: S106
         code_verifier="v" * 43,
         environment="SIM",
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
     rotated = SaxoTokenSet(
-        access_token="rotated-access",  # noqa: S106
-        refresh_token="rotated-refresh",  # noqa: S106
+        access_token="mocked-access-token",  # noqa: S106
+        refresh_token="mocked-refresh-token",  # noqa: S106
         code_verifier="v" * 43,
         environment="SIM",
         expires_at=datetime.now(UTC) + timedelta(minutes=20),

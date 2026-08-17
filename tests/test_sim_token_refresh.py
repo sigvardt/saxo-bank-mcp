@@ -465,8 +465,8 @@ async def test_cache_change_allows_one_new_refresh_attempt(tmp_path: Path) -> No
             lambda _request: httpx2.Response(
                 200,
                 json={
-                    "access_token": "recovered-access",
-                    "refresh_token": "recovered-refresh",
+                    "access_token": "new-access-token",
+                    "refresh_token": "new-refresh-token",
                     "expires_in": 1200,
                 },
             ),

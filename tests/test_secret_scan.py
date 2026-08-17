@@ -11,11 +11,28 @@ from saxo_bank_mcp._redaction import scan_secret_paths
 from saxo_bank_mcp.secret_scan import scan_secret_text
 
 TOKEN_KEY = f"access{chr(95)}token"
+ROOT = Path(__file__).resolve().parents[1]
+AUTH_WRITER_TEST_PATHS = (
+    ROOT / "tests/test_pkce_exchange_tool.py",
+    ROOT / "tests/test_sim_login.py",
+    ROOT / "tests/test_sim_portal_token.py",
+    ROOT / "tests/test_sim_token_refresh.py",
+    ROOT / "tests/test_token_cache.py",
+)
 SECRET_VALUE_ADJACENCY = tuple(
     character
     for character in string.printable
     if character not in "'\"{}&?=" and not character.isspace()
 )
+
+
+def test_installed_auth_writer_fixtures_are_privacy_clean() -> None:
+    findings, scan_errors = scan_secret_paths(
+        [str(path) for path in AUTH_WRITER_TEST_PATHS],
+    )
+
+    assert scan_errors == []
+    assert findings == []
 
 
 def test_secret_scan_allows_safe_python_token_field_wiring(tmp_path: Path) -> None:

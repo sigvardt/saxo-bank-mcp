@@ -89,8 +89,8 @@ def test_portal_cache_write_does_not_overwrite_later_legitimate_writer(
     monkeypatch.setenv("SAXO_MCP_SIM_APP_KEY", "sim-app-key")
     cache_path = tmp_path / ".local/state/saxo-bank-mcp/token-cache.json"
     concurrent = SaxoTokenSet(
-        access_token="later-login-access",  # noqa: S106
-        refresh_token="later-login-refresh",  # noqa: S106
+        access_token="new-access-token",  # noqa: S106
+        refresh_token="new-refresh-token",  # noqa: S106
         code_verifier="v" * 43,
         environment="SIM",
         expires_at=datetime.now(UTC) + timedelta(minutes=30),

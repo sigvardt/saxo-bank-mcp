@@ -62,8 +62,8 @@ def test_sim_login_callback_saves_under_owner_only_shared_lock(
         return callback_server
 
     token = SaxoTokenSet(
-        access_token="login-access",  # noqa: S106
-        refresh_token="login-refresh",  # noqa: S106
+        access_token="new-access-token",  # noqa: S106
+        refresh_token="new-refresh-token",  # noqa: S106
         code_verifier="v" * 43,
         environment="SIM",
         expires_at=datetime.now(UTC) + timedelta(minutes=20),

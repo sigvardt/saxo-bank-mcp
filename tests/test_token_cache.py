@@ -94,11 +94,11 @@ def test_token_cache_save_uses_owner_only_file_mode(
 def test_token_cache_write_lease_cannot_be_reused_after_unlock(tmp_path: Path) -> None:
     cache = tmp_path / "state/token.json"
     first = SaxoTokenSet(
-        access_token="first-access",  # noqa: S106
+        access_token="existing-access-token",  # noqa: S106
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
     replacement = SaxoTokenSet(
-        access_token="replacement-access",  # noqa: S106
+        access_token="new-access-token",  # noqa: S106
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
 
