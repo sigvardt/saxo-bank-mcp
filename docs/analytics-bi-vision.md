@@ -2323,23 +2323,25 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The explicit Codex-only producer now exists in frozen candidate `9c94bf1`. Its policy requires
-exactly the Codex harness, preserves the historical dual path unchanged, and retains every numerical,
-Saxo reconciliation, cleanup, privacy, source-binding, and no-write gate. Its exact one-client
-installation and deterministic validation pass.
+The current Codex-only candidate is `d23d24f`. It binds the disposable native runtime to the exact
+contained plugin and gives analytics hard cases schema-valid synthetic handles. Its focused,
+related, static, privacy, and exact 60-tool installation checks pass. The historical dual policy and
+evidence remain unchanged.
 
-The immediate blocker is fresh SIM authentication, not another producer change. A network-free
-status read proved requested and effective SIM with LIVE reads and writes disabled. The cache was
-expired and refresh-capable; the single permitted capability attempt reached Saxo's SIM OAuth
-endpoint and received HTTP 401. No browser, account, market, order, subscription, analytics-job,
-purchase, disclaimer-response, or LIVE call followed.
+The one sealed proof attempt stopped at `proof_producer_command_failed`. Its outer receipt did not
+retain the child phase, SIM preflight, network provenance, child exit detail, or partial execution
+state. Do not retry this candidate. First correct that failure envelope so every failed child emits
+a typed, safe receipt with the exact phase and truthful observed provenance.
 
-After an owner-local login or valid owner-only cache makes `saxo_get_session_capabilities` pass,
-run one controlled native hard workflow, per-analysis proof and Saxo reconciliation, fresh 60-tool
-SIM matrix, cleanup, account readback, privacy, and activation decision. The historical matrix
-remains historical: its three structured quarantine refusals and five invalid-argument coverage
-gaps are not relabeled. The corrected candidate's focused real-FastMCP tests prove schema-valid
-structured refusal for the five downstream tools, but they are not a fresh broker matrix.
+A network-free status check after the attempt proved requested and effective SIM with LIVE reads
+and writes disabled and a fresh readable local cache. That check does not prove server-side session
+capabilities or account access. No extra account read was made because the failed attempt has no
+bound before fingerprint, so an after-only read could not prove equality.
+
+After a new candidate passes TDD, focused checks twice, related checks, Ruff, BasedPyright, privacy,
+and exact installation, a newly authorized sealed run must prove the native hard workflow, all 54
+per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account equality,
+and the activation decision. The historical matrix remains historical and is not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
