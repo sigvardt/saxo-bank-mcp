@@ -14,12 +14,15 @@ import pytest
 from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeBootstrapEnvelope,
+    CodexNativeBootstrapVerification,
     CodexNativeChildFailureEnvelope,
     CodexNativeProofPhase,
     CodexNativeProofProgress,
     CodexNativeSimPreflightReceipt,
     CodexNativeVerifiedChildFailure,
     build_child_failure_envelope,
+    verify_bootstrap_envelope_file,
     verify_child_failure_envelope,
 )
 
@@ -34,6 +37,75 @@ CLI_TOTAL_MCP_EVENT_COUNT = 3
 CRASH_EXIT_CODE = -9
 FAILED_CHILD_EXIT_CODE = 7
 EXPECTED_BINDING_CALLS = 2
+
+
+def _bootstrap_envelope(
+    *,
+    child_exit_code: int | None = 1,
+    state: str = "failed",
+    contract_sha256: str = CONTRACT_SHA256,
+) -> CodexNativeBootstrapEnvelope:
+    material: dict[str, object] = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_bootstrap",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": CANDIDATE,
+        "installed_cache_sha256": CACHE_SHA256,
+        "bootstrap_module_sha256": "6" * 64,
+        "producer_module_sha256": MODULE_SHA256,
+        "catalog_sha256": CATALOG_SHA256,
+        "contract_sha256": contract_sha256,
+        "bootstrap_state": state,
+        "completed_bootstrap_phases": (
+            "entry",
+            "producer_import",
+            "producer_handoff",
+        ),
+        "current_bootstrap_phase": "producer_execution",
+        "child_exit_code": child_exit_code,
+        "sim_preflight_status": "unknown",
+        "network_call_made": None,
+        "model_event_count": None,
+        "mcp_event_count": None,
+        "saxo_event_count": None,
+        "execution_performed": None,
+        "broker_write_made": None,
+        "live_mutation_calls": None,
+        "purchase_occurred": None,
+        "disclaimer_response_made": None,
+        "child_cleanup_status": "unknown",
+        "child_remaining_process_count": None,
+        "child_remaining_process_group_count": None,
+        "reason": (
+            "proof_bootstrap_producer_nonzero"
+            if state == "failed"
+            else "proof_bootstrap_producer_started"
+        ),
+        "redacted_publication": True,
+    }
+    return CodexNativeBootstrapEnvelope.model_validate(
+        {
+            **material,
+            "envelope_sha256": hashlib.sha256(
+                json.dumps(
+                    material,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode(),
+            ).hexdigest(),
+        },
+    )
+
+
+def _bootstrap_verification(
+    *,
+    contract_sha256: str = CONTRACT_SHA256,
+) -> CodexNativeBootstrapVerification:
+    return CodexNativeBootstrapVerification(
+        status="authenticated",
+        envelope=_bootstrap_envelope(contract_sha256=contract_sha256),
+    )
 
 
 def _progress() -> CodexNativeProofProgress:
@@ -89,6 +161,7 @@ def _verify(raw: str, **overrides: object) -> CodexNativeVerifiedChildFailure:
         "remaining_process_count": 0,
         "remaining_process_group_count": 0,
         "runtime_cleanup_status": "complete",
+        "bootstrap_verification": _bootstrap_verification(),
     }
     values.update(overrides)
     return verify_child_failure_envelope(**cast("Any", values))
@@ -529,6 +602,22 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
     monkeypatch.setattr(producer, "run_command", fail_command)
 
+    def native_command(*_args: object) -> tuple[str, ...]:
+        return command
+
+    def bootstrap_verifier(
+        *_args: object,
+        **_kwargs: object,
+    ) -> CodexNativeBootstrapVerification:
+        return _bootstrap_verification()
+
+    monkeypatch.setattr(producer, "_codex_native_producer_command", native_command)
+    monkeypatch.setattr(
+        producer,
+        "verify_bootstrap_envelope_file",
+        bootstrap_verifier,
+    )
+
     def no_op(_value: object) -> None:
         return
 
@@ -543,12 +632,14 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     with pytest.raises(producer.CodexNativeProofFailureError) as caught:
         producer._execute_codex_native_installed_child(  # noqa: SLF001
             cache_root,
-            command,
             source_repo=source_repo,
             retained_codex_home=retained_codex_home,
             candidate_commit=CANDIDATE,
             installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
             producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
         )
 
     receipt = caught.value.receipt
@@ -565,8 +656,26 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
 ) -> None:
     script = _load_proof_matrix_script()
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
-    child = _failure(_progress(), reason="proof_before_preflight_injected")
-    receipt = _verify(child.model_dump_json())
+    catalog = script.load_analysis_kind_catalog(script.ANALYSIS_KIND_CATALOG_PATH)
+    contracts = script.build_proof_execution_contracts(catalog=catalog)
+    actual_contract_sha256 = script._digest(  # noqa: SLF001
+        [contract.model_dump(mode="json") for contract in contracts],
+    )
+    progress = CodexNativeProofProgress(
+        candidate_commit=CANDIDATE,
+        installed_cache_sha256=CACHE_SHA256,
+        producer_module_sha256=MODULE_SHA256,
+        catalog_sha256=CATALOG_SHA256,
+        contract_sha256=actual_contract_sha256,
+    )
+    child = _failure(progress, reason="proof_before_preflight_injected")
+    receipt = _verify(
+        child.model_dump_json(),
+        contract_sha256=actual_contract_sha256,
+        bootstrap_verification=_bootstrap_verification(
+            contract_sha256=actual_contract_sha256,
+        ),
+    )
     install = SimpleNamespace(candidate_commit=CANDIDATE)
 
     def load_install(*_args: object, **_kwargs: object) -> tuple[SimpleNamespace, tuple[str, ...]]:
@@ -597,10 +706,112 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
 
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert exit_code == 1
-    assert payload["failure_evidence_status"] == "authenticated"
-    assert payload["execution_performed"] is False
-    assert payload["network_call_made"] is False
-    assert payload["broker_write_made"] is False
-    assert payload["reason"] == "proof_before_preflight_injected"
+    assert payload["receipt_kind"] == "codex_native_proof_publication"
+    assert payload["result_kind"] == "verified_child_failure"
+    assert payload["result"]["failure_evidence_status"] == "authenticated"
+    assert payload["result"]["execution_performed"] is False
+    assert payload["result"]["network_call_made"] is False
+    assert payload["result"]["broker_write_made"] is False
+    assert payload["result"]["reason"] == "proof_before_preflight_injected"
     assert "raw_stdout" not in payload
     assert "raw_stderr" not in payload
+
+
+def test_bootstrap_file_verifier_authenticates_bindings_and_owner_mode(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    envelope = _bootstrap_envelope()
+    path = tmp_path / "bootstrap.json"
+    path.write_text(envelope.model_dump_json(), encoding="utf-8")
+    path.chmod(0o600)
+
+    verified = verify_bootstrap_envelope_file(
+        path,
+        expected_parent=tmp_path,
+        candidate_commit=CANDIDATE,
+        installed_cache_sha256=CACHE_SHA256,
+        bootstrap_module_sha256="6" * 64,
+        producer_module_sha256=MODULE_SHA256,
+        catalog_sha256=CATALOG_SHA256,
+        contract_sha256=CONTRACT_SHA256,
+        child_exit_code=1,
+    )
+
+    assert verified.status == "authenticated"
+    assert verified.envelope == envelope
+
+
+@pytest.mark.parametrize("mutation", ["digest", "binding", "mode"])
+def test_bootstrap_file_verifier_rejects_tampering_or_unsafe_mode(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    payload = _bootstrap_envelope().model_dump(mode="json")
+    if mutation == "digest":
+        payload["envelope_sha256"] = "f" * 64
+    elif mutation == "binding":
+        payload["candidate_commit"] = "a" * 40
+    path = tmp_path / "bootstrap.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o644 if mutation == "mode" else 0o600)
+
+    verified = verify_bootstrap_envelope_file(
+        path,
+        expected_parent=tmp_path,
+        candidate_commit=CANDIDATE,
+        installed_cache_sha256=CACHE_SHA256,
+        bootstrap_module_sha256="6" * 64,
+        producer_module_sha256=MODULE_SHA256,
+        catalog_sha256=CATALOG_SHA256,
+        contract_sha256=CONTRACT_SHA256,
+        child_exit_code=1,
+    )
+
+    assert verified.status in {"tampered", "unsafe"}
+    assert verified.envelope is None
+
+
+def test_authenticated_child_is_unknown_without_bootstrap_evidence() -> None:
+    child = _failure(_progress())
+
+    verified = _verify(
+        child.model_dump_json(),
+        bootstrap_verification=CodexNativeBootstrapVerification(
+            status="missing",
+            envelope=None,
+        ),
+    )
+
+    assert verified.failure_evidence_status == "missing"
+    assert verified.producer_authenticated is False
+    assert verified.execution_performed is None
+    assert verified.network_call_made is None
+    assert verified.bootstrap_evidence_status == "missing"
+    assert verified.bootstrap_envelope is None
+
+
+def test_native_sealed_command_invokes_direct_bootstrap_before_producer(
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "cache"
+    envelope_path = tmp_path / "runtime" / "bootstrap.json"
+
+    command = producer._codex_native_producer_command(  # noqa: SLF001
+        cache_root,
+        envelope_path,
+        CANDIDATE,
+        CACHE_SHA256,
+        "6" * 64,
+        MODULE_SHA256,
+        CATALOG_SHA256,
+        CONTRACT_SHA256,
+    )
+
+    assert "-m" not in command
+    assert "saxo_bank_mcp.qa_analytics_proof_producer" not in command
+    assert command[4].endswith("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
+    assert command[5:7] == ("--envelope-path", str(envelope_path.resolve()))
+    assert command[-2:] == ("--harness-policy", "codex_native_v1")

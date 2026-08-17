@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -27,11 +30,32 @@ type SimPreflightStatus = Literal["not_started", "passed", "blocked", "unknown"]
 type CleanupStatus = Literal["not_started", "in_progress", "complete", "failed", "unknown"]
 type FailureEvidenceStatus = Literal[
     "authenticated",
+    "bootstrap_authenticated",
     "missing",
     "malformed",
     "tampered",
     "crashed",
     "cleanup_failed",
+]
+type BootstrapEvidenceStatus = Literal[
+    "authenticated",
+    "missing",
+    "malformed",
+    "tampered",
+    "unsafe",
+]
+type BootstrapState = Literal[
+    "entered",
+    "producer_imported",
+    "producer_started",
+    "failed",
+    "complete",
+]
+type BootstrapPhase = Literal[
+    "entry",
+    "producer_import",
+    "producer_handoff",
+    "producer_execution",
 ]
 type OuterRuntimeCleanupStatus = Literal["complete", "failed", "unknown"]
 
@@ -47,8 +71,17 @@ _PHASES: Final[tuple[CodexNativeProofPhase, ...]] = (
 )
 _SAFE_REASON_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SAFE_REASON_PREFIXES: Final = ("installed_", "native_", "proof_")
+_BOOTSTRAP_PHASES: Final[tuple[BootstrapPhase, ...]] = (
+    "entry",
+    "producer_import",
+    "producer_handoff",
+    "producer_execution",
+)
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _COMMIT_PATTERN = r"^[a-f0-9]{40}$"
+_OWNER_FILE_MODE: Final = 0o600
+_OWNER_DIRECTORY_MODE: Final = 0o700
+_MAX_BOOTSTRAP_BYTES: Final = 32_768
 
 
 class _StrictModel(BaseModel):
@@ -94,6 +127,115 @@ class CodexNativeSimPreflightReceipt(_StrictModel):
         elif self.session_capabilities_proven or self.capabilities_status == "passed":
             raise ValueError("blocked native preflight cannot prove session capabilities")
         return self
+
+
+class CodexNativeBootstrapEnvelope(_StrictModel):
+    """Durable stdlib startup evidence written before producer import."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_proof_bootstrap"] = "codex_native_proof_bootstrap"
+    harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
+    installed_cache_sha256: str = Field(pattern=_SHA256_PATTERN)
+    bootstrap_module_sha256: str = Field(pattern=_SHA256_PATTERN)
+    producer_module_sha256: str = Field(pattern=_SHA256_PATTERN)
+    catalog_sha256: str = Field(pattern=_SHA256_PATTERN)
+    contract_sha256: str = Field(pattern=_SHA256_PATTERN)
+    bootstrap_state: BootstrapState
+    completed_bootstrap_phases: tuple[BootstrapPhase, ...]
+    current_bootstrap_phase: BootstrapPhase | Literal["complete"]
+    child_exit_code: int | None
+    sim_preflight_status: SimPreflightStatus
+    network_call_made: bool | None
+    model_event_count: int | None = Field(ge=0)
+    mcp_event_count: int | None = Field(ge=0)
+    saxo_event_count: int | None = Field(ge=0)
+    execution_performed: bool | None
+    broker_write_made: bool | None
+    live_mutation_calls: int | None = Field(ge=0)
+    purchase_occurred: bool | None
+    disclaimer_response_made: bool | None
+    child_cleanup_status: CleanupStatus
+    child_remaining_process_count: int | None = Field(ge=0)
+    child_remaining_process_group_count: int | None = Field(ge=0)
+    reason: str = Field(pattern=r"^proof_bootstrap_[a-z0-9_]{1,104}$")
+    redacted_publication: Literal[True] = True
+    envelope_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_bootstrap_state(self) -> Self:  # noqa: C901
+        material = self.model_dump(mode="json", exclude={"envelope_sha256"})
+        if self.envelope_sha256 != _digest(material):
+            raise ValueError("bootstrap envelope digest mismatch")
+        indexes = tuple(_BOOTSTRAP_PHASES.index(phase) for phase in self.completed_bootstrap_phases)
+        if indexes != tuple(range(len(indexes))):
+            raise ValueError("bootstrap phases must be an ordered prefix")
+        expected_state: dict[BootstrapState, tuple[tuple[BootstrapPhase, ...], str]] = {
+            "entered": (("entry",), "producer_import"),
+            "producer_imported": (("entry", "producer_import"), "producer_handoff"),
+            "producer_started": (
+                ("entry", "producer_import", "producer_handoff"),
+                "producer_execution",
+            ),
+            "complete": (_BOOTSTRAP_PHASES, "complete"),
+            "failed": (self.completed_bootstrap_phases, self.current_bootstrap_phase),
+        }
+        phases, current = expected_state[self.bootstrap_state]
+        if self.completed_bootstrap_phases != phases or self.current_bootstrap_phase != current:
+            raise ValueError("bootstrap state and phases are inconsistent")
+        if self.bootstrap_state in {"entered", "producer_imported", "producer_started"}:
+            if self.child_exit_code is not None:
+                raise ValueError("unfinished bootstrap cannot claim a child exit")
+        elif self.bootstrap_state == "complete":
+            if self.child_exit_code != 0 or self.reason != "proof_bootstrap_complete":
+                raise ValueError("completed bootstrap requires a zero exit")
+        elif self.child_exit_code is None or self.child_exit_code == 0:
+            raise ValueError("failed bootstrap requires a nonzero exit")
+        producer_started = "producer_handoff" in self.completed_bootstrap_phases
+        inactive_values = (
+            self.network_call_made,
+            self.execution_performed,
+            self.broker_write_made,
+            self.purchase_occurred,
+            self.disclaimer_response_made,
+        )
+        inactive_counts = (
+            self.model_event_count,
+            self.mcp_event_count,
+            self.saxo_event_count,
+            self.live_mutation_calls,
+            self.child_remaining_process_count,
+            self.child_remaining_process_group_count,
+        )
+        if not producer_started:
+            if (
+                self.sim_preflight_status != "not_started"
+                or any(value is not False for value in inactive_values)
+                or any(value != 0 for value in inactive_counts)
+                or self.child_cleanup_status != "complete"
+            ):
+                raise ValueError("pre-handoff bootstrap must prove exact inactivity")
+        elif (
+            self.sim_preflight_status != "unknown"
+            or any(value is not None for value in inactive_values)
+            or any(value is not None for value in inactive_counts)
+            or self.child_cleanup_status != "unknown"
+        ):
+            raise ValueError("post-handoff bootstrap outcomes must remain unknown")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class CodexNativeBootstrapVerification:
+    """Parent-owned bootstrap file verification without retaining its path."""
+
+    status: BootstrapEvidenceStatus
+    envelope: CodexNativeBootstrapEnvelope | None
+
+    def __post_init__(self) -> None:
+        """Require one exact status-to-envelope relationship."""
+        if (self.status == "authenticated") != (self.envelope is not None):
+            raise ValueError("bootstrap verification state is inconsistent")
 
 
 class CodexNativeChildFailureEnvelope(_StrictModel):
@@ -174,6 +316,9 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     producer_module_sha256: str = Field(pattern=_SHA256_PATTERN)
     catalog_sha256: str = Field(pattern=_SHA256_PATTERN)
     contract_sha256: str = Field(pattern=_SHA256_PATTERN)
+    bootstrap_evidence_status: BootstrapEvidenceStatus
+    bootstrap_authenticated: bool
+    bootstrap_envelope: CodexNativeBootstrapEnvelope | None
     failure_evidence_status: FailureEvidenceStatus
     producer_authenticated: bool
     completed_phases: tuple[CodexNativeProofPhase, ...] | None
@@ -208,6 +353,20 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     @model_validator(mode="after")
     def _validate_evidence_state(self) -> Self:
         trusted = self.failure_evidence_status in {"authenticated", "cleanup_failed"}
+        if self.bootstrap_authenticated != (self.bootstrap_evidence_status == "authenticated"):
+            raise ValueError("bootstrap authentication state is inconsistent")
+        if self.bootstrap_authenticated != (self.bootstrap_envelope is not None):
+            raise ValueError("bootstrap envelope state is inconsistent")
+        if self.bootstrap_envelope is not None and (
+            self.bootstrap_envelope.candidate_commit != self.candidate_commit
+            or self.bootstrap_envelope.installed_cache_sha256 != self.installed_cache_sha256
+            or self.bootstrap_envelope.producer_module_sha256 != self.producer_module_sha256
+            or self.bootstrap_envelope.catalog_sha256 != self.catalog_sha256
+            or self.bootstrap_envelope.contract_sha256 != self.contract_sha256
+        ):
+            raise ValueError("bootstrap and verified child bindings differ")
+        if trusted and not self.bootstrap_authenticated:
+            raise ValueError("producer evidence requires an authenticated bootstrap")
         if self.producer_authenticated != (
             self.failure_evidence_status in {"authenticated", "cleanup_failed"}
         ):
@@ -371,6 +530,92 @@ class CodexNativeProofProgress:
         self.disclaimer_response_made = None
 
 
+def verify_bootstrap_envelope_file(  # noqa: C901, PLR0911, PLR0912, PLR0913
+    path: Path,
+    *,
+    expected_parent: Path,
+    candidate_commit: str,
+    installed_cache_sha256: str,
+    bootstrap_module_sha256: str,
+    producer_module_sha256: str,
+    catalog_sha256: str,
+    contract_sha256: str,
+    child_exit_code: int | None,
+) -> CodexNativeBootstrapVerification:
+    """Verify one owner-only startup file and discard its filesystem location."""
+    try:
+        parent_metadata = os.lstat(path.parent)
+        path_metadata = os.lstat(path)
+        parent_matches = path.parent.resolve(strict=True) == expected_parent.resolve(strict=True)
+    except FileNotFoundError:
+        return CodexNativeBootstrapVerification(status="missing", envelope=None)
+    except OSError:
+        return CodexNativeBootstrapVerification(status="unsafe", envelope=None)
+    if not (
+        path.is_absolute()
+        and parent_matches
+        and stat.S_ISDIR(parent_metadata.st_mode)
+        and not stat.S_ISLNK(parent_metadata.st_mode)
+        and parent_metadata.st_uid == os.getuid()
+        and stat.S_IMODE(parent_metadata.st_mode) == _OWNER_DIRECTORY_MODE
+        and stat.S_ISREG(path_metadata.st_mode)
+        and not stat.S_ISLNK(path_metadata.st_mode)
+        and path_metadata.st_uid == os.getuid()
+        and path_metadata.st_nlink == 1
+        and stat.S_IMODE(path_metadata.st_mode) == _OWNER_FILE_MODE
+        and path_metadata.st_size <= _MAX_BOOTSTRAP_BYTES
+    ):
+        return CodexNativeBootstrapVerification(status="unsafe", envelope=None)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        opened_metadata = os.fstat(descriptor)
+        if (
+            opened_metadata.st_dev != path_metadata.st_dev
+            or opened_metadata.st_ino != path_metadata.st_ino
+        ):
+            return CodexNativeBootstrapVerification(status="unsafe", envelope=None)
+        raw = os.read(descriptor, _MAX_BOOTSTRAP_BYTES + 1)
+    except OSError:
+        return CodexNativeBootstrapVerification(status="unsafe", envelope=None)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if len(raw) > _MAX_BOOTSTRAP_BYTES:
+        return CodexNativeBootstrapVerification(status="unsafe", envelope=None)
+    try:
+        text = raw.decode("utf-8")
+        decoded_object: object = json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return CodexNativeBootstrapVerification(status="malformed", envelope=None)
+    if not isinstance(decoded_object, dict):
+        return CodexNativeBootstrapVerification(status="malformed", envelope=None)
+    decoded = cast("dict[str, object]", decoded_object)
+    expected = {
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": candidate_commit,
+        "installed_cache_sha256": installed_cache_sha256,
+        "bootstrap_module_sha256": bootstrap_module_sha256,
+        "producer_module_sha256": producer_module_sha256,
+        "catalog_sha256": catalog_sha256,
+        "contract_sha256": contract_sha256,
+    }
+    if any(decoded.get(key) != value for key, value in expected.items()):
+        return CodexNativeBootstrapVerification(status="tampered", envelope=None)
+    claimed_digest = decoded.get("envelope_sha256")
+    material = {key: value for key, value in decoded.items() if key != "envelope_sha256"}
+    if not isinstance(claimed_digest, str) or claimed_digest != _digest(material):
+        return CodexNativeBootstrapVerification(status="tampered", envelope=None)
+    try:
+        envelope = CodexNativeBootstrapEnvelope.model_validate_json(text, strict=True)
+    except ValidationError:
+        return CodexNativeBootstrapVerification(status="malformed", envelope=None)
+    if envelope.child_exit_code is not None and envelope.child_exit_code != child_exit_code:
+        return CodexNativeBootstrapVerification(status="tampered", envelope=None)
+    return CodexNativeBootstrapVerification(status="authenticated", envelope=envelope)
+
+
 def build_child_failure_envelope(
     progress: CodexNativeProofProgress,
     *,
@@ -432,6 +677,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
+    bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
     """Authenticate a failed child's one-line envelope or publish unknown facts."""
     expected = {
@@ -444,7 +690,19 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
     actual_stdout_sha256 = hashlib.sha256(raw_stdout.encode()).hexdigest()
     envelope: CodexNativeChildFailureEnvelope | None = None
     status: FailureEvidenceStatus
-    if command_timed_out or (child_exit_code is not None and child_exit_code < 0):
+    bootstrap_authenticated = bootstrap_verification.status == "authenticated"
+    if not bootstrap_authenticated:
+        status = cast(
+            "FailureEvidenceStatus",
+            (
+                "tampered"
+                if bootstrap_verification.status == "tampered"
+                else "malformed"
+                if bootstrap_verification.status in {"malformed", "unsafe"}
+                else "missing"
+            ),
+        )
+    elif command_timed_out or (child_exit_code is not None and child_exit_code < 0):
         status = "crashed"
     elif not raw_stdout:
         status = "missing"
@@ -498,6 +756,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
+            bootstrap_verification=bootstrap_verification,
         )
     if status != "authenticated":
         return _unknown_verified_failure(
@@ -513,6 +772,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
             child_envelope_sha256=envelope.envelope_sha256 if envelope is not None else None,
+            bootstrap_verification=bootstrap_verification,
         )
     if envelope is None:
         raise AssertionError("authenticated child envelope is missing")
@@ -546,6 +806,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
         remaining_process_group_count=remaining_process_group_count,
         child_envelope_sha256=envelope.envelope_sha256,
         reason=envelope.reason,
+        bootstrap_verification=bootstrap_verification,
     )
     return CodexNativeVerifiedChildFailure.model_validate(
         {**material, "failure_receipt_sha256": _digest(material)},
@@ -575,6 +836,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
     child_envelope_sha256: str | None,
+    bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
     reason_by_status: dict[FailureEvidenceStatus, str] = {
         "authenticated": "proof_child_failed",
@@ -583,6 +845,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
         "tampered": "proof_child_failure_envelope_tampered",
         "crashed": "proof_child_process_crashed",
         "cleanup_failed": "proof_child_cleanup_failed",
+        "bootstrap_authenticated": "proof_child_failure_envelope_missing",
     }
     material = _verified_material(
         expected=expected,
@@ -614,6 +877,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
         remaining_process_group_count=remaining_process_group_count,
         child_envelope_sha256=child_envelope_sha256,
         reason=reason_by_status[status],
+        bootstrap_verification=bootstrap_verification,
     )
     return CodexNativeVerifiedChildFailure.model_validate(
         {**material, "failure_receipt_sha256": _digest(material)},
@@ -632,6 +896,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
     """Keep phase and positive facts while making unfinished outcomes unknown."""
     material = _verified_material(
@@ -668,6 +933,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
         remaining_process_group_count=remaining_process_group_count,
         child_envelope_sha256=envelope.envelope_sha256,
         reason="proof_child_cleanup_failed",
+        bootstrap_verification=bootstrap_verification,
     )
     return CodexNativeVerifiedChildFailure.model_validate(
         {**material, "failure_receipt_sha256": _digest(material)},
@@ -705,6 +971,7 @@ def _verified_material(  # noqa: PLR0913
     remaining_process_group_count: int | None,
     child_envelope_sha256: str | None,
     reason: str,
+    bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> dict[str, object]:
     return {
         "schema_version": "1",
@@ -712,6 +979,13 @@ def _verified_material(  # noqa: PLR0913
         "status": "refused",
         "harness_policy": "codex_native_v1",
         **expected,
+        "bootstrap_evidence_status": bootstrap_verification.status,
+        "bootstrap_authenticated": bootstrap_verification.status == "authenticated",
+        "bootstrap_envelope": (
+            bootstrap_verification.envelope.model_dump(mode="python")
+            if bootstrap_verification.envelope is not None
+            else None
+        ),
         "failure_evidence_status": failure_evidence_status,
         "producer_authenticated": producer_authenticated,
         "completed_phases": completed_phases,

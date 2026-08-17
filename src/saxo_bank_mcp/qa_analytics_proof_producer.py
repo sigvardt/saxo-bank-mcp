@@ -13,6 +13,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Self, cast
 
@@ -62,11 +63,13 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     validate_proof_matrix_bundle,
 )
 from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeBootstrapEnvelope,
     CodexNativeProofProgress,
     CodexNativeSimPreflightReceipt,
     CodexNativeVerifiedChildFailure,
     build_child_failure_envelope,
     safe_failure_reason,
+    verify_bootstrap_envelope_file,
     verify_child_failure_envelope,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
@@ -83,6 +86,7 @@ _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _PRODUCER_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
+_BOOTSTRAP_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
 _COMMAND_NAME = "analytics_proof_producer"
 _AGENT_EVAL_COMMAND_NAME = "analytics_installed_dual_evaluation"
 _PROCESS_AUTHORITY = object()
@@ -151,6 +155,13 @@ class CodexNativeProofFailureError(ProofProducerError):
         """Retain only the verified redacted receipt."""
         self.receipt = receipt
         super().__init__(receipt.reason)
+
+
+@dataclass(frozen=True, slots=True)
+class _CodexNativeChildExecution:
+    result: CommandResult
+    command: tuple[str, ...]
+    bootstrap_envelope: CodexNativeBootstrapEnvelope
 
 
 class _StrictModel(BaseModel):
@@ -436,6 +447,8 @@ class CodexNativeVerifiedInstalledProofValidation(_StrictModel):
     network_call_made: bool | None = None
     broker_write_made: Literal[False] = False
     disclaimer_response_made: Literal[False] = False
+    bootstrap_authenticated: Literal[True] = True
+    bootstrap_envelope: CodexNativeBootstrapEnvelope
 
     @model_validator(mode="after")
     def _validate_network_provenance(self) -> Self:
@@ -443,6 +456,8 @@ class CodexNativeVerifiedInstalledProofValidation(_StrictModel):
             raise ValueError("native proof network provenance does not match proof state")
         if self.status == "validated" and self.sim_preflight.status != "passed":
             raise ValueError("validated native proof requires passed SIM preflight")
+        if self.bootstrap_envelope.bootstrap_state != "complete":
+            raise ValueError("validated native proof requires completed bootstrap evidence")
         return self
 
 
@@ -495,7 +510,7 @@ def run_verified_installed_producer(
     )
 
 
-def run_verified_codex_native_producer(
+def run_verified_codex_native_producer(  # noqa: C901
     install: CodexInstallEvidenceReport,
     *,
     candidate_commit: str,
@@ -513,16 +528,19 @@ def run_verified_codex_native_producer(
     if clone_digest != codex_digest:
         raise ProofProducerError("proof_installed_cache_digest_mismatch")
     expected_module_sha256 = _installed_producer_module_sha256(install.codex.cache_root)
-    command = _codex_native_producer_command(candidate_commit, codex_digest)
+    expected_bootstrap_sha256 = _installed_bootstrap_module_sha256(install.codex.cache_root)
+    catalog_sha256, contract_sha256 = _installed_contract_digests()
     try:
-        result = _execute_codex_native_installed_child(
+        execution = _execute_codex_native_installed_child(
             install.codex.cache_root,
-            command,
             source_repo=install.clone.path,
             retained_codex_home=install.run_root / "codex-home",
             candidate_commit=candidate_commit,
             installed_cache_sha256=codex_digest,
+            bootstrap_module_sha256=expected_bootstrap_sha256,
             producer_module_sha256=expected_module_sha256,
+            catalog_sha256=catalog_sha256,
+            contract_sha256=contract_sha256,
         )
     except CodexNativeProofFailureError:
         _require_clean_source_commit(install.repo, candidate_commit)
@@ -530,19 +548,27 @@ def run_verified_codex_native_producer(
             raise ProofProducerError("proof_installed_cache_changed_during_execution") from None
         if _installed_producer_module_sha256(install.codex.cache_root) != expected_module_sha256:
             raise ProofProducerError("proof_installed_producer_changed_during_execution") from None
+        if (
+            _installed_bootstrap_module_sha256(install.codex.cache_root)
+            != expected_bootstrap_sha256
+        ):
+            raise ProofProducerError("proof_installed_bootstrap_changed_during_execution") from None
         raise
     _require_clean_source_commit(install.repo, candidate_commit)
     if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
         raise ProofProducerError("proof_installed_cache_changed_during_execution")
     if _installed_producer_module_sha256(install.codex.cache_root) != expected_module_sha256:
         raise ProofProducerError("proof_installed_producer_changed_during_execution")
+    if _installed_bootstrap_module_sha256(install.codex.cache_root) != expected_bootstrap_sha256:
+        raise ProofProducerError("proof_installed_bootstrap_changed_during_execution")
     return _validate_codex_native_process_owned_result(
-        result,
-        command=command,
+        execution.result,
+        command=execution.command,
         cache_root=install.codex.cache_root,
         candidate_commit=candidate_commit,
         installed_cache_sha256=codex_digest,
         producer_module_sha256=expected_module_sha256,
+        bootstrap_envelope=execution.bootstrap_envelope,
         authority=_PROCESS_AUTHORITY,
     )
 
@@ -2078,6 +2104,7 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
     candidate_commit: str,
     installed_cache_sha256: str,
     producer_module_sha256: str,
+    bootstrap_envelope: CodexNativeBootstrapEnvelope,
     authority: object,
 ) -> CodexNativeVerifiedInstalledProofValidation:
     if authority is not _PROCESS_AUTHORITY:
@@ -2154,6 +2181,8 @@ def _validate_codex_native_process_owned_result(  # noqa: PLR0913
         sim_preflight=produced.sim_preflight,
         network_call_made=produced.network_call_made,
         validation_errors=produced.validation_errors,
+        bootstrap_authenticated=True,
+        bootstrap_envelope=bootstrap_envelope,
     )
 
 
@@ -2172,21 +2201,36 @@ def _producer_command(candidate_commit: str, installed_cache_sha256: str) -> tup
     )
 
 
-def _codex_native_producer_command(
+def _codex_native_producer_command(  # noqa: PLR0913
+    cache_root: Path,
+    envelope_path: Path,
     candidate_commit: str,
     installed_cache_sha256: str,
+    bootstrap_module_sha256: str,
+    producer_module_sha256: str,
+    catalog_sha256: str,
+    contract_sha256: str,
 ) -> tuple[str, ...]:
     return (
         "uv",
         "run",
         "--offline",
         "python",
-        "-m",
-        "saxo_bank_mcp.qa_analytics_proof_producer",
+        str((cache_root.resolve() / _BOOTSTRAP_MODULE_RELATIVE).resolve()),
+        "--envelope-path",
+        str(envelope_path.resolve()),
         "--candidate-commit",
         candidate_commit,
         "--installed-cache-sha256",
         installed_cache_sha256,
+        "--bootstrap-module-sha256",
+        bootstrap_module_sha256,
+        "--producer-module-sha256",
+        producer_module_sha256,
+        "--catalog-sha256",
+        catalog_sha256,
+        "--contract-sha256",
+        contract_sha256,
         "--harness-policy",
         "codex_native_v1",
     )
@@ -2268,16 +2312,18 @@ def _execute_installed_child(  # noqa: C901, PLR0912, PLR0913
         return result
 
 
-def _execute_codex_native_installed_child(  # noqa: PLR0913
+def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
     cache_root: Path,
-    command: tuple[str, ...],
     *,
     source_repo: Path,
     retained_codex_home: Path,
     candidate_commit: str,
     installed_cache_sha256: str,
+    bootstrap_module_sha256: str,
     producer_module_sha256: str,
-) -> CommandResult:
+    catalog_sha256: str,
+    contract_sha256: str,
+) -> _CodexNativeChildExecution:
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
@@ -2294,6 +2340,17 @@ def _execute_codex_native_installed_child(  # noqa: PLR0913
             )
         except MatrixEnvError as error:
             raise ProofProducerError("proof_sim_auth_lease_unavailable") from error
+        bootstrap_path = runtime_root / "proof-bootstrap.json"
+        command = _codex_native_producer_command(
+            cache_root,
+            bootstrap_path,
+            candidate_commit,
+            installed_cache_sha256,
+            bootstrap_module_sha256,
+            producer_module_sha256,
+            catalog_sha256,
+            contract_sha256,
+        )
         command_error: CommandFailureError | None = None
         result: CommandResult | None = None
         promotion_error: MatrixEnvError | None = None
@@ -2340,7 +2397,17 @@ def _execute_codex_native_installed_child(  # noqa: PLR0913
                 and command_receipt.stderr_sha256
                 == hashlib.sha256(command_error.stderr.encode()).hexdigest()
             )
-            catalog_sha256, contract_sha256 = _installed_contract_digests()
+            bootstrap_verification = verify_bootstrap_envelope_file(
+                bootstrap_path,
+                expected_parent=runtime_root,
+                candidate_commit=candidate_commit,
+                installed_cache_sha256=installed_cache_sha256,
+                bootstrap_module_sha256=bootstrap_module_sha256,
+                producer_module_sha256=producer_module_sha256,
+                catalog_sha256=catalog_sha256,
+                contract_sha256=contract_sha256,
+                child_exit_code=command_receipt.exit_code,
+            )
             verified_failure = verify_child_failure_envelope(
                 raw_stdout=command_error.stdout if command_trusted else "",
                 candidate_commit=candidate_commit,
@@ -2358,6 +2425,7 @@ def _execute_codex_native_installed_child(  # noqa: PLR0913
                 runtime_cleanup_status=(
                     "complete" if promotion_error is None and cleanup_error is None else "failed"
                 ),
+                bootstrap_verification=bootstrap_verification,
             )
             raise CodexNativeProofFailureError(verified_failure) from command_error
         if promotion_error is not None:
@@ -2366,7 +2434,28 @@ def _execute_codex_native_installed_child(  # noqa: PLR0913
             raise ProofProducerError("proof_sim_auth_lease_cleanup_failed") from cleanup_error
         if result is None:
             raise ProofProducerError("proof_producer_result_missing")
-        return result
+        bootstrap_verification = verify_bootstrap_envelope_file(
+            bootstrap_path,
+            expected_parent=runtime_root,
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=installed_cache_sha256,
+            bootstrap_module_sha256=bootstrap_module_sha256,
+            producer_module_sha256=producer_module_sha256,
+            catalog_sha256=catalog_sha256,
+            contract_sha256=contract_sha256,
+            child_exit_code=result.receipt.exit_code,
+        )
+        if (
+            bootstrap_verification.status != "authenticated"
+            or bootstrap_verification.envelope is None
+            or bootstrap_verification.envelope.bootstrap_state != "complete"
+        ):
+            raise ProofProducerError("proof_bootstrap_receipt_invalid")
+        return _CodexNativeChildExecution(
+            result=result,
+            command=command,
+            bootstrap_envelope=bootstrap_verification.envelope,
+        )
 
 
 def _require_clean_source_commit(repo: Path, candidate_commit: str) -> None:
@@ -2411,6 +2500,13 @@ def _installed_producer_module_sha256(cache_root: Path) -> str:
     path = cache_root.resolve() / _PRODUCER_MODULE_RELATIVE
     if path.is_symlink() or not path.is_file():
         raise ProofProducerError("proof_installed_producer_missing")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _installed_bootstrap_module_sha256(cache_root: Path) -> str:
+    path = cache_root.resolve() / _BOOTSTRAP_MODULE_RELATIVE
+    if path.is_symlink() or not path.is_file():
+        raise ProofProducerError("proof_installed_bootstrap_missing")
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 

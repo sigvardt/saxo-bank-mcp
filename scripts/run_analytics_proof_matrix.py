@@ -32,6 +32,12 @@ from saxo_bank_mcp.qa_analytics_proof_producer import (
     run_verified_codex_native_producer,
     run_verified_installed_producer,
 )
+from saxo_bank_mcp.qa_analytics_proof_publication import (
+    CodexNativePublishedResult,
+    CodexNativePublishedResultKind,
+    build_codex_native_boundary_failure,
+    build_codex_native_proof_publication,
+)
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 
@@ -42,7 +48,7 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
+def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912
     parser = argparse.ArgumentParser(
         description="Plan or validate the complete Saxo analytics proof matrix.",
     )
@@ -74,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         )
         return 1
     contract_material = [contract.model_dump(mode="json") for contract in contracts]
+    contract_sha256 = _digest(contract_material)
     if args.plan_only:
         return _publish(
             args.out,
@@ -82,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
                 "execution_performed": False,
                 "analysis_kind_count": len(contracts),
                 "evidence_receipt_count": len(catalog.evidence_receipt_ids),
-                "contract_sha256": _digest(contract_material),
+                "contract_sha256": contract_sha256,
                 "reason": "final_execution_deferred",
             },
             success=True,
@@ -97,6 +104,24 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         args.claude_global_home is None or args.fixture_cleanup_ledger is None
     )
     if shared_missing or dual_missing:
+        if (
+            args.harness_policy == "codex_native_v1"
+            and isinstance(args.candidate_commit, str)
+            and _COMMIT_PATTERN.fullmatch(args.candidate_commit) is not None
+        ):
+            return _publish_native(
+                args.out,
+                candidate_commit=args.candidate_commit,
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
+                    candidate_commit=args.candidate_commit,
+                    reason="proof_producer_execution_context_missing",
+                ),
+                success=False,
+            )
         return _publish(
             args.out,
             {"status": "refused", "reason": "proof_producer_execution_context_missing"},
@@ -115,6 +140,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             fixture_cleanup_ledger=cast("Path", args.fixture_cleanup_ledger),
         )
     if install is None:
+        if args.harness_policy == "codex_native_v1":
+            return _publish_native(
+                args.out,
+                candidate_commit=cast("str", args.candidate_commit),
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
+                    candidate_commit=cast("str", args.candidate_commit),
+                    reason="proof_installed_candidate_unverified",
+                ),
+                success=False,
+            )
         return _publish(
             args.out,
             {
@@ -125,6 +164,20 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             success=False,
         )
     if install.candidate_commit != args.candidate_commit:
+        if args.harness_policy == "codex_native_v1":
+            return _publish_native(
+                args.out,
+                candidate_commit=cast("str", args.candidate_commit),
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
+                    candidate_commit=cast("str", args.candidate_commit),
+                    reason="proof_installed_candidate_mismatch",
+                ),
+                success=False,
+            )
         return _publish(
             args.out,
             {"status": "failed", "reason": "proof_installed_candidate_mismatch"},
@@ -143,19 +196,26 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             )
         )
     except CodexNativeProofFailureError as error:
-        payload = error.receipt.model_dump(mode="json")
-        payload.update(
-            {
-                "analysis_kind_count": len(contracts),
-                "evidence_receipt_count": len(catalog.evidence_receipt_ids),
-            },
+        return _publish_native(
+            args.out,
+            candidate_commit=cast("str", args.candidate_commit),
+            analysis_kind_count=len(contracts),
+            evidence_receipt_count=len(catalog.evidence_receipt_ids),
+            contract_sha256=contract_sha256,
+            result_kind="verified_child_failure",
+            result=error.receipt,
+            success=False,
         )
-        return _publish(args.out, payload, success=False)
     except ProofProducerError as error:
         if args.harness_policy == "codex_native_v1":
-            return _publish(
+            return _publish_native(
                 args.out,
-                _unknown_native_failure_payload(
+                candidate_commit=cast("str", args.candidate_commit),
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
                     candidate_commit=args.candidate_commit,
                     reason="proof_producer_native_boundary_failed",
                 ),
@@ -175,9 +235,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         )
     except (OSError, ValueError):
         if args.harness_policy == "codex_native_v1":
-            return _publish(
+            return _publish_native(
                 args.out,
-                _unknown_native_failure_payload(
+                candidate_commit=cast("str", args.candidate_commit),
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
                     candidate_commit=args.candidate_commit,
                     reason="proof_producer_local_boundary_failed",
                 ),
@@ -195,12 +260,23 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             },
             success=False,
         )
+    if args.harness_policy == "codex_native_v1":
+        return _publish_native(
+            args.out,
+            candidate_commit=cast("str", args.candidate_commit),
+            analysis_kind_count=len(contracts),
+            evidence_receipt_count=len(catalog.evidence_receipt_ids),
+            contract_sha256=contract_sha256,
+            result_kind="verified_result",
+            result=cast("CodexNativePublishedResult", validated),
+            success=validated.status == "validated",
+        )
     payload = validated.model_dump(mode="json")
     payload.update(
         {
             "analysis_kind_count": len(contracts),
             "evidence_receipt_count": len(catalog.evidence_receipt_ids),
-            "contract_sha256": _digest(contract_material),
+            "contract_sha256": contract_sha256,
             "redacted_publication": True,
         },
     )
@@ -215,36 +291,30 @@ def _publish(path: Path, payload: Mapping[str, JsonValue], *, success: bool) -> 
     return 0 if write_scanned_json(path, payload) and success else 1
 
 
-def _unknown_native_failure_payload(
+def _publish_native(  # noqa: PLR0913
+    path: Path,
     *,
     candidate_commit: str,
-    reason: str,
-) -> dict[str, JsonValue]:
-    return {
-        "schema_version": "1",
-        "status": "refused",
-        "harness_policy": "codex_native_v1",
-        "candidate_commit": candidate_commit,
-        "failure_evidence_status": "missing",
-        "producer_authenticated": False,
-        "completed_phases": None,
-        "current_phase": None,
-        "sim_preflight_status": "unknown",
-        "sim_preflight": None,
-        "network_call_made": None,
-        "model_event_count": None,
-        "mcp_event_count": None,
-        "saxo_event_count": None,
-        "execution_performed": None,
-        "broker_write_made": None,
-        "live_mutation_calls": None,
-        "purchase_occurred": None,
-        "disclaimer_response_made": None,
-        "child_cleanup_status": "unknown",
-        "outer_runtime_cleanup_status": "unknown",
-        "reason": reason,
-        "redacted_publication": True,
-    }
+    analysis_kind_count: int,
+    evidence_receipt_count: int,
+    contract_sha256: str,
+    result_kind: CodexNativePublishedResultKind,
+    result: CodexNativePublishedResult,
+    success: bool,
+) -> int:
+    publication = build_codex_native_proof_publication(
+        candidate_commit=candidate_commit,
+        analysis_kind_count=analysis_kind_count,
+        evidence_receipt_count=evidence_receipt_count,
+        contract_sha256=contract_sha256,
+        result_kind=result_kind,
+        result=result,
+    )
+    return _publish(
+        path,
+        cast("Mapping[str, JsonValue]", publication.model_dump(mode="json")),
+        success=success,
+    )
 
 
 if __name__ == "__main__":
