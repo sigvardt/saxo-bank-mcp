@@ -76,6 +76,8 @@ _COMMIT_PATTERN = r"^[a-f0-9]{40}$"
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _PROOF_RUNTIME_NAME = "proof-runtime"
 _PROOF_RUNTIME_BINDING_NAME = "proof-runtime-binding.json"
+_PROOF_RUNTIME_CONSUMPTION_INTENT_NAME = "proof-runtime-consumption-intent.json"
+_PROOF_RUNTIME_CLEANUP_NAME = "proof-runtime-cleanup.json"
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
 
@@ -132,6 +134,62 @@ class CodexProofRuntimeBinding(_StrictModel):
 class CodexProofRuntimeEvidence(_StrictModel):
     binding_path: Path
     binding: CodexProofRuntimeBinding
+
+
+class CodexProofRuntimeConsumptionIntent(_StrictModel):
+    """Durable authorization written before the one-shot runtime is removed."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_proof_runtime_consumption_intent"] = (
+        "codex_native_proof_runtime_consumption_intent"
+    )
+    harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
+    candidate_tree: str = Field(pattern=_COMMIT_PATTERN)
+    runtime_binding_sha256: str = Field(pattern=_SHA256_PATTERN)
+    cleanup_target: Literal["bound_proof_runtime"] = "bound_proof_runtime"
+    runtime_present: Literal[True] = True
+    owner_only: Literal[True] = True
+    intent_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_intent(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"intent_sha256"})
+        if self.intent_sha256 != _digest(material):
+            raise ValueError("codex_proof_runtime_consumption_intent_digest_invalid")
+        return self
+
+
+class CodexProofRuntimeCleanupReceipt(_StrictModel):
+    """Authenticated proof that the authorized runtime consumption completed."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_proof_runtime_cleanup"] = (
+        "codex_native_proof_runtime_cleanup"
+    )
+    harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
+    candidate_tree: str = Field(pattern=_COMMIT_PATTERN)
+    runtime_binding_sha256: str = Field(pattern=_SHA256_PATTERN)
+    consumption_intent_sha256: str = Field(pattern=_SHA256_PATTERN)
+    cleanup_status: Literal["complete"] = "complete"
+    runtime_absent: Literal[True] = True
+    owner_only: Literal[True] = True
+    cleanup_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_cleanup(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"cleanup_receipt_sha256"})
+        if self.cleanup_receipt_sha256 != _digest(material):
+            raise ValueError("codex_proof_runtime_cleanup_receipt_digest_invalid")
+        return self
+
+
+class CodexProofRuntimeConsumptionEvidence(_StrictModel):
+    intent_path: Path
+    intent: CodexProofRuntimeConsumptionIntent
+    cleanup_path: Path
+    cleanup: CodexProofRuntimeCleanupReceipt
 
 
 class ProofRuntimeCleanupError(ValueError):
@@ -674,8 +732,10 @@ def load_verified_codex_install_report(  # noqa: C901, PLR0912
     return (report, ()) if not errors else (None, tuple(dict.fromkeys(errors)))
 
 
-def cleanup_codex_proof_runtime(report: CodexInstallEvidenceReport) -> None:
-    """Remove only the verified one-shot runtime, retaining its binding receipt."""
+def cleanup_codex_proof_runtime(  # noqa: C901
+    report: CodexInstallEvidenceReport,
+) -> CodexProofRuntimeConsumptionEvidence:
+    """Authorize, remove, and durably prove consumption of the one-shot runtime."""
     evidence = report.proof_runtime
     if evidence is None:
         raise ProofRuntimeCleanupError("codex_proof_runtime_missing")
@@ -693,12 +753,144 @@ def cleanup_codex_proof_runtime(report: CodexInstallEvidenceReport) -> None:
         or stat.S_IMODE(metadata.st_mode) != _OWNER_DIRECTORY_MODE
     ):
         raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_target_unsafe")
+    intent_path = report.run_root.resolve() / _PROOF_RUNTIME_CONSUMPTION_INTENT_NAME
+    cleanup_path = report.run_root.resolve() / _PROOF_RUNTIME_CLEANUP_NAME
+    if os.path.lexists(intent_path) or os.path.lexists(cleanup_path):
+        raise ProofRuntimeCleanupError("codex_proof_runtime_consumption_receipt_exists")
+    intent_material = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime_consumption_intent",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": report.candidate_commit,
+        "candidate_tree": evidence.binding.candidate_tree,
+        "runtime_binding_sha256": evidence.binding.binding_sha256,
+        "cleanup_target": "bound_proof_runtime",
+        "runtime_present": True,
+        "owner_only": True,
+    }
+    intent = CodexProofRuntimeConsumptionIntent.model_validate(
+        {**intent_material, "intent_sha256": _digest(intent_material)},
+        strict=True,
+    )
+    try:
+        write_json(
+            intent_path,
+            cast("dict[str, JsonValue]", intent.model_dump(mode="json")),
+        )
+        intent_path.chmod(_OWNER_FILE_MODE)
+    except OSError as exc:
+        raise ProofRuntimeCleanupError(
+            "codex_proof_runtime_consumption_intent_write_failed",
+        ) from exc
+    try:
+        intent_metadata = os.lstat(intent_path)
+        persisted_intent = CodexProofRuntimeConsumptionIntent.model_validate_json(
+            intent_path.read_text(encoding="utf-8"),
+        )
+    except (OSError, ValidationError) as exc:
+        raise ProofRuntimeCleanupError(
+            "codex_proof_runtime_consumption_intent_invalid",
+        ) from exc
+    if (
+        persisted_intent != intent
+        or not stat.S_ISREG(intent_metadata.st_mode)
+        or stat.S_ISLNK(intent_metadata.st_mode)
+        or intent_metadata.st_uid != os.getuid()
+        or intent_metadata.st_nlink != 1
+        or stat.S_IMODE(intent_metadata.st_mode) != _OWNER_FILE_MODE
+    ):
+        raise ProofRuntimeCleanupError("codex_proof_runtime_consumption_intent_invalid")
     try:
         shutil.rmtree(declared)
     except OSError as exc:
         raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_failed") from exc
     if os.path.lexists(declared):
         raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_residue")
+
+    cleanup_material = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime_cleanup",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": report.candidate_commit,
+        "candidate_tree": evidence.binding.candidate_tree,
+        "runtime_binding_sha256": evidence.binding.binding_sha256,
+        "consumption_intent_sha256": intent.intent_sha256,
+        "cleanup_status": "complete",
+        "runtime_absent": True,
+        "owner_only": True,
+    }
+    cleanup = CodexProofRuntimeCleanupReceipt.model_validate(
+        {
+            **cleanup_material,
+            "cleanup_receipt_sha256": _digest(cleanup_material),
+        },
+        strict=True,
+    )
+    try:
+        write_json(
+            cleanup_path,
+            cast("dict[str, JsonValue]", cleanup.model_dump(mode="json")),
+        )
+        cleanup_path.chmod(_OWNER_FILE_MODE)
+    except OSError as exc:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_receipt_write_failed") from exc
+    return verify_codex_proof_runtime_consumed(report)
+
+
+def verify_codex_proof_runtime_consumed(
+    report: CodexInstallEvidenceReport,
+) -> CodexProofRuntimeConsumptionEvidence:
+    """Verify post-consumption state without requiring the deleted runtime to exist."""
+    evidence = report.proof_runtime
+    if evidence is None:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_missing")
+    runtime_root = report.run_root.resolve() / _PROOF_RUNTIME_NAME
+    intent_path = report.run_root.resolve() / _PROOF_RUNTIME_CONSUMPTION_INTENT_NAME
+    cleanup_path = report.run_root.resolve() / _PROOF_RUNTIME_CLEANUP_NAME
+    try:
+        intent_metadata = os.lstat(intent_path)
+        cleanup_metadata = os.lstat(cleanup_path)
+        binding_metadata = os.lstat(evidence.binding_path)
+        intent = CodexProofRuntimeConsumptionIntent.model_validate_json(
+            intent_path.read_text(encoding="utf-8"),
+        )
+        cleanup = CodexProofRuntimeCleanupReceipt.model_validate_json(
+            cleanup_path.read_text(encoding="utf-8"),
+        )
+        on_disk_binding = CodexProofRuntimeBinding.model_validate_json(
+            evidence.binding_path.read_text(encoding="utf-8"),
+        )
+    except (OSError, ValidationError) as exc:
+        raise ProofRuntimeCleanupError(
+            "codex_proof_runtime_consumption_receipt_invalid",
+        ) from exc
+    file_metadata = (intent_metadata, cleanup_metadata, binding_metadata)
+    invalid_file = any(
+        not stat.S_ISREG(item.st_mode)
+        or stat.S_ISLNK(item.st_mode)
+        or item.st_uid != os.getuid()
+        or item.st_nlink != 1
+        or stat.S_IMODE(item.st_mode) != _OWNER_FILE_MODE
+        for item in file_metadata
+    )
+    invalid_binding = (
+        on_disk_binding != evidence.binding
+        or intent.candidate_commit != report.candidate_commit
+        or intent.candidate_tree != evidence.binding.candidate_tree
+        or intent.runtime_binding_sha256 != evidence.binding.binding_sha256
+        or cleanup.candidate_commit != report.candidate_commit
+        or cleanup.candidate_tree != evidence.binding.candidate_tree
+        or cleanup.runtime_binding_sha256 != evidence.binding.binding_sha256
+        or cleanup.consumption_intent_sha256 != intent.intent_sha256
+    )
+    if os.path.lexists(runtime_root) or invalid_file or invalid_binding:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_consumption_receipt_invalid")
+    return CodexProofRuntimeConsumptionEvidence(
+        intent_path=intent_path,
+        intent=intent,
+        cleanup_path=cleanup_path,
+        cleanup=cleanup,
+    )
 
 
 def _proof_runtime_errors(

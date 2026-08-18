@@ -27,6 +27,7 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     load_analysis_kind_catalog,
 )
 from saxo_bank_mcp.qa_analytics_proof_producer import (
+    CodexNativeBoundaryFailureError,
     CodexNativeProofFailureError,
     ProofProducerError,
     run_verified_codex_native_producer,
@@ -207,8 +208,30 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912
             result=error.receipt,
             success=False,
         )
+    except CodexNativeBoundaryFailureError as error:
+        return _publish_native(
+            args.out,
+            candidate_commit=cast("str", args.candidate_commit),
+            analysis_kind_count=len(contracts),
+            evidence_receipt_count=len(catalog.evidence_receipt_ids),
+            contract_sha256=contract_sha256,
+            result_kind="boundary_failure",
+            result=build_codex_native_boundary_failure(
+                candidate_commit=cast("str", args.candidate_commit),
+                reason=error.reason,
+                boundary_phase=error.boundary_phase,
+                command_state=error.command_state,
+                cleanup_status=error.cleanup_status,
+                runtime_consumption_intent_sha256=(error.runtime_consumption_intent_sha256),
+                runtime_cleanup_receipt_sha256=error.runtime_cleanup_receipt_sha256,
+            ),
+            success=False,
+        )
     except ProofProducerError as error:
         if args.harness_policy == "codex_native_v1":
+            reason = str(error)
+            if re.fullmatch(r"proof_[a-z0-9_]{1,122}", reason) is None:
+                reason = "proof_producer_native_boundary_failed"
             return _publish_native(
                 args.out,
                 candidate_commit=cast("str", args.candidate_commit),
@@ -218,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912
                 result_kind="boundary_failure",
                 result=build_codex_native_boundary_failure(
                     candidate_commit=args.candidate_commit,
-                    reason="proof_producer_native_boundary_failed",
+                    reason=reason,
                 ),
                 success=False,
             )

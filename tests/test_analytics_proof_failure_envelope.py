@@ -148,6 +148,13 @@ def _failure(
     )
 
 
+def _consumption_evidence() -> SimpleNamespace:
+    return SimpleNamespace(
+        intent=SimpleNamespace(intent_sha256="a" * 64),
+        cleanup=SimpleNamespace(cleanup_receipt_sha256="b" * 64),
+    )
+
+
 def _verify(raw: str, **overrides: object) -> CodexNativeVerifiedChildFailure:
     values: dict[str, object] = {
         "raw_stdout": raw,
@@ -640,8 +647,9 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_op)
     cleanup_calls: list[object] = []
 
-    def cleanup_proof_runtime(value: object) -> None:
+    def cleanup_proof_runtime(value: object) -> SimpleNamespace:
         cleanup_calls.append(value)
+        return _consumption_evidence()
 
     monkeypatch.setattr(producer, "cleanup_codex_proof_runtime", cleanup_proof_runtime)
     monkeypatch.setattr(
@@ -703,8 +711,9 @@ def test_native_wrapper_cleans_retained_runtime_when_eval_setup_fails(
 
     cleanup_calls: list[object] = []
 
-    def cleanup_proof_runtime(value: object) -> None:
+    def cleanup_proof_runtime(value: object) -> SimpleNamespace:
         cleanup_calls.append(value)
+        return _consumption_evidence()
 
     monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", fail_prepare)
     monkeypatch.setattr(
@@ -713,7 +722,7 @@ def test_native_wrapper_cleans_retained_runtime_when_eval_setup_fails(
         cleanup_proof_runtime,
     )
 
-    with pytest.raises(producer.ProofProducerError, match="proof_sim_auth_lease_unavailable"):
+    with pytest.raises(producer.ProofProducerError) as caught:
         producer._execute_codex_native_installed_child(  # noqa: SLF001
             cache_root,
             source_repo=source_repo,
@@ -729,7 +738,131 @@ def test_native_wrapper_cleans_retained_runtime_when_eval_setup_fails(
             contract_sha256=CONTRACT_SHA256,
         )
 
+    assert type(caught.value).__name__ == "CodexNativeBoundaryFailureError"
+    assert caught.value.reason == "proof_sim_auth_lease_unavailable"
+    assert caught.value.boundary_phase == "runtime_preparation"
+    assert caught.value.command_state == "not_started"
+    assert caught.value.cleanup_status == "complete"
+    assert caught.value.runtime_consumption_intent_sha256 == "a" * 64
+    assert caught.value.runtime_cleanup_receipt_sha256 == "b" * 64
     assert cleanup_calls == [install]
+
+
+def test_native_wrapper_preserves_bootstrap_verification_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    for directory in (cache_root, source_repo, retained_codex_home):
+        directory.mkdir(mode=0o700)
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+    command = ("proof-child",)
+
+    def prepare(runtime_root: Path, **_kwargs: object) -> SimpleNamespace:
+        codex_home = runtime_root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        return SimpleNamespace(
+            env={"PATH": "/usr/bin:/bin"},
+            codex_home=codex_home,
+            run_root=runtime_root,
+        )
+
+    def pass_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> object:
+        del env, timeout_seconds
+        return producer.CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=12,
+                pgid=12,
+                exit_code=0,
+                stdout_sha256=hashlib.sha256(b"{}").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=False,
+            ),
+            stdout="{}",
+            stderr="",
+        )
+
+    def native_command(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return command
+
+    def missing_bootstrap(
+        *_args: object,
+        **_kwargs: object,
+    ) -> CodexNativeBootstrapVerification:
+        return CodexNativeBootstrapVerification(status="missing", envelope=None)
+
+    def no_op(_value: object) -> None:
+        return
+
+    def consume_runtime(_value: object) -> SimpleNamespace:
+        return _consumption_evidence()
+
+    monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
+    monkeypatch.setattr(producer, "run_command", pass_command)
+    monkeypatch.setattr(
+        producer,
+        "_codex_native_producer_command",
+        native_command,
+    )
+    monkeypatch.setattr(
+        producer,
+        "verify_bootstrap_envelope_file",
+        missing_bootstrap,
+    )
+    monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", no_op)
+    monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_op)
+    monkeypatch.setattr(
+        producer,
+        "cleanup_codex_proof_runtime",
+        consume_runtime,
+    )
+
+    with pytest.raises(producer.ProofProducerError) as caught:
+        producer._execute_codex_native_installed_child(  # noqa: SLF001
+            cache_root,
+            source_repo=source_repo,
+            retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
+        )
+
+    assert type(caught.value).__name__ == "CodexNativeBoundaryFailureError"
+    assert caught.value.reason == "proof_bootstrap_receipt_invalid"
+    assert caught.value.boundary_phase == "bootstrap_verification"
+    assert caught.value.command_state == "completed"
+    assert caught.value.cleanup_status == "complete"
 
 
 def test_native_wrapper_cleans_retained_runtime_after_success(
@@ -808,8 +941,9 @@ def test_native_wrapper_cleans_retained_runtime_after_success(
     def no_op(_value: object) -> None:
         return
 
-    def cleanup_proof_runtime(value: object) -> None:
+    def cleanup_proof_runtime(value: object) -> SimpleNamespace:
         cleanup_calls.append(value)
+        return _consumption_evidence()
 
     monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
     monkeypatch.setattr(producer, "run_command", pass_command)
@@ -928,8 +1062,9 @@ def test_native_wrapper_cleans_retained_runtime_after_child_crash(
     def no_op(_value: object) -> None:
         return
 
-    def cleanup_proof_runtime(value: object) -> None:
+    def cleanup_proof_runtime(value: object) -> SimpleNamespace:
         cleanup_calls.append(value)
+        return _consumption_evidence()
 
     monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
     monkeypatch.setattr(producer, "run_command", crash_command)
@@ -1037,6 +1172,96 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
     assert payload["result"]["reason"] == "proof_before_preflight_injected"
     assert "raw_stdout" not in payload
     assert "raw_stderr" not in payload
+
+
+def test_proof_matrix_cli_publishes_typed_native_boundary_discriminators(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script = _load_proof_matrix_script()
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    install = SimpleNamespace(candidate_commit=CANDIDATE)
+
+    def load_install(*_args: object, **_kwargs: object) -> tuple[SimpleNamespace, tuple[str, ...]]:
+        return install, ()
+
+    monkeypatch.setattr(
+        script,
+        "load_verified_codex_install_report",
+        load_install,
+    )
+
+    def fail_boundary(*_args: object, **_kwargs: object) -> NoReturn:
+        raise producer.CodexNativeBoundaryFailureError(
+            reason="proof_bootstrap_receipt_invalid",
+            boundary_phase="bootstrap_verification",
+            command_state="completed",
+            cleanup_status="complete",
+            runtime_consumption_intent_sha256="a" * 64,
+            runtime_cleanup_receipt_sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(script, "run_verified_codex_native_producer", fail_boundary)
+    output = tmp_path / "proof.json"
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    publication = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    assert exit_code == 1
+    assert publication.result_kind == "boundary_failure"
+    assert publication.result.reason == "proof_bootstrap_receipt_invalid"
+    assert publication.result.boundary_phase == "bootstrap_verification"
+    assert publication.result.command_state == "completed"
+    assert publication.result.cleanup_status == "complete"
+    assert publication.result.runtime_consumption_intent_sha256 == "a" * 64
+    assert publication.result.runtime_cleanup_receipt_sha256 == "b" * 64
+    assert publication.result.network_call_made is None
+    assert publication.result.execution_performed is None
+
+
+def test_native_boundary_error_sanitizes_untyped_reason() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    error = producer.CodexNativeBoundaryFailureError(
+        reason="untyped_private_detail",
+        boundary_phase="local_boundary",
+        command_state="unknown",
+        cleanup_status="unknown",
+    )
+
+    assert error.reason == "proof_producer_local_boundary_failed"
+
+
+def test_native_boundary_failure_retains_consumption_receipts_when_other_cleanup_fails() -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    error = producer._native_boundary_failure(  # noqa: SLF001
+        reason="proof_sim_auth_lease_cleanup_failed",
+        boundary_phase="isolated_runtime_cleanup",
+        command_state="completed",
+        consumption=cast("Any", _consumption_evidence()),
+        cleanup_failed=True,
+    )
+
+    assert error.cleanup_status == "failed"
+    assert error.runtime_consumption_intent_sha256 == "a" * 64
+    assert error.runtime_cleanup_receipt_sha256 == "b" * 64
 
 
 def test_bootstrap_file_verifier_authenticates_bindings_and_owner_mode(

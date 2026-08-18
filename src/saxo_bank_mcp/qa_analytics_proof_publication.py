@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.qa_analytics_proof_failure import CodexNativeVerifiedChildFailure
 from saxo_bank_mcp.qa_analytics_proof_producer import (
+    CodexNativeBoundaryPhase,
+    CodexNativeCleanupStatus,
+    CodexNativeCommandState,
     CodexNativeVerifiedInstalledProofValidation,
 )
 
@@ -36,6 +39,11 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
     candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
     failure_evidence_status: Literal["missing"] = "missing"
     producer_authenticated: Literal[False] = False
+    boundary_phase: CodexNativeBoundaryPhase = "producer_validation"
+    command_state: CodexNativeCommandState = "not_started"
+    cleanup_status: CodexNativeCleanupStatus = "unknown"
+    runtime_consumption_intent_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    runtime_cleanup_receipt_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     completed_phases: None = None
     current_phase: None = None
     sim_preflight_status: Literal["unknown"] = "unknown"
@@ -50,13 +58,30 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
     purchase_occurred: None = None
     disclaimer_response_made: None = None
     child_cleanup_status: Literal["unknown"] = "unknown"
-    outer_runtime_cleanup_status: Literal["unknown"] = "unknown"
+    outer_runtime_cleanup_status: CodexNativeCleanupStatus = "unknown"
     reason: str = Field(pattern=r"^proof_[a-z0-9_]{1,122}$")
     redacted_publication: Literal[True] = True
     boundary_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        digests = (
+            self.runtime_consumption_intent_sha256,
+            self.runtime_cleanup_receipt_sha256,
+        )
+        if self.cleanup_status == "complete":
+            if any(item is None for item in digests):
+                raise ValueError("native boundary cleanup receipt missing")
+        elif self.cleanup_status == "failed":
+            if (
+                self.runtime_cleanup_receipt_sha256 is not None
+                and self.runtime_consumption_intent_sha256 is None
+            ):
+                raise ValueError("native boundary cleanup receipt lacks its intent")
+        elif any(item is not None for item in digests):
+            raise ValueError("unproved native boundary cleanup cannot have receipts")
+        if self.outer_runtime_cleanup_status != self.cleanup_status:
+            raise ValueError("native boundary cleanup states do not match")
         material = self.model_dump(mode="json", exclude={"boundary_receipt_sha256"})
         if self.boundary_receipt_sha256 != _digest(material):
             raise ValueError("native boundary receipt digest mismatch")
@@ -112,10 +137,15 @@ class CodexNativeProofPublication(_StrictModel):
         return self
 
 
-def build_codex_native_boundary_failure(
+def build_codex_native_boundary_failure(  # noqa: PLR0913
     *,
     candidate_commit: str,
     reason: str,
+    boundary_phase: CodexNativeBoundaryPhase = "producer_validation",
+    command_state: CodexNativeCommandState = "not_started",
+    cleanup_status: CodexNativeCleanupStatus = "unknown",
+    runtime_consumption_intent_sha256: str | None = None,
+    runtime_cleanup_receipt_sha256: str | None = None,
 ) -> CodexNativeBoundaryFailureReceipt:
     material = {
         "schema_version": "1",
@@ -125,6 +155,11 @@ def build_codex_native_boundary_failure(
         "candidate_commit": candidate_commit,
         "failure_evidence_status": "missing",
         "producer_authenticated": False,
+        "boundary_phase": boundary_phase,
+        "command_state": command_state,
+        "cleanup_status": cleanup_status,
+        "runtime_consumption_intent_sha256": runtime_consumption_intent_sha256,
+        "runtime_cleanup_receipt_sha256": runtime_cleanup_receipt_sha256,
         "completed_phases": None,
         "current_phase": None,
         "sim_preflight_status": "unknown",
@@ -139,7 +174,7 @@ def build_codex_native_boundary_failure(
         "purchase_occurred": None,
         "disclaimer_response_made": None,
         "child_cleanup_status": "unknown",
-        "outer_runtime_cleanup_status": "unknown",
+        "outer_runtime_cleanup_status": cleanup_status,
         "reason": reason,
         "redacted_publication": True,
     }

@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_codex_install import (
     CodexInstallEvidenceReport,
+    CodexProofRuntimeConsumptionEvidence,
     ProofRuntimeCleanupError,
     cleanup_codex_proof_runtime,
 )
@@ -153,6 +154,61 @@ class ProofProducerError(RuntimeError):
     """Fail-closed reason from the private installed-producer boundary."""
 
 
+type CodexNativeBoundaryPhase = Literal[
+    "retained_runtime_validation",
+    "runtime_preparation",
+    "command_build",
+    "command_execution",
+    "token_promotion",
+    "isolated_runtime_cleanup",
+    "retained_runtime_cleanup",
+    "result_validation",
+    "bootstrap_verification",
+    "producer_validation",
+    "local_boundary",
+]
+type CodexNativeCommandState = Literal[
+    "not_started",
+    "start_failed",
+    "failed",
+    "completed",
+    "unknown",
+]
+type CodexNativeCleanupStatus = Literal["not_started", "complete", "failed", "unknown"]
+
+
+class CodexNativeBoundaryFailureError(ProofProducerError):
+    """Privacy-safe local boundary facts preserved before outer publication."""
+
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        reason: str,
+        boundary_phase: CodexNativeBoundaryPhase,
+        command_state: CodexNativeCommandState,
+        cleanup_status: CodexNativeCleanupStatus,
+        runtime_consumption_intent_sha256: str | None = None,
+        runtime_cleanup_receipt_sha256: str | None = None,
+    ) -> None:
+        """Retain only typed, safe local-boundary discriminators."""
+        if not reason.startswith("proof_") or _SAFE_REASON_PATTERN.fullmatch(reason) is None:
+            reason = "proof_producer_local_boundary_failed"
+        digests = (runtime_consumption_intent_sha256, runtime_cleanup_receipt_sha256)
+        if any(item is not None and _SHA256_PATTERN.fullmatch(item) is None for item in digests):
+            runtime_consumption_intent_sha256 = None
+            runtime_cleanup_receipt_sha256 = None
+            cleanup_status = "unknown"
+        if cleanup_status == "complete" and any(item is None for item in digests):
+            cleanup_status = "unknown"
+        self.reason = reason
+        self.boundary_phase = boundary_phase
+        self.command_state = command_state
+        self.cleanup_status = cleanup_status
+        self.runtime_consumption_intent_sha256 = runtime_consumption_intent_sha256
+        self.runtime_cleanup_receipt_sha256 = runtime_cleanup_receipt_sha256
+        super().__init__(reason)
+
+
 class CodexNativeProofFailureError(ProofProducerError):
     """A failed native child with one parent-verified redacted receipt."""
 
@@ -167,6 +223,34 @@ class _CodexNativeChildExecution:
     result: CommandResult
     command: tuple[str, ...]
     bootstrap_envelope: CodexNativeBootstrapEnvelope
+
+
+def _native_boundary_failure(
+    *,
+    reason: str,
+    boundary_phase: CodexNativeBoundaryPhase,
+    command_state: CodexNativeCommandState,
+    consumption: CodexProofRuntimeConsumptionEvidence | None,
+    cleanup_failed: bool,
+) -> CodexNativeBoundaryFailureError:
+    cleanup_status: CodexNativeCleanupStatus = "unknown"
+    intent_sha256: str | None = None
+    cleanup_sha256: str | None = None
+    if cleanup_failed:
+        cleanup_status = "failed"
+    if consumption is not None:
+        intent_sha256 = consumption.intent.intent_sha256
+        cleanup_sha256 = consumption.cleanup.cleanup_receipt_sha256
+        if not cleanup_failed:
+            cleanup_status = "complete"
+    return CodexNativeBoundaryFailureError(
+        reason=reason,
+        boundary_phase=boundary_phase,
+        command_state=command_state,
+        cleanup_status=cleanup_status,
+        runtime_consumption_intent_sha256=intent_sha256,
+        runtime_cleanup_receipt_sha256=cleanup_sha256,
+    )
 
 
 class _StrictModel(BaseModel):
@@ -555,7 +639,7 @@ def run_verified_codex_native_producer(  # noqa: C901
             catalog_sha256=catalog_sha256,
             contract_sha256=contract_sha256,
         )
-    except CodexNativeProofFailureError:
+    except (CodexNativeBoundaryFailureError, CodexNativeProofFailureError):
         _require_clean_source_commit(install.repo, candidate_commit)
         if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
             raise ProofProducerError("proof_installed_cache_changed_during_execution") from None
@@ -2384,7 +2468,12 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
 ) -> _CodexNativeChildExecution:
     proof_runtime = install.proof_runtime
     if proof_runtime is None:
-        raise ProofProducerError("proof_retained_runtime_required")
+        raise CodexNativeBoundaryFailureError(
+            reason="proof_retained_runtime_required",
+            boundary_phase="retained_runtime_validation",
+            command_state="not_started",
+            cleanup_status="not_started",
+        )
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
@@ -2400,34 +2489,86 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
                 harness_policy="codex_native_v1",
             )
         except MatrixEnvError as error:
+            consumption: CodexProofRuntimeConsumptionEvidence | None = None
+            retained_cleanup_error: ProofRuntimeCleanupError | None = None
             try:
-                cleanup_codex_proof_runtime(install)
+                consumption = cleanup_codex_proof_runtime(install)
             except ProofRuntimeCleanupError as proof_cleanup_error:
-                raise ProofProducerError(
-                    "proof_retained_runtime_cleanup_failed",
-                ) from proof_cleanup_error
-            raise ProofProducerError("proof_sim_auth_lease_unavailable") from error
+                retained_cleanup_error = proof_cleanup_error
+            if retained_cleanup_error is not None:
+                raise _native_boundary_failure(
+                    reason="proof_retained_runtime_cleanup_failed",
+                    boundary_phase="retained_runtime_cleanup",
+                    command_state="not_started",
+                    consumption=consumption,
+                    cleanup_failed=True,
+                ) from retained_cleanup_error
+            raise _native_boundary_failure(
+                reason="proof_sim_auth_lease_unavailable",
+                boundary_phase="runtime_preparation",
+                command_state="not_started",
+                consumption=consumption,
+                cleanup_failed=False,
+            ) from error
         bootstrap_path = runtime_root / "proof-bootstrap.json"
-        command = _codex_native_producer_command(
-            cache_root,
-            bootstrap_path,
-            candidate_commit,
-            installed_cache_sha256,
-            bootstrap_module_sha256,
-            producer_module_sha256,
-            catalog_sha256,
-            contract_sha256,
-            producer_python=proof_runtime.binding.interpreter,
-            runtime_binding_path=proof_runtime.binding_path,
-            runtime_binding_sha256=proof_runtime.binding.binding_sha256,
-            install_report_path=install_report_path,
-            install_report_sha256=install_report_sha256,
-        )
+        try:
+            command = _codex_native_producer_command(
+                cache_root,
+                bootstrap_path,
+                candidate_commit,
+                installed_cache_sha256,
+                bootstrap_module_sha256,
+                producer_module_sha256,
+                catalog_sha256,
+                contract_sha256,
+                producer_python=proof_runtime.binding.interpreter,
+                runtime_binding_path=proof_runtime.binding_path,
+                runtime_binding_sha256=proof_runtime.binding.binding_sha256,
+                install_report_path=install_report_path,
+                install_report_sha256=install_report_sha256,
+            )
+        except (OSError, ValueError) as error:
+            isolated_cleanup_error: MatrixEnvError | None = None
+            consumption = None
+            retained_cleanup_error = None
+            try:
+                require_matrix_runtime_cleanup(runtime.run_root)
+            except MatrixEnvError as matrix_cleanup_error:
+                isolated_cleanup_error = matrix_cleanup_error
+            try:
+                consumption = cleanup_codex_proof_runtime(install)
+            except ProofRuntimeCleanupError as proof_cleanup_error:
+                retained_cleanup_error = proof_cleanup_error
+            if retained_cleanup_error is not None:
+                raise _native_boundary_failure(
+                    reason="proof_retained_runtime_cleanup_failed",
+                    boundary_phase="retained_runtime_cleanup",
+                    command_state="not_started",
+                    consumption=consumption,
+                    cleanup_failed=True,
+                ) from retained_cleanup_error
+            if isolated_cleanup_error is not None:
+                raise _native_boundary_failure(
+                    reason="proof_sim_auth_lease_cleanup_failed",
+                    boundary_phase="isolated_runtime_cleanup",
+                    command_state="not_started",
+                    consumption=consumption,
+                    cleanup_failed=True,
+                ) from isolated_cleanup_error
+            raise _native_boundary_failure(
+                reason="proof_native_command_build_failed",
+                boundary_phase="command_build",
+                command_state="not_started",
+                consumption=consumption,
+                cleanup_failed=False,
+            ) from error
         command_error: CommandFailureError | None = None
+        local_command_error: OSError | ValueError | None = None
         result: CommandResult | None = None
         promotion_error: MatrixEnvError | None = None
         cleanup_error: MatrixEnvError | None = None
         retained_runtime_cleanup_error: ProofRuntimeCleanupError | None = None
+        retained_runtime_consumption: CodexProofRuntimeConsumptionEvidence | None = None
         env = dict(runtime.env)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["UV_OFFLINE"] = "1"
@@ -2446,6 +2587,8 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
             )
         except CommandFailureError as error:
             command_error = error
+        except (OSError, ValueError) as error:
+            local_command_error = error
         finally:
             try:
                 promote_rotated_sim_token_cache(runtime)
@@ -2456,7 +2599,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
             except MatrixEnvError as error:
                 cleanup_error = error
             try:
-                cleanup_codex_proof_runtime(install)
+                retained_runtime_consumption = cleanup_codex_proof_runtime(install)
             except ProofRuntimeCleanupError as error:
                 retained_runtime_cleanup_error = error
         if command_error is not None:
@@ -2507,41 +2650,91 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
                         promotion_error is None
                         and cleanup_error is None
                         and retained_runtime_cleanup_error is None
+                        and retained_runtime_consumption is not None
                     )
                     else "failed"
                 ),
                 bootstrap_verification=bootstrap_verification,
             )
             raise CodexNativeProofFailureError(verified_failure) from command_error
+        if local_command_error is not None:
+            raise _native_boundary_failure(
+                reason="proof_native_command_start_failed",
+                boundary_phase="command_execution",
+                command_state="start_failed",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=(
+                    cleanup_error is not None or retained_runtime_cleanup_error is not None
+                ),
+            ) from local_command_error
         if promotion_error is not None:
-            raise ProofProducerError("proof_sim_token_promotion_failed") from promotion_error
+            raise _native_boundary_failure(
+                reason="proof_sim_token_promotion_failed",
+                boundary_phase="token_promotion",
+                command_state="completed" if result is not None else "unknown",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=(
+                    cleanup_error is not None or retained_runtime_cleanup_error is not None
+                ),
+            ) from promotion_error
         if cleanup_error is not None:
-            raise ProofProducerError("proof_sim_auth_lease_cleanup_failed") from cleanup_error
+            raise _native_boundary_failure(
+                reason="proof_sim_auth_lease_cleanup_failed",
+                boundary_phase="isolated_runtime_cleanup",
+                command_state="completed" if result is not None else "unknown",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=True,
+            ) from cleanup_error
         if retained_runtime_cleanup_error is not None:
-            raise ProofProducerError(
-                "proof_retained_runtime_cleanup_failed",
+            raise _native_boundary_failure(
+                reason="proof_retained_runtime_cleanup_failed",
+                boundary_phase="retained_runtime_cleanup",
+                command_state="completed" if result is not None else "unknown",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=True,
             ) from retained_runtime_cleanup_error
         if result is None:
-            raise ProofProducerError("proof_producer_result_missing")
-        bootstrap_verification = verify_bootstrap_envelope_file(
-            bootstrap_path,
-            expected_parent=runtime_root,
-            candidate_commit=candidate_commit,
-            installed_cache_sha256=installed_cache_sha256,
-            bootstrap_module_sha256=bootstrap_module_sha256,
-            producer_module_sha256=producer_module_sha256,
-            catalog_sha256=catalog_sha256,
-            contract_sha256=contract_sha256,
-            child_exit_code=result.receipt.exit_code,
-            runtime_binding_sha256=proof_runtime.binding.binding_sha256,
-            install_report_sha256=install_report_sha256,
-        )
+            raise _native_boundary_failure(
+                reason="proof_producer_result_missing",
+                boundary_phase="result_validation",
+                command_state="unknown",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=False,
+            )
+        try:
+            bootstrap_verification = verify_bootstrap_envelope_file(
+                bootstrap_path,
+                expected_parent=runtime_root,
+                candidate_commit=candidate_commit,
+                installed_cache_sha256=installed_cache_sha256,
+                bootstrap_module_sha256=bootstrap_module_sha256,
+                producer_module_sha256=producer_module_sha256,
+                catalog_sha256=catalog_sha256,
+                contract_sha256=contract_sha256,
+                child_exit_code=result.receipt.exit_code,
+                runtime_binding_sha256=proof_runtime.binding.binding_sha256,
+                install_report_sha256=install_report_sha256,
+            )
+        except (OSError, ValueError) as error:
+            raise _native_boundary_failure(
+                reason="proof_bootstrap_receipt_verification_failed",
+                boundary_phase="bootstrap_verification",
+                command_state="completed",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=False,
+            ) from error
         if (
             bootstrap_verification.status != "authenticated"
             or bootstrap_verification.envelope is None
             or bootstrap_verification.envelope.bootstrap_state != "complete"
         ):
-            raise ProofProducerError("proof_bootstrap_receipt_invalid")
+            raise _native_boundary_failure(
+                reason="proof_bootstrap_receipt_invalid",
+                boundary_phase="bootstrap_verification",
+                command_state="completed",
+                consumption=retained_runtime_consumption,
+                cleanup_failed=False,
+            )
         return _CodexNativeChildExecution(
             result=result,
             command=command,

@@ -317,6 +317,117 @@ def test_codex_proof_runtime_cleanup_is_exact_and_keeps_binding(tmp_path: Path) 
     assert unrelated.is_dir()
 
 
+def test_codex_proof_runtime_cleanup_retains_authenticated_consumption_receipts(
+    tmp_path: Path,
+) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    runtime_root, binding_path = _add_proof_runtime(report_path, cache)
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+
+    consumed = codex_install.cleanup_codex_proof_runtime(report)
+    verified = codex_install.verify_codex_proof_runtime_consumed(report)
+
+    assert report.proof_runtime is not None
+    assert consumed == verified
+    assert not os.path.lexists(runtime_root)
+    assert binding_path.is_file()
+    assert consumed.intent_path.is_file()
+    assert consumed.cleanup_path.is_file()
+    assert (consumed.intent_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
+    assert (consumed.cleanup_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
+    assert consumed.intent.runtime_binding_sha256 == report.proof_runtime.binding.binding_sha256
+    assert consumed.cleanup.consumption_intent_sha256 == consumed.intent.intent_sha256
+    assert consumed.cleanup.cleanup_status == "complete"
+    assert consumed.cleanup.runtime_absent is True
+
+
+def test_codex_proof_runtime_post_consumption_verifier_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    _runtime_root, _binding_path = _add_proof_runtime(report_path, cache)
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+    consumed = codex_install.cleanup_codex_proof_runtime(report)
+    payload = json.loads(consumed.cleanup_path.read_text(encoding="utf-8"))
+    payload["runtime_binding_sha256"] = "f" * 64
+    write_json(consumed.cleanup_path, payload)
+    consumed.cleanup_path.chmod(OWNER_FILE_MODE)
+
+    with pytest.raises(
+        codex_install.ProofRuntimeCleanupError,
+        match="codex_proof_runtime_consumption_receipt_invalid",
+    ):
+        codex_install.verify_codex_proof_runtime_consumed(report)
+
+
+def test_codex_proof_runtime_cleanup_failure_retains_owner_only_intent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    runtime_root, _binding_path = _add_proof_runtime(report_path, cache)
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+
+    def fail_cleanup(_target: Path) -> None:
+        raise OSError("injected cleanup failure")
+
+    monkeypatch.setattr(codex_install.shutil, "rmtree", fail_cleanup)
+
+    with pytest.raises(
+        codex_install.ProofRuntimeCleanupError,
+        match="codex_proof_runtime_cleanup_failed",
+    ):
+        codex_install.cleanup_codex_proof_runtime(report)
+
+    intent_path = report.run_root / "proof-runtime-consumption-intent.json"
+    cleanup_path = report.run_root / "proof-runtime-cleanup.json"
+    assert runtime_root.is_dir()
+    assert intent_path.is_file()
+    assert (intent_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
+    assert not cleanup_path.exists()
+    intent = codex_install.CodexProofRuntimeConsumptionIntent.model_validate_json(
+        intent_path.read_text(encoding="utf-8"),
+    )
+    assert report.proof_runtime is not None
+    assert intent.runtime_binding_sha256 == report.proof_runtime.binding.binding_sha256
+
+
+def test_codex_proof_runtime_is_not_deleted_when_intent_readback_is_tampered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    runtime_root, _binding_path = _add_proof_runtime(report_path, cache)
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+    original_write_json = codex_install.write_json
+
+    def tamper_intent(path: Path, payload: dict[str, JsonValue]) -> None:
+        original_write_json(path, payload)
+        if path.name == "proof-runtime-consumption-intent.json":
+            changed = dict(payload)
+            changed["intent_sha256"] = "f" * 64
+            original_write_json(path, changed)
+
+    monkeypatch.setattr(codex_install, "write_json", tamper_intent)
+
+    with pytest.raises(
+        codex_install.ProofRuntimeCleanupError,
+        match="codex_proof_runtime_consumption_intent_invalid",
+    ):
+        codex_install.cleanup_codex_proof_runtime(report)
+
+    assert runtime_root.is_dir()
+    assert not (report.run_root / "proof-runtime-cleanup.json").exists()
+
+
 def test_normal_codex_install_report_keeps_existing_cleanup_contract(tmp_path: Path) -> None:
     report_path, _cache, _global_home = _build_report_fixture(tmp_path)
 
