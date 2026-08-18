@@ -1,27 +1,20 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_command_runner import (
-    descendant_pids,
-    process_group_members,
-    process_still_running,
-    remaining_live_pgids,
-    remaining_live_pids,
+    ProcessCleanupTerminalSnapshot,
+    capture_process_cleanup_scope,
+    cleanup_birth_bound_processes,
     shutil_which,
-    terminate_process_group,
 )
 from saxo_bank_mcp.agent_skill_eval_commands import path_with_cli_dirs
 from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
-TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
-COMMUNICATE_GRACE_SECONDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +38,10 @@ class EvalProcessManager:
     remaining_processes: int = 0
     timed_out: bool = False
     process_cleanup: str = "not_required"
-    _tracked_pgids: list[int] = field(default_factory=list, repr=False)
+    _cleanup_snapshots: list[ProcessCleanupTerminalSnapshot] = field(
+        default_factory=list,
+        repr=False,
+    )
 
     def run(
         self,
@@ -82,8 +78,8 @@ class EvalProcessManager:
         )
         root_pid = process.pid
         pgid = os.getpgid(root_pid)
-        self._tracked_pgids.append(pgid)
-        created = _snapshot_live_count(root_pid, pgid)
+        scope = capture_process_cleanup_scope(root_pid, pgid)
+        created = max(1, len(scope.identities))
         self.created_processes += created
         self.process_cleanup = "pending"
         timed_out = False
@@ -94,20 +90,23 @@ class EvalProcessManager:
         except subprocess.TimeoutExpired:
             timed_out = True
             self.timed_out = True
-            terminated = _terminate_group(pgid, root_pid=root_pid)
-            self.terminated_processes += terminated
+        snapshot = cleanup_birth_bound_processes(
+            scope.identities,
+            tracked_pids=scope.tracked_pids,
+            tracked_pgids=scope.tracked_pgids,
+        )
+        self._cleanup_snapshots.append(snapshot)
+        terminated = snapshot.signaled_process_count
+        self.terminated_processes += terminated
+        if timed_out:
             try:
                 stdout, stderr = process.communicate(timeout=KILL_WAIT_SECONDS)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                stdout, stderr = process.communicate(timeout=COMMUNICATE_GRACE_SECONDS)
-        else:
-            # Parent exited; still reclaim any client-spawned group members (MCP children).
-            terminated = _terminate_group(pgid, root_pid=root_pid)
-            self.terminated_processes += terminated
-        remaining = _count_remaining(root_pid, pgid)
+            except (subprocess.TimeoutExpired, OSError):
+                stdout = stdout or ""
+                stderr = stderr or "communicate_timeout"
+        remaining = snapshot.remaining_process_count or 0
         self.remaining_processes = remaining
-        cleanup = "passed" if remaining == 0 else "residue"
+        cleanup = "passed" if snapshot.cleanup_status == "complete" else "residue"
         self.process_cleanup = cleanup
         # Preserve exact zero. `or 124` would turn successful exit 0 into 124.
         returncode = 124 if timed_out or process.returncode is None else int(process.returncode)
@@ -123,28 +122,20 @@ class EvalProcessManager:
         )
 
     def finalize(self) -> dict[str, object]:
-        """Reclaim every tracked process group before token promotion / runtime delete."""
-        if not self._tracked_pgids and self.process_cleanup == "not_required":
+        """Publish the shared primitive's terminal semantics without re-signalling IDs."""
+        if not self._cleanup_snapshots and self.process_cleanup == "not_required":
             return self.snapshot()
-        terminated = 0
-        for pgid in sorted(set(self._tracked_pgids)):
-            terminated += _terminate_group(pgid, root_pid=None)
-        self.terminated_processes += terminated
-        remaining = 0
-        for pgid in sorted(set(self._tracked_pgids)):
-            remaining += len(remaining_live_pgids((pgid,)))
-            remaining += len(remaining_live_pids(process_group_members(pgid)))
-        # Remaining is process-group membership count, not group count.
-        live: set[int] = set()
-        for pgid in sorted(set(self._tracked_pgids)):
-            live.update(process_group_members(pgid))
-        self.remaining_processes = len(live)
-        if self.remaining_processes:
-            self.process_cleanup = "residue"
-        elif self.timed_out:
-            self.process_cleanup = "passed"
-        else:
-            self.process_cleanup = "passed"
+        known_remaining = tuple(
+            snapshot.remaining_process_count
+            for snapshot in self._cleanup_snapshots
+            if snapshot.remaining_process_count is not None
+        )
+        self.remaining_processes = sum(known_remaining)
+        self.process_cleanup = (
+            "passed"
+            if all(snapshot.cleanup_status == "complete" for snapshot in self._cleanup_snapshots)
+            else "residue"
+        )
         return self.snapshot()
 
     def snapshot(self) -> dict[str, object]:
@@ -155,51 +146,6 @@ class EvalProcessManager:
             "timed_out": self.timed_out,
             "process_cleanup": self.process_cleanup,
         }
-
-
-def _snapshot_live_count(root_pid: int, pgid: int) -> int:
-    pids = set(descendant_pids(root_pid))
-    pids.add(root_pid)
-    pids.update(process_group_members(pgid))
-    return max(1, len({pid for pid in pids if process_still_running(pid)}))
-
-
-def _count_remaining(root_pid: int | None, pgid: int) -> int:
-    live: set[int] = set()
-    if root_pid is not None:
-        live.update(pid for pid in descendant_pids(root_pid) if process_still_running(pid))
-        if process_still_running(root_pid):
-            live.add(root_pid)
-    live.update(process_group_members(pgid))
-    return len(live)
-
-
-def _terminate_group(pgid: int, *, root_pid: int | None) -> int:
-    before = set(process_group_members(pgid))
-    if root_pid is not None:
-        before.update(descendant_pids(root_pid))
-        before.add(root_pid)
-    before = {pid for pid in before if process_still_running(pid)}
-    if not before and not remaining_live_pgids((pgid,)):
-        return 0
-    terminate_process_group(pgid, escalate=True)
-    if root_pid is not None:
-        for pid in reversed(tuple(before)):
-            _signal_pid(pid, signal.SIGTERM)
-        time.sleep(TERM_WAIT_SECONDS)
-        for pid in reversed(tuple(pid for pid in before if process_still_running(pid))):
-            _signal_pid(pid, signal.SIGKILL)
-        time.sleep(KILL_WAIT_SECONDS)
-    after = {pid for pid in before if process_still_running(pid)}
-    after.update(process_group_members(pgid))
-    return max(0, len(before) - len(after))
-
-
-def _signal_pid(pid: int, sig: signal.Signals) -> None:
-    try:
-        os.kill(pid, sig)
-    except (ProcessLookupError, PermissionError):
-        return
 
 
 def _resolve_run_executable(command0: str, path: str | None) -> str:

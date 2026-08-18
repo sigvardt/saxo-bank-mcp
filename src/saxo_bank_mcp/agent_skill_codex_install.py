@@ -16,9 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
-    cleanup_recorded_groups,
-    remaining_live_pgids,
-    remaining_live_pids,
     run_command,
 )
 from saxo_bank_mcp.agent_skill_evidence_io import git_output, resolve_commit
@@ -534,11 +531,10 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
 
     observed_pids = tuple(receipt.pid for receipt in receipts if receipt.pid is not None)
     observed_pgids = tuple(receipt.pgid for receipt in receipts if receipt.pgid is not None)
-    remaining_pgids = remaining_live_pgids(observed_pgids)
-    if remaining_pgids:
-        cleanup_recorded_groups(remaining_pgids)
-    remaining_pids = remaining_live_pids(observed_pids)
-    remaining_pgids = remaining_live_pgids(observed_pgids)
+    # Successful run_command returns are already closed by the shared birth-bound cleanup.
+    # Receipt PID/PGID values are immutable evidence, never later liveness/signal targets.
+    remaining_pids: tuple[int, ...] = ()
+    remaining_pgids: tuple[int, ...] = ()
     try:
         require_disposable_cleanup(run_root, extra_paths=(marketplace,))
     except DisposableCleanupError:
@@ -1058,10 +1054,7 @@ def _verify_startup(
     except Exception:  # noqa: BLE001
         errors.append("codex_startup_probe_failed")
     finally:
-        observed_pids = tuple(receipt.pid for receipt in receipts if receipt.pid is not None)
-        observed_pgids = tuple(receipt.pgid for receipt in receipts if receipt.pgid is not None)
-        if remaining_live_pids(observed_pids) or remaining_live_pgids(observed_pgids):
-            errors.append("codex_verify_process_cleanup_failed")
+        # probe_root_stdio only returns after run_command's semantic cleanup closes.
         if cleanup_verify_scratch_state(run_root):
             errors.append("codex_verify_scratch_cleanup_failed")
     return errors
@@ -1103,12 +1096,13 @@ def _privacy_errors(
 def _cleanup_failed_run(
     run_root: Path,
     marketplace: Path,
-    pgid: int | None,
+    historical_pgid: int | None,
     *,
     retained_runtime: Path | None = None,
 ) -> None:
-    if pgid is not None:
-        cleanup_recorded_groups((pgid,))
+    # The failing run_command already performed identity-bound cleanup. Never signal the
+    # historical numeric group again; it may have been reused before this file cleanup.
+    _ = historical_pgid
     try:
         extra_paths = (
             (marketplace,) if retained_runtime is None else (marketplace, retained_runtime)

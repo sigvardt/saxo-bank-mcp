@@ -1295,22 +1295,26 @@ def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_
         ("write-failed", "c" * 64),
     ],
 )
-def test_outer_cleanup_evidence_status_requires_consistent_optional_digest(
+def test_outer_cleanup_inconsistent_optional_digest_is_normalized_fail_closed(
     tmp_path: Path,
     status: str,
     digest: str | None,
 ) -> None:
     child = _failure(_progress_with_failed_agent_summary(tmp_path))
 
-    with pytest.raises(ValidationError):
-        _verify(
-            child.model_dump_json(),
-            cleanup_identity_evidence_status=status,
-            cleanup_identity_receipt_sha256=digest,
-        )
+    verified = _verify(
+        child.model_dump_json(),
+        cleanup_identity_evidence_status=status,
+        cleanup_identity_receipt_sha256=digest,
+    )
+
+    assert verified.failure_evidence_status == "cleanup_failed"
+    assert verified.reason == "proof_child_cleanup_failed"
+    assert verified.outer_process_cleanup_evidence_status == "observation-unknown"
+    assert verified.outer_process_cleanup_receipt_sha256 is None
 
 
-def test_outer_cleanup_missing_receipt_is_explicit_and_privacy_safe(tmp_path: Path) -> None:
+def test_outer_cleanup_missing_receipt_fails_closed_and_is_privacy_safe(tmp_path: Path) -> None:
     child = _failure(_progress_with_failed_agent_summary(tmp_path))
     verified = _verify(
         child.model_dump_json(),
@@ -1330,12 +1334,52 @@ def test_outer_cleanup_missing_receipt_is_explicit_and_privacy_safe(tmp_path: Pa
         publication.model_dump_json(),
     )
 
+    assert round_trip.result.failure_evidence_status == "cleanup_failed"
+    assert round_trip.result.reason == "proof_child_cleanup_failed"
     assert round_trip.result.outer_process_cleanup_evidence_status == "write-failed"
     assert round_trip.result.outer_process_cleanup_receipt_sha256 is None
+    assert round_trip.result.model_event_count is None
+    assert round_trip.result.mcp_event_count is None
+    assert round_trip.result.saxo_event_count is None
     rendered = round_trip.model_dump_json()
     assert "PRIVATE" not in rendered
     assert "pid" not in rendered.lower()
     assert "birth" not in rendered.lower()
+
+
+@pytest.mark.parametrize(
+    ("status", "digest", "remaining_process_count", "remaining_group_count"),
+    [
+        ("observation-unknown", None, 0, 0),
+        ("write-failed", None, 0, 0),
+        ("authenticated", None, 0, 0),
+        ("no-target-observed", "c" * 64, 0, 0),
+        ("authenticated", "c" * 64, None, 0),
+        ("authenticated", "c" * 64, 0, None),
+    ],
+)
+def test_outer_cleanup_untrusted_or_inconsistent_evidence_fails_closed(
+    tmp_path: Path,
+    status: str,
+    digest: str | None,
+    remaining_process_count: int | None,
+    remaining_group_count: int | None,
+) -> None:
+    child = _failure(_progress_with_failed_agent_summary(tmp_path))
+
+    verified = _verify(
+        child.model_dump_json(),
+        cleanup_identity_evidence_status=status,
+        cleanup_identity_receipt_sha256=digest,
+        remaining_process_count=remaining_process_count,
+        remaining_process_group_count=remaining_group_count,
+    )
+
+    assert verified.failure_evidence_status == "cleanup_failed"
+    assert verified.reason == "proof_child_cleanup_failed"
+    assert verified.model_event_count is None
+    assert verified.mcp_event_count is None
+    assert verified.saxo_event_count is None
 
 
 def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path) -> None:

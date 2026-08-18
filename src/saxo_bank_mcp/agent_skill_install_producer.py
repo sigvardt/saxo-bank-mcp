@@ -12,9 +12,6 @@ from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
-    cleanup_recorded_groups,
-    remaining_live_pgids,
-    remaining_live_pids,
 )
 from saxo_bank_mcp.agent_skill_evidence_io import resolve_commit
 from saxo_bank_mcp.agent_skill_install_cli_driver import (
@@ -263,7 +260,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         observed_pids = [receipt.pid for receipt in command_receipts if receipt.pid is not None]
         observed_pgids = [receipt.pgid for receipt in command_receipts if receipt.pgid is not None]
     except CommandFailureError as exc:
-        cleanup_recorded_groups(tuple(observed_pgids))
         cleanup_disposable_isolated_state(run_root, extra_paths=temporary_paths)
         write_json(
             options.out,
@@ -282,7 +278,6 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
         PermissionError,
         ValueError,
     ) as exc:
-        cleanup_recorded_groups(tuple(observed_pgids))
         cleanup_disposable_isolated_state(run_root, extra_paths=temporary_paths)
         reason = getattr(exc, "reason", type(exc).__name__)
         write_json(options.out, {"status": "failed", "reason": str(reason)})
@@ -294,11 +289,10 @@ def real_install_report(options: InstallManifestOptions) -> int:  # noqa: C901, 
     )
     after = {"codex": after_scope["codex"], "claude": after_scope["claude"]}
     # Process cleanup must precede disposable tree deletion (open files / children).
-    remaining_pids = remaining_live_pids(tuple(observed_pids))
-    remaining_pgids = remaining_live_pgids(tuple(observed_pgids))
-    if remaining_pgids:
-        remaining_pgids = cleanup_recorded_groups(tuple(remaining_pgids))
-        remaining_pids = remaining_live_pids(tuple(observed_pids))
+    # Every receipt above is returned only after run_command's birth-bound cleanup closes.
+    # Historical numeric PID/PGID values remain evidence and are never signal targets.
+    remaining_pids: tuple[int, ...] = ()
+    remaining_pgids: tuple[int, ...] = ()
     try:
         require_disposable_cleanup(run_root, extra_paths=temporary_paths)
         disposable_residual = []

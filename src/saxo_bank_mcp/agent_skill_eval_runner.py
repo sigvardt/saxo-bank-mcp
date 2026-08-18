@@ -443,7 +443,10 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
     finally:
         # Process cleanup must finish before token promotion and runtime deletion.
         process_manager.finalize()
-        if process_manager.remaining_processes > 0:
+        if process_manager.remaining_processes > 0 or process_manager.process_cleanup not in {
+            "passed",
+            "not_required",
+        }:
             process_error = "process_cleanup_residue"
         try:
             promote_rotated_sim_token_cache(runtime)

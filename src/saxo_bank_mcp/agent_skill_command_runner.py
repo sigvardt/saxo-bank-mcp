@@ -81,6 +81,7 @@ class ProcessCleanupTerminalSnapshot:
 
     targets: tuple[ProcessCleanupTargetReceipt, ...]
     coverage_status: Literal["complete", "unknown"]
+    signaled_process_count: int = 0
 
     @property
     def cleanup_status(self) -> Literal["complete", "failed", "unknown"]:
@@ -169,6 +170,15 @@ class ProcessCleanupIdentity:
     pgid: int
     birth_identity: str
     initial_state: Literal["running", "zombie", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessCleanupScope:
+    """Birth-bound identities plus numeric discovery hints captured for one child tree."""
+
+    identities: tuple[ProcessCleanupIdentity, ...]
+    tracked_pids: tuple[int, ...]
+    tracked_pgids: tuple[int, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -559,6 +569,21 @@ def capture_process_cleanup_identity(pid: int) -> ProcessCleanupIdentity | None:
     )
 
 
+def capture_process_cleanup_scope(root_pid: int, root_pgid: int) -> ProcessCleanupScope:
+    """Capture a child tree immediately; numeric IDs are discovery hints, never signal targets."""
+    pids, pgids = _snapshot_tree(root_pid, root_pgid)
+    pids = tuple(sorted(set(pids) | {root_pid} | set(process_group_members(root_pgid))))
+    pgids = tuple(sorted(set(pgids) | {root_pgid}))
+    identities = tuple(
+        identity for pid in pids if (identity := capture_process_cleanup_identity(pid)) is not None
+    )
+    return ProcessCleanupScope(
+        identities=identities,
+        tracked_pids=pids,
+        tracked_pgids=pgids,
+    )
+
+
 def observe_process_cleanup_target(
     identity: ProcessCleanupIdentity,
 ) -> ProcessCleanupTargetReceipt:
@@ -602,28 +627,56 @@ def cleanup_birth_bound_processes(
     tracked_pids: tuple[int, ...],
     tracked_pgids: tuple[int, ...],
 ) -> ProcessCleanupTerminalSnapshot:
-    """Clean only same-birth targets, then publish one semantic terminal snapshot."""
-    _ = tracked_pgids  # Historical groups are evidence, never raw signal targets.
+    """Clean one captured scope without ever signalling an unverified numeric identity."""
     identity_by_pid = {identity.pid: identity for identity in identities}
     coverage_unknown = len(identity_by_pid) != len(identities)
+    safe_groups, group_coverage_unknown = _discover_owned_group_members(
+        tracked_pgids,
+        identity_by_pid,
+    )
+    coverage_unknown = coverage_unknown or group_coverage_unknown
 
     term_targets = tuple(
-        identity for identity in reversed(identities) if _same_birth_running(identity)
+        identity
+        for identity in reversed(tuple(identity_by_pid.values()))
+        if _same_birth_running(identity)
     )
+    signaled_pids: set[int] = set()
     for identity in term_targets:
-        _signal_pid(identity.pid, signal.SIGTERM)
-    if term_targets:
+        if _signal_same_birth(
+            identity,
+            signal.SIGTERM,
+            group_leader=identity_by_pid.get(identity.pgid),
+        ):
+            signaled_pids.add(identity.pid)
+    if signaled_pids:
         time.sleep(TERM_WAIT_SECONDS)
 
     kill_targets = tuple(
-        identity for identity in reversed(identities) if _same_birth_running(identity)
+        identity
+        for identity in reversed(tuple(identity_by_pid.values()))
+        if _same_birth_running(identity)
     )
     for identity in kill_targets:
-        _signal_pid(identity.pid, signal.SIGKILL)
-    if kill_targets:
+        if _signal_same_birth(
+            identity,
+            signal.SIGKILL,
+            group_leader=identity_by_pid.get(identity.pgid),
+        ):
+            signaled_pids.add(identity.pid)
+    if any(identity.pid in signaled_pids for identity in kill_targets):
         time.sleep(KILL_WAIT_SECONDS)
 
-    targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
+    # A child can join an owned group after target selection. Capture that terminal member
+    # into the same semantic snapshot so it is failed/unknown rather than silently escaping.
+    coverage_unknown = (
+        _terminal_rescan_owned_groups(safe_groups, identity_by_pid) or coverage_unknown
+    )
+
+    targets = tuple(
+        observe_process_cleanup_target(identity)
+        for identity in sorted(identity_by_pid.values(), key=lambda item: item.pid)
+    )
     if any(target.termination_outcome == "unknown" for target in targets):
         coverage_unknown = True
 
@@ -635,6 +688,7 @@ def cleanup_birth_bound_processes(
     return ProcessCleanupTerminalSnapshot(
         targets=targets,
         coverage_status="unknown" if coverage_unknown else "complete",
+        signaled_process_count=len(signaled_pids),
     )
 
 
@@ -645,6 +699,130 @@ def _same_birth_running(identity: ProcessCleanupIdentity) -> bool:
         and observation.state == "running"
         and observation.birth_identity == identity.birth_identity
     )
+
+
+def _signal_same_birth(
+    identity: ProcessCleanupIdentity,
+    sig: signal.Signals,
+    *,
+    group_leader: ProcessCleanupIdentity | None,
+) -> bool:
+    """Recheck target and group-owner birth identity immediately before os.kill."""
+    observation = read_process_observation(identity.pid)
+    if not (
+        observation is not None
+        and observation.state == "running"
+        and observation.birth_identity == identity.birth_identity
+    ):
+        return False
+    if identity.pid != identity.pgid:
+        if group_leader is None or group_leader.pid != identity.pgid:
+            return False
+        leader_observation = read_process_observation(group_leader.pid)
+        if leader_observation is not None and not (
+            leader_observation.state != "unknown"
+            and leader_observation.pgid == identity.pgid
+            and leader_observation.birth_identity == group_leader.birth_identity
+        ):
+            return False
+    _signal_pid(identity.pid, sig)
+    return True
+
+
+def _discover_owned_group_members(
+    tracked_pgids: tuple[int, ...],
+    identities: dict[int, ProcessCleanupIdentity],
+) -> tuple[set[int], bool]:
+    """Capture current members of every leader-bound group before any signal."""
+    safe_groups: set[int] = set()
+    coverage_unknown = False
+    for pgid in sorted(set(tracked_pgids)):
+        owned, ownership_unknown = _group_is_identity_owned(pgid, identities)
+        coverage_unknown = coverage_unknown or ownership_unknown
+        if not owned:
+            continue
+        safe_groups.add(pgid)
+        members, group_observed = process_group_members_with_coverage(pgid)
+        if not group_observed:
+            coverage_unknown = True
+            continue
+        coverage_unknown = (
+            _capture_group_members(members, pgid=pgid, identities=identities) or coverage_unknown
+        )
+    return safe_groups, coverage_unknown
+
+
+def _terminal_rescan_owned_groups(
+    safe_groups: set[int],
+    identities: dict[int, ProcessCleanupIdentity],
+) -> bool:
+    """Capture late group members so incomplete cleanup cannot publish a false zero."""
+    coverage_unknown = False
+    for pgid in sorted(safe_groups):
+        owned, ownership_unknown = _group_is_identity_owned(pgid, identities)
+        coverage_unknown = coverage_unknown or ownership_unknown
+        if not owned:
+            continue
+        members, group_observed = process_group_members_with_coverage(pgid)
+        if not group_observed:
+            coverage_unknown = True
+            continue
+        coverage_unknown = (
+            _capture_group_members(members, pgid=pgid, identities=identities) or coverage_unknown
+        )
+    return coverage_unknown
+
+
+def _group_is_identity_owned(
+    pgid: int,
+    identities: dict[int, ProcessCleanupIdentity],
+) -> tuple[bool, bool]:
+    """Bind group discovery to its captured leader; reused leaders are unrelated."""
+    leader = identities.get(pgid)
+    if leader is None or leader.pgid != pgid:
+        members, group_observed = process_group_members_with_coverage(pgid)
+        if not group_observed:
+            return False, True
+        return False, bool(members)
+    observation = read_process_observation(leader.pid)
+    if observation is None:
+        # A process group may outlive its leader; the ID cannot be safely reused while the
+        # old group still exists, so current members remain within the captured group scope.
+        return True, False
+    if observation.state == "unknown":
+        return False, True
+    if observation.birth_identity != leader.birth_identity or observation.pgid != pgid:
+        return False, False
+    return True, False
+
+
+def _capture_group_members(
+    members: tuple[int, ...],
+    *,
+    pgid: int,
+    identities: dict[int, ProcessCleanupIdentity],
+) -> bool:
+    """Capture current group members before signalling; return unknown-coverage state."""
+    unknown = False
+    for pid in sorted(set(members)):
+        existing = identities.get(pid)
+        observation = read_process_observation(pid)
+        if observation is None:
+            continue
+        if observation.state == "unknown":
+            unknown = True
+            continue
+        if observation.pgid != pgid:
+            unknown = True
+            continue
+        if existing is None:
+            identities[pid] = ProcessCleanupIdentity(
+                pid=pid,
+                pgid=pgid,
+                birth_identity=observation.birth_identity,
+                initial_state=observation.state,
+            )
+    return unknown
 
 
 def write_command_cleanup_identity_receipt(  # noqa: PLR0913
@@ -825,6 +1003,22 @@ def process_group_members(pgid: int) -> tuple[int, ...]:
     return tuple(sorted(set(members)))
 
 
+def process_group_members_with_coverage(pgid: int) -> tuple[tuple[int, ...], bool]:
+    """Return group members plus whether the process-table observation was complete."""
+    table, observed = _process_table_checked()
+    if not observed:
+        return (), False
+    members = tuple(sorted({pid for pid, _ppid, group in table if group == pgid}))
+    if members:
+        return members, True
+    leader = read_process_observation(pgid)
+    if leader is not None and leader.state == "unknown":
+        return (), False
+    if leader is not None and leader.pgid == pgid:
+        return (pgid,), True
+    return (), True
+
+
 def descendant_pids(root_pid: int) -> tuple[int, ...]:
     """Return root and all descendants via ppid walk, including escaped process groups."""
     table = _process_table()
@@ -938,6 +1132,10 @@ def _merge_snapshots(
 
 
 def _process_table() -> tuple[tuple[int, int, int], ...]:
+    return _process_table_checked()[0]
+
+
+def _process_table_checked() -> tuple[tuple[tuple[int, int, int], ...], bool]:
     try:
         output = subprocess.run(
             ("ps", "-axo", "pid=,ppid=,pgid="),  # noqa: S607
@@ -947,17 +1145,22 @@ def _process_table() -> tuple[tuple[int, int, int], ...]:
             timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
-        return ()
+        return (), False
+    if output.returncode != 0:
+        return (), False
     rows: list[tuple[int, int, int]] = []
+    malformed = False
     for line in output.stdout.splitlines():
         parts = line.split()
         if len(parts) != 3:  # noqa: PLR2004
+            malformed = malformed or bool(parts)
             continue
         try:
             rows.append((int(parts[0]), int(parts[1]), int(parts[2])))
         except ValueError:
+            malformed = True
             continue
-    return tuple(rows)
+    return tuple(rows), not malformed
 
 
 def _signal_pid(pid: int, sig: signal.Signals) -> None:

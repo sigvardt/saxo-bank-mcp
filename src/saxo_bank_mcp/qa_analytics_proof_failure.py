@@ -1138,11 +1138,21 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
                     envelope = None
                 else:
                     status = "authenticated"
+    cleanup_evidence_consistent = (cleanup_identity_evidence_status == "authenticated") == (
+        cleanup_identity_receipt_sha256 is not None
+    )
+    normalized_cleanup_evidence_status: OuterProcessCleanupEvidenceStatus = (
+        cleanup_identity_evidence_status if cleanup_evidence_consistent else "observation-unknown"
+    )
+    normalized_cleanup_receipt_sha256 = (
+        cleanup_identity_receipt_sha256 if cleanup_evidence_consistent else None
+    )
     cleanup_complete = (
         runtime_cleanup_status == "complete"
         and command_cleanup_attempted
         and remaining_process_count == 0
         and remaining_process_group_count == 0
+        and normalized_cleanup_evidence_status in {"authenticated", "no-target-observed"}
     )
     if envelope is not None and not cleanup_complete:
         status = "cleanup_failed"
@@ -1158,8 +1168,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
-            cleanup_identity_evidence_status=cleanup_identity_evidence_status,
-            cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+            cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
+            cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
             bootstrap_verification=bootstrap_verification,
         )
     if status != "authenticated":
@@ -1175,8 +1185,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
-            cleanup_identity_evidence_status=cleanup_identity_evidence_status,
-            cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+            cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
+            cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
             child_envelope_sha256=envelope.envelope_sha256 if envelope is not None else None,
             bootstrap_verification=bootstrap_verification,
         )
@@ -1211,8 +1221,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
-        cleanup_identity_evidence_status=cleanup_identity_evidence_status,
-        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+        cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
+        cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
         child_envelope_sha256=envelope.envelope_sha256,
         reason=envelope.reason,
         bootstrap_verification=bootstrap_verification,
