@@ -202,7 +202,7 @@ class EvalRunRecord(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_mcp_probe_evidence(self) -> EvalRunRecord:
+    def _validate_mcp_probe_evidence(self) -> EvalRunRecord:  # noqa: C901
         paired = (self.mcp_probe_exit_code is None) == (self.mcp_probe_stdout_schema_sha256 is None)
         completed_command = self.mcp_probe_stage in {
             "command_exit",
@@ -249,6 +249,33 @@ class EvalRunRecord(BaseModel):
             and self.raw_assistant_message_present is not None
         ):
             raise ValueError("raw assistant evidence requires diagnostic hashes")
+        if (
+            self.harness == "codex"
+            and self.error == "malformed_output"
+            and (
+                any(
+                    value is not None
+                    for value in (
+                        self.assistant_message_present,
+                        self.raw_assistant_event_count,
+                        self.raw_assistant_events_sha256,
+                        self.final_assistant_text_sha256,
+                        self.raw_assistant_message_present,
+                    )
+                )
+                or any(
+                    (
+                        self.required_all_assertion_results,
+                        self.required_any_assertion_results,
+                        self.forbidden_assertion_absent_results,
+                        self.raw_assistant_required_all_assertion_results,
+                        self.raw_assistant_required_any_assertion_results,
+                        self.raw_assistant_forbidden_assertion_absent_results,
+                    )
+                )
+            )
+        ):
+            raise ValueError("malformed Codex output cannot carry assistant diagnostics")
         return self
 
 

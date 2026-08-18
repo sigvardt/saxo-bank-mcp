@@ -320,6 +320,7 @@ def _verify(raw: str, **overrides: object) -> CodexNativeVerifiedChildFailure:
         "command_stderr_sha256": hashlib.sha256(b"").hexdigest(),
         "remaining_process_count": 0,
         "remaining_process_group_count": 0,
+        "cleanup_identity_evidence_status": "no-target-observed",
         "runtime_cleanup_status": "complete",
         "bootstrap_verification": _bootstrap_verification(),
     }
@@ -1106,9 +1107,11 @@ def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_
 
     verified = _verify(
         child.model_dump_json(),
+        cleanup_identity_evidence_status="authenticated",
         cleanup_identity_receipt_sha256=cleanup_digest,
     )
 
+    assert verified.outer_process_cleanup_evidence_status == "authenticated"
     assert verified.outer_process_cleanup_receipt_sha256 == cleanup_digest
     rendered = verified.model_dump_json()
     assert "pid" not in rendered.lower()
@@ -1125,12 +1128,67 @@ def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_
     round_trip = publication_module.verify_codex_native_proof_publication(
         publication.model_dump_json(),
     )
+    assert round_trip.result.outer_process_cleanup_evidence_status == "authenticated"
     assert round_trip.result.outer_process_cleanup_receipt_sha256 == cleanup_digest
 
     tampered = publication.model_dump(mode="json")
-    cast("dict[str, Any]", tampered["result"])["outer_process_cleanup_receipt_sha256"] = "d" * 64
+    cast("dict[str, Any]", tampered["result"])["outer_process_cleanup_evidence_status"] = (
+        "observation-unknown"
+    )
     with pytest.raises(ValidationError):
         publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
+
+
+@pytest.mark.parametrize(
+    ("status", "digest"),
+    [
+        ("authenticated", None),
+        ("no-target-observed", "c" * 64),
+        ("observation-unknown", "c" * 64),
+        ("write-failed", "c" * 64),
+    ],
+)
+def test_outer_cleanup_evidence_status_requires_consistent_optional_digest(
+    tmp_path: Path,
+    status: str,
+    digest: str | None,
+) -> None:
+    child = _failure(_progress_with_failed_agent_summary(tmp_path))
+
+    with pytest.raises(ValidationError):
+        _verify(
+            child.model_dump_json(),
+            cleanup_identity_evidence_status=status,
+            cleanup_identity_receipt_sha256=digest,
+        )
+
+
+def test_outer_cleanup_missing_receipt_is_explicit_and_privacy_safe(tmp_path: Path) -> None:
+    child = _failure(_progress_with_failed_agent_summary(tmp_path))
+    verified = _verify(
+        child.model_dump_json(),
+        cleanup_identity_evidence_status="write-failed",
+        cleanup_identity_receipt_sha256=None,
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    round_trip = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert round_trip.result.outer_process_cleanup_evidence_status == "write-failed"
+    assert round_trip.result.outer_process_cleanup_receipt_sha256 is None
+    rendered = round_trip.model_dump_json()
+    assert "PRIVATE" not in rendered
+    assert "pid" not in rendered.lower()
+    assert "birth" not in rendered.lower()
 
 
 def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path) -> None:

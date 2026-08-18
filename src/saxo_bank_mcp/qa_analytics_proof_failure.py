@@ -59,6 +59,12 @@ type BootstrapPhase = Literal[
     "producer_execution",
 ]
 type OuterRuntimeCleanupStatus = Literal["complete", "failed", "unknown"]
+type OuterProcessCleanupEvidenceStatus = Literal[
+    "authenticated",
+    "no-target-observed",
+    "observation-unknown",
+    "write-failed",
+]
 
 _PHASES: Final[tuple[CodexNativeProofPhase, ...]] = (
     "before_preflight",
@@ -639,6 +645,7 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     outer_runtime_cleanup_status: OuterRuntimeCleanupStatus
     outer_remaining_process_count: int | None = Field(ge=0)
     outer_remaining_process_group_count: int | None = Field(ge=0)
+    outer_process_cleanup_evidence_status: OuterProcessCleanupEvidenceStatus
     outer_process_cleanup_receipt_sha256: str | None = Field(
         default=None,
         pattern=_SHA256_PATTERN,
@@ -651,6 +658,10 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     @model_validator(mode="after")
     def _validate_evidence_state(self) -> Self:
         trusted = self.failure_evidence_status in {"authenticated", "cleanup_failed"}
+        if (self.outer_process_cleanup_evidence_status == "authenticated") != (
+            self.outer_process_cleanup_receipt_sha256 is not None
+        ):
+            raise ValueError("outer process cleanup evidence status and digest differ")
         if self.bootstrap_authenticated != (self.bootstrap_evidence_status == "authenticated"):
             raise ValueError("bootstrap authentication state is inconsistent")
         if self.bootstrap_authenticated != (self.bootstrap_envelope is not None):
@@ -1003,6 +1014,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
     remaining_process_group_count: int | None,
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     bootstrap_verification: CodexNativeBootstrapVerification,
+    cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus = ("no-target-observed"),
     cleanup_identity_receipt_sha256: str | None = None,
 ) -> CodexNativeVerifiedChildFailure:
     """Authenticate a failed child's one-line envelope or publish unknown facts."""
@@ -1087,6 +1099,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_evidence_status=cleanup_identity_evidence_status,
             cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
             bootstrap_verification=bootstrap_verification,
         )
@@ -1103,6 +1116,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_evidence_status=cleanup_identity_evidence_status,
             cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
             child_envelope_sha256=envelope.envelope_sha256 if envelope is not None else None,
             bootstrap_verification=bootstrap_verification,
@@ -1138,6 +1152,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=envelope.envelope_sha256,
         reason=envelope.reason,
@@ -1170,6 +1185,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     child_envelope_sha256: str | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
@@ -1212,6 +1228,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=child_envelope_sha256,
         reason=reason_by_status[status],
@@ -1234,6 +1251,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
@@ -1271,6 +1289,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=envelope.envelope_sha256,
         reason="proof_child_cleanup_failed",
@@ -1311,6 +1330,7 @@ def _verified_material(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     child_envelope_sha256: str | None,
     reason: str,
@@ -1360,6 +1380,7 @@ def _verified_material(  # noqa: PLR0913
         "outer_runtime_cleanup_status": runtime_cleanup_status,
         "outer_remaining_process_count": remaining_process_count,
         "outer_remaining_process_group_count": remaining_process_group_count,
+        "outer_process_cleanup_evidence_status": cleanup_identity_evidence_status,
         "outer_process_cleanup_receipt_sha256": cleanup_identity_receipt_sha256,
         "child_envelope_sha256": child_envelope_sha256,
         "reason": reason,

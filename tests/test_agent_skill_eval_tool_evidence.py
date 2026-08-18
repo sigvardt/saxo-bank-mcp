@@ -288,6 +288,78 @@ def test_codex_assertion_diagnostics_prove_phrase_absent_from_both_surfaces(
     assert record.raw_assistant_event_count == 1
 
 
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "not-json",
+        "\n".join(
+            (
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "answer",
+                            "type": "agent_message",
+                            "text": (
+                                "analysis_id explicit numeric shocks model distribution refused"
+                            ),
+                        },
+                    },
+                ),
+                "not-json",
+            ),
+        ),
+    ],
+    ids=("malformed-only", "valid-then-malformed"),
+)
+def test_codex_malformed_output_keeps_assistant_diagnostics_unknown(
+    stream: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomplete JSONL cannot prove zero events, an absent message, or failed phrases."""
+    case = next(
+        item for item in load_eval_cases(ROOT / "evals/saxo-analytics") if item.id == "scenario"
+    )
+    grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
+
+    def fake_run(
+        self: EvalProcessManager,
+        command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: float,
+    ) -> ManagedProcessResult:
+        _ = (self, command, cwd, env, timeout_seconds)
+        return _managed(stream)
+
+    monkeypatch.setattr(EvalProcessManager, "run", fake_run)
+
+    record = execute_model_case(
+        case,
+        "codex",
+        grants,
+        roots=_roots(tmp_path),
+        env=_env(tmp_path),
+        process_manager=EvalProcessManager(),
+    )
+
+    assert record.status == "failed"
+    assert record.error == "malformed_output"
+    assert record.assistant_message_present is None
+    assert record.required_all_assertion_results == ()
+    assert record.required_any_assertion_results == ()
+    assert record.forbidden_assertion_absent_results == ()
+    assert record.raw_assistant_event_count is None
+    assert record.raw_assistant_events_sha256 is None
+    assert record.final_assistant_text_sha256 is None
+    assert record.raw_assistant_message_present is None
+    assert record.raw_assistant_required_all_assertion_results == ()
+    assert record.raw_assistant_required_any_assertion_results == ()
+    assert record.raw_assistant_forbidden_assertion_absent_results == ()
+
+
 def test_out_of_grant_tool_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

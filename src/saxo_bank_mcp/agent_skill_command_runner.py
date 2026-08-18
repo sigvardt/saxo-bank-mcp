@@ -25,6 +25,12 @@ KILL_WAIT_SECONDS = 1.0
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
+type CleanupIdentityEvidenceKind = Literal[
+    "authenticated",
+    "no-target-observed",
+    "observation-unknown",
+    "write-failed",
+]
 
 
 class _StrictModel(BaseModel):
@@ -85,11 +91,30 @@ class ProcessCleanupIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandCleanupIdentityEvidence:
+    evidence_status: CleanupIdentityEvidenceKind
+    receipt_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        """Require authenticated evidence to carry exactly one digest."""
+        if (self.evidence_status == "authenticated") != (self.receipt_sha256 is not None):
+            raise ValueError("cleanup identity evidence status and digest differ")
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
     receipt: CommandReceipt
     stdout: str
     stderr: str
     cleanup_identity_receipt_sha256: str | None = None
+    cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+
+    def __post_init__(self) -> None:
+        """Require command cleanup status and digest consistency."""
+        _require_cleanup_identity_evidence_consistency(
+            self.cleanup_identity_evidence_status,
+            self.cleanup_identity_receipt_sha256,
+        )
 
     def json_stdout(self) -> dict[str, JsonValue]:
         try:
@@ -112,9 +137,17 @@ class CommandFailureError(Exception):
     remaining_process_count: int | None = None
     remaining_process_group_count: int | None = None
     cleanup_identity_receipt_sha256: str | None = None
+    cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+
+    def __post_init__(self) -> None:
+        """Require failed-command cleanup status and digest consistency."""
+        _require_cleanup_identity_evidence_consistency(
+            self.cleanup_identity_evidence_status,
+            self.cleanup_identity_receipt_sha256,
+        )
 
 
-def run_command(  # noqa: C901, PLR0913, PLR0915
+def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     name: str,
     argv: tuple[str, ...],
     *,
@@ -141,6 +174,9 @@ def run_command(  # noqa: C901, PLR0913, PLR0915
     stdout = ""
     stderr = ""
     exit_code = 124
+    process_error: OSError | None = None
+    pids: tuple[int, ...] = ()
+    pgids: tuple[int, ...] = ()
 
     def _capture_identities(pids: tuple[int, ...]) -> None:
         if cleanup_identity_receipt_path is None:
@@ -174,13 +210,11 @@ def run_command(  # noqa: C901, PLR0913, PLR0915
                         initial_state=identity.initial_state,
                     )
 
-    def _write_cleanup_receipt() -> str | None:
+    def _write_cleanup_receipt() -> CommandCleanupIdentityEvidence:
         if cleanup_identity_receipt_path is None or root_pid is None or pgid is None:
-            return None
+            return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
         with watch_lock:
             identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
-        if not identities:
-            return None
         return write_command_cleanup_identity_receipt(
             cleanup_identity_receipt_path,
             name=name,
@@ -247,41 +281,51 @@ def run_command(  # noqa: C901, PLR0913, PLR0915
         pgids = tuple(sorted(set(pgids) | {tracked_pgid}))
         pids = tuple(sorted(set(pids) | set(process_group_members(tracked_pgid))))
         _capture_identities(pids)
-        # Kill descendants before draining pipes so background children cannot hold pipes open.
-        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
-        try:
-            stdout, stderr = process.communicate(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
-        except subprocess.TimeoutExpired:
-            stdout = stdout or ""
-            stderr = stderr or "communicate_timeout"
-        if timed_out:
-            exit_code = 124
-            receipt = _receipt(
-                name,
-                argv,
-                cwd,
-                root_pid,
-                pgid,
-                exit_code,
-                stdout,
-                stderr,
-                timed_out=True,
-                cleanup_attempted=True,
-            )
-            raise CommandFailureError(
-                receipt,
-                stdout,
-                stderr,
-                len(remaining_live_pids(pids)),
-                len(remaining_live_pgids(pgids)),
-                _write_cleanup_receipt(),
-            )
-        exit_code = int(process.returncode if process.returncode is not None else 124)
     except OSError as exc:
+        process_error = exc
+    finally:
+        stop_watch.set()
+        if watcher is not None:
+            watcher.join(timeout=1.0)
         with watch_lock:
-            pids = tuple(tracked_pids)
-            pgids = tuple(tracked_pgids)
+            pids, pgids = _merge_snapshots(
+                pids,
+                pgids,
+                tuple(tracked_pids),
+                tuple(tracked_pgids),
+            )
+        try:
+            final_pids, final_pgids = _snapshot_tree(root_pid, pgid)
+        except OSError:
+            final_pids, final_pgids = (), ()
+        pids, pgids = _merge_snapshots(pids, pgids, final_pids, final_pgids)
+        if root_pid is not None:
+            pids = tuple(sorted(set(pids) | {root_pid}))
+        if pgid is not None:
+            pgids = tuple(sorted(set(pgids) | {pgid}))
+            pids = tuple(sorted(set(pids) | set(process_group_members(pgid))))
+        _capture_identities(pids)
+        # One cleanup pass precedes every terminal observation. Background children must
+        # release inherited pipes before communicate, and no later cleanup may invalidate
+        # the recorded identity/count evidence.
         _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
+        if process is not None:
+            try:
+                stdout, stderr = process.communicate(
+                    timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                stdout = stdout or ""
+                stderr = stderr or "communicate_timeout"
+            except OSError as exc:
+                process_error = process_error or exc
+
+    cleanup_identity_evidence = _write_cleanup_receipt()
+    remaining_process_count = len(remaining_live_pids(pids))
+    remaining_process_group_count = len(remaining_live_pgids(pgids))
+
+    if process_error is not None:
+        safe_error = type(process_error).__name__
         receipt = _receipt(
             name,
             argv,
@@ -290,26 +334,46 @@ def run_command(  # noqa: C901, PLR0913, PLR0915
             pgid,
             124,
             "",
-            type(exc).__name__,
+            safe_error,
             timed_out=False,
             cleanup_attempted=True,
         )
         raise CommandFailureError(
-            receipt,
-            "",
-            type(exc).__name__,
-            len(remaining_live_pids(pids)),
-            len(remaining_live_pgids(pgids)),
-            _write_cleanup_receipt(),
-        ) from exc
-    finally:
-        stop_watch.set()
-        if watcher is not None:
-            watcher.join(timeout=1.0)
-        with watch_lock:
-            pids = tuple(tracked_pids)
-            pgids = tuple(tracked_pgids)
-        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
+            receipt=receipt,
+            stdout="",
+            stderr=safe_error,
+            remaining_process_count=remaining_process_count,
+            remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+        ) from process_error
+
+    if timed_out:
+        exit_code = 124
+        receipt = _receipt(
+            name,
+            argv,
+            cwd,
+            root_pid,
+            pgid,
+            exit_code,
+            stdout,
+            stderr,
+            timed_out=True,
+            cleanup_attempted=True,
+        )
+        raise CommandFailureError(
+            receipt=receipt,
+            stdout=stdout,
+            stderr=stderr,
+            remaining_process_count=remaining_process_count,
+            remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+        )
+
+    if process is not None:
+        exit_code = int(process.returncode if process.returncode is not None else 124)
 
     receipt = _receipt(
         name,
@@ -323,24 +387,22 @@ def run_command(  # noqa: C901, PLR0913, PLR0915
         timed_out=False,
         cleanup_attempted=True,
     )
-    cleanup_identity_receipt_sha256 = _write_cleanup_receipt()
     result = CommandResult(
         receipt=receipt,
         stdout=stdout,
         stderr=stderr,
-        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+        cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+        cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
     )
     if exit_code != 0:
-        with watch_lock:
-            final_pids = tuple(tracked_pids)
-            final_pgids = tuple(tracked_pgids)
         raise CommandFailureError(
-            result.receipt,
-            result.stdout,
-            result.stderr,
-            len(remaining_live_pids(final_pids)),
-            len(remaining_live_pgids(final_pgids)),
-            cleanup_identity_receipt_sha256,
+            receipt=result.receipt,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            remaining_process_count=remaining_process_count,
+            remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
         )
     return result
 
@@ -437,10 +499,17 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
     root_pid: int,
     root_pgid: int,
     identities: tuple[ProcessCleanupIdentity, ...],
-) -> str | None:
-    targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
+) -> CommandCleanupIdentityEvidence:
+    if not identities:
+        return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
+    try:
+        targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
+    except (OSError, ValueError):
+        return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
     if not targets:
-        return None
+        return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
+    if any(target.termination_outcome == "unknown" for target in targets):
+        return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
     material = {
         "schema_version": "1",
         "receipt_kind": "command_cleanup_identity",
@@ -457,8 +526,11 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
         strict=True,
     )
     if not _atomic_owner_only_write(path, receipt.model_dump_json() + "\n"):
-        return None
-    return receipt.receipt_sha256
+        return CommandCleanupIdentityEvidence(evidence_status="write-failed")
+    return CommandCleanupIdentityEvidence(
+        evidence_status="authenticated",
+        receipt_sha256=receipt.receipt_sha256,
+    )
 
 
 def verify_command_cleanup_identity_receipt(
@@ -532,6 +604,14 @@ def _atomic_owner_only_write(path: Path, text: str) -> bool:
         return False
     else:
         return True
+
+
+def _require_cleanup_identity_evidence_consistency(
+    status: CleanupIdentityEvidenceKind,
+    receipt_sha256: str | None,
+) -> None:
+    if (status == "authenticated") != (receipt_sha256 is not None):
+        raise ValueError("cleanup identity evidence status and digest differ")
 
 
 def _digest(value: object) -> str:

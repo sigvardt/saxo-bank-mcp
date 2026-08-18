@@ -347,14 +347,15 @@ def _failed_record(  # noqa: PLR0913
     trace: ModelToolTrace | None = None,
     assertions_passed: bool = False,
 ) -> EvalRunRecord:
+    assistant_output_observable = trace is not None and trace.parse_error != "malformed_output"
     assertion_evidence = (
         None
-        if trace is None
+        if not assistant_output_observable or trace is None
         else transcript_assertion_evidence(case, trace.assistant_text, trace.invoked_logical_tools)
     )
     raw_assertion_evidence = (
         None
-        if trace is None
+        if not assistant_output_observable or trace is None
         else transcript_assertion_evidence(
             case,
             "\n".join(trace.assistant_event_texts),
