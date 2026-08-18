@@ -2325,38 +2325,41 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The latest sealed evidence is `06fb8e1`. It passed an exact retained-runtime install with 60 tools,
-9 skills, 1 MCP server, and 616 exact files; a signed 2,810-test full suite; static, type, catalog,
-evaluation-manifest, privacy, install-readback, and SIM safety gates. The source kept the child
-result separate from the final publication, so the terminal child failure remained authenticated
-and was not overwritten. The historical dual policy and evidence remain unchanged.
+The latest sealed evidence is `c716047`. It passed an exact retained-runtime install with 60 tools,
+9 skills, 1 MCP server, and 617 exact files; a signed 2,835-test full suite; static, type, catalog,
+evaluation-manifest, privacy, install-readback, and SIM safety gates. The historical dual policy
+and evidence remain unchanged.
 
 The single sealed native proof passed its child SIM preflight and recorded truthful network
 provenance. Ten of eleven hard cases passed. The `scenario` case failed its transcript assertion
-despite a passed grant check and exact invocation of both required tools. The outer publication
-refused with `proof_child_cleanup_failed`; child cleanup was not started, while retained-runtime and
-candidate-runner cleanup completed. Aggregate model, MCP, Saxo, broker-write, mutation, purchase,
-and disclaimer-response facts remain unknown. A terminal local readback found no exact-candidate
-process, proof run root, or retained proof runtime. No retry ran.
+despite a passed grant check and exact invocation of both required tools. Privacy-safe raw decoded
+assistant events and final parsed text were both observable and both omitted the exact phrase
+`explicit numeric shocks`; this was not a parser-only loss. The outer publication refused with
+`proof_child_cleanup_failed`. Aggregate model, MCP, Saxo, broker-write, mutation, purchase, and
+disclaimer-response facts remain unknown. Authenticated runtime-consumption and candidate-runner
+cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
+process, or proof run root. No retry ran.
 
-Local corrective source `c716047` adds the fail-closed evidence needed for a future authorized
-attempt without changing the assertion, prompt, successful evaluation behavior, or historical dual
-policy. Malformed or mixed malformed Codex output no longer emits false zero event counts, false
-call-absence booleans, empty invoked-tool evidence, false message absence, or negative assertion
-vectors. Parse-derived tool, call, per-case count, and aggregate MCP/Saxo evidence remains unknown
-through the authenticated failure summary and publication. Timeout and post-spawn operating-system
-failures clean up once and only then record terminal process evidence. A strict cleanup-evidence
-status is authenticated with its optional receipt digest through the failure and publication
-schemas; observation or write failure remains unknown. Five focused tests passed twice, 232 related
-tests and 243 auth/privacy tests passed, and type, static, catalog, evaluation-manifest, and bounded
-privacy gates were clean. This local source has no exact install or proof and does not relabel
-`06fb8e1`.
+Local corrective source `94a8643`, tree `40cef27`, keeps the sealed `c716047` evidence unchanged
+while addressing the two confirmed local causes. The native `scenario` fixture contract now
+requires the exact ordered receipt text `explicit numeric shocks -0.10 0.05`; the assertion and its
+grading are unchanged. Command cleanup binds every signal to a captured PID birth identity, never
+signals a historical process group, and uses one terminal semantic snapshot for authenticated
+outcomes and remaining counts. Reused identities, absent processes, and non-executing zombies are
+not survivors; incomplete observation coverage remains unknown and fails closed. The verifier
+derives cleanup state from those authenticated semantic outcomes instead of a second raw PID or
+process-group liveness count.
 
-The independent native review should verify the corrective source before any exact install or
-sealed attempt. A future authenticated run can then distinguish observable assertion surfaces and
-cleanup outcomes without converting malformed or missing evidence into false negatives. The all-54
-numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account equality, and
-activation decision remain unrun. The historical matrix remains historical and is not relabeled.
+The local corrective source passed 47 focused tests twice, 313 related tests, 267 auth/privacy
+tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/0 notes, and
+plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No model, MCP, Saxo,
+broker, browser, install, sealed proof, or broker/data network activity ran. It is not installed or
+sealed and does not relabel `c716047`.
+
+The independent native review should verify `94a8643` before any exact install or sealed attempt.
+The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
+equality, and activation decision remain unrun. The historical matrix remains historical and is
+not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured

@@ -19,6 +19,24 @@ No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation
 readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
 active.
 
+Local corrective source `94a86430d90d4e8db770e1b9c4d96eceffa23b29`, tree
+`40cef275436f178f202300290ef9f21c65ef583a`, addresses the two independently confirmed local
+causes without changing the sealed result. Command cleanup now uses birth-bound process identities:
+only a PID whose current birth identity still matches may receive a signal, historical process
+groups are never signalled, and one terminal semantic snapshot supplies the authenticated target
+outcomes and remaining process and group counts. Reused identities, absent processes, and
+non-executing zombies are not candidate survivors; incomplete or unknown observation coverage
+fails unknown rather than proving cleanup. The `scenario` native fixture contract now explicitly
+requires the exact ordered receipt text `explicit numeric shocks -0.10 0.05`; the assertion itself
+is unchanged.
+
+This corrective source passed 47 focused tests twice, 313 related evaluation/proof tests, and 267
+auth/privacy tests. Ruff check and changed-file format check passed; BasedPyright reported 0 errors,
+0 warnings, and 0 notes; plugin, static, catalog, evaluation-manifest, and bounded privacy gates
+passed. No model, MCP, Saxo, broker, browser, install, sealed proof, or broker/data network activity
+ran for this correction. It is not an installed or sealed candidate. The latest sealed evidence
+remains `c716047`; 54/54 profiles remain quarantined and 0/54 are active.
+
 This exact candidate builds on the diagnostic source without changing the assertion, prompt,
 successful evaluation behavior, or historical `dual_v1` path. The new raw-versus-final vectors
 remove the earlier parser ambiguity for this run: the required phrase was absent before and after
@@ -32,11 +50,11 @@ privacy-safe per-case failure summary and outer publication. Fully decoded valid
 their prior behavior. A nonzero child exit cannot take precedence over a simultaneously malformed
 Codex event stream and reintroduce false counts.
 
-The earlier assistant-diagnostic and cleanup protections remain: message presence, hashes, and
-assertion vectors are unknown for malformed output; timeout and post-spawn operating-system
-failures clean up once before terminal evidence is recorded; and cleanup status and optional digest
-remain strictly bound. No transcript, arguments, raw output, account data, handles, payloads, or
-private paths are retained.
+The earlier assistant-diagnostic protections remain: message presence, hashes, and assertion
+vectors are unknown for malformed output. The local corrective source additionally makes timeout,
+post-spawn operating-system failure, and ordinary terminal cleanup share the birth-bound semantic
+snapshot described above. Cleanup status and optional digest remain strictly bound. No transcript,
+arguments, raw output, account data, handles, payloads, or private paths are retained.
 
 The source correction had already passed five focused tests twice, 232 related evaluation/proof
 tests, and 243 auth/privacy tests. The exact candidate then passed the retained-runtime install,

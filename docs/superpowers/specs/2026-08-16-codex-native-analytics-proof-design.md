@@ -117,9 +117,15 @@ observable, every parse-derived tool, call, and count field is unknown. This inc
 booleans, model/tool/MCP/Saxo event counts, invoked logical tool identities and counts, runner
 aggregates, assistant-message presence, hashes, and assertion vectors; zero, false, empty, and
 negative values require a completely decoded observable surface. The authenticated per-case
-failure summary and outer publication enforce the same observability state. Timeout and post-spawn
-operating-system failures clean up exactly once, observe terminal identities and counts, and persist
-cleanup evidence before they are raised. The authenticated cleanup-evidence status is one of
+failure summary and outer publication enforce the same observability state. Timeout, post-spawn
+operating-system failure, and ordinary terminal cleanup use captured PID birth identities. A
+process may receive TERM or KILL only while its current birth identity matches; historical process
+groups are never raw signal targets. One terminal semantic snapshot supplies authenticated target
+outcomes and remaining process and group counts. Identity reuse, absence, and non-executing zombies
+are zero candidate survivors; incomplete or unknown observation coverage remains unknown and fails
+closed. Verifiers use those authenticated semantic outcomes rather than a second raw liveness
+query. Cleanup runs exactly once and persists its evidence before a terminal failure is raised. The
+authenticated cleanup-evidence status is one of
 `authenticated`, `no-target-observed`, `observation-unknown`, or `write-failed`. A receipt digest is
 present only for `authenticated`, and strict child-failure and outer-publication schemas bind and
 verify that relationship. Missing, inconsistent, or tampered cleanup evidence cannot prove absence
@@ -130,7 +136,9 @@ material, a dirty or mismatched candidate, an inexact installed cache, a non-Cod
 record, a skipped model call, an absent or unknown MCP event identity, incomplete tool coverage,
 failed proof measurement, Saxo mismatch, cleanup residue, state change, privacy finding, LIVE
 event, broker write, purchase, or disclaimer response. Each native execution prompt also binds the
-exact case ID; prose that merely names a tool cannot satisfy tool evidence.
+exact case ID; prose that merely names a tool cannot satisfy tool evidence. The native `scenario`
+fixture contract explicitly requires the exact ordered final-receipt text
+`explicit numeric shocks -0.10 0.05`; its existing transcript assertion remains unchanged.
 
 No browser is opened. No LIVE endpoint is allowed. Missing Saxo inputs never receive substitute
 market or account data.
