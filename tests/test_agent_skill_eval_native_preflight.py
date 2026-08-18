@@ -1,7 +1,10 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from re import fullmatch
@@ -12,17 +15,25 @@ import pytest
 
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
 from saxo_bank_mcp import agent_skill_eval_native_preflight as preflight
+from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError
 from saxo_bank_mcp.agent_skill_eval_execution import HarnessRoots
-from saxo_bank_mcp.agent_skill_eval_models import load_eval_cases
-from saxo_bank_mcp.agent_skill_eval_native_preflight import CodexNativePreflightError
+from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, load_eval_cases
+from saxo_bank_mcp.agent_skill_eval_native_preflight import (
+    CodexNativePreflightError,
+    CodexNativePreflightReceipt,
+)
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions
+from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
+from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
 from saxo_bank_mcp.agent_skill_matrix_env import MatrixIsolatedRuntime
+from saxo_bank_mcp.server_eval_tool_filter import derive_eval_tool_filter_env
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
 GRANTS: Final = ("saxo_health", "saxo_list_registered_endpoints")
 CODEX_0147_PLUGIN_LIST: Final = ROOT / "tests/fixtures/codex-0.147-plugin-list.json"
+MCP_PROBE_FAILURE_EXIT_CODE: Final = 23
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +130,81 @@ def _write_plugin_identity(root: Path) -> None:
     )
 
 
+def test_generic_offline_probe_fails_with_empty_disposable_environment(
+    tmp_path: Path,
+) -> None:
+    """Catch replacement of the retained runtime with a fresh offline uv environment."""
+    uv = shutil.which("uv")
+    assert uv is not None
+    empty_project_environment = tmp_path / "empty-project-environment"
+    empty_cache = tmp_path / "empty-uv-cache"
+    empty_python = tmp_path / "empty-uv-python"
+    for path in (empty_project_environment, empty_cache, empty_python):
+        path.mkdir(mode=0o700)
+    env = _env(tmp_path)
+    env.update(
+        {
+            "PATH": f"{Path(uv).parent}:/usr/bin:/bin",
+            "UV_CACHE_DIR": str(empty_cache),
+            "UV_PROJECT_ENVIRONMENT": str(empty_project_environment),
+            "UV_PYTHON_INSTALL_DIR": str(empty_python),
+            "UV_PYTHON_DOWNLOADS": "never",
+        }
+    )
+
+    with pytest.raises(CommandFailureError) as exc_info:
+        probe_root_stdio(
+            "codex_native_empty_offline_probe",
+            ROOT,
+            env=env,
+            probe_env=empty_project_environment,
+            offline=True,
+        )
+
+    assert exc_info.value.receipt.exit_code != 0
+    assert exc_info.value.receipt.cleanup_attempted is True
+    assert exc_info.value.remaining_process_count == 0
+    assert exc_info.value.remaining_process_group_count == 0
+
+
+def test_native_preflight_uses_retained_interpreter_when_disposable_uv_env_is_empty(
+    tmp_path: Path,
+) -> None:
+    """The native MCP probe must not need uv or an empty nested project environment."""
+    env = derive_eval_tool_filter_env(_env(tmp_path), GRANTS)
+    plugin_root = _plugin_root(env)
+    _write_plugin_identity(plugin_root)
+    shutil.copy2(ROOT / ".mcp.json", plugin_root / ".mcp.json")
+    _use_real_plugin_list_subprocess(
+        env,
+        executable=_fake_codex(tmp_path),
+        fixture=CODEX_0147_PLUGIN_LIST,
+    )
+    empty_project_environment = Path(env["UV_PROJECT_ENVIRONMENT"])
+    empty_cache = tmp_path / "empty-uv-cache"
+    empty_cache.mkdir(mode=0o700)
+    env["UV_CACHE_DIR"] = str(empty_cache)
+    env["PATH"] = "/usr/bin:/bin"
+
+    receipt = preflight.preflight_codex_native_case(
+        codex_home=Path(env["CODEX_HOME"]),
+        plugin_root=plugin_root,
+        logical_grants=GRANTS,
+        env=env,
+        probe_env=empty_project_environment,
+        retained_project_environment=Path(sys.prefix),
+        retained_interpreter=Path(sys.executable),
+    )
+
+    assert receipt.mcp_started is True
+    assert receipt.visible_logical_tools == GRANTS
+    assert receipt.mcp_probe_stage == "complete"
+    assert receipt.mcp_probe_exit_code == 0
+    assert fullmatch(r"[0-9a-f]{64}", receipt.mcp_probe_stdout_schema_sha256)
+    assert not any(empty_project_environment.iterdir())
+    assert not any(empty_cache.iterdir())
+
+
 def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -153,7 +239,8 @@ def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
                     "annotations_missing": [],
                     "tool_names": list(GRANTS),
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     monkeypatch.setattr(
@@ -199,7 +286,8 @@ def test_native_preflight_accepts_codex_0147_plugin_list_via_isolated_subprocess
                     "annotations_missing": [],
                     "tool_names": list(GRANTS),
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     monkeypatch.setattr(preflight, "probe_root_stdio", fake_probe)
@@ -397,7 +485,8 @@ def test_native_preflight_schema_digest_ignores_plugin_list_values(
                     "annotations_missing": [],
                     "tool_names": list(GRANTS),
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     monkeypatch.setattr(preflight, "probe_root_stdio", fake_probe)
@@ -490,7 +579,8 @@ def test_native_preflight_fails_typed_before_model_for_registration_or_visibilit
                     "annotations_missing": [],
                     "tool_names": list(scenario.visible),
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     monkeypatch.setattr(
@@ -565,6 +655,67 @@ def test_native_preflight_keeps_mcp_start_unknown_when_probe_process_fails(
     assert exc_info.value.mcp_started is None
     assert exc_info.value.plugin_list_exit_code == 0
     assert fullmatch(r"[0-9a-f]{64}", exc_info.value.plugin_list_stdout_schema_sha256 or "")
+    assert exc_info.value.mcp_probe_stage == "command_start"
+    assert exc_info.value.mcp_probe_exit_code is None
+    assert exc_info.value.mcp_probe_stdout_schema_sha256 is None
+
+
+def test_native_preflight_retains_safe_mcp_command_failure_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(tmp_path)
+
+    def fake_command(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            stdout=CODEX_0147_PLUGIN_LIST.read_text(encoding="utf-8"),
+            receipt=SimpleNamespace(exit_code=0),
+        )
+
+    stdout = '{"private_value":"DO_NOT_PUBLISH"}'
+    stderr = "PRIVATE_STDERR_SENTINEL"
+
+    def fail_probe(*_args: object, **_kwargs: object) -> object:
+        raise CommandFailureError(
+            CommandReceipt(
+                name="codex_native_case_list_tools",
+                argv=("private-command",),
+                cwd=str(tmp_path),
+                pid=17,
+                pgid=17,
+                exit_code=MCP_PROBE_FAILURE_EXIT_CODE,
+                stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(),
+                stderr_sha256=hashlib.sha256(stderr.encode()).hexdigest(),
+                cleanup_attempted=True,
+            ),
+            stdout=stdout,
+            stderr=stderr,
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    monkeypatch.setattr(preflight, "run_command", fake_command)
+    monkeypatch.setattr(preflight, "probe_root_stdio", fail_probe)
+
+    with pytest.raises(CodexNativePreflightError) as exc_info:
+        preflight.preflight_codex_native_case(
+            codex_home=Path(env["CODEX_HOME"]),
+            plugin_root=_plugin_root(env),
+            logical_grants=GRANTS,
+            env=env,
+            probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        )
+
+    failure = exc_info.value
+    assert failure.reason == "codex_native_mcp_start_failed"
+    assert failure.mcp_started is None
+    assert failure.mcp_probe_stage == "command_exit"
+    assert failure.mcp_probe_exit_code == MCP_PROBE_FAILURE_EXIT_CODE
+    assert fullmatch(r"[0-9a-f]{64}", failure.mcp_probe_stdout_schema_sha256 or "")
+    rendered = repr(failure)
+    assert "DO_NOT_PUBLISH" not in rendered
+    assert "PRIVATE_STDERR_SENTINEL" not in rendered
+    assert str(tmp_path) not in rendered
 
 
 def test_runner_records_native_preflight_failure_without_starting_model(
@@ -641,6 +792,9 @@ def test_runner_retains_plugin_list_command_evidence_in_failed_record() -> None:
         mcp_started=False,
         plugin_list_exit_code=0,
         plugin_list_stdout_schema_sha256="e" * 64,
+        mcp_probe_stage="command_exit",
+        mcp_probe_exit_code=MCP_PROBE_FAILURE_EXIT_CODE,
+        mcp_probe_stdout_schema_sha256="f" * 64,
     )
 
     record = eval_runner._native_preflight_failed_record(  # noqa: SLF001
@@ -651,3 +805,90 @@ def test_runner_retains_plugin_list_command_evidence_in_failed_record() -> None:
 
     assert record.plugin_list_exit_code == 0
     assert record.plugin_list_stdout_schema_sha256 == "e" * 64
+    assert record.mcp_probe_stage == "command_exit"
+    assert record.mcp_probe_exit_code == MCP_PROBE_FAILURE_EXIT_CODE
+    assert record.mcp_probe_stdout_schema_sha256 == "f" * 64
+
+
+def test_runner_retains_completed_mcp_probe_evidence_on_model_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(tmp_path)
+    case = next(
+        case for case in load_eval_cases(CASE_ROOT) if case.id == "codex-native-safety-boundary"
+    )
+    runtime = MatrixIsolatedRuntime(
+        run_root=tmp_path,
+        env=env,
+        home=Path(env["HOME"]),
+        codex_home=Path(env["CODEX_HOME"]),
+        probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        auth_dir=tmp_path / "auth",
+        sim_credential_path=tmp_path / "auth" / "credentials",
+        token_cache_path=tmp_path / "auth" / "token.json",
+        sim_token_source=tmp_path / "source-token.json",
+        sim_token_source_digest="d" * 64,
+    )
+    options = EvalRunOptions(
+        harness="codex",
+        case_id=case.id,
+        tag=None,
+        environment="LOCAL",
+        case_root=CASE_ROOT,
+        codex_plugin_root=ROOT,
+        claude_plugin_root=ROOT,
+        codex_home=None,
+        claude_home=None,
+        out=tmp_path / "eval.json",
+        dry_run=False,
+        nonzero_on_skip=True,
+        credential_mode="ephemeral-owner-only-copy",
+        harness_policy="codex_native_v1",
+    )
+
+    def passed_preflight(**_kwargs: object) -> CodexNativePreflightReceipt:
+        return CodexNativePreflightReceipt(
+            plugin_enabled=True,
+            mcp_started=True,
+            visible_logical_tools=case.exact_tool_grants["codex"],
+            plugin_list_exit_code=0,
+            plugin_list_stdout_schema_sha256="e" * 64,
+            mcp_probe_stage="complete",
+            mcp_probe_exit_code=0,
+            mcp_probe_stdout_schema_sha256="f" * 64,
+        )
+
+    def passed_model(*_args: object, **_kwargs: object) -> EvalRunRecord:
+        return EvalRunRecord(
+            case_id=case.id,
+            harness="codex",
+            status="passed",
+            execution_mode="model_execution",
+            expected_skill=case.expected_skill,
+            required_logical_tools=case.required_logical_tools,
+            forbidden_logical_tools=case.forbidden_logical_tools,
+            resolved_tool_grants=case.exact_tool_grants["codex"],
+            transcript_assertions_passed=True,
+            no_model_call=False,
+            no_mcp_call=False,
+            no_saxo_call=True,
+            grant_status="passed",
+            assertion_status="passed",
+        )
+
+    monkeypatch.setattr(eval_runner, "preflight_codex_native_case", passed_preflight)
+    monkeypatch.setattr(eval_runner, "execute_model_case", passed_model)
+
+    records = eval_runner._execute_selected_cases(  # noqa: SLF001
+        options,
+        cases=(case,),
+        roots=HarnessRoots(ROOT, ROOT, None, None),
+        binding=None,
+        runtime=runtime,
+        process_manager=EvalProcessManager(),
+    )
+
+    assert records[0].mcp_probe_stage == "complete"
+    assert records[0].mcp_probe_exit_code == 0
+    assert records[0].mcp_probe_stdout_schema_sha256 == "f" * 64

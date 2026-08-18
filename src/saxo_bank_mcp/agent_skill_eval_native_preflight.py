@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, cast
+from typing import Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -16,6 +18,15 @@ from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 
 _JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+type McpProbeStage = Literal[
+    "runtime_binding",
+    "contract_validation",
+    "command_start",
+    "command_exit",
+    "payload_parse",
+    "tool_visibility",
+    "complete",
+]
 
 
 class _CodexPlugin(BaseModel):
@@ -42,6 +53,9 @@ class CodexNativePreflightReceipt:
     visible_logical_tools: tuple[str, ...]
     plugin_list_exit_code: int
     plugin_list_stdout_schema_sha256: str
+    mcp_probe_stage: Literal["complete"]
+    mcp_probe_exit_code: int
+    mcp_probe_stdout_schema_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +64,9 @@ class CodexNativePreflightError(ValueError):
     mcp_started: bool | None = False
     plugin_list_exit_code: int | None = None
     plugin_list_stdout_schema_sha256: str | None = None
+    mcp_probe_stage: McpProbeStage | None = None
+    mcp_probe_exit_code: int | None = None
+    mcp_probe_stdout_schema_sha256: str | None = None
 
     def __str__(self) -> str:  # noqa: D105
         return self.reason
@@ -63,13 +80,15 @@ class _ExpectedPluginIdentity:
     plugin_id: str
 
 
-def preflight_codex_native_case(
+def preflight_codex_native_case(  # noqa: PLR0913
     *,
     codex_home: Path,
     plugin_root: Path,
     logical_grants: tuple[str, ...],
     env: dict[str, str],
     probe_env: Path,
+    retained_project_environment: Path | None = None,
+    retained_interpreter: Path | None = None,
 ) -> CodexNativePreflightReceipt:
     """Prove native plugin registration and exact SIM-filtered tool visibility.
 
@@ -87,6 +106,10 @@ def preflight_codex_native_case(
         expected=identity,
         env=env,
     )
+    interpreter = _require_retained_interpreter(
+        retained_project_environment=retained_project_environment,
+        retained_interpreter=retained_interpreter,
+    )
     probe_env_vars = dict(env)
     probe_env_vars["UV_OFFLINE"] = "1"
     try:
@@ -96,14 +119,36 @@ def preflight_codex_native_case(
             env=probe_env_vars,
             probe_env=probe_env,
             offline=True,
+            interpreter=interpreter,
         )
-    except (CommandFailureError, OSError, ValueError) as exc:
+    except CommandFailureError as exc:
         raise CodexNativePreflightError(
             "codex_native_mcp_start_failed",
             mcp_started=None,
             plugin_list_exit_code=plugin_list.exit_code,
             plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="command_exit",
+            mcp_probe_exit_code=exc.receipt.exit_code,
+            mcp_probe_stdout_schema_sha256=_probe_stdout_schema_sha256(exc.stdout),
         ) from exc
+    except FileNotFoundError as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_start_failed",
+            mcp_started=False,
+            plugin_list_exit_code=plugin_list.exit_code,
+            plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="contract_validation",
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_start_failed",
+            mcp_started=None,
+            plugin_list_exit_code=plugin_list.exit_code,
+            plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="command_start",
+        ) from exc
+    probe_exit_code = result.receipt.exit_code
+    probe_schema_sha256 = _probe_stdout_schema_sha256(result.stdout)
     try:
         payload = _last_json_object(result.stdout)
         visible = _strict_tool_names(payload)
@@ -115,6 +160,9 @@ def preflight_codex_native_case(
             mcp_started=True,
             plugin_list_exit_code=plugin_list.exit_code,
             plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="payload_parse",
+            mcp_probe_exit_code=probe_exit_code,
+            mcp_probe_stdout_schema_sha256=probe_schema_sha256,
         ) from exc
     if annotations != [] or tool_count != len(visible):
         raise CodexNativePreflightError(
@@ -122,6 +170,9 @@ def preflight_codex_native_case(
             mcp_started=True,
             plugin_list_exit_code=plugin_list.exit_code,
             plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="tool_visibility",
+            mcp_probe_exit_code=probe_exit_code,
+            mcp_probe_stdout_schema_sha256=probe_schema_sha256,
         )
     if frozenset(visible) != frozenset(expected) or len(visible) != len(expected):
         raise CodexNativePreflightError(
@@ -129,6 +180,9 @@ def preflight_codex_native_case(
             mcp_started=True,
             plugin_list_exit_code=plugin_list.exit_code,
             plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+            mcp_probe_stage="tool_visibility",
+            mcp_probe_exit_code=probe_exit_code,
+            mcp_probe_stdout_schema_sha256=probe_schema_sha256,
         )
     return CodexNativePreflightReceipt(
         plugin_enabled=True,
@@ -136,7 +190,42 @@ def preflight_codex_native_case(
         visible_logical_tools=tuple(sorted(visible)),
         plugin_list_exit_code=plugin_list.exit_code,
         plugin_list_stdout_schema_sha256=plugin_list.stdout_schema_sha256,
+        mcp_probe_stage="complete",
+        mcp_probe_exit_code=probe_exit_code,
+        mcp_probe_stdout_schema_sha256=probe_schema_sha256,
     )
+
+
+def _require_retained_interpreter(
+    *,
+    retained_project_environment: Path | None,
+    retained_interpreter: Path | None,
+) -> Path:
+    project_environment = retained_project_environment or Path(sys.prefix)
+    interpreter = retained_interpreter or Path(sys.executable)
+    try:
+        expected_environment = Path(sys.prefix).resolve(strict=True)
+        actual_environment = project_environment.resolve(strict=True)
+        expected_interpreter = Path(sys.executable).absolute()
+        actual_interpreter = interpreter.absolute()
+        metadata = os.lstat(actual_interpreter)
+    except OSError as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_runtime_binding_invalid",
+            mcp_probe_stage="runtime_binding",
+        ) from exc
+    if (
+        actual_environment != expected_environment
+        or actual_interpreter != expected_interpreter
+        or actual_interpreter.parent.parent.resolve() != actual_environment
+        or not os.access(actual_interpreter, os.X_OK)
+        or not (metadata.st_mode & 0o100)
+    ):
+        raise CodexNativePreflightError(
+            "codex_native_mcp_runtime_binding_invalid",
+            mcp_probe_stage="runtime_binding",
+        )
+    return actual_interpreter
 
 
 def _require_exact_disposable_binding(
@@ -262,6 +351,15 @@ def _stdout_schema_sha256(raw: str) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _probe_stdout_schema_sha256(raw: str) -> str:
+    try:
+        schema = _json_schema(_last_json_object(raw))
+    except ValueError:
+        schema = {"type": "invalid_json"}
+    encoded = json.dumps(schema, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
 def _json_schema(value: object) -> JsonValue:
     if isinstance(value, list):
         unique: dict[str, JsonValue] = {}
@@ -277,11 +375,7 @@ def _json_schema(value: object) -> JsonValue:
         return {"type": "array", "items": tuple(unique[key] for key in sorted(unique))}
     if isinstance(value, dict):
         raw = cast("dict[object, object]", value)
-        properties = {
-            key: _json_schema(item)
-            for key, item in raw.items()
-            if isinstance(key, str)
-        }
+        properties = {key: _json_schema(item) for key, item in raw.items() if isinstance(key, str)}
         return {"type": "object", "properties": properties}
     return _scalar_json_schema(value)
 

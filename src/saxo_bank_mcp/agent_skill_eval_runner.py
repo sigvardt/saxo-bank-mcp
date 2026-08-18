@@ -498,6 +498,7 @@ def _execute_selected_cases(  # noqa: PLR0913
     records: list[EvalRunRecord] = []
     for case in cases:
         for harness in selected_harnesses(options.harness):
+            native_preflight = None
             grants = resolve_tool_grants(harness, case.exact_tool_grants[harness])
             execution_case = _codex_native_fixture_bound_case(
                 case,
@@ -533,7 +534,7 @@ def _execute_selected_cases(  # noqa: PLR0913
                 and execution_case.router_expectation is None
             ):
                 try:
-                    preflight_codex_native_case(
+                    native_preflight = preflight_codex_native_case(
                         codex_home=runtime.codex_home,
                         plugin_root=child_roots.codex_plugin_root,
                         logical_grants=execution_case.exact_tool_grants["codex"],
@@ -549,19 +550,28 @@ def _execute_selected_cases(  # noqa: PLR0913
                         )
                     )
                     continue
-            records.append(
-                execute_model_case(
-                    execution_case,
-                    harness,
-                    grants,
-                    roots=child_roots,
-                    env=env,
-                    expected_router_source_sha256=(
-                        None if binding is None else binding.router_source_sha256
-                    ),
-                    process_manager=process_manager,
+            record = execute_model_case(
+                execution_case,
+                harness,
+                grants,
+                roots=child_roots,
+                env=env,
+                expected_router_source_sha256=(
+                    None if binding is None else binding.router_source_sha256
                 ),
+                process_manager=process_manager,
             )
+            if native_preflight is not None:
+                record = record.model_copy(
+                    update={
+                        "mcp_probe_stage": native_preflight.mcp_probe_stage,
+                        "mcp_probe_exit_code": native_preflight.mcp_probe_exit_code,
+                        "mcp_probe_stdout_schema_sha256": (
+                            native_preflight.mcp_probe_stdout_schema_sha256
+                        ),
+                    },
+                )
+            records.append(record)
     return tuple(records)
 
 
@@ -586,6 +596,9 @@ def _native_preflight_failed_record(
         error=failure.reason,
         plugin_list_exit_code=failure.plugin_list_exit_code,
         plugin_list_stdout_schema_sha256=failure.plugin_list_stdout_schema_sha256,
+        mcp_probe_stage=failure.mcp_probe_stage,
+        mcp_probe_exit_code=failure.mcp_probe_exit_code,
+        mcp_probe_stdout_schema_sha256=failure.mcp_probe_stdout_schema_sha256,
         grant_status="failed",
         assertion_status="failed",
     )

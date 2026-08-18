@@ -25,13 +25,14 @@ class ProbePayloadError(ValueError):
         self.reason = reason
 
 
-def probe_root_stdio(
+def probe_root_stdio(  # noqa: PLR0913
     name: str,
     root: Path,
     *,
     env: dict[str, str],
     probe_env: Path,
     offline: bool = False,
+    interpreter: Path | None = None,
 ) -> CommandResult:
     """Start MCP via each root's .mcp.json stdio contract and list tools."""
     probe_env.mkdir(parents=True, exist_ok=True)
@@ -39,8 +40,9 @@ def probe_root_stdio(
     if not mcp_path.is_file():
         msg = f"missing_mcp_json:{root}"
         raise FileNotFoundError(msg)
+    direct_server = "None" if interpreter is None else repr(str(interpreter.absolute()))
     code = f"""
-import anyio, json
+import anyio, json, os
 from pathlib import Path
 from fastmcp import Client
 
@@ -59,13 +61,35 @@ for index, arg in enumerate(args):
         skip = True
         continue
     fixed.append(arg)
+direct_server = {direct_server}
+if direct_server is not None:
+    if server.get("command") != "uv" or fixed != [
+        "run", "--project", str(root), "saxo-bank-mcp", "--transport", "stdio"
+    ]:
+        raise ValueError("mcp_stdio_contract_invalid")
+    command = direct_server
+    fixed = ["-I", "-B", "-m", "saxo_bank_mcp", "--transport", "stdio"]
+else:
+    command = server["command"]
+server_config = {{
+    "command": command,
+    "args": fixed,
+    "cwd": str(root),
+}}
+if direct_server is not None:
+    server_config["env"] = {{
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith("SAXO_MCP_")
+        or key in {{
+            "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+            "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
+        }}
+    }}
 config = {{
     "mcpServers": {{
-        {PLUGIN_NAME!r}: {{
-            "command": server["command"],
-            "args": fixed,
-            "cwd": str(root),
-        }}
+        {PLUGIN_NAME!r}: server_config
     }}
 }}
 async def main() -> None:
@@ -80,11 +104,10 @@ async def main() -> None:
 anyio.run(main)
 """
     merged = dict(env)
-    merged["UV_PROJECT_ENVIRONMENT"] = str(probe_env)
-    merged["UV_NO_MODIFY_PATH"] = "1"
-    result = run_command(
-        name,
-        (
+    if interpreter is None:
+        merged["UV_PROJECT_ENVIRONMENT"] = str(probe_env)
+        merged["UV_NO_MODIFY_PATH"] = "1"
+        command = (
             "uv",
             "run",
             *(("--offline",) if offline else ()),
@@ -93,7 +116,12 @@ anyio.run(main)
             "python",
             "-c",
             code,
-        ),
+        )
+    else:
+        command = (str(interpreter.absolute()), "-I", "-B", "-c", code)
+    result = run_command(
+        name,
+        command,
         cwd=root,
         env=merged,
         timeout_seconds=300,

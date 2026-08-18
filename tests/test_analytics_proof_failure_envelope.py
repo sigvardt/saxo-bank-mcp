@@ -16,6 +16,7 @@ from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_co
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeAgentEvaluationCaseSummary,
     CodexNativeBootstrapEnvelope,
     CodexNativeBootstrapVerification,
     CodexNativeChildFailureEnvelope,
@@ -43,6 +44,7 @@ FAILED_CHILD_EXIT_CODE = 7
 EXPECTED_BINDING_CALLS = 2
 FAILED_EVAL_CASE_COUNT = 2
 FAILED_EVAL_REQUIRED_TOOL_COUNT = 3
+FAILED_MCP_PROBE_EXIT_CODE = 23
 
 
 def _bootstrap_envelope(
@@ -226,6 +228,9 @@ def _write_failed_agent_report(path: Path) -> str:
     failed_record = cast("list[dict[str, Any]]", payload["records"])[1]
     failed_record["plugin_list_exit_code"] = 0
     failed_record["plugin_list_stdout_schema_sha256"] = "e" * 64
+    failed_record["mcp_probe_stage"] = "command_exit"
+    failed_record["mcp_probe_exit_code"] = FAILED_MCP_PROBE_EXIT_CODE
+    failed_record["mcp_probe_stdout_schema_sha256"] = "f" * 64
     payload["run_cleanup"] = {"complete": True, "remaining_processes": 0}
     payload["installation_fixture_preserved"] = True
     encoded = json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
@@ -361,7 +366,7 @@ def test_failure_after_model_and_mcp_activity_retains_exact_counts() -> None:
     assert envelope.disclaimer_response_made is None
 
 
-def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
+def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -446,6 +451,9 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
     assert failed.invoked_logical_tool_ids == ("saxo_get_research_dataset",)
     assert failed.plugin_list_exit_code == 0
     assert failed.plugin_list_stdout_schema_sha256 == "e" * 64
+    assert failed.mcp_probe_stage == "command_exit"
+    assert failed.mcp_probe_exit_code == FAILED_MCP_PROBE_EXIT_CODE
+    assert failed.mcp_probe_stdout_schema_sha256 == "f" * 64
     assert set(failed.model_dump(mode="json")) == {
         "case_id",
         "status",
@@ -462,6 +470,9 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
         "model_saxo_event_count",
         "plugin_list_exit_code",
         "plugin_list_stdout_schema_sha256",
+        "mcp_probe_stage",
+        "mcp_probe_exit_code",
+        "mcp_probe_stdout_schema_sha256",
     }
     assert set(summary.model_dump(mode="json")) == {
         "schema_version",
@@ -511,11 +522,42 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
 
 
 @pytest.mark.parametrize(
+    "mutation",
+    [
+        {"mcp_probe_exit_code": None},
+        {"mcp_probe_stdout_schema_sha256": None},
+        {"mcp_probe_stage": "command_start"},
+        {
+            "mcp_probe_stage": "complete",
+            "mcp_probe_exit_code": FAILED_MCP_PROBE_EXIT_CODE,
+        },
+        {"mcp_probe_stdout_schema_sha256": "invalid"},
+        {"raw_stderr": "DO_NOT_PUBLISH"},
+    ],
+)
+def test_failed_eval_case_summary_rejects_incomplete_tampered_or_extra_mcp_probe_evidence(
+    tmp_path: Path,
+    mutation: dict[str, object],
+) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    summary = getattr(progress, "agent_evaluation_failure_summary", None)
+    assert summary is not None
+    payload = summary.cases[1].model_dump(mode="json")
+    payload.update(mutation)
+
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationCaseSummary.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     ("mutation", "value"),
     [
         ("error", "transcript_assertion_failed"),
         ("plugin_list_exit_code", 99),
         ("plugin_list_stdout_schema_sha256", "f" * 64),
+        ("mcp_probe_stage", "payload_parse"),
+        ("mcp_probe_exit_code", 99),
+        ("mcp_probe_stdout_schema_sha256", "a" * 64),
         ("raw_transcript", "DO_NOT_PUBLISH"),
     ],
 )

@@ -152,6 +152,23 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
         default=None,
         pattern=_SHA256_PATTERN,
     )
+    mcp_probe_stage: (
+        Literal[
+            "runtime_binding",
+            "contract_validation",
+            "command_start",
+            "command_exit",
+            "payload_parse",
+            "tool_visibility",
+            "complete",
+        ]
+        | None
+    ) = None
+    mcp_probe_exit_code: int | None = None
+    mcp_probe_stdout_schema_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
 
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
@@ -170,11 +187,37 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             raise ValueError("failed agent evaluation case requires a safe error")
         if self.status == "passed" and self.error:
             raise ValueError("passed agent evaluation case cannot carry an error")
-        if (self.plugin_list_exit_code is None) != (
-            self.plugin_list_stdout_schema_sha256 is None
-        ):
+        if (self.plugin_list_exit_code is None) != (self.plugin_list_stdout_schema_sha256 is None):
             raise ValueError("plugin list command evidence must be complete")
+        _validate_mcp_probe_command_evidence(
+            stage=self.mcp_probe_stage,
+            exit_code=self.mcp_probe_exit_code,
+            stdout_schema_sha256=self.mcp_probe_stdout_schema_sha256,
+        )
         return self
+
+
+def _validate_mcp_probe_command_evidence(
+    *,
+    stage: str | None,
+    exit_code: int | None,
+    stdout_schema_sha256: str | None,
+) -> None:
+    paired = (exit_code is None) == (stdout_schema_sha256 is None)
+    completed_command = stage in {
+        "command_exit",
+        "payload_parse",
+        "tool_visibility",
+        "complete",
+    }
+    if not paired or (completed_command != (exit_code is not None)):
+        raise ValueError("mcp probe command evidence must match its stage")
+    if stage is None and exit_code is not None:
+        raise ValueError("mcp probe command evidence requires a stage")
+    if stage == "command_exit" and exit_code == 0:
+        raise ValueError("failed mcp probe command must have a nonzero exit")
+    if stage in {"payload_parse", "tool_visibility", "complete"} and exit_code != 0:
+        raise ValueError("completed mcp probe command must have exit zero")
 
 
 class CodexNativeAgentEvaluationFailureSummary(_StrictModel):

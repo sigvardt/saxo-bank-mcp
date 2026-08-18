@@ -1842,6 +1842,9 @@ def _agent_evaluation_failure_summary(
             model_saxo_event_count=record.model_saxo_event_count,
             plugin_list_exit_code=record.plugin_list_exit_code,
             plugin_list_stdout_schema_sha256=record.plugin_list_stdout_schema_sha256,
+            mcp_probe_stage=record.mcp_probe_stage,
+            mcp_probe_exit_code=record.mcp_probe_exit_code,
+            mcp_probe_stdout_schema_sha256=record.mcp_probe_stdout_schema_sha256,
         )
         for record in report.records
     )

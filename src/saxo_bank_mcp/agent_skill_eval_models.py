@@ -5,7 +5,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
 
@@ -152,11 +152,49 @@ class EvalRunRecord(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    mcp_probe_stage: (
+        Literal[
+            "runtime_binding",
+            "contract_validation",
+            "command_start",
+            "command_exit",
+            "payload_parse",
+            "tool_visibility",
+            "complete",
+        ]
+        | None
+    ) = None
+    mcp_probe_exit_code: int | None = None
+    mcp_probe_stdout_schema_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     client_version: str = ""
     invoked_logical_tools: tuple[str, ...] = ()
     invoked_logical_tool_count: int = 0
     grant_status: Literal["passed", "failed", "not_required"] = "not_required"
     assertion_status: Literal["passed", "failed", "not_required"] = "not_required"
+
+    @model_validator(mode="after")
+    def _validate_mcp_probe_evidence(self) -> EvalRunRecord:
+        paired = (self.mcp_probe_exit_code is None) == (self.mcp_probe_stdout_schema_sha256 is None)
+        completed_command = self.mcp_probe_stage in {
+            "command_exit",
+            "payload_parse",
+            "tool_visibility",
+            "complete",
+        }
+        if not paired or (completed_command != (self.mcp_probe_exit_code is not None)):
+            raise ValueError("mcp probe command evidence must match its stage")
+        if self.mcp_probe_stage is None and self.mcp_probe_exit_code is not None:
+            raise ValueError("mcp probe command evidence requires a stage")
+        if self.mcp_probe_stage == "command_exit" and self.mcp_probe_exit_code == 0:
+            raise ValueError("failed mcp probe command must have a nonzero exit")
+        if self.mcp_probe_stage in {"payload_parse", "tool_visibility", "complete"} and (
+            self.mcp_probe_exit_code != 0
+        ):
+            raise ValueError("completed mcp probe command must have exit zero")
+        return self
 
 
 class EvalRunReport(BaseModel):
