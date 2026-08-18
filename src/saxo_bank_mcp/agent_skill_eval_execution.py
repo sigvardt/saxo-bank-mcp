@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from saxo_bank_mcp.agent_skill_eval_commands import (
     enrich_eval_cli_env,
@@ -29,6 +32,16 @@ class HarnessRoots:
     claude_plugin_root: Path
     codex_home: Path | None
     claude_home: Path | None
+
+
+class _AssistantDiagnosticFields(TypedDict):
+    raw_assistant_event_count: int | None
+    raw_assistant_events_sha256: str | None
+    final_assistant_text_sha256: str | None
+    raw_assistant_message_present: bool | None
+    raw_assistant_required_all_assertion_results: tuple[bool, ...]
+    raw_assistant_required_any_assertion_results: tuple[bool, ...]
+    raw_assistant_forbidden_assertion_absent_results: tuple[bool, ...]
 
 
 def execute_model_case(  # noqa: PLR0913
@@ -218,6 +231,19 @@ def _evaluate_trace(
     invoked = trace.invoked_logical_tools
     invoked_set = frozenset(invoked)
     assertion_evidence = transcript_assertion_evidence(case, trace.assistant_text, invoked)
+    raw_assertion_evidence = transcript_assertion_evidence(
+        case,
+        "\n".join(trace.assistant_event_texts),
+        invoked,
+    )
+    diagnostic_fields = (
+        _assistant_diagnostic_fields(
+            trace,
+            raw_assertion_evidence=raw_assertion_evidence,
+        )
+        if harness == "codex"
+        else _empty_assistant_diagnostic_fields()
+    )
     assertions_passed = assertion_evidence.passed
     error = non_router_error(
         case=case,
@@ -254,6 +280,7 @@ def _evaluate_trace(
         required_all_assertion_results=assertion_evidence.required_all,
         required_any_assertion_results=assertion_evidence.required_any,
         forbidden_assertion_absent_results=assertion_evidence.forbidden_absent,
+        **diagnostic_fields,
     )
 
 
@@ -325,6 +352,23 @@ def _failed_record(  # noqa: PLR0913
         if trace is None
         else transcript_assertion_evidence(case, trace.assistant_text, trace.invoked_logical_tools)
     )
+    raw_assertion_evidence = (
+        None
+        if trace is None
+        else transcript_assertion_evidence(
+            case,
+            "\n".join(trace.assistant_event_texts),
+            trace.invoked_logical_tools,
+        )
+    )
+    diagnostic_fields = (
+        _empty_assistant_diagnostic_fields()
+        if harness != "codex" or trace is None or raw_assertion_evidence is None
+        else _assistant_diagnostic_fields(
+            trace,
+            raw_assertion_evidence=raw_assertion_evidence,
+        )
+    )
     return EvalRunRecord(
         case_id=case.id,
         harness=harness,
@@ -359,7 +403,44 @@ def _failed_record(  # noqa: PLR0913
         forbidden_assertion_absent_results=(
             () if assertion_evidence is None else assertion_evidence.forbidden_absent
         ),
+        **diagnostic_fields,
     )
+
+
+def _assistant_diagnostic_fields(
+    trace: ModelToolTrace,
+    *,
+    raw_assertion_evidence: TranscriptAssertionEvidence,
+) -> _AssistantDiagnosticFields:
+    """Return content-free evidence for decoded events and the final parsed text."""
+    raw_material = json.dumps(
+        trace.assistant_event_texts,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode()
+    return {
+        "raw_assistant_event_count": len(trace.assistant_event_texts),
+        "raw_assistant_events_sha256": hashlib.sha256(raw_material).hexdigest(),
+        "final_assistant_text_sha256": hashlib.sha256(trace.assistant_text.encode()).hexdigest(),
+        "raw_assistant_message_present": raw_assertion_evidence.assistant_message_present,
+        "raw_assistant_required_all_assertion_results": raw_assertion_evidence.required_all,
+        "raw_assistant_required_any_assertion_results": raw_assertion_evidence.required_any,
+        "raw_assistant_forbidden_assertion_absent_results": (
+            raw_assertion_evidence.forbidden_absent
+        ),
+    }
+
+
+def _empty_assistant_diagnostic_fields() -> _AssistantDiagnosticFields:
+    return {
+        "raw_assistant_event_count": None,
+        "raw_assistant_events_sha256": None,
+        "final_assistant_text_sha256": None,
+        "raw_assistant_message_present": None,
+        "raw_assistant_required_all_assertion_results": (),
+        "raw_assistant_required_any_assertion_results": (),
+        "raw_assistant_forbidden_assertion_absent_results": (),
+    }
 
 
 @dataclass(frozen=True, slots=True)

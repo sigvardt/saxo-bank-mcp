@@ -126,6 +126,9 @@ class ModelToolTrace:
     saxo_event_count: int
     non_saxo_mcp_event_count: int
     parse_error: str = ""
+    # Ephemeral decoded assistant-event text used only to derive privacy-safe diagnostics.
+    # Eval reports persist only counts, hashes, and assertion booleans.
+    assistant_event_texts: tuple[str, ...] = ()
 
 
 def parse_codex_model_output(stream: str) -> ModelToolTrace:
@@ -139,10 +142,13 @@ def parse_codex_model_output(stream: str) -> ModelToolTrace:
     order: list[str] = []
     counts = _EventCounts()
     answer_parts: list[str] = []
+    assistant_event_parts: list[str] = []
     for event in events:
         item = event.item
         if item is None:
             continue
+        if item.type == "agent_message" and item.text:
+            assistant_event_parts.append(item.text)
         if event.type == "item.completed" and item.type == "agent_message" and item.text:
             answer_parts.append(item.text)
         if item.type not in CODEX_TOOL_ITEM_TYPES:
@@ -153,7 +159,12 @@ def parse_codex_model_output(stream: str) -> ModelToolTrace:
         seen_ids.add(identity)
         counts.tool += 1
         _classify_codex_item(item, counts, order)
-    return _trace_from_counts(counts, order, "\n".join(answer_parts))
+    return _trace_from_counts(
+        counts,
+        order,
+        "\n".join(answer_parts),
+        assistant_event_texts=tuple(assistant_event_parts),
+    )
 
 
 def parse_claude_model_output(stream: str) -> ModelToolTrace:
@@ -397,6 +408,8 @@ def _trace_from_counts(
     counts: _EventCounts,
     order: list[str],
     assistant_text: str,
+    *,
+    assistant_event_texts: tuple[str, ...] = (),
 ) -> ModelToolTrace:
     return ModelToolTrace(
         assistant_text=assistant_text,
@@ -410,6 +423,7 @@ def _trace_from_counts(
         saxo_event_count=counts.saxo,
         non_saxo_mcp_event_count=counts.non_saxo_mcp,
         parse_error=counts.parse_error,
+        assistant_event_texts=assistant_event_texts,
     )
 
 
@@ -426,4 +440,5 @@ def _empty_trace(*, parse_error: str) -> ModelToolTrace:
         saxo_event_count=0,
         non_saxo_mcp_event_count=0,
         parse_error=parse_error,
+        assistant_event_texts=(),
     )

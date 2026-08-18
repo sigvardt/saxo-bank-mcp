@@ -69,6 +69,7 @@ from saxo_bank_mcp.qa_analytics_evidence import (
 )
 from saxo_bank_mcp.qa_analytics_proof_failure import (
     CodexNativeAgentEvaluationCaseSummary,
+    CodexNativeAgentEvaluationCleanupSummary,
     CodexNativeAgentEvaluationFailureSummary,
     CodexNativeBootstrapEnvelope,
     CodexNativeProofProgress,
@@ -611,6 +612,7 @@ def run_verified_codex_native_producer(  # noqa: C901
     candidate_commit: str,
     install_report_path: Path,
     source_repo: Path,
+    cleanup_identity_receipt_path: Path | None = None,
 ) -> CodexNativeVerifiedInstalledProofValidation:
     """Execute the unchanged proof suite with the native Codex harness quorum."""
     if type(install) is not CodexInstallEvidenceReport:
@@ -637,6 +639,11 @@ def run_verified_codex_native_producer(  # noqa: C901
     expected_bootstrap_sha256 = _installed_bootstrap_module_sha256(install.codex.cache_root)
     catalog_sha256, contract_sha256 = _installed_contract_digests()
     try:
+        execution_kwargs: dict[str, Path] = {}
+        if cleanup_identity_receipt_path is not None:
+            execution_kwargs["cleanup_identity_receipt_path"] = (
+                cleanup_identity_receipt_path.resolve()
+            )
         execution = _execute_codex_native_installed_child(
             install.codex.cache_root,
             source_repo=validated_source,
@@ -650,6 +657,7 @@ def run_verified_codex_native_producer(  # noqa: C901
             producer_module_sha256=expected_module_sha256,
             catalog_sha256=catalog_sha256,
             contract_sha256=contract_sha256,
+            **execution_kwargs,
         )
     except (CodexNativeBoundaryFailureError, CodexNativeProofFailureError):
         validate_codex_native_candidate_source_root(
@@ -1867,9 +1875,23 @@ def _agent_evaluation_failure_summary(
             required_all_assertion_results=record.required_all_assertion_results,
             required_any_assertion_results=record.required_any_assertion_results,
             forbidden_assertion_absent_results=(record.forbidden_assertion_absent_results),
+            raw_assistant_event_count=record.raw_assistant_event_count,
+            raw_assistant_events_sha256=record.raw_assistant_events_sha256,
+            final_assistant_text_sha256=record.final_assistant_text_sha256,
+            raw_assistant_message_present=record.raw_assistant_message_present,
+            raw_assistant_required_all_assertion_results=(
+                record.raw_assistant_required_all_assertion_results
+            ),
+            raw_assistant_required_any_assertion_results=(
+                record.raw_assistant_required_any_assertion_results
+            ),
+            raw_assistant_forbidden_assertion_absent_results=(
+                record.raw_assistant_forbidden_assertion_absent_results
+            ),
         )
         for record in report.records
     )
+    cleanup = _agent_evaluation_cleanup_summary(report.cleanup)
     material = {
         "schema_version": "1",
         "receipt_kind": "codex_native_agent_evaluation_failure_summary",
@@ -1878,9 +1900,82 @@ def _agent_evaluation_failure_summary(
         "case_count": report.case_count,
         "failed_case_count": sum(record.status == "failed" for record in report.records),
         "cases": tuple(case.model_dump(mode="python") for case in cases),
+        "cleanup": cleanup.model_dump(mode="python"),
     }
     return CodexNativeAgentEvaluationFailureSummary.model_validate(
         {**material, "summary_sha256": _digest(material)},
+        strict=True,
+    )
+
+
+def _agent_evaluation_cleanup_summary(
+    raw: dict[str, JsonValue],
+) -> CodexNativeAgentEvaluationCleanupSummary:
+    """Reduce an eval cleanup mapping to a strict content-free receipt."""
+    complete = raw.get("complete")
+    process_cleanup = raw.get("process_cleanup")
+    runtime_cleanup = raw.get("runtime_cleanup")
+    token_promote = raw.get("token_promote")
+    created = raw.get("created_processes")
+    terminated = raw.get("terminated_processes")
+    remaining = raw.get("remaining_processes")
+    timed_out = raw.get("process_timed_out")
+    persisted = raw.get("raw_transcripts_persisted")
+    valid = (
+        type(complete) is bool
+        and process_cleanup in {"passed", "residue", "not_required"}
+        and runtime_cleanup in {"passed", "residue", "not_required"}
+        and token_promote in {"passed", "failed", "not_required"}
+        and type(created) is int
+        and type(terminated) is int
+        and type(remaining) is int
+        and type(timed_out) is bool
+        and type(persisted) is int
+        and created >= 0
+        and terminated >= 0
+        and remaining >= 0
+        and persisted >= 0
+    )
+    if valid:
+        cleanup_is_complete = (
+            complete is True
+            and process_cleanup in {"passed", "not_required"}
+            and runtime_cleanup in {"passed", "not_required"}
+            and token_promote in {"passed", "not_required"}
+            and remaining == 0
+            and persisted == 0
+        )
+        material: dict[str, object] = {
+            "schema_version": "1",
+            "receipt_kind": "codex_native_agent_evaluation_cleanup",
+            "status": (
+                "complete" if cleanup_is_complete else "failed" if complete is False else "unknown"
+            ),
+            "process_cleanup": process_cleanup,
+            "runtime_cleanup": runtime_cleanup,
+            "token_promote": token_promote,
+            "created_process_count": created,
+            "terminated_process_count": terminated,
+            "remaining_process_count": remaining,
+            "process_timed_out": timed_out,
+            "persisted_raw_output_count": persisted,
+        }
+    else:
+        material = {
+            "schema_version": "1",
+            "receipt_kind": "codex_native_agent_evaluation_cleanup",
+            "status": "unknown",
+            "process_cleanup": "unknown",
+            "runtime_cleanup": "unknown",
+            "token_promote": "unknown",
+            "created_process_count": None,
+            "terminated_process_count": None,
+            "remaining_process_count": None,
+            "process_timed_out": None,
+            "persisted_raw_output_count": None,
+        }
+    return CodexNativeAgentEvaluationCleanupSummary.model_validate(
+        {**material, "cleanup_sha256": _digest(material)},
         strict=True,
     )
 
@@ -2599,6 +2694,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
     producer_module_sha256: str,
     catalog_sha256: str,
     contract_sha256: str,
+    cleanup_identity_receipt_path: Path | None = None,
 ) -> _CodexNativeChildExecution:
     proof_runtime = install.proof_runtime
     if proof_runtime is None:
@@ -2712,13 +2808,23 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             env["UV_CACHE_DIR"] = uv_cache
         try:
-            result = run_command(
-                _COMMAND_NAME,
-                command,
-                cwd=cache_root.resolve(),
-                env=env,
-                timeout_seconds=3600,
-            )
+            if cleanup_identity_receipt_path is None:
+                result = run_command(
+                    _COMMAND_NAME,
+                    command,
+                    cwd=cache_root.resolve(),
+                    env=env,
+                    timeout_seconds=3600,
+                )
+            else:
+                result = run_command(
+                    _COMMAND_NAME,
+                    command,
+                    cwd=cache_root.resolve(),
+                    env=env,
+                    timeout_seconds=3600,
+                    cleanup_identity_receipt_path=cleanup_identity_receipt_path,
+                )
         except CommandFailureError as error:
             command_error = error
         except (OSError, ValueError) as error:
@@ -2778,6 +2884,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
                 command_stderr_sha256=command_receipt.stderr_sha256,
                 remaining_process_count=command_error.remaining_process_count,
                 remaining_process_group_count=command_error.remaining_process_group_count,
+                cleanup_identity_receipt_sha256=(command_error.cleanup_identity_receipt_sha256),
                 runtime_cleanup_status=(
                     "complete"
                     if (

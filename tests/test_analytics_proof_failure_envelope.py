@@ -55,6 +55,9 @@ FAILED_EVAL_REQUIRED_TOOL_COUNT = 3
 FAILED_MCP_PROBE_EXIT_CODE = 23
 OWNER_FILE_MODE = 0o600
 EXPECTED_RECEIPT_WRITE_COUNT = 2
+RAW_ASSISTANT_EVENT_COUNT = 2
+EVAL_CREATED_PROCESS_COUNT = 4
+EVAL_TERMINATED_PROCESS_COUNT = 2
 
 
 def _bootstrap_envelope(
@@ -213,6 +216,13 @@ def _failed_agent_evaluation_report() -> EvalRunReport:
             required_all_assertion_results=(True, False, True),
             required_any_assertion_results=(True,),
             forbidden_assertion_absent_results=(True, True),
+            raw_assistant_event_count=2,
+            raw_assistant_events_sha256="a" * 64,
+            final_assistant_text_sha256="b" * 64,
+            raw_assistant_message_present=True,
+            raw_assistant_required_all_assertion_results=(True, True, True),
+            raw_assistant_required_any_assertion_results=(True,),
+            raw_assistant_forbidden_assertion_absent_results=(True, True),
         ),
     )
     return EvalRunReport(
@@ -225,7 +235,13 @@ def _failed_agent_evaluation_report() -> EvalRunReport:
         records=records,
         cleanup={
             "complete": True,
+            "process_cleanup": "passed",
+            "runtime_cleanup": "passed",
+            "token_promote": "passed",
+            "created_processes": 4,
+            "terminated_processes": 2,
             "remaining_processes": 0,
+            "process_timed_out": False,
             "raw_transcripts_persisted": 0,
         },
         before_global_state={"private_marker": "DO_NOT_COPY"},
@@ -986,6 +1002,13 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
     assert failed.required_all_assertion_results == (True, False, True)
     assert failed.required_any_assertion_results == (True,)
     assert failed.forbidden_assertion_absent_results == (True, True)
+    assert failed.raw_assistant_event_count == RAW_ASSISTANT_EVENT_COUNT
+    assert failed.raw_assistant_events_sha256 == "a" * 64
+    assert failed.final_assistant_text_sha256 == "b" * 64
+    assert failed.raw_assistant_message_present is True
+    assert failed.raw_assistant_required_all_assertion_results == (True, True, True)
+    assert failed.raw_assistant_required_any_assertion_results == (True,)
+    assert failed.raw_assistant_forbidden_assertion_absent_results == (True, True)
     assert set(failed.model_dump(mode="json")) == {
         "case_id",
         "status",
@@ -1011,7 +1034,23 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
         "required_all_assertion_results",
         "required_any_assertion_results",
         "forbidden_assertion_absent_results",
+        "raw_assistant_event_count",
+        "raw_assistant_events_sha256",
+        "final_assistant_text_sha256",
+        "raw_assistant_message_present",
+        "raw_assistant_required_all_assertion_results",
+        "raw_assistant_required_any_assertion_results",
+        "raw_assistant_forbidden_assertion_absent_results",
     }
+    assert summary.cleanup.status == "complete"
+    assert summary.cleanup.process_cleanup == "passed"
+    assert summary.cleanup.runtime_cleanup == "passed"
+    assert summary.cleanup.token_promote == "passed"  # noqa: S105
+    assert summary.cleanup.created_process_count == EVAL_CREATED_PROCESS_COUNT
+    assert summary.cleanup.terminated_process_count == EVAL_TERMINATED_PROCESS_COUNT
+    assert summary.cleanup.remaining_process_count == 0
+    assert summary.cleanup.process_timed_out is False
+    assert summary.cleanup.persisted_raw_output_count == 0
     assert set(summary.model_dump(mode="json")) == {
         "schema_version",
         "receipt_kind",
@@ -1020,6 +1059,7 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
         "case_count",
         "failed_case_count",
         "cases",
+        "cleanup",
         "summary_sha256",
     }
     rendered = summary.model_dump_json()
@@ -1028,6 +1068,69 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
     assert "transcript" not in rendered
     assert "stderr" not in rendered
     assert "/" not in rendered
+
+
+def test_failed_eval_summary_rejects_diagnostic_tamper_extra_and_cleanup_tamper(
+    tmp_path: Path,
+) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    summary = progress.agent_evaluation_failure_summary
+    assert summary is not None
+
+    vector_tamper = summary.model_dump(mode="json")
+    cast("list[dict[str, Any]]", vector_tamper["cases"])[1][
+        "raw_assistant_required_all_assertion_results"
+    ] = [False, False, False]
+    with pytest.raises(ValidationError):
+        type(summary).model_validate(vector_tamper, strict=True)
+
+    extra_content = summary.model_dump(mode="json")
+    cast("list[dict[str, Any]]", extra_content["cases"])[1]["raw_assistant_text"] = (
+        "PRIVATE_TRANSCRIPT_DO_NOT_PUBLISH"
+    )
+    with pytest.raises(ValidationError):
+        type(summary).model_validate(extra_content, strict=True)
+
+    cleanup_tamper = summary.model_dump(mode="json")
+    cast("dict[str, Any]", cleanup_tamper["cleanup"])["remaining_process_count"] = 1
+    with pytest.raises(ValidationError):
+        type(summary).model_validate(cleanup_tamper, strict=True)
+
+
+def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_as_digest(
+    tmp_path: Path,
+) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    child = _failure(progress, reason="installed_agent_evaluation_command_failed")
+    cleanup_digest = "c" * 64
+
+    verified = _verify(
+        child.model_dump_json(),
+        cleanup_identity_receipt_sha256=cleanup_digest,
+    )
+
+    assert verified.outer_process_cleanup_receipt_sha256 == cleanup_digest
+    rendered = verified.model_dump_json()
+    assert "pid" not in rendered.lower()
+    assert "birth" not in rendered.lower()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    round_trip = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+    assert round_trip.result.outer_process_cleanup_receipt_sha256 == cleanup_digest
+
+    tampered = publication.model_dump(mode="json")
+    cast("dict[str, Any]", tampered["result"])["outer_process_cleanup_receipt_sha256"] = "d" * 64
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
 
 
 def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path) -> None:

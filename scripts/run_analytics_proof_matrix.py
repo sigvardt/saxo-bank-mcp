@@ -330,6 +330,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                 candidate_commit=args.candidate_commit,
                 install_report_path=cast("Path", args.install_report).resolve(),
                 source_repo=cast("Path", candidate_source_root),
+                cleanup_identity_receipt_path=_proof_child_cleanup_identity_receipt_path(
+                    args.out,
+                ),
             )
             if args.harness_policy == "codex_native_v1"
             else run_verified_installed_producer(
@@ -688,6 +691,10 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
 def _candidate_runner_result_path(output: Path) -> Path:
     return output.with_name(f"{output.name}.candidate-result.json")
+
+
+def _proof_child_cleanup_identity_receipt_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.proof-child-cleanup.json").resolve()
 
 
 def _prepare_candidate_result_path(path: Path) -> None:

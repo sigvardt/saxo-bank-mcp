@@ -74,6 +74,7 @@ LIVE_WRITE_TOOLS: Final = frozenset(
         "saxo_register_disclaimer_response",
     },
 )
+SHA256_HEX: Final = r"^[a-f0-9]{64}$"
 
 
 class TranscriptAssertions(BaseModel):
@@ -183,6 +184,22 @@ class EvalRunRecord(BaseModel):
     required_all_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
     required_any_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
     forbidden_assertion_absent_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    raw_assistant_event_count: int | None = Field(default=None, ge=0, le=1024)
+    raw_assistant_events_sha256: str | None = Field(default=None, pattern=SHA256_HEX)
+    final_assistant_text_sha256: str | None = Field(default=None, pattern=SHA256_HEX)
+    raw_assistant_message_present: bool | None = None
+    raw_assistant_required_all_assertion_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
+    raw_assistant_required_any_assertion_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
+    raw_assistant_forbidden_assertion_absent_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
 
     @model_validator(mode="after")
     def _validate_mcp_probe_evidence(self) -> EvalRunRecord:
@@ -216,6 +233,22 @@ class EvalRunRecord(BaseModel):
             )
         ):
             raise ValueError("assertion outcomes require assistant-message evidence")
+        raw_digests = (self.raw_assistant_events_sha256, self.final_assistant_text_sha256)
+        if (self.raw_assistant_event_count is None) != any(item is None for item in raw_digests):
+            raise ValueError("assistant diagnostic counts and hashes must be complete")
+        if self.raw_assistant_message_present is None and any(
+            (
+                self.raw_assistant_required_all_assertion_results,
+                self.raw_assistant_required_any_assertion_results,
+                self.raw_assistant_forbidden_assertion_absent_results,
+            )
+        ):
+            raise ValueError("raw assertion outcomes require assistant-event evidence")
+        if (
+            self.raw_assistant_event_count is None
+            and self.raw_assistant_message_present is not None
+        ):
+            raise ValueError("raw assistant evidence requires diagnostic hashes")
         return self
 
 

@@ -4,14 +4,16 @@ import hashlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Literal, Self, cast
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
@@ -20,6 +22,66 @@ from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environmen
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
+_SHA256_PATTERN = r"^[a-f0-9]{64}$"
+_OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+
+
+class ProcessCleanupTargetReceipt(_StrictModel):
+    pid: int = Field(gt=0)
+    pgid: int = Field(gt=0)
+    birth_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    terminal_birth_identity_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    terminal_state: Literal["running", "zombie", "absent", "identity_reused", "unknown"]
+    termination_outcome: Literal[
+        "no_longer_running",
+        "non_executing_zombie",
+        "identity_changed",
+        "still_running",
+        "unknown",
+    ]
+
+
+class CommandCleanupIdentityReceipt(_StrictModel):
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["command_cleanup_identity"] = "command_cleanup_identity"
+    command_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    root_pid: int = Field(gt=0)
+    root_pgid: int = Field(gt=0)
+    target_count: int = Field(ge=1)
+    targets: tuple[ProcessCleanupTargetReceipt, ...] = Field(min_length=1)
+    receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> Self:
+        if self.target_count != len(self.targets):
+            raise ValueError("cleanup identity target count differs")
+        if len({target.pid for target in self.targets}) != len(self.targets):
+            raise ValueError("cleanup identity target pids must be unique")
+        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
+        if self.receipt_sha256 != _digest(material):
+            raise ValueError("cleanup identity receipt digest mismatch")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessObservation:
+    pid: int
+    pgid: int
+    birth_identity: str
+    state: Literal["running", "zombie", "unknown"]
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessCleanupIdentity:
+    pid: int
+    pgid: int
+    birth_identity: str
+    initial_state: Literal["running", "zombie", "unknown"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +89,7 @@ class CommandResult:
     receipt: CommandReceipt
     stdout: str
     stderr: str
+    cleanup_identity_receipt_sha256: str | None = None
 
     def json_stdout(self) -> dict[str, JsonValue]:
         try:
@@ -48,15 +111,17 @@ class CommandFailureError(Exception):
     stderr: str = field(default="", repr=False)
     remaining_process_count: int | None = None
     remaining_process_group_count: int | None = None
+    cleanup_identity_receipt_sha256: str | None = None
 
 
-def run_command(  # noqa: C901, PLR0915
+def run_command(  # noqa: C901, PLR0913, PLR0915
     name: str,
     argv: tuple[str, ...],
     *,
     cwd: Path,
     env: dict[str, str] | None = None,
     timeout_seconds: int = 180,
+    cleanup_identity_receipt_path: Path | None = None,
 ) -> CommandResult:
     """Run a command; always clean the process group on success, fail, interrupt, timeout."""
     if env is None:
@@ -69,6 +134,7 @@ def run_command(  # noqa: C901, PLR0915
     root_pid: int | None = None
     tracked_pids: list[int] = []
     tracked_pgids: list[int] = []
+    tracked_identities: dict[int, ProcessCleanupIdentity] = {}
     stop_watch = threading.Event()
     watch_lock = threading.Lock()
     timed_out = False
@@ -76,12 +142,62 @@ def run_command(  # noqa: C901, PLR0915
     stderr = ""
     exit_code = 124
 
+    def _capture_identities(pids: tuple[int, ...]) -> None:
+        if cleanup_identity_receipt_path is None:
+            return
+        with watch_lock:
+            prior = dict(tracked_identities)
+        observations = tuple(
+            observation
+            for pid in pids
+            if (observation := read_process_observation(pid)) is not None
+            and observation.state != "unknown"
+        )
+        with watch_lock:
+            for observation in observations:
+                identity = prior.get(observation.pid)
+                if identity is None:
+                    tracked_identities[observation.pid] = ProcessCleanupIdentity(
+                        pid=observation.pid,
+                        pgid=observation.pgid,
+                        birth_identity=observation.birth_identity,
+                        initial_state=observation.state,
+                    )
+                elif (
+                    identity.birth_identity == observation.birth_identity
+                    and identity.pgid != observation.pgid
+                ):
+                    tracked_identities[observation.pid] = ProcessCleanupIdentity(
+                        pid=identity.pid,
+                        pgid=observation.pgid,
+                        birth_identity=identity.birth_identity,
+                        initial_state=identity.initial_state,
+                    )
+
+    def _write_cleanup_receipt() -> str | None:
+        if cleanup_identity_receipt_path is None or root_pid is None or pgid is None:
+            return None
+        with watch_lock:
+            identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
+        if not identities:
+            return None
+        return write_command_cleanup_identity_receipt(
+            cleanup_identity_receipt_path,
+            name=name,
+            argv=argv,
+            cwd=cwd,
+            root_pid=root_pid,
+            root_pgid=pgid,
+            identities=identities,
+        )
+
     def _watch() -> None:
         while not stop_watch.is_set():
             if root_pid is None:
                 time.sleep(0.001)
                 continue
             pids, pgids = _snapshot_tree(root_pid, pgid)
+            _capture_identities(pids)
             with watch_lock:
                 tracked_pids[:] = sorted(set(tracked_pids) | set(pids))
                 tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids))
@@ -102,6 +218,7 @@ def run_command(  # noqa: C901, PLR0915
         pgid = os.getpgid(process.pid)
         # Immediate snapshot so fast-exit parents still leave tracked members.
         first_pids, first_pgids = _snapshot_tree(root_pid, pgid)
+        _capture_identities(first_pids)
         with watch_lock:
             tracked_pids[:] = list(first_pids)
             tracked_pgids[:] = list(first_pgids)
@@ -111,6 +228,7 @@ def run_command(  # noqa: C901, PLR0915
         while process.poll() is None:
             # Continuous capture while parent is alive (escaped groups / new sessions).
             pids_now, pgids_now = _snapshot_tree(root_pid, pgid)
+            _capture_identities(pids_now)
             with watch_lock:
                 tracked_pids[:] = sorted(set(tracked_pids) | set(pids_now))
                 tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids_now))
@@ -128,6 +246,7 @@ def run_command(  # noqa: C901, PLR0915
         tracked_pgid = pgid
         pgids = tuple(sorted(set(pgids) | {tracked_pgid}))
         pids = tuple(sorted(set(pids) | set(process_group_members(tracked_pgid))))
+        _capture_identities(pids)
         # Kill descendants before draining pipes so background children cannot hold pipes open.
         _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
         try:
@@ -155,6 +274,7 @@ def run_command(  # noqa: C901, PLR0915
                 stderr,
                 len(remaining_live_pids(pids)),
                 len(remaining_live_pgids(pgids)),
+                _write_cleanup_receipt(),
             )
         exit_code = int(process.returncode if process.returncode is not None else 124)
     except OSError as exc:
@@ -180,6 +300,7 @@ def run_command(  # noqa: C901, PLR0915
             type(exc).__name__,
             len(remaining_live_pids(pids)),
             len(remaining_live_pgids(pgids)),
+            _write_cleanup_receipt(),
         ) from exc
     finally:
         stop_watch.set()
@@ -202,7 +323,13 @@ def run_command(  # noqa: C901, PLR0915
         timed_out=False,
         cleanup_attempted=True,
     )
-    result = CommandResult(receipt=receipt, stdout=stdout, stderr=stderr)
+    cleanup_identity_receipt_sha256 = _write_cleanup_receipt()
+    result = CommandResult(
+        receipt=receipt,
+        stdout=stdout,
+        stderr=stderr,
+        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+    )
     if exit_code != 0:
         with watch_lock:
             final_pids = tuple(tracked_pids)
@@ -213,8 +340,208 @@ def run_command(  # noqa: C901, PLR0915
             result.stderr,
             len(remaining_live_pids(final_pids)),
             len(remaining_live_pgids(final_pgids)),
+            cleanup_identity_receipt_sha256,
         )
     return result
+
+
+def read_process_observation(pid: int) -> ProcessObservation | None:
+    """Read one local PID's group, state, and birth identity without process content."""
+    try:
+        completed = subprocess.run(
+            ("ps", "-o", "pgid=,state=,lstart=", "-p", str(pid)),  # noqa: S607
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ProcessObservation(pid=pid, pgid=pid, birth_identity="", state="unknown")
+    line = next((item.strip() for item in completed.stdout.splitlines() if item.strip()), "")
+    if completed.returncode != 0 and not line:
+        return None
+    parts = line.split(maxsplit=2)
+    if completed.returncode != 0 or len(parts) != 3:  # noqa: PLR2004
+        return ProcessObservation(pid=pid, pgid=pid, birth_identity="", state="unknown")
+    try:
+        pgid = int(parts[0])
+    except ValueError:
+        return ProcessObservation(pid=pid, pgid=pid, birth_identity="", state="unknown")
+    state_code = parts[1][:1].upper()
+    state: Literal["running", "zombie", "unknown"] = (
+        "zombie" if state_code == "Z" else "running" if state_code else "unknown"
+    )
+    return ProcessObservation(
+        pid=pid,
+        pgid=pgid,
+        birth_identity=parts[2],
+        state=state,
+    )
+
+
+def capture_process_cleanup_identity(pid: int) -> ProcessCleanupIdentity | None:
+    observation = read_process_observation(pid)
+    if observation is None or observation.state == "unknown":
+        return None
+    return ProcessCleanupIdentity(
+        pid=observation.pid,
+        pgid=observation.pgid,
+        birth_identity=observation.birth_identity,
+        initial_state=observation.state,
+    )
+
+
+def observe_process_cleanup_target(
+    identity: ProcessCleanupIdentity,
+) -> ProcessCleanupTargetReceipt:
+    observation = read_process_observation(identity.pid)
+    initial_sha256 = hashlib.sha256(identity.birth_identity.encode()).hexdigest()
+    if observation is None:
+        terminal_sha256 = None
+        terminal_state = "absent"
+        outcome = "no_longer_running"
+    elif observation.state == "unknown":
+        terminal_sha256 = None
+        terminal_state = "unknown"
+        outcome = "unknown"
+    else:
+        terminal_sha256 = hashlib.sha256(observation.birth_identity.encode()).hexdigest()
+        if observation.birth_identity != identity.birth_identity:
+            terminal_state = "identity_reused"
+            outcome = "identity_changed"
+        elif observation.state == "zombie":
+            terminal_state = "zombie"
+            outcome = "non_executing_zombie"
+        elif observation.state == "running":
+            terminal_state = "running"
+            outcome = "still_running"
+        else:
+            terminal_state = "unknown"
+            outcome = "unknown"
+    return ProcessCleanupTargetReceipt(
+        pid=identity.pid,
+        pgid=identity.pgid,
+        birth_identity_sha256=initial_sha256,
+        terminal_birth_identity_sha256=terminal_sha256,
+        terminal_state=terminal_state,
+        termination_outcome=outcome,
+    )
+
+
+def write_command_cleanup_identity_receipt(  # noqa: PLR0913
+    path: Path,
+    *,
+    name: str,
+    argv: tuple[str, ...],
+    cwd: Path,
+    root_pid: int,
+    root_pgid: int,
+    identities: tuple[ProcessCleanupIdentity, ...],
+) -> str | None:
+    targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
+    if not targets:
+        return None
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "command_cleanup_identity",
+        "command_identity_sha256": _digest(
+            {"name": name, "argv": argv, "cwd": str(cwd.resolve())},
+        ),
+        "root_pid": root_pid,
+        "root_pgid": root_pgid,
+        "target_count": len(targets),
+        "targets": tuple(target.model_dump(mode="python") for target in targets),
+    }
+    receipt = CommandCleanupIdentityReceipt.model_validate(
+        {**material, "receipt_sha256": _digest(material)},
+        strict=True,
+    )
+    if not _atomic_owner_only_write(path, receipt.model_dump_json() + "\n"):
+        return None
+    return receipt.receipt_sha256
+
+
+def verify_command_cleanup_identity_receipt(
+    path: Path,
+    *,
+    expected_receipt_sha256: str,
+) -> CommandCleanupIdentityReceipt | None:
+    try:
+        metadata = os.lstat(path)
+        receipt = CommandCleanupIdentityReceipt.model_validate_json(
+            path.read_bytes(),
+            strict=True,
+        )
+    except (OSError, ValidationError):
+        return None
+    if not (
+        path.is_absolute()
+        and stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+        and receipt.receipt_sha256 == expected_receipt_sha256
+    ):
+        return None
+    return receipt
+
+
+def _atomic_owner_only_write(path: Path, text: str) -> bool:
+    if not path.is_absolute():
+        return False
+    parent = path.parent
+    temporary: Path | None = None
+    try:
+        parent_metadata = os.lstat(parent)
+        if not (
+            stat.S_ISDIR(parent_metadata.st_mode)
+            and not stat.S_ISLNK(parent_metadata.st_mode)
+            and parent_metadata.st_uid == os.getuid()
+            and stat.S_IMODE(parent_metadata.st_mode) == _OWNER_DIRECTORY_MODE
+        ):
+            return False
+        if path.exists() or path.is_symlink():
+            existing = os.lstat(path)
+            if not (
+                stat.S_ISREG(existing.st_mode)
+                and not stat.S_ISLNK(existing.st_mode)
+                and existing.st_uid == os.getuid()
+                and existing.st_nlink == 1
+                and stat.S_IMODE(existing.st_mode) == _OWNER_FILE_MODE
+            ):
+                return False
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            _OWNER_FILE_MODE,
+        )
+        try:
+            os.fchmod(descriptor, _OWNER_FILE_MODE)
+            os.write(descriptor, text.encode())
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        temporary.replace(path)
+        path.chmod(_OWNER_FILE_MODE)
+    except OSError:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        return False
+    else:
+        return True
+
+
+def _digest(value: object) -> str:
+    rendered = json.dumps(
+        value,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(rendered).hexdigest()
 
 
 def process_still_running(pid: int) -> bool:

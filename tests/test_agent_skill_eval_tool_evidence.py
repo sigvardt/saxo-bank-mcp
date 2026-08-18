@@ -14,6 +14,7 @@ from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
+RAW_ASSISTANT_EVENT_COUNT: Final = 2
 
 
 def _case(case_id: str = "qa-evidence-readiness") -> SkillEvalCase:
@@ -183,6 +184,108 @@ def test_structured_exact_calls_pass_without_real_clients(
     assert record.required_all_assertion_results == (True, True, True, True)
     assert record.required_any_assertion_results == (True, True)
     assert record.forbidden_assertion_absent_results == (True, True)
+
+
+def test_codex_assertion_diagnostics_distinguish_raw_event_from_final_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A phrase in a decoded non-final event must be observable without changing grading."""
+    case = next(
+        item for item in load_eval_cases(ROOT / "evals/saxo-analytics") if item.id == "scenario"
+    )
+    grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
+    stream_lines = _codex_success_stream(
+        case.required_logical_tools,
+        "analysis_id model distribution refused",
+    ).splitlines()
+    stream_lines.insert(
+        -1,
+        json.dumps(
+            {
+                "type": "item.started",
+                "item": {
+                    "id": "draft-answer",
+                    "type": "agent_message",
+                    "text": "explicit numeric shocks",
+                },
+            },
+        ),
+    )
+
+    def fake_run(
+        self: EvalProcessManager,
+        command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: float,
+    ) -> ManagedProcessResult:
+        _ = (self, command, cwd, env, timeout_seconds)
+        return _managed("\n".join(stream_lines))
+
+    monkeypatch.setattr(EvalProcessManager, "run", fake_run)
+
+    record = execute_model_case(
+        case,
+        "codex",
+        grants,
+        roots=_roots(tmp_path),
+        env=_env(tmp_path),
+        process_manager=EvalProcessManager(),
+    )
+
+    assert record.status == "failed"
+    assert record.error == "transcript_assertion_failed"
+    assert record.required_all_assertion_results == (True, False, True)
+    assert record.raw_assistant_required_all_assertion_results == (True, True, True)
+    assert record.raw_assistant_event_count == RAW_ASSISTANT_EVENT_COUNT
+    assert record.raw_assistant_events_sha256 is not None
+    assert record.final_assistant_text_sha256 is not None
+    assert record.raw_assistant_events_sha256 != record.final_assistant_text_sha256
+    rendered = record.model_dump_json()
+    assert "explicit numeric shocks" not in rendered
+    assert "analysis_id model distribution refused" not in rendered
+
+
+def test_codex_assertion_diagnostics_prove_phrase_absent_from_both_surfaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = next(
+        item for item in load_eval_cases(ROOT / "evals/saxo-analytics") if item.id == "scenario"
+    )
+    grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
+    stream = _codex_success_stream(
+        case.required_logical_tools,
+        "analysis_id model distribution refused",
+    )
+
+    def fake_run(
+        self: EvalProcessManager,
+        command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: float,
+    ) -> ManagedProcessResult:
+        _ = (self, command, cwd, env, timeout_seconds)
+        return _managed(stream)
+
+    monkeypatch.setattr(EvalProcessManager, "run", fake_run)
+
+    record = execute_model_case(
+        case,
+        "codex",
+        grants,
+        roots=_roots(tmp_path),
+        env=_env(tmp_path),
+        process_manager=EvalProcessManager(),
+    )
+
+    assert record.required_all_assertion_results == (True, False, True)
+    assert record.raw_assistant_required_all_assertion_results == (True, False, True)
+    assert record.raw_assistant_event_count == 1
 
 
 def test_out_of_grant_tool_fails(

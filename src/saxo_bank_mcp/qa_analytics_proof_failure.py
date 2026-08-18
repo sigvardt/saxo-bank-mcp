@@ -179,6 +179,28 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
     required_all_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
     required_any_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
     forbidden_assertion_absent_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    raw_assistant_event_count: int | None = Field(default=None, ge=0, le=1024)
+    raw_assistant_events_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    final_assistant_text_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    raw_assistant_message_present: bool | None = None
+    raw_assistant_required_all_assertion_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
+    raw_assistant_required_any_assertion_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
+    raw_assistant_forbidden_assertion_absent_results: tuple[bool, ...] = Field(
+        default=(),
+        max_length=64,
+    )
 
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
@@ -214,6 +236,15 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             required_any=self.required_any_assertion_results,
             forbidden_absent=self.forbidden_assertion_absent_results,
         )
+        _validate_assistant_diagnostic_evidence(
+            event_count=self.raw_assistant_event_count,
+            event_sha256=self.raw_assistant_events_sha256,
+            final_sha256=self.final_assistant_text_sha256,
+            assistant_message_present=self.raw_assistant_message_present,
+            required_all=self.raw_assistant_required_all_assertion_results,
+            required_any=self.raw_assistant_required_any_assertion_results,
+            forbidden_absent=self.raw_assistant_forbidden_assertion_absent_results,
+        )
         return self
 
 
@@ -235,6 +266,29 @@ def _validate_assertion_result_evidence(
 ) -> None:
     if assistant_message_present is None and any((required_all, required_any, forbidden_absent)):
         raise ValueError("assertion outcomes require assistant-message evidence")
+
+
+def _validate_assistant_diagnostic_evidence(  # noqa: PLR0913
+    *,
+    event_count: int | None,
+    event_sha256: str | None,
+    final_sha256: str | None,
+    assistant_message_present: bool | None,
+    required_all: tuple[bool, ...],
+    required_any: tuple[bool, ...],
+    forbidden_absent: tuple[bool, ...],
+) -> None:
+    complete = event_count is not None and event_sha256 is not None and final_sha256 is not None
+    if complete != any(value is not None for value in (event_count, event_sha256, final_sha256)):
+        raise ValueError("assistant diagnostic counts and hashes must be complete")
+    if not complete and assistant_message_present is not None:
+        raise ValueError("raw assistant evidence requires diagnostic hashes")
+    _validate_assertion_result_evidence(
+        assistant_message_present=assistant_message_present,
+        required_all=required_all,
+        required_any=required_any,
+        forbidden_absent=forbidden_absent,
+    )
 
 
 def _validate_mcp_probe_command_evidence(
@@ -260,6 +314,40 @@ def _validate_mcp_probe_command_evidence(
         raise ValueError("completed mcp probe command must have exit zero")
 
 
+class CodexNativeAgentEvaluationCleanupSummary(_StrictModel):
+    """Content-free authenticated cleanup facts from one eval report."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_agent_evaluation_cleanup"] = (
+        "codex_native_agent_evaluation_cleanup"
+    )
+    status: Literal["complete", "failed", "unknown"]
+    process_cleanup: Literal["passed", "residue", "not_required", "unknown"]
+    runtime_cleanup: Literal["passed", "residue", "not_required", "unknown"]
+    token_promote: Literal["passed", "failed", "not_required", "unknown"]
+    created_process_count: int | None = Field(default=None, ge=0)
+    terminated_process_count: int | None = Field(default=None, ge=0)
+    remaining_process_count: int | None = Field(default=None, ge=0)
+    process_timed_out: bool | None = None
+    persisted_raw_output_count: int | None = Field(default=None, ge=0)
+    cleanup_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_cleanup(self) -> Self:
+        if self.status == "complete" and (
+            self.process_cleanup not in {"passed", "not_required"}
+            or self.runtime_cleanup not in {"passed", "not_required"}
+            or self.token_promote not in {"passed", "not_required"}
+            or self.remaining_process_count != 0
+            or self.persisted_raw_output_count != 0
+        ):
+            raise ValueError("complete evaluation cleanup requires zero residue")
+        material = self.model_dump(mode="json", exclude={"cleanup_sha256"})
+        if self.cleanup_sha256 != _digest(material):
+            raise ValueError("agent evaluation cleanup digest mismatch")
+        return self
+
+
 class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
     """Authenticated redacted summary retained before failed eval cleanup."""
 
@@ -275,6 +363,7 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
         min_length=1,
         max_length=64,
     )
+    cleanup: CodexNativeAgentEvaluationCleanupSummary | None = None
     summary_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -295,10 +384,20 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
                 "required_all_assertion_results",
                 "required_any_assertion_results",
                 "forbidden_assertion_absent_results",
+                "raw_assistant_event_count",
+                "raw_assistant_events_sha256",
+                "final_assistant_text_sha256",
+                "raw_assistant_message_present",
+                "raw_assistant_required_all_assertion_results",
+                "raw_assistant_required_any_assertion_results",
+                "raw_assistant_forbidden_assertion_absent_results",
             }
-            if any(legacy_fields & case.model_fields_set for case in self.cases):
+            if self.cleanup is not None or any(
+                legacy_fields & case.model_fields_set for case in self.cases
+            ):
                 raise ValueError("agent evaluation summary digest mismatch")
             legacy_material = dict(material)
+            legacy_material.pop("cleanup", None)
             legacy_cases: list[dict[str, JsonValue]] = []
             for case in self.cases:
                 case_material = case.model_dump(mode="json")
@@ -540,6 +639,10 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     outer_runtime_cleanup_status: OuterRuntimeCleanupStatus
     outer_remaining_process_count: int | None = Field(ge=0)
     outer_remaining_process_group_count: int | None = Field(ge=0)
+    outer_process_cleanup_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
     child_envelope_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     reason: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     redacted_publication: Literal[True] = True
@@ -900,6 +1003,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
     remaining_process_group_count: int | None,
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     bootstrap_verification: CodexNativeBootstrapVerification,
+    cleanup_identity_receipt_sha256: str | None = None,
 ) -> CodexNativeVerifiedChildFailure:
     """Authenticate a failed child's one-line envelope or publish unknown facts."""
     expected = {
@@ -983,6 +1087,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
             bootstrap_verification=bootstrap_verification,
         )
     if status != "authenticated":
@@ -998,6 +1103,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
             runtime_cleanup_status=runtime_cleanup_status,
             remaining_process_count=remaining_process_count,
             remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
             child_envelope_sha256=envelope.envelope_sha256 if envelope is not None else None,
             bootstrap_verification=bootstrap_verification,
         )
@@ -1032,6 +1138,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=envelope.envelope_sha256,
         reason=envelope.reason,
         bootstrap_verification=bootstrap_verification,
@@ -1063,6 +1170,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_receipt_sha256: str | None,
     child_envelope_sha256: str | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
@@ -1104,6 +1212,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=child_envelope_sha256,
         reason=reason_by_status[status],
         bootstrap_verification=bootstrap_verification,
@@ -1125,6 +1234,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_receipt_sha256: str | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
     """Keep phase and positive facts while making unfinished outcomes unknown."""
@@ -1161,6 +1271,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
         runtime_cleanup_status=runtime_cleanup_status,
         remaining_process_count=remaining_process_count,
         remaining_process_group_count=remaining_process_group_count,
+        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         child_envelope_sha256=envelope.envelope_sha256,
         reason="proof_child_cleanup_failed",
         bootstrap_verification=bootstrap_verification,
@@ -1200,6 +1311,7 @@ def _verified_material(  # noqa: PLR0913
     runtime_cleanup_status: OuterRuntimeCleanupStatus,
     remaining_process_count: int | None,
     remaining_process_group_count: int | None,
+    cleanup_identity_receipt_sha256: str | None,
     child_envelope_sha256: str | None,
     reason: str,
     bootstrap_verification: CodexNativeBootstrapVerification,
@@ -1248,6 +1360,7 @@ def _verified_material(  # noqa: PLR0913
         "outer_runtime_cleanup_status": runtime_cleanup_status,
         "outer_remaining_process_count": remaining_process_count,
         "outer_remaining_process_group_count": remaining_process_group_count,
+        "outer_process_cleanup_receipt_sha256": cleanup_identity_receipt_sha256,
         "child_envelope_sha256": child_envelope_sha256,
         "reason": reason,
         "redacted_publication": True,
