@@ -206,6 +206,9 @@ runner, nested native evaluation, and exact installer capture process identities
 discovery hints at spawn, rediscover current owned-group members before signaling, recheck target
 birth identity inside every individual signal, and terminally rescan for late members. A present
 reused group leader blocks member signals; historical numeric process groups are never signaled.
+If the original captured leader is absent, current membership cannot add a cleanup target. Only an
+already captured member with the same birth identity and group remains eligible for an individual
+signal; every uncaptured or changed-identity member makes coverage unknown.
 Receipts publish semantic target outcomes, coverage, and optional remaining counts. Child-failure
 verification accepts cleanup success only from consistent `authenticated` or
 `no-target-observed` evidence with complete coverage and known zero process and group counts.

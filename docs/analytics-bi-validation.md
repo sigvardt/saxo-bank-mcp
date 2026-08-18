@@ -222,4 +222,28 @@ cases with its authenticated unknown broker/account facts. No numerical proof, f
 matrix, Saxo reconciliation, account equality, controlled lifecycle, or activation ran. All 54
 profiles remain quarantined and 0/54 are active. The branch remains local and unpushed.
 
+## Absent-leader discovery correction after `003f8e8`
+
+Local source `4d80141cedaecbc6ee84a41d3264fa73d1c2e811`, tree
+`f8371777eaeedbd5d130827eca81b0d063420a58`, closes the final review finding without changing the
+sealed `c716047` result. When the original captured process-group leader is absent, numeric group
+membership no longer authorizes discovery of a new cleanup target. The cleanup code compares each
+current member with the captured PID and birth identity set. An uncaptured member or changed birth
+identity is never added or signaled and makes cleanup coverage unknown. A child that was already
+captured before the leader exited remains eligible for an individual signal only while its own
+birth identity and group still match.
+
+Final local verification passed 113 focused tests twice, 346 related cleanup/install/evaluation/
+proof tests, and 431 safe auth/privacy tests. Ruff check and changed-file format passed;
+BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, static, catalog,
+evaluation-manifest, bounded privacy, and `git diff --check` gates passed. No exact install, model,
+production MCP server, Saxo request, broker operation, browser, sealed proof, or broker/data network
+activity ran.
+
+This source is not installed or sealed and does not relabel earlier evidence. The latest sealed
+result remains `c716047` at 10/11 hard cases with unknown broker/account facts. No numerical proof,
+fresh 60-tool SIM matrix, Saxo reconciliation, account equality, controlled lifecycle, or
+activation ran. All 54 profiles remain quarantined and 0/54 are active. The branch remains local
+and unpushed.
+
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.

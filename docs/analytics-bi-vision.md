@@ -2340,25 +2340,22 @@ disclaimer-response facts remain unknown. Authenticated runtime-consumption and 
 cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
 process, or proof run root. No retry ran.
 
-Local corrective source `003f8e8`, tree `3c273b2`, keeps the sealed `c716047` evidence unchanged
-while incorporating the `94a8643` scenario contract and closing the remaining cleanup identity and
-failure-publication gaps. One shared cleanup primitive now serves the command runner, nested native
-evaluation, and exact install. It rechecks each captured process birth immediately inside every
-individual signal, rejects a present reused group leader, discovers current owned-group members
-before signaling, and terminally rescans for late descendants. Historical numeric process groups
-are never signaled. Late members, unknown observation, or incomplete coverage cannot become false
-zero counts. Strict child-failure verification requires consistent cleanup status, digest, known
-zero counts, and complete coverage before it accepts cleanup success.
+Local corrective source `4d80141`, tree `f837177`, keeps the sealed `c716047` evidence unchanged
+while incorporating the `94a8643` scenario contract and the shared cleanup work from `003f8e8`.
+The final review correction separates two cases after the original process-group leader exits. A
+previously captured child can still be cleaned while its own birth identity and group match. A new
+same-group process is never discovered or signaled. Any uncaptured member or changed birth identity
+makes coverage unknown. The shared command, nested-evaluation, and exact-install cleanup paths keep
+their immediate per-signal identity checks, present-leader reuse checks, final membership scan, and
+strict authenticated zero-count rules.
 
-The local corrective source passed 111 focused tests twice, 344 related tests, 431 safe
+The local corrective source passed 113 focused tests twice, 346 related tests, 431 safe
 auth/privacy tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/
-0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. One isolated
-fake-client install fixture entered by an overbroad local test selection was stopped, cleaned, and
-excluded from completed-suite counts. No real client/model process, exact candidate install,
-production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity ran. The
-source is not installed or sealed and does not relabel `c716047`.
+0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No exact
+install, model, production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity
+ran. The source is not installed or sealed and does not relabel `c716047`.
 
-The independent native review should verify `003f8e8` before any exact install or sealed attempt.
+The independent native review should verify `4d80141` before any exact install or sealed attempt.
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
