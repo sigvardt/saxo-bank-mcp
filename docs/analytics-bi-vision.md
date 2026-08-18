@@ -5,14 +5,16 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Candidate `5853302` passed its exact Codex-only installation, guarded 2,739-test full
-suite, static, type, catalog, evaluation-manifest, privacy, and SIM authorization gates. Its single
-sealed `codex_native_v1` proof then stopped during agent evaluation: all 11 hard cases invoked zero
-required logical tools and failed `required_tool_missing`. The authenticated receipt records model
-and MCP activity but leaves Saxo and broker safety outcomes unknown. Offline numerical proof, fresh
-SIM matrix, Saxo reconciliation, account equality, and activation did not run. No retry or
-activation occurred; all 54 proof profiles remain quarantined. Exact evidence boundaries are
-recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Sealed candidate `bd26296` passed its exact Codex-only installation, signed
+2,751-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM authorization
+gates. Its one sealed `codex_native_v1` proof then stopped during native registration preflight.
+All 11 cases reported `codex_native_registration_invalid`; zero model events ran, while downstream
+MCP, Saxo, and broker safety facts remain unknown. Local candidate `1277f48` corrects the confirmed
+disposable plugin-path defect and adds strict privacy-safe failure evidence, but it has not passed
+exact-candidate or sealed-proof gates. Offline numerical proof, the fresh SIM matrix, Saxo
+reconciliation, account equality, and activation did not run. No retry or activation occurred;
+all 54 proof profiles remain quarantined. Exact evidence boundaries are recorded in
+`docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
