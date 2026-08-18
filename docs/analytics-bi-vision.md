@@ -5,14 +5,14 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Evidence candidate `6d66a3e` starts a stdlib-only bootstrap directly before any
-installed-project launcher, without relabeling the historical dual-agent evidence. Its exact
-Codex-only installation, guarded 2,700-test suite, static, type, catalog, and privacy gates pass.
-The one sealed native proof child exited 1 with an authenticated bootstrap receipt but without the
-producer phase envelope. The receipt proves the fixed-Python entry and nonzero installed-runtime
-handoff; every unproved child execution, network, event, mutation, purchase, disclaimer, and cleanup
-fact remains unknown. No retry or activation ran. All 54 proof profiles remain quarantined. The
-exact result is recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Evidence candidate `f24fddf` retains one install-probed Python runtime through the
+sealed proof boundary and suppresses import-time bytecode writes. Its exact Codex-only installation,
+guarded 2,713-test suite, static, type, catalog, and privacy gates pass. The one sealed proof command
+exited 1 with an authenticated outer boundary refusal but no authenticated producer or bootstrap
+failure evidence. Every child phase, network, event, execution, mutation, purchase, disclaimer, and
+cleanup fact remains unknown. Separate local cleanup checks found no candidate process or native
+runtime residue. No retry or activation ran. All 54 proof profiles remain quarantined. The exact
+result is recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2323,26 +2323,25 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The current Codex-only candidate is `6d66a3e`. Its sealed parent invokes an absolute Python
-interpreter with isolated flags and the stdlib bootstrap before any `uv` or installed dependency.
-The bootstrap writes owner-only durable entry evidence, binds the exact producer bytes, suppresses
-raw output, and records unknown outcomes after the installed-runtime handoff. Its focused, related,
-full-suite, static, privacy, and exact 60-tool installation checks pass. The historical dual policy
-and evidence remain unchanged.
+The current Codex-only candidate is `f24fddf`. Its retained runtime is bound to the exact candidate,
+installed inventory, dependency lock, producer, interpreter, and installation receipt. The install
+probe and sealed child both use Python's explicit no-bytecode flag, so imports do not change the
+installed source inventory. Focused, related, full-suite, static, privacy, and exact 60-tool
+installation checks pass. The historical dual policy and evidence remain unchanged.
 
-The required external SIM status and session-capability preflight passed. The one sealed proof child
-then exited 1. The strict outer publication and bootstrap envelope authenticate, record
-`proof_bootstrap_producer_nonzero` in `producer_execution`, and prove outer cleanup with zero
-remaining processes. The producer phase envelope is missing, so child-local SIM preflight,
-network, event counts, execution, mutation, purchase, disclaimer response, and child cleanup remain
-unknown. Do not retry this candidate or make an after-only account read.
+The required external SIM status and session-capability preflight passed. The one sealed proof
+command then exited 1. The strict outer publication authenticates a `boundary_failure` with reason
+`proof_producer_native_boundary_failed`, but no producer or bootstrap failure evidence survived.
+Child-local SIM preflight, network, event counts, execution, mutation, purchase, disclaimer response,
+and cleanup remain unknown. Separate local checks after exit found zero candidate processes, zero
+native temp-runtime residues, and the retained proof runtime removed. Do not retry this candidate or
+make an after-only account read.
 
-The next local candidate must diagnose the installed producer's import/pre-tracker boundary without
-model or Saxo activity and retain the producer phase envelope before any newly authorized sealed
-run. Only after another complete local gate set may a sealed run prove the native hard workflow,
-all 54 per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account
-equality, and the activation decision. The historical matrix remains historical and is not
-relabeled.
+The next local change must explain and preserve the exact native boundary failure without model or
+Saxo proof activity. Only after another complete local gate set may a sealed run prove the native
+hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix,
+cleanup, account equality, and the activation decision. The historical matrix remains historical
+and is not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
