@@ -83,10 +83,10 @@ BasedPyright.
 
 ### Task 6: Validate the frozen candidate once
 
-- [ ] Run one exact-candidate Codex-only clean install and verify 60 tools, 9 skills, one MCP, and
+- [x] Run one exact-candidate Codex-only clean install and verify 60 tools, 9 skills, one MCP, and
       exact installed inventory.
-- [ ] Run one guarded full suite through the receipt runner and retain owner-only JUnit and receipt.
-- [ ] Run static, catalog, and privacy readbacks against the exact installed candidate.
+- [x] Run one guarded full suite through the receipt runner and retain owner-only JUnit and receipt.
+- [x] Run static, catalog, and privacy readbacks against the exact installed candidate.
 
 ### Task 6A: Correct the pre-bootstrap launcher boundary
 
@@ -100,9 +100,11 @@ BasedPyright.
 
 ### Task 7: Run one sealed native proof attempt
 
-- [ ] Re-prove SIM-only status and current session capabilities before broker-bound activity.
-- [ ] Run exactly one sealed `codex_native_v1` attempt.
-- [ ] On failure, retain authenticated startup and phase evidence and stop without retry.
+- [x] Re-prove SIM-only status and current session capabilities before broker-bound activity.
+- [x] Run exactly one sealed `codex_native_v1` attempt.
+- [x] On failure, retain authenticated startup evidence and stop without retry. The bootstrap
+      envelope authenticated; the producer phase envelope remained missing, so child facts are
+      unknown.
 - [ ] On success, finish 54 proof receipts, Saxo reconciliation, fresh 60-tool SIM matrix, controlled
       cleanup, account equality, and activation only if every gate passes.
 

@@ -5,13 +5,14 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Evidence candidate `04241a5` adds the privacy-safe native child-failure envelope
-without relabeling the historical dual-agent evidence. Its exact Codex-only installation, guarded
-2,667-test suite, static, type, catalog, and privacy gates pass. The one sealed native proof child
-exited 1 without an authenticated envelope. The outer receipt now reports the missing evidence and
-every unproved execution, network, event, mutation, purchase, disclaimer, and child-cleanup fact as
-unknown. No proof retry or activation ran. All 54 proof profiles remain quarantined. The exact
-result is recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Evidence candidate `6d66a3e` starts a stdlib-only bootstrap directly before any
+installed-project launcher, without relabeling the historical dual-agent evidence. Its exact
+Codex-only installation, guarded 2,700-test suite, static, type, catalog, and privacy gates pass.
+The one sealed native proof child exited 1 with an authenticated bootstrap receipt but without the
+producer phase envelope. The receipt proves the fixed-Python entry and nonzero installed-runtime
+handoff; every unproved child execution, network, event, mutation, purchase, disclaimer, and cleanup
+fact remains unknown. No retry or activation ran. All 54 proof profiles remain quarantined. The
+exact result is recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2322,21 +2323,26 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The current Codex-only candidate is `04241a5`. It preserves failed native child output only in
-memory, authenticates strict candidate-bound envelopes, and publishes unknown rather than false
-when an envelope is missing or untrusted. Its focused, related, full-suite, static, privacy, and
-exact 60-tool installation checks pass. The historical dual policy and evidence remain unchanged.
+The current Codex-only candidate is `6d66a3e`. Its sealed parent invokes an absolute Python
+interpreter with isolated flags and the stdlib bootstrap before any `uv` or installed dependency.
+The bootstrap writes owner-only durable entry evidence, binds the exact producer bytes, suppresses
+raw output, and records unknown outcomes after the installed-runtime handoff. Its focused, related,
+full-suite, static, privacy, and exact 60-tool installation checks pass. The historical dual policy
+and evidence remain unchanged.
 
-The one sealed proof child exited 1 without emitting an authenticated envelope. The redacted outer
-receipt retains the child exit and command digests, proves outer cleanup with zero remaining
-processes, and marks phase, SIM preflight, network, event counts, execution, mutation, purchase,
-disclaimer response, and child cleanup unknown. Do not retry this candidate.
+The required external SIM status and session-capability preflight passed. The one sealed proof child
+then exited 1. The strict outer publication and bootstrap envelope authenticate, record
+`proof_bootstrap_producer_nonzero` in `producer_execution`, and prove outer cleanup with zero
+remaining processes. The producer phase envelope is missing, so child-local SIM preflight,
+network, event counts, execution, mutation, purchase, disclaimer response, and child cleanup remain
+unknown. Do not retry this candidate or make an after-only account read.
 
-The next local candidate must diagnose the child startup boundary without model or Saxo activity
-and preserve a safe authenticated startup cause when possible. Only after another complete local
-gate set and new authorization may a sealed run prove the native hard workflow, all 54 per-analysis
-receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account equality, and the
-activation decision. The historical matrix remains historical and is not relabeled.
+The next local candidate must diagnose the installed producer's import/pre-tracker boundary without
+model or Saxo activity and retain the producer phase envelope before any newly authorized sealed
+run. Only after another complete local gate set may a sealed run prove the native hard workflow,
+all 54 per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix, cleanup, account
+equality, and the activation decision. The historical matrix remains historical and is not
+relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
