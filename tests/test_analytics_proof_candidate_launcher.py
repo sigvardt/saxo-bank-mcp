@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
+from pydantic import ValidationError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = REPO_ROOT / "scripts/run_analytics_proof_matrix.py"
 INTENT_NAME = "proof-runtime-consumption-intent.json"
+OWNER_FILE_MODE = 0o600
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -29,39 +33,76 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _detached_candidate(tmp_path: Path, name: str) -> tuple[Path, str, str, Path]:
+    return _detached_candidate_with_runner(tmp_path, name, runner_kind="stdlib")
+
+
+def _detached_candidate_with_runner(
+    tmp_path: Path,
+    name: str,
+    *,
+    runner_kind: Literal["stdlib", "third_party", "third_party_exit"],
+) -> tuple[Path, str, str, Path]:
     root = tmp_path / name
     script = root / "scripts/run_analytics_proof_matrix.py"
     producer = root / "src/saxo_bank_mcp/qa_analytics_proof_producer.py"
     marker = root / "candidate-runner-started.json"
     script.parent.mkdir(parents=True)
     producer.parent.mkdir(parents=True)
-    script.write_text(
-        "\n".join(
+    lines = [
+        "from __future__ import annotations",
+        "import json",
+        "import os",
+        "import sys",
+        "from pathlib import Path",
+    ]
+    if runner_kind != "stdlib":
+        lines.extend(
             (
-                "from __future__ import annotations",
-                "import json",
-                "import os",
-                "import sys",
-                "from pathlib import Path",
-                "root = Path(__file__).resolve().parents[1]",
-                "expected_runner = root / 'scripts/run_analytics_proof_matrix.py'",
-                "source_root = Path(os.environ['SAXO_ANALYTICS_CANDIDATE_SOURCE_ROOT'])",
-                "marker = root / 'candidate-runner-started.json'",
-                "payload = {",
-                f"    'candidate_name': {name!r},",
-                "    'cwd_is_candidate': Path.cwd().resolve() == root,",
-                "    'runner_is_candidate': Path(__file__).resolve() == expected_runner,",
-                "    'source_root_is_candidate': source_root.resolve() == root,",
-                "    'bound_flag_count': sys.argv.count('--candidate-root-bound'),",
-                "}",
-                "marker.write_text(json.dumps(payload, sort_keys=True), encoding='utf-8')",
-                "out = Path(sys.argv[sys.argv.index('--out') + 1])",
-                "out.write_text(json.dumps(payload, sort_keys=True), encoding='utf-8')",
+                "from pydantic import BaseModel",
+                "class CandidatePayload(BaseModel):",
+                "    candidate_name: str",
+                "    cwd_is_candidate: bool",
+                "    runner_is_candidate: bool",
+                "    source_root_is_candidate: bool",
+                "    bound_flag_count: int",
+                "    entry_receipt_seen: bool",
             ),
         )
-        + "\n",
-        encoding="utf-8",
+    lines.extend(
+        (
+            "root = Path(__file__).resolve().parents[1]",
+            "expected_runner = root / 'scripts/run_analytics_proof_matrix.py'",
+            "source_root = Path(os.environ['SAXO_ANALYTICS_CANDIDATE_SOURCE_ROOT'])",
+            "marker = root / 'candidate-runner-started.json'",
+            "out = Path(sys.argv[sys.argv.index('--out') + 1])",
+            "payload = {",
+            f"    'candidate_name': {name!r},",
+            "    'cwd_is_candidate': Path.cwd().resolve() == root,",
+            "    'runner_is_candidate': Path(__file__).resolve() == expected_runner,",
+            "    'source_root_is_candidate': source_root.resolve() == root,",
+            "    'bound_flag_count': sys.argv.count('--candidate-root-bound'),",
+            "}",
+        ),
     )
+    if runner_kind != "stdlib":
+        lines.extend(
+            (
+                "receipt = out.with_name(f'{out.name}.candidate-runner.json')",
+                "entry = json.loads(receipt.read_text(encoding='utf-8'))",
+                "payload['entry_receipt_seen'] = (",
+                "    entry['phase'] == 'entry' and entry['spawned'] is False",
+                ")",
+            ),
+        )
+        lines.append("payload = CandidatePayload(**payload).model_dump(mode='json')")
+    lines.append("marker.write_text(json.dumps(payload, sort_keys=True), encoding='utf-8')")
+    if runner_kind == "third_party_exit":
+        lines.append("raise SystemExit(7)")
+    else:
+        lines.extend(
+            ("out.write_text(json.dumps(payload, sort_keys=True), encoding='utf-8')",),
+        )
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
     producer.write_text("# candidate proof producer fixture\n", encoding="utf-8")
     _git(root, "init", "--quiet")
     _git(root, "config", "user.email", "candidate-launcher@invalid")
@@ -175,6 +216,160 @@ def test_docs_head_launcher_executes_exact_detached_candidate_runner(
         "source_root_is_candidate": True,
     }
     assert marker.is_file()
+    assert not (run_root / INTENT_NAME).exists()
+
+
+def test_candidate_launcher_preserves_venv_for_real_third_party_import(
+    tmp_path: Path,
+) -> None:
+    candidate, commit, tree, marker = _detached_candidate_with_runner(
+        tmp_path,
+        "dependency-candidate",
+        runner_kind="third_party",
+    )
+    run_root = tmp_path / "install-runtime"
+    run_root.mkdir(mode=0o700)
+    report = tmp_path / "install.json"
+    output = tmp_path / "proof.json"
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    _write_install_binding(
+        report,
+        candidate_commit=commit,
+        candidate_tree=tree,
+        run_root=run_root,
+    )
+
+    result = _launch(
+        candidate_root=candidate,
+        candidate_commit=commit,
+        install_report=report,
+        output=output,
+        codex_home=codex_home,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file()
+    assert json.loads(output.read_text(encoding="utf-8"))["candidate_name"] == (
+        "dependency-candidate"
+    )
+    assert json.loads(output.read_text(encoding="utf-8"))["entry_receipt_seen"] is True
+    receipt = output.with_name(f"{output.name}.candidate-runner.json")
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["spawned"] is True
+    assert payload["exit_code"] == 0
+    assert payload["result_present"] is True
+    assert payload["cleanup_status"] == "complete"
+    assert receipt.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert not (run_root / INTENT_NAME).exists()
+
+
+def test_candidate_launcher_publishes_truthful_exit_when_result_is_missing(
+    tmp_path: Path,
+) -> None:
+    candidate, commit, tree, marker = _detached_candidate_with_runner(
+        tmp_path,
+        "failed-candidate",
+        runner_kind="third_party_exit",
+    )
+    run_root = tmp_path / "install-runtime"
+    run_root.mkdir(mode=0o700)
+    report = tmp_path / "install.json"
+    output = tmp_path / "proof.json"
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    _write_install_binding(
+        report,
+        candidate_commit=commit,
+        candidate_tree=tree,
+        run_root=run_root,
+    )
+
+    result = _launch(
+        candidate_root=candidate,
+        candidate_commit=commit,
+        install_report=report,
+        output=output,
+        codex_home=codex_home,
+    )
+
+    publication = json.loads(output.read_text(encoding="utf-8"))
+    receipt_path = output.with_name(f"{output.name}.candidate-runner.json")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert result.returncode == 1
+    assert marker.is_file()
+    assert publication["result"]["reason"] == "proof_candidate_runner_result_missing"
+    assert publication["result"]["command_state"] == "completed"
+    assert publication["result"]["candidate_runner_cleanup_status"] == "complete"
+    assert publication["result"]["candidate_runner_receipt_sha256"] == receipt["receipt_sha256"]
+    assert receipt == {
+        "candidate_commit": commit,
+        "candidate_tree": tree,
+        "cleanup_status": "complete",
+        "command_schema_sha256": receipt["command_schema_sha256"],
+        "command_sha256": receipt["command_sha256"],
+        "exit_code": 7,
+        "harness_policy": "codex_native_v1",
+        "phase": "exit",
+        "receipt_kind": "codex_native_candidate_runner",
+        "receipt_sha256": receipt["receipt_sha256"],
+        "result_present": False,
+        "result_sha256": None,
+        "schema_version": "1",
+        "spawned": True,
+    }
+    assert re.fullmatch(r"[a-f0-9]{64}", receipt["command_sha256"])
+    assert re.fullmatch(r"[a-f0-9]{64}", receipt["command_schema_sha256"])
+    assert all("/" not in str(value) for value in receipt.values())
+    assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert not (run_root / INTENT_NAME).exists()
+
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    verified = publication_module.verify_codex_native_candidate_runner_receipt(
+        receipt_path.read_text(encoding="utf-8"),
+    )
+    assert verified.receipt_sha256 == receipt["receipt_sha256"]
+    for changed in (
+        {**receipt, "exit_code": 8},
+        {**receipt, "private_path": "/forbidden"},
+    ):
+        with pytest.raises(ValidationError):
+            publication_module.verify_codex_native_candidate_runner_receipt(
+                json.dumps(changed),
+            )
+
+
+def test_candidate_launcher_rejects_forwarded_relative_path_before_spawn(
+    tmp_path: Path,
+) -> None:
+    candidate, commit, tree, marker = _detached_candidate(tmp_path, "candidate")
+    run_root = tmp_path / "install-runtime"
+    run_root.mkdir(mode=0o700)
+    report = tmp_path / "install.json"
+    output = tmp_path / "proof.json"
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    _write_install_binding(
+        report,
+        candidate_commit=commit,
+        candidate_tree=tree,
+        run_root=run_root,
+    )
+    relative_output = Path(os.path.relpath(output, REPO_ROOT))
+
+    result = _launch(
+        candidate_root=candidate,
+        candidate_commit=commit,
+        install_report=report,
+        output=relative_output,
+        codex_home=codex_home,
+    )
+
+    publication = json.loads(output.read_text(encoding="utf-8"))
+    assert result.returncode == 1
+    assert publication["result"]["reason"] == "proof_candidate_runner_path_not_absolute"
+    assert publication["result"]["command_state"] == "not_started"
+    assert not marker.exists()
     assert not (run_root / INTENT_NAME).exists()
 
 

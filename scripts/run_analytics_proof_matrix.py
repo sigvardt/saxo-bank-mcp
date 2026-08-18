@@ -9,7 +9,6 @@ import json
 import os
 import re
 import stat
-import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,6 +19,7 @@ from saxo_bank_mcp.agent_skill_codex_install import (
     CodexInstallEvidenceReport,
     load_verified_codex_install_report,
 )
+from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.agent_skill_install_models import InstallEvidenceReport
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 from saxo_bank_mcp.evidence_publication import write_scanned_json
@@ -31,6 +31,8 @@ from saxo_bank_mcp.qa_analytics_evidence import (
 )
 from saxo_bank_mcp.qa_analytics_proof_producer import (
     CodexNativeBoundaryFailureError,
+    CodexNativeCleanupStatus,
+    CodexNativeCommandState,
     CodexNativeProofFailureError,
     ProofProducerError,
     run_verified_codex_native_producer,
@@ -38,10 +40,14 @@ from saxo_bank_mcp.qa_analytics_proof_producer import (
     validate_codex_native_candidate_source_root,
 )
 from saxo_bank_mcp.qa_analytics_proof_publication import (
+    CodexNativeCandidateRunnerReceipt,
     CodexNativePublishedResult,
     CodexNativePublishedResultKind,
     build_codex_native_boundary_failure,
+    build_codex_native_candidate_runner_receipt,
     build_codex_native_proof_publication,
+    candidate_runner_receipt_path,
+    write_codex_native_candidate_runner_receipt,
 )
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -49,6 +55,34 @@ _OWNER_FILE_MODE = 0o600
 _CANDIDATE_SOURCE_ENV = "SAXO_ANALYTICS_CANDIDATE_SOURCE_ROOT"
 _RUNNER_RELATIVE = Path("scripts/run_analytics_proof_matrix.py")
 _PRODUCER_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
+_CANDIDATE_RUNNER_TIMEOUT_SECONDS = 7200
+_CANDIDATE_RUNNER_SCRIPT_INDEX = 2
+_FORWARDED_PATH_OPTIONS = frozenset(
+    {
+        "--catalog",
+        "--candidate-source-root",
+        "--install-report",
+        "--codex-global-home",
+        "--claude-global-home",
+        "--fixture-cleanup-ledger",
+        "--out",
+    },
+)
+
+
+class _CandidateRunnerError(ProofProducerError):
+    """One privacy-safe failure at the detached-candidate runner boundary."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        command_state: CodexNativeCommandState,
+        receipt: CodexNativeCandidateRunnerReceipt | None = None,
+    ) -> None:
+        self.command_state = command_state
+        self.receipt = receipt
+        super().__init__(reason)
 
 
 def _digest(value: object) -> str:
@@ -165,7 +199,32 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                     candidate_source_root,
                     argv=list(sys.argv[1:] if argv is None else argv),
                     out=args.out,
+                    candidate_commit=launch_commit,
+                    candidate_tree=launch_tree,
                 )
+        except _CandidateRunnerError as error:
+            receipt = error.receipt
+            return _publish_native(
+                args.out,
+                candidate_commit=cast("str", args.candidate_commit),
+                analysis_kind_count=len(contracts),
+                evidence_receipt_count=len(catalog.evidence_receipt_ids),
+                contract_sha256=contract_sha256,
+                result_kind="boundary_failure",
+                result=build_codex_native_boundary_failure(
+                    candidate_commit=cast("str", args.candidate_commit),
+                    reason=str(error),
+                    boundary_phase="candidate_runner",
+                    command_state=error.command_state,
+                    candidate_runner_receipt_sha256=(
+                        receipt.receipt_sha256 if receipt is not None else None
+                    ),
+                    candidate_runner_cleanup_status=(
+                        receipt.cleanup_status if receipt is not None else "unknown"
+                    ),
+                ),
+                success=False,
+            )
         except ProofProducerError as error:
             reason = str(error)
             if re.fullmatch(r"proof_[a-z0-9_]{1,122}", reason) is None:
@@ -452,33 +511,165 @@ def _run_candidate_entrypoint(
     *,
     argv: list[str],
     out: Path,
+    candidate_commit: str,
+    candidate_tree: str,
 ) -> int:
+    _require_absolute_forwarded_paths(argv, out=out)
+    interpreter = Path(sys.executable).absolute()
     command = (
-        str(Path(sys.executable).resolve()),
+        str(interpreter),
         "-B",
         str(candidate_source_root / _RUNNER_RELATIVE),
         *argv,
         "--candidate-root-bound",
     )
+    command_sha256 = _digest(command)
+    command_schema_sha256 = _digest(_candidate_runner_command_schema(command))
+    receipt_path = candidate_runner_receipt_path(out)
+    entry_receipt = build_codex_native_candidate_runner_receipt(
+        candidate_commit=candidate_commit,
+        candidate_tree=candidate_tree,
+        phase="entry",
+        spawned=False,
+        exit_code=None,
+        command_sha256=command_sha256,
+        command_schema_sha256=command_schema_sha256,
+        result_sha256=None,
+        cleanup_status="not_started",
+    )
+    if not write_codex_native_candidate_runner_receipt(receipt_path, entry_receipt):
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_receipt_write_failed",
+            command_state="not_started",
+        )
     env = dict(os.environ)
     env.pop("PYTHONHOME", None)
     env["PYTHONPATH"] = str(candidate_source_root / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env[_CANDIDATE_SOURCE_ENV] = str(candidate_source_root)
+    command_state: CodexNativeCommandState = "completed"
+    cleanup_status: CodexNativeCleanupStatus = "complete"
+    spawned = True
     try:
-        completed = subprocess.run(
+        completed = run_command(
+            "analytics_candidate_runner",
             command,
             cwd=candidate_source_root,
             env=env,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            timeout_seconds=_CANDIDATE_RUNNER_TIMEOUT_SECONDS,
         )
-    except OSError as exc:
-        raise ProofProducerError("proof_candidate_runner_start_failed") from exc
-    if not out.is_file():
-        raise ProofProducerError("proof_candidate_runner_result_missing")
-    return completed.returncode
+        exit_code = completed.receipt.exit_code
+    except CommandFailureError as exc:
+        spawned = exc.receipt.pid is not None
+        exit_code = exc.receipt.exit_code if spawned else None
+        if not spawned:
+            command_state = "start_failed"
+            cleanup_status = "not_started"
+        elif exc.remaining_process_count == 0 and exc.remaining_process_group_count == 0:
+            cleanup_status = "complete"
+        elif (
+            exc.remaining_process_count is not None
+            and exc.remaining_process_group_count is not None
+        ):
+            cleanup_status = "failed"
+        else:
+            cleanup_status = "unknown"
+    result_sha256 = _regular_file_sha256(out)
+    exit_receipt = build_codex_native_candidate_runner_receipt(
+        candidate_commit=candidate_commit,
+        candidate_tree=candidate_tree,
+        phase="exit",
+        spawned=spawned,
+        exit_code=exit_code,
+        command_sha256=command_sha256,
+        command_schema_sha256=command_schema_sha256,
+        result_sha256=result_sha256,
+        cleanup_status=cleanup_status,
+    )
+    if not write_codex_native_candidate_runner_receipt(receipt_path, exit_receipt):
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_receipt_write_failed",
+            command_state=command_state,
+        )
+    if not spawned:
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_start_failed",
+            command_state=command_state,
+            receipt=exit_receipt,
+        )
+    if cleanup_status != "complete":
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_cleanup_failed",
+            command_state=command_state,
+            receipt=exit_receipt,
+        )
+    if result_sha256 is None:
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_missing",
+            command_state=command_state,
+            receipt=exit_receipt,
+        )
+    return cast("int", exit_code)
+
+
+def _require_absolute_forwarded_paths(argv: list[str], *, out: Path) -> None:
+    if not out.is_absolute():
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_path_not_absolute",
+            command_state="not_started",
+        )
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        option, separator, inline_value = argument.partition("=")
+        if option not in _FORWARDED_PATH_OPTIONS:
+            index += 1
+            continue
+        if separator:
+            value = inline_value
+        elif index + 1 < len(argv):
+            index += 1
+            value = argv[index]
+        else:
+            value = ""
+        if not value or not Path(value).is_absolute():
+            raise _CandidateRunnerError(
+                "proof_candidate_runner_path_not_absolute",
+                command_state="not_started",
+            )
+        index += 1
+
+
+def _candidate_runner_command_schema(command: tuple[str, ...]) -> tuple[str, ...]:
+    schema: list[str] = []
+    path_value_expected = False
+    for index, argument in enumerate(command):
+        option, separator, _inline_value = argument.partition("=")
+        if index == 0:
+            schema.append("<venv-interpreter>")
+        elif index == _CANDIDATE_RUNNER_SCRIPT_INDEX:
+            schema.append("<candidate-runner>")
+        elif path_value_expected:
+            schema.append("<absolute-path>")
+            path_value_expected = False
+        elif option in _FORWARDED_PATH_OPTIONS:
+            schema.append(f"{option}=<absolute-path>" if separator else option)
+            path_value_expected = not separator
+        elif argument.startswith("--"):
+            schema.append(option)
+        else:
+            schema.append("<value>")
+    return tuple(schema)
+
+
+def _regular_file_sha256(path: Path) -> str | None:
+    try:
+        metadata = os.lstat(path)
+        if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 if __name__ == "__main__":

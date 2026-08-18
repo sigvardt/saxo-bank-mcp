@@ -160,6 +160,7 @@ class ProofProducerError(RuntimeError):
 
 
 type CodexNativeBoundaryPhase = Literal[
+    "candidate_runner",
     "retained_runtime_validation",
     "runtime_preparation",
     "command_build",

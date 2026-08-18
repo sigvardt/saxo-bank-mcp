@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
+from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_proof_failure import CodexNativeVerifiedChildFailure
 from saxo_bank_mcp.qa_analytics_proof_producer import (
     CodexNativeBoundaryPhase,
@@ -18,6 +22,8 @@ from saxo_bank_mcp.qa_analytics_proof_producer import (
 
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _COMMIT_PATTERN = r"^[a-f0-9]{40}$"
+_OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
 
 
 class _StrictModel(BaseModel):
@@ -42,6 +48,11 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
     boundary_phase: CodexNativeBoundaryPhase = "producer_validation"
     command_state: CodexNativeCommandState = "not_started"
     cleanup_status: CodexNativeCleanupStatus = "unknown"
+    candidate_runner_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown"
     runtime_consumption_intent_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     runtime_cleanup_receipt_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     completed_phases: None = None
@@ -65,6 +76,11 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
 
     @model_validator(mode="after")
     def _validate_digest(self) -> Self:
+        if (
+            self.candidate_runner_receipt_sha256 is None
+            and self.candidate_runner_cleanup_status != "unknown"
+        ):
+            raise ValueError("native candidate runner cleanup lacks receipt")
         digests = (
             self.runtime_consumption_intent_sha256,
             self.runtime_cleanup_receipt_sha256,
@@ -83,8 +99,52 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
         if self.outer_runtime_cleanup_status != self.cleanup_status:
             raise ValueError("native boundary cleanup states do not match")
         material = self.model_dump(mode="json", exclude={"boundary_receipt_sha256"})
-        if self.boundary_receipt_sha256 != _digest(material):
+        accepted_digests = {_digest(material)}
+        legacy_material = dict(material)
+        legacy_material.pop("candidate_runner_receipt_sha256")
+        legacy_material.pop("candidate_runner_cleanup_status")
+        accepted_digests.add(_digest(legacy_material))
+        if self.boundary_receipt_sha256 not in accepted_digests:
             raise ValueError("native boundary receipt digest mismatch")
+        return self
+
+
+class CodexNativeCandidateRunnerReceipt(_StrictModel):
+    """Path-free private entry/exit evidence for the candidate runner."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_candidate_runner"] = "codex_native_candidate_runner"
+    harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
+    candidate_tree: str = Field(pattern=_COMMIT_PATTERN)
+    phase: Literal["entry", "exit"]
+    spawned: bool
+    exit_code: int | None
+    command_sha256: str = Field(pattern=_SHA256_PATTERN)
+    command_schema_sha256: str = Field(pattern=_SHA256_PATTERN)
+    result_present: bool
+    result_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    cleanup_status: CodexNativeCleanupStatus
+    receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> Self:
+        if self.phase == "entry" and self.spawned:
+            raise ValueError("candidate runner entry cannot prove spawn")
+        if not self.spawned and (
+            self.exit_code is not None
+            or self.result_present
+            or self.result_sha256 is not None
+            or self.cleanup_status != "not_started"
+        ):
+            raise ValueError("unspawned candidate runner has execution facts")
+        if self.spawned and (self.phase != "exit" or self.exit_code is None):
+            raise ValueError("spawned candidate runner lacks exit evidence")
+        if self.result_present != (self.result_sha256 is not None):
+            raise ValueError("candidate runner result digest mismatch")
+        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
+        if self.receipt_sha256 != _digest(material):
+            raise ValueError("candidate runner receipt digest mismatch")
         return self
 
 
@@ -142,6 +202,13 @@ class CodexNativeProofPublication(_StrictModel):
             legacy_result.pop("agent_evaluation_failure_summary")
             legacy_material["result"] = legacy_result
             accepted_digests.add(_digest(legacy_material))
+        if isinstance(self.result, CodexNativeBoundaryFailureReceipt):
+            legacy_material = dict(material)
+            legacy_result = dict(legacy_material["result"])
+            legacy_result.pop("candidate_runner_receipt_sha256")
+            legacy_result.pop("candidate_runner_cleanup_status")
+            legacy_material["result"] = legacy_result
+            accepted_digests.add(_digest(legacy_material))
         if self.publication_sha256 not in accepted_digests:
             raise ValueError("native publication digest mismatch")
         return self
@@ -154,6 +221,8 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
     boundary_phase: CodexNativeBoundaryPhase = "producer_validation",
     command_state: CodexNativeCommandState = "not_started",
     cleanup_status: CodexNativeCleanupStatus = "unknown",
+    candidate_runner_receipt_sha256: str | None = None,
+    candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown",
     runtime_consumption_intent_sha256: str | None = None,
     runtime_cleanup_receipt_sha256: str | None = None,
 ) -> CodexNativeBoundaryFailureReceipt:
@@ -168,6 +237,8 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
         "boundary_phase": boundary_phase,
         "command_state": command_state,
         "cleanup_status": cleanup_status,
+        "candidate_runner_receipt_sha256": candidate_runner_receipt_sha256,
+        "candidate_runner_cleanup_status": candidate_runner_cleanup_status,
         "runtime_consumption_intent_sha256": runtime_consumption_intent_sha256,
         "runtime_cleanup_receipt_sha256": runtime_cleanup_receipt_sha256,
         "completed_phases": None,
@@ -192,6 +263,100 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
         {**material, "boundary_receipt_sha256": _digest(material)},
         strict=True,
     )
+
+
+def build_codex_native_candidate_runner_receipt(  # noqa: PLR0913
+    *,
+    candidate_commit: str,
+    candidate_tree: str,
+    phase: Literal["entry", "exit"],
+    spawned: bool,
+    exit_code: int | None,
+    command_sha256: str,
+    command_schema_sha256: str,
+    result_sha256: str | None,
+    cleanup_status: CodexNativeCleanupStatus,
+) -> CodexNativeCandidateRunnerReceipt:
+    """Build one self-authenticating path-free runner receipt."""
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_candidate_runner",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
+        "phase": phase,
+        "spawned": spawned,
+        "exit_code": exit_code,
+        "command_sha256": command_sha256,
+        "command_schema_sha256": command_schema_sha256,
+        "result_present": result_sha256 is not None,
+        "result_sha256": result_sha256,
+        "cleanup_status": cleanup_status,
+    }
+    return CodexNativeCandidateRunnerReceipt.model_validate(
+        {**material, "receipt_sha256": _digest(material)},
+        strict=True,
+    )
+
+
+def candidate_runner_receipt_path(result_path: Path) -> Path:
+    """Return the private sibling receipt path for one proof publication."""
+    return result_path.with_name(f"{result_path.name}.candidate-runner.json")
+
+
+def write_codex_native_candidate_runner_receipt(
+    path: Path,
+    receipt: CodexNativeCandidateRunnerReceipt,
+) -> bool:
+    """Atomically publish an owner-only runner receipt and read it back."""
+    try:
+        parent = os.lstat(path.parent)
+        existing = os.lstat(path) if path.exists() else None
+    except OSError:
+        return False
+    if (
+        not path.is_absolute()
+        or not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != _OWNER_DIRECTORY_MODE
+        or (
+            existing is not None
+            and (
+                not stat.S_ISREG(existing.st_mode)
+                or stat.S_ISLNK(existing.st_mode)
+                or existing.st_uid != os.getuid()
+                or existing.st_nlink != 1
+                or stat.S_IMODE(existing.st_mode) != _OWNER_FILE_MODE
+            )
+        )
+    ):
+        return False
+    if not write_scanned_json(path, receipt.model_dump(mode="json")):
+        return False
+    try:
+        path.chmod(_OWNER_FILE_MODE)
+        metadata = os.lstat(path)
+        verified = verify_codex_native_candidate_runner_receipt(
+            path.read_text(encoding="utf-8"),
+        )
+    except (OSError, ValueError):
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+        and verified == receipt
+    )
+
+
+def verify_codex_native_candidate_runner_receipt(
+    raw: str,
+) -> CodexNativeCandidateRunnerReceipt:
+    """Strictly authenticate one path-free candidate-runner receipt."""
+    return CodexNativeCandidateRunnerReceipt.model_validate_json(raw, strict=True)
 
 
 def build_codex_native_proof_publication(  # noqa: PLR0913
