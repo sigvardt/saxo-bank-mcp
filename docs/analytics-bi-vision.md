@@ -5,16 +5,16 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Sealed candidate `bd26296` passed its exact Codex-only installation, signed
-2,751-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM authorization
-gates. Its one sealed `codex_native_v1` proof then stopped during native registration preflight.
-All 11 cases reported `codex_native_registration_invalid`; zero model events ran, while downstream
-MCP, Saxo, and broker safety facts remain unknown. Local candidate `1277f48` corrects the confirmed
-disposable plugin-path defect and adds strict privacy-safe failure evidence, but it has not passed
-exact-candidate or sealed-proof gates. Offline numerical proof, the fresh SIM matrix, Saxo
-reconciliation, account equality, and activation did not run. No retry or activation occurred;
-all 54 proof profiles remain quarantined. Exact evidence boundaries are recorded in
-`docs/analytics-bi-validation.md`.
+catalog to 60. Exact candidate `c716047` passed its retained-runtime Codex-only installation,
+signed 2,835-test full suite, static, type, catalog, evaluation-manifest, privacy, install-readback,
+and SIM authorization gates. Its one sealed `codex_native_v1` proof returned an authenticated
+`verified_child_failure`: ten of eleven cases passed, while `scenario` omitted the required phrase
+`explicit numeric shocks` in both observable raw decoded assistant events and observable final
+parsed text despite a passed grant and both required tool calls. The outer reason remained
+`proof_child_cleanup_failed`. Aggregate broker safety facts remain unknown. Offline numerical
+proof, the fresh SIM matrix, Saxo reconciliation, account equality, and activation did not run.
+No retry or activation occurred; all 54 proof profiles remain quarantined. Exact evidence
+boundaries are recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 

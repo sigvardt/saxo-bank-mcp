@@ -5,22 +5,24 @@ Date: 2026-08-18
 Harness policy: `codex_native_v1`
 Independent review: pending the root orchestrator's separate native review
 
-Candidate `06fb8e1731af158825d4c83a6f01cadb489dec83`, tree
-`db36b068962bdb266d5f7b49da4d0e9b2234b738`, passed its exact Codex-only retained-runtime
-installation, signed 2,810-test full suite, required local gates, and current SIM safety preflight.
+Candidate `c716047a332a78cccd0d1c94ed4348e7edbd1169`, tree
+`3170c9d4dc7d3ff63987999892209e7b19b98275`, passed its exact Codex-only retained-runtime
+installation, signed 2,835-test full suite, required local gates, and current SIM safety preflight.
 Its one sealed proof command then returned an authenticated `verified_child_failure`. Ten of eleven
 native hard cases passed. The `scenario` case failed `transcript_assertion_failed` despite a passed
-grant check and exact invocation of its two required logical tools. The outer failure reason is
-`proof_child_cleanup_failed`.
+grant check and exact invocation of its two required logical tools. Both raw decoded assistant
+events and final parsed text were observable and had the same required-all vector
+`[true, false, true]`: the exact required phrase `explicit numeric shocks` was absent. The outer
+failure reason is `proof_child_cleanup_failed`.
 
 No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, account-equality
 readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
 active.
 
-Local corrective source `c716047a332a78cccd0d1c94ed4348e7edbd1169`, tree
-`3170c9d4dc7d3ff63987999892209e7b19b98275`, builds on the diagnostic source without changing the
-assertion, prompt, successful evaluation behavior, or historical `dual_v1` path. It has not been
-installed and no proof has run for it, so the sealed evidence above remains bound to `06fb8e1`.
+This exact candidate builds on the diagnostic source without changing the assertion, prompt,
+successful evaluation behavior, or historical `dual_v1` path. The new raw-versus-final vectors
+remove the earlier parser ambiguity for this run: the required phrase was absent before and after
+final-text parsing.
 
 Malformed or partly malformed Codex output is now explicitly unobservable for all parse-derived
 tool, call, and count evidence. `no_mcp_call`, `no_saxo_call`, model/tool/MCP/Saxo event counts,
@@ -36,13 +38,12 @@ failures clean up once before terminal evidence is recorded; and cleanup status 
 remain strictly bound. No transcript, arguments, raw output, account data, handles, payloads, or
 private paths are retained.
 
-Final local validation passed five focused tests twice, 232 related evaluation/proof tests, and 243
-auth/privacy tests. Ruff and changed-file format passed; BasedPyright reported 0 errors, 0 warnings,
-and 0 notes; plugin, nine-skill static, 60-tool/294-operation catalog, and 34-case
-evaluation-manifest gates passed. A bounded eight-path privacy scan reported 0 findings and 0 scan
-errors. No model, production MCP server, Saxo, browser, broker, install, proof, or broker/data
-network activity ran in the source and test correction. The required Knowledge Base readback was
-the only external documentation update.
+The source correction had already passed five focused tests twice, 232 related evaluation/proof
+tests, and 243 auth/privacy tests. The exact candidate then passed the retained-runtime install,
+signed full suite, Ruff check, BasedPyright, plugin, static, catalog, evaluation-manifest, privacy,
+and install readback gates described below. The separate whole-repository Ruff format audit still
+reports 95 pre-existing files that would reformat; it is not claimed passed and no such file was
+changed.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
@@ -51,11 +52,11 @@ private local paths, raw broker payloads, transcripts, model arguments, or priva
 
 | Item | Value |
 | --- | --- |
-| Sealed source | `06fb8e1731af158825d4c83a6f01cadb489dec83` |
-| Sealed tree | `db36b068962bdb266d5f7b49da4d0e9b2234b738` |
+| Sealed source | `c716047a332a78cccd0d1c94ed4348e7edbd1169` |
+| Sealed tree | `3170c9d4dc7d3ff63987999892209e7b19b98275` |
 | Harness policy | `codex_native_v1` |
 | Installed surface | 60 tools, including 21 analytics tools; 9 skills; 1 MCP server |
-| Installed inventory | 616 exact compared files |
+| Installed inventory | 617 exact compared files |
 | Saxo operation catalog | 294 operations: 182 implemented and 112 refused |
 | Proof catalog | 54 analysis kinds and 54 proof profile IDs |
 | Activation state | 54 quarantined as `implementation_pending`; 0 active |
@@ -67,13 +68,13 @@ process, or evaluation.
 ## Exact candidate gates
 
 The retained-runtime installation passed with exact candidate and tree binding, 60 tools, 9 skills,
-1 MCP server, 616 exact compared files, no inventory mismatch, unchanged caller state during the
+1 MCP server, 617 exact compared files, no inventory mismatch, unchanged caller state during the
 install window, owner-only evidence, and complete install-process cleanup. Verify-only readback
 passed before the retained runtime was consumed.
 
 The signed exact-candidate full-suite receipt reports:
 
-- 2,810 tests passed;
+- 2,835 tests passed;
 - zero failures, errors, or skips;
 - the exact candidate and tree before and after;
 - a clean source worktree before and after;
@@ -88,6 +89,7 @@ candidate-owned system-temporary pytest directory appeared, and the system disk 
 | Local gate | Result |
 | --- | --- |
 | Ruff check | passed |
+| Whole-repository Ruff format audit | 95 pre-existing files would reformat; not claimed passed |
 | BasedPyright | 0 errors, 0 warnings, 0 notes |
 | Plugin validator | passed |
 | Nine-skill static gate | 9 skills, 0 findings, 0 errors |
@@ -110,7 +112,7 @@ facts.
 
 ## One sealed proof attempt
 
-Exactly one sealed `codex_native_v1` command ran for `06fb8e1` and exited 1. The authenticated outer
+Exactly one sealed `codex_native_v1` command ran for `c716047` and exited 1. The authenticated outer
 publication has the complete 54-analysis and 54-receipt contract counts and result kind
 `verified_child_failure`.
 
@@ -128,6 +130,9 @@ publication has the complete 54-analysis and 54-receipt contract counts and resu
 | Failing case | `scenario`: `transcript_assertion_failed` |
 | Failing-case grant | passed |
 | Failing-case required tools | exact two logical tools invoked |
+| Raw and final observability | observable |
+| Raw and final required-all vectors | `[true, false, true]` |
+| Missing required phrase | `explicit numeric shocks` |
 | Child cleanup status | not started |
 | Outer retained-runtime cleanup | complete |
 | Candidate-runner cleanup | complete |
@@ -139,10 +144,11 @@ or private path.
 
 The overall receipt deliberately leaves aggregate model, MCP, and Saxo event counts, broker-write
 state, LIVE mutation count, purchase state, and disclaimer-response state unknown. The per-case
-summary is not used to invent those aggregate or broker facts. The failure receipt recorded two
-remaining child processes and zero process groups at capture. After the command terminated, an
-independent local readback found no exact-candidate process, no proof run root, and no retained
-proof runtime.
+summary is not used to invent those aggregate or broker facts. The nested evaluation cleanup
+summary reports complete runtime and process cleanup with zero remaining evaluation processes and
+no retained raw output. The authenticated outer process-cleanup receipt covers 90 observed targets,
+all terminally absent. After the command terminated, an independent local readback found no
+exact-candidate process, no proof run root, and no retained proof runtime.
 
 No second proof, diagnostic model run, numerical proof, fresh SIM matrix, account read, or
 activation ran.
@@ -160,8 +166,8 @@ disclaimer response. No attempt-bound before/after account fingerprint exists, s
 reported as unproved rather than unchanged.
 
 All 54 profiles remain quarantined and 0 are active. The branch remains local and unpushed. The
-local diagnostic source is ready for independent review; it must pass a separately authorized
-exact install and sealed run before its new evidence can answer whether the remaining blocker is
-the scenario assertion surface, child cleanup state, or both.
+exact run proves the scenario assertion surface independently of final-text parsing, while the
+separate `proof_child_cleanup_failed` boundary also remains unresolved. Root owns the independent
+native review.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
