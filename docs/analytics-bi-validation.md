@@ -188,4 +188,38 @@ exact run proves the scenario assertion surface independently of final-text pars
 separate `proof_child_cleanup_failed` boundary also remains unresolved. Root owns the independent
 native review.
 
+## Shared identity-safe cleanup correction after `94a8643`
+
+Local source `003f8e8eee92c68ee188abd096ab3a24b688d6d5`, tree
+`3c273b2e88cb0985644ddedf6ece8679ec53c9b6`, closes the remaining cleanup identity and failure-
+publication gaps without relabeling the sealed `c716047` evidence. One shared primitive now owns
+command-runner, nested native-evaluation, and exact-install cleanup. It captures birth-bound process
+identities, discovers current members of owned process groups before signaling, rechecks each
+target's birth identity immediately inside every individual signal operation, rejects a present
+reused group leader, never signals a historical numeric process group, and terminally rescans
+owned groups. A late member, incomplete observation, or unknown coverage cannot become a false
+zero. An absent group leader does not prevent cleanup of a separately captured same-birth child in
+the still-observed original group.
+
+The exact-install and nested-evaluation paths no longer perform their former raw PID or process-
+group cleanup. Their receipts consume the shared semantic outcomes. Strict child-failure
+verification accepts cleanup completion only from consistent authenticated or no-target-observed
+evidence with known zero process and group counts; missing or inconsistent digests, write failure,
+unknown counts, incomplete coverage, or residual processes become `proof_child_cleanup_failed` or
+unknown instead of a false success.
+
+Final local verification passed 111 focused tests twice, 344 related cleanup/install/evaluation/
+proof tests, and 431 safe auth/privacy tests. Ruff check and changed-file format passed;
+BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, static, catalog,
+evaluation-manifest, bounded privacy, and `git diff --check` gates passed. One deliberately broad
+test selection entered a fully isolated fake-client install fixture; it was immediately stopped,
+its process and temporary state were cleaned, and it is excluded from the completed suite counts.
+No real client/model process, exact candidate install, production MCP server, Saxo request, broker
+operation, browser, or broker/data network activity ran in this correction.
+
+This source is not installed or sealed. The latest sealed evidence remains `c716047` at 10/11 hard
+cases with its authenticated unknown broker/account facts. No numerical proof, fresh 60-tool SIM
+matrix, Saxo reconciliation, account equality, controlled lifecycle, or activation ran. All 54
+profiles remain quarantined and 0/54 are active. The branch remains local and unpushed.
+
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
