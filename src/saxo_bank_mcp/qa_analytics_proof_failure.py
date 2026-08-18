@@ -147,6 +147,11 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
     model_command_event_count: int | None = Field(ge=0)
     model_mcp_event_count: int | None = Field(ge=0)
     model_saxo_event_count: int | None = Field(ge=0)
+    plugin_list_exit_code: int | None = None
+    plugin_list_stdout_schema_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
 
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
@@ -165,6 +170,10 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             raise ValueError("failed agent evaluation case requires a safe error")
         if self.status == "passed" and self.error:
             raise ValueError("passed agent evaluation case cannot carry an error")
+        if (self.plugin_list_exit_code is None) != (
+            self.plugin_list_stdout_schema_sha256 is None
+        ):
+            raise ValueError("plugin list command evidence must be complete")
         return self
 
 

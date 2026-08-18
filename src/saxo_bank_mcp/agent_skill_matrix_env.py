@@ -361,7 +361,7 @@ def _register_codex_native_plugin(
     source = runtime.codex_home / "marketplace-source"
     try:
         _copy_owner_only_tree(retained_plugin_root.expanduser().resolve(strict=True), source)
-        marketplace, plugin, version = _codex_plugin_identity(source)
+        marketplace, plugin, version = codex_plugin_identity(source)
         if marketplace != MARKETPLACE_NAME or plugin != PLUGIN_NAME:
             raise MatrixEnvError("codex_plugin_registration_invalid")  # noqa: TRY301
         run_codex_install(source, runtime.env)
@@ -378,7 +378,7 @@ def _register_codex_native_plugin(
     return installed
 
 
-def _codex_plugin_identity(root: Path) -> tuple[str, str, str]:
+def codex_plugin_identity(root: Path) -> tuple[str, str, str]:
     marketplace_raw: object = json.loads(
         (root / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
     )

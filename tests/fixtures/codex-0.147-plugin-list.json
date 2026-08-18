@@ -1,0 +1,17 @@
+{
+  "installed": [
+    {
+      "authPolicy": "ON_USE",
+      "enabled": true,
+      "installPolicy": "AVAILABLE",
+      "installed": true,
+      "marketplaceName": "sigvardt",
+      "marketplaceSource": "fixture:marketplace",
+      "name": "saxo-bank-mcp",
+      "pluginId": "saxo-bank-mcp@sigvardt",
+      "source": "fixture:plugin",
+      "version": "0.1.0"
+    }
+  ],
+  "available": []
+}

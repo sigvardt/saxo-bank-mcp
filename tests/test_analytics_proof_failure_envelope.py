@@ -223,6 +223,9 @@ def _failed_agent_evaluation_report() -> EvalRunReport:
 
 def _write_failed_agent_report(path: Path) -> str:
     payload = _failed_agent_evaluation_report().model_dump(mode="json")
+    failed_record = cast("list[dict[str, Any]]", payload["records"])[1]
+    failed_record["plugin_list_exit_code"] = 0
+    failed_record["plugin_list_stdout_schema_sha256"] = "e" * 64
     payload["run_cleanup"] = {"complete": True, "remaining_processes": 0}
     payload["installation_fixture_preserved"] = True
     encoded = json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
@@ -441,6 +444,8 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
         "saxo_export_analysis",
     )
     assert failed.invoked_logical_tool_ids == ("saxo_get_research_dataset",)
+    assert failed.plugin_list_exit_code == 0
+    assert failed.plugin_list_stdout_schema_sha256 == "e" * 64
     assert set(failed.model_dump(mode="json")) == {
         "case_id",
         "status",
@@ -455,6 +460,8 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
         "model_command_event_count",
         "model_mcp_event_count",
         "model_saxo_event_count",
+        "plugin_list_exit_code",
+        "plugin_list_stdout_schema_sha256",
     }
     assert set(summary.model_dump(mode="json")) == {
         "schema_version",
@@ -507,13 +514,15 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
     ("mutation", "value"),
     [
         ("error", "transcript_assertion_failed"),
+        ("plugin_list_exit_code", 99),
+        ("plugin_list_stdout_schema_sha256", "f" * 64),
         ("raw_transcript", "DO_NOT_PUBLISH"),
     ],
 )
 def test_publication_rejects_tampered_or_extra_eval_failure_material(
     tmp_path: Path,
     mutation: str,
-    value: str,
+    value: object,
 ) -> None:
     progress = _progress_with_failed_agent_summary(tmp_path)
     child = _failure(progress, reason="installed_agent_evaluation_command_failed")

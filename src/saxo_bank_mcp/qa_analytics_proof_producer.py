@@ -1840,6 +1840,8 @@ def _agent_evaluation_failure_summary(
             model_command_event_count=record.model_command_event_count,
             model_mcp_event_count=record.model_mcp_event_count,
             model_saxo_event_count=record.model_saxo_event_count,
+            plugin_list_exit_code=record.plugin_list_exit_code,
+            plugin_list_stdout_schema_sha256=record.plugin_list_stdout_schema_sha256,
         )
         for record in report.records
     )

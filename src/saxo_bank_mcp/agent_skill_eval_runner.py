@@ -27,11 +27,13 @@ from saxo_bank_mcp.agent_skill_eval_native_preflight import (
 )
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
+from saxo_bank_mcp.agent_skill_install_paths import MARKETPLACE_NAME, PLUGIN_NAME
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
 from saxo_bank_mcp.agent_skill_matrix_env import (
     MatrixEnvError,
     MatrixIsolatedRuntime,
     cleanup_matrix_isolated_runtime,
+    codex_plugin_identity,
     prepare_eval_isolated_runtime,
     promote_rotated_claude_credentials,
     promote_rotated_sim_token_cache,
@@ -582,6 +584,8 @@ def _native_preflight_failed_record(
         no_mcp_call=failure.mcp_started is False,
         no_saxo_call=True,
         error=failure.reason,
+        plugin_list_exit_code=failure.plugin_list_exit_code,
+        plugin_list_stdout_schema_sha256=failure.plugin_list_stdout_schema_sha256,
         grant_status="failed",
         assertion_status="failed",
     )
@@ -732,11 +736,31 @@ def _disposable_codex_plugin_path(
             if plugin_resolved.is_relative_to(home):
                 candidate = disposable_codex_home / plugin_resolved.relative_to(home)
                 if candidate.is_dir():
-                    return candidate
+                    return candidate.resolve()
         except OSError:
-            return None
+            pass
+    marketplace = ""
+    plugin_name = ""
+    disposable_home: Path | None = None
+    try:
+        marketplace, plugin_name, version = codex_plugin_identity(plugin_resolved)
+        disposable_home = disposable_codex_home.expanduser().resolve(strict=True)
+        candidate = (
+            disposable_home / "plugins" / "cache" / marketplace / plugin_name / version
+        ).resolve(strict=True)
+    except (MatrixEnvError, OSError):
+        candidate = None
+    if (
+        candidate is not None
+        and disposable_home is not None
+        and marketplace == MARKETPLACE_NAME
+        and plugin_name == PLUGIN_NAME
+        and candidate.is_dir()
+        and candidate.is_relative_to(disposable_home)
+    ):
+        return candidate
     fallback = disposable_codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
-    return fallback if fallback.is_dir() else None
+    return fallback.resolve() if fallback.is_dir() else None
 
 
 def _idle_cleanup() -> dict[str, JsonValue]:

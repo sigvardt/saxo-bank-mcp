@@ -147,6 +147,11 @@ class EvalRunRecord(BaseModel):
     model_command_event_count: int | None = None
     model_mcp_event_count: int | None = None
     model_saxo_event_count: int | None = None
+    plugin_list_exit_code: int | None = None
+    plugin_list_stdout_schema_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     client_version: str = ""
     invoked_logical_tools: tuple[str, ...] = ()
     invoked_logical_tool_count: int = 0

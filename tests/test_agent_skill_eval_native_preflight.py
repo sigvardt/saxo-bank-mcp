@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from re import fullmatch
 from types import SimpleNamespace
 from typing import Final
 
@@ -21,6 +22,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import MatrixIsolatedRuntime
 ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
 GRANTS: Final = ("saxo_health", "saxo_list_registered_endpoints")
+CODEX_0147_PLUGIN_LIST: Final = ROOT / "tests/fixtures/codex-0.147-plugin-list.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
     probe = tmp_path / "probe"
     for path in (codex_home, home, probe):
         path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
     return {
         "HOME": str(home),
         "CODEX_HOME": str(codex_home),
@@ -53,7 +56,67 @@ def _env(tmp_path: Path) -> dict[str, str]:
 def _plugin_root(env: dict[str, str]) -> Path:
     root = Path(env["CODEX_HOME"]) / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
     root.mkdir(parents=True, exist_ok=True)
+    for path in (root, *root.parents):
+        if path == Path(env["CODEX_HOME"]).parent:
+            break
+        path.chmod(0o700)
     return root
+
+
+def _fake_codex(tmp_path: Path) -> Path:
+    executable = tmp_path / "codex"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = "plugin" || exit 64\n'
+        'test "$2" = "list" || exit 64\n'
+        'test "$3" = "--json" || exit 64\n'
+        '/bin/cat "$PLUGIN_LIST_FIXTURE"\n'
+        'exit "${PLUGIN_LIST_EXIT_CODE:-0}"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    return executable
+
+
+def _use_real_plugin_list_subprocess(
+    env: dict[str, str],
+    *,
+    executable: Path,
+    fixture: Path,
+    exit_code: int = 0,
+) -> None:
+    env["EVAL_CLI_CODEX_BIN"] = str(executable)
+    env["PLUGIN_LIST_FIXTURE"] = str(fixture)
+    env["PLUGIN_LIST_EXIT_CODE"] = str(exit_code)
+
+
+def _write_plugin_list_fixture(tmp_path: Path, raw: str) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    tmp_path.chmod(0o700)
+    fixture = tmp_path / "plugin-list.json"
+    fixture.write_text(raw, encoding="utf-8")
+    fixture.chmod(0o600)
+    return fixture
+
+
+def _write_plugin_identity(root: Path) -> None:
+    marketplace = root / ".agents/plugins/marketplace.json"
+    manifest = root / ".codex-plugin/plugin.json"
+    marketplace.parent.mkdir(parents=True, exist_ok=True)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    marketplace.write_text(
+        json.dumps(
+            {
+                "name": "sigvardt",
+                "plugins": [{"name": "saxo-bank-mcp", "version": "0.1.0"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest.write_text(
+        json.dumps({"name": "saxo-bank-mcp", "version": "0.1.0"}),
+        encoding="utf-8",
+    )
 
 
 def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
@@ -66,6 +129,8 @@ def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
             {
                 "name": "saxo-bank-mcp",
                 "version": "0.1.0",
+                "marketplaceName": "sigvardt",
+                "pluginId": "saxo-bank-mcp@sigvardt",
                 "enabled": True,
                 "installed": True,
             }
@@ -74,7 +139,10 @@ def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
     }
 
     def fake_command(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(stdout=json.dumps(plugin_payload))
+        return SimpleNamespace(
+            stdout=json.dumps(plugin_payload),
+            receipt=SimpleNamespace(exit_code=0),
+        )
 
     def fake_probe(*_args: object, **kwargs: object) -> SimpleNamespace:
         assert kwargs.get("offline") is True
@@ -112,13 +180,271 @@ def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(
     assert receipt.visible_logical_tools == GRANTS
 
 
+def test_native_preflight_accepts_codex_0147_plugin_list_via_isolated_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(tmp_path)
+    _use_real_plugin_list_subprocess(
+        env,
+        executable=_fake_codex(tmp_path),
+        fixture=CODEX_0147_PLUGIN_LIST,
+    )
+
+    def fake_probe(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "tool_count": len(GRANTS),
+                    "annotations_missing": [],
+                    "tool_names": list(GRANTS),
+                }
+            )
+        )
+
+    monkeypatch.setattr(preflight, "probe_root_stdio", fake_probe)
+
+    receipt = preflight.preflight_codex_native_case(
+        codex_home=Path(env["CODEX_HOME"]),
+        plugin_root=_plugin_root(env),
+        logical_grants=GRANTS,
+        env=env,
+        probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+    )
+
+    assert receipt.plugin_list_exit_code == 0
+    assert fullmatch(r"[0-9a-f]{64}", receipt.plugin_list_stdout_schema_sha256)
+    assert "/" not in receipt.plugin_list_stdout_schema_sha256
+
+
+def test_native_preflight_rejects_plugin_root_outside_disposable_home_before_command(
+    tmp_path: Path,
+) -> None:
+    env = _env(tmp_path)
+    outside = tmp_path / "outside-plugin"
+    outside.mkdir(mode=0o700)
+
+    with pytest.raises(preflight.CodexNativePreflightError) as exc_info:
+        preflight.preflight_codex_native_case(
+            codex_home=Path(env["CODEX_HOME"]),
+            plugin_root=outside,
+            logical_grants=GRANTS,
+            env=env,
+            probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        )
+
+    assert exc_info.value.reason == "codex_native_disposable_binding_invalid"
+    assert exc_info.value.plugin_list_exit_code is None
+    assert exc_info.value.plugin_list_stdout_schema_sha256 is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "exit_code", "reason", "expected_exit"),
+    [
+        (
+            CODEX_0147_PLUGIN_LIST.read_text(encoding="utf-8"),
+            17,
+            "codex_native_plugin_list_command_failed",
+            17,
+        ),
+        ("{not-json", 0, "codex_native_plugin_list_schema_invalid", 0),
+        (json.dumps({"available": []}), 0, "codex_native_plugin_list_schema_invalid", 0),
+        (
+            json.dumps({"installed": [], "available": []}),
+            0,
+            "codex_native_plugin_identity_cardinality_invalid",
+            0,
+        ),
+        (
+            json.dumps(
+                {
+                    "installed": [
+                        {
+                            "name": "saxo-bank-mcp",
+                            "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
+                            "enabled": True,
+                            "installed": True,
+                        },
+                        {
+                            "name": "saxo-bank-mcp",
+                            "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
+                            "enabled": True,
+                            "installed": True,
+                        },
+                    ],
+                    "available": [],
+                }
+            ),
+            0,
+            "codex_native_plugin_identity_cardinality_invalid",
+            0,
+        ),
+        (
+            json.dumps(
+                {
+                    "installed": [
+                        {
+                            "name": "saxo-bank-mcp",
+                            "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
+                            "enabled": True,
+                            "installed": False,
+                        }
+                    ],
+                    "available": [],
+                }
+            ),
+            0,
+            "codex_native_plugin_not_installed",
+            0,
+        ),
+        (
+            json.dumps(
+                {
+                    "installed": [
+                        {
+                            "name": "saxo-bank-mcp",
+                            "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
+                            "enabled": False,
+                            "installed": True,
+                        }
+                    ],
+                    "available": [],
+                }
+            ),
+            0,
+            "codex_native_plugin_not_enabled",
+            0,
+        ),
+        (
+            json.dumps(
+                {
+                    "installed": [
+                        {
+                            "name": "saxo-bank-mcp",
+                            "version": "0.1.0",
+                            "marketplaceName": "other",
+                            "pluginId": "saxo-bank-mcp@other",
+                            "enabled": True,
+                            "installed": True,
+                        }
+                    ],
+                    "available": [],
+                }
+            ),
+            0,
+            "codex_native_plugin_identity_cardinality_invalid",
+            0,
+        ),
+    ],
+)
+def test_native_preflight_reports_strict_plugin_list_failure_reason_and_safe_command_evidence(
+    tmp_path: Path,
+    raw: str,
+    exit_code: int,
+    reason: str,
+    expected_exit: int,
+) -> None:
+    env = _env(tmp_path)
+    fixture = _write_plugin_list_fixture(tmp_path, raw)
+    _use_real_plugin_list_subprocess(
+        env,
+        executable=_fake_codex(tmp_path),
+        fixture=fixture,
+        exit_code=exit_code,
+    )
+
+    with pytest.raises(preflight.CodexNativePreflightError) as exc_info:
+        preflight.preflight_codex_native_case(
+            codex_home=Path(env["CODEX_HOME"]),
+            plugin_root=_plugin_root(env),
+            logical_grants=GRANTS,
+            env=env,
+            probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        )
+
+    assert exc_info.value.reason == reason
+    assert exc_info.value.plugin_list_exit_code == expected_exit
+    assert fullmatch(r"[0-9a-f]{64}", exc_info.value.plugin_list_stdout_schema_sha256 or "")
+    rendered = repr(exc_info.value)
+    assert raw not in rendered
+    assert str(fixture) not in rendered
+
+
+def test_native_preflight_schema_digest_ignores_plugin_list_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = _env(tmp_path)
+    first = CODEX_0147_PLUGIN_LIST.read_text(encoding="utf-8")
+    second = first.replace("fixture:marketplace", "private-value").replace(
+        "fixture:plugin", "different-private-value"
+    )
+    digests: list[str] = []
+
+    def fake_probe(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "tool_count": len(GRANTS),
+                    "annotations_missing": [],
+                    "tool_names": list(GRANTS),
+                }
+            )
+        )
+
+    monkeypatch.setattr(preflight, "probe_root_stdio", fake_probe)
+    executable = _fake_codex(tmp_path)
+    for index, raw in enumerate((first, second)):
+        fixture = _write_plugin_list_fixture(tmp_path / str(index), raw)
+        _use_real_plugin_list_subprocess(env, executable=executable, fixture=fixture)
+        receipt = preflight.preflight_codex_native_case(
+            codex_home=Path(env["CODEX_HOME"]),
+            plugin_root=_plugin_root(env),
+            logical_grants=GRANTS,
+            env=env,
+            probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        )
+        digests.append(receipt.plugin_list_stdout_schema_sha256)
+
+    assert digests[0] == digests[1]
+
+
+def test_runner_maps_retained_manifest_identity_to_disposable_registered_plugin(
+    tmp_path: Path,
+) -> None:
+    retained = tmp_path / "retained-cache"
+    retained.mkdir(mode=0o700)
+    _write_plugin_identity(retained)
+    retained_auth_home = tmp_path / "retained-auth-home"
+    retained_auth_home.mkdir(mode=0o700)
+    disposable_home = tmp_path / "disposable-home"
+    expected = disposable_home / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+    expected.mkdir(parents=True)
+
+    resolved = eval_runner._disposable_codex_plugin_path(  # noqa: SLF001
+        disposable_home,
+        retained_codex_home=retained_auth_home,
+        retained_plugin_root=retained,
+    )
+
+    assert resolved == expected.resolve()
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
         _FailureScenario(
             plugin_enabled=False,
             visible=GRANTS,
-            reason="codex_native_registration_invalid",
+            reason="codex_native_plugin_not_enabled",
             mcp_started=False,
         ),
         _FailureScenario(
@@ -144,13 +470,16 @@ def test_native_preflight_fails_typed_before_model_for_registration_or_visibilit
                         {
                             "name": "saxo-bank-mcp",
                             "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
                             "enabled": scenario.plugin_enabled,
                             "installed": True,
                         }
                     ],
                     "available": [],
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     def fake_probe(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -186,6 +515,8 @@ def test_native_preflight_fails_typed_before_model_for_registration_or_visibilit
 
     assert exc_info.value.reason == scenario.reason
     assert exc_info.value.mcp_started is scenario.mcp_started
+    assert exc_info.value.plugin_list_exit_code == 0
+    assert fullmatch(r"[0-9a-f]{64}", exc_info.value.plugin_list_stdout_schema_sha256 or "")
 
 
 def test_native_preflight_keeps_mcp_start_unknown_when_probe_process_fails(
@@ -202,13 +533,16 @@ def test_native_preflight_keeps_mcp_start_unknown_when_probe_process_fails(
                         {
                             "name": "saxo-bank-mcp",
                             "version": "0.1.0",
+                            "marketplaceName": "sigvardt",
+                            "pluginId": "saxo-bank-mcp@sigvardt",
                             "enabled": True,
                             "installed": True,
                         }
                     ],
                     "available": [],
                 }
-            )
+            ),
+            receipt=SimpleNamespace(exit_code=0),
         )
 
     monkeypatch.setattr(preflight, "run_command", fake_command)
@@ -229,6 +563,8 @@ def test_native_preflight_keeps_mcp_start_unknown_when_probe_process_fails(
 
     assert exc_info.value.reason == "codex_native_mcp_start_failed"
     assert exc_info.value.mcp_started is None
+    assert exc_info.value.plugin_list_exit_code == 0
+    assert fullmatch(r"[0-9a-f]{64}", exc_info.value.plugin_list_stdout_schema_sha256 or "")
 
 
 def test_runner_records_native_preflight_failure_without_starting_model(
@@ -294,3 +630,24 @@ def test_runner_records_native_preflight_failure_without_starting_model(
     assert records[0].no_model_call is True
     assert records[0].no_mcp_call is False
     assert records[0].no_saxo_call is True
+
+
+def test_runner_retains_plugin_list_command_evidence_in_failed_record() -> None:
+    case = next(
+        case for case in load_eval_cases(CASE_ROOT) if case.id == "codex-native-safety-boundary"
+    )
+    failure = CodexNativePreflightError(
+        reason="codex_native_plugin_not_enabled",
+        mcp_started=False,
+        plugin_list_exit_code=0,
+        plugin_list_stdout_schema_sha256="e" * 64,
+    )
+
+    record = eval_runner._native_preflight_failed_record(  # noqa: SLF001
+        case,
+        ("mcp__saxo_bank_mcp__saxo_health",),
+        failure,
+    )
+
+    assert record.plugin_list_exit_code == 0
+    assert record.plugin_list_stdout_schema_sha256 == "e" * 64
