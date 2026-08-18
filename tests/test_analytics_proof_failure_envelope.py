@@ -810,8 +810,43 @@ def test_native_sealed_command_invokes_direct_bootstrap_before_producer(
         CONTRACT_SHA256,
     )
 
-    assert "-m" not in command
-    assert "saxo_bank_mcp.qa_analytics_proof_producer" not in command
-    assert command[4].endswith("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
-    assert command[5:7] == ("--envelope-path", str(envelope_path.resolve()))
+    assert Path(command[0]).is_absolute()
+    assert command[1:3] == ("-I", "-S")
+    assert command[3].endswith("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
+    assert command[4:6] == ("--envelope-path", str(envelope_path.resolve()))
+    assert command[0] != "uv"
+    assert "uv" not in command[:4]
+    assert "--uv-executable" in command
+    assert "--producer-root" in command
     assert command[-2:] == ("--harness-policy", "codex_native_v1")
+
+
+def test_native_sealed_command_keeps_bootstrap_first_when_uv_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+
+    def _missing_uv(_name: str) -> None:
+        return None
+
+    monkeypatch.setattr(producer.shutil, "which", _missing_uv)
+    cache_root = tmp_path / "cache"
+
+    command = producer._codex_native_producer_command(  # noqa: SLF001
+        cache_root,
+        tmp_path / "runtime/bootstrap.json",
+        CANDIDATE,
+        CACHE_SHA256,
+        "6" * 64,
+        MODULE_SHA256,
+        CATALOG_SHA256,
+        CONTRACT_SHA256,
+    )
+
+    assert Path(command[0]).is_absolute()
+    assert command[1:3] == ("-I", "-S")
+    assert command[3].endswith("qa_analytics_proof_bootstrap.py")
+    launcher = Path(command[command.index("--uv-executable") + 1])
+    assert launcher.is_absolute()
+    assert launcher.name == ".missing-proof-uv"

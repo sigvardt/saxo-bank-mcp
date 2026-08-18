@@ -5,22 +5,27 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
 import os
 import re
 import stat
+import subprocess
+import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, Final
+from typing import Final, cast
 
 _COMMIT_PATTERN: Final = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_PATTERN: Final = re.compile(r"^[a-f0-9]{64}$")
 _CONFIG_FAILURE_EXIT: Final = 78
+_ARGUMENT_FAILURE_EXIT: Final = 2
+_MAX_SHELL_EXIT: Final = 255
+_MAX_CHILD_STDOUT_BYTES: Final = 1_048_576
 _OWNER_FILE_MODE: Final = 0o600
 _OWNER_DIRECTORY_MODE: Final = 0o700
 _PRODUCER_MODULE: Final = "saxo_bank_mcp.qa_analytics_proof_producer"
+_PRODUCER_MODULE_RELATIVE: Final = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _BOOTSTRAP_PHASES: Final = (
     "entry",
     "producer_import",
@@ -39,6 +44,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--catalog-sha256", required=True)
     parser.add_argument("--contract-sha256", required=True)
     parser.add_argument("--harness-policy", required=True)
+    parser.add_argument("--producer-root", required=True)
+    parser.add_argument("--uv-executable", required=True)
     return parser
 
 
@@ -194,6 +201,66 @@ def _valid_bindings(args: argparse.Namespace) -> bool:
     )
 
 
+def _bound_producer_root(args: argparse.Namespace) -> Path | None:
+    root = Path(args.producer_root)
+    try:
+        root_metadata = os.lstat(root)
+    except OSError:
+        return None
+    if (
+        not root.is_absolute()
+        or not stat.S_ISDIR(root_metadata.st_mode)
+        or stat.S_ISLNK(root_metadata.st_mode)
+        or root_metadata.st_uid != os.getuid()
+    ):
+        return None
+    producer = root / _PRODUCER_MODULE_RELATIVE
+    try:
+        producer_metadata = os.lstat(producer)
+        producer_digest = hashlib.sha256(producer.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(producer_metadata.st_mode)
+        or stat.S_ISLNK(producer_metadata.st_mode)
+        or producer_metadata.st_uid != os.getuid()
+        or producer_digest != args.producer_module_sha256
+    ):
+        return None
+    return root
+
+
+def _safe_child_stdout(raw: str, args: argparse.Namespace) -> str:
+    if not raw or len(raw.encode("utf-8", errors="replace")) > _MAX_CHILD_STDOUT_BYTES:
+        return ""
+    try:
+        decoded: object = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(decoded, dict):
+        return ""
+    decoded_mapping = cast("dict[str, object]", decoded)
+    expected = {
+        "schema_version": "1",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": args.candidate_commit,
+        "installed_cache_sha256": args.installed_cache_sha256,
+        "producer_module_sha256": args.producer_module_sha256,
+        "catalog_sha256": args.catalog_sha256,
+        "contract_sha256": args.contract_sha256,
+    }
+    if any(decoded_mapping.get(key) != value for key, value in expected.items()):
+        return ""
+    receipt_kind = decoded_mapping.get("receipt_kind")
+    if receipt_kind not in {None, "codex_native_child_failure"}:
+        return ""
+    return raw
+
+
+def _normalized_child_exit(return_code: int) -> int:
+    return return_code if 0 <= return_code <= _MAX_SHELL_EXIT else 1
+
+
 def _write_failure(  # noqa: PLR0913
     path: Path,
     args: argparse.Namespace,
@@ -238,36 +305,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     if not _atomic_write(path, entry):
         return _CONFIG_FAILURE_EXIT
 
-    try:
-        producer: Any = importlib.import_module(_PRODUCER_MODULE)
-    except BaseException:  # noqa: BLE001
+    producer_root = _bound_producer_root(args)
+    if producer_root is None:
         _write_failure(
             path,
             args,
             completed_phases=("entry",),
             current_phase="producer_import",
-            child_exit_code=1,
-            known_inactive=True,
-            reason="proof_bootstrap_import_failed",
-        )
-        return 1
-
-    producer_file = getattr(producer, "__file__", None)
-    try:
-        producer_digest = (
-            hashlib.sha256(Path(producer_file).read_bytes()).hexdigest()
-            if isinstance(producer_file, str)
-            else ""
-        )
-    except OSError:
-        producer_digest = ""
-    entrypoint = getattr(producer, "main", None)
-    if producer_digest != args.producer_module_sha256 or not callable(entrypoint):
-        _write_failure(
-            path,
-            args,
-            completed_phases=("entry", "producer_import"),
-            current_phase="producer_handoff",
             child_exit_code=1,
             known_inactive=True,
             reason="proof_bootstrap_producer_binding_failed",
@@ -297,29 +341,39 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     if not _atomic_write(path, started):
         return _CONFIG_FAILURE_EXIT
 
-    producer_argv = [
+    producer_argv = (
+        str(args.uv_executable),
+        "run",
+        "--offline",
+        "--project",
+        str(producer_root),
+        "python",
+        "-m",
+        _PRODUCER_MODULE,
         "--candidate-commit",
         args.candidate_commit,
         "--installed-cache-sha256",
         args.installed_cache_sha256,
         "--harness-policy",
         "codex_native_v1",
-    ]
+    )
+    child_env = dict(os.environ)
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    child_env["UV_OFFLINE"] = "1"
     try:
-        raw_exit = entrypoint(producer_argv)
-    except SystemExit as error:
-        exit_code = error.code if isinstance(error.code, int) and error.code != 0 else 1
-        _write_failure(
-            path,
-            args,
-            completed_phases=("entry", "producer_import", "producer_handoff"),
-            current_phase="producer_execution",
-            child_exit_code=exit_code,
-            known_inactive=False,
-            reason="proof_bootstrap_invalid_arguments",
+        child = subprocess.run(
+            producer_argv,
+            cwd=producer_root,
+            env=child_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
         )
-        return exit_code
-    except BaseException:  # noqa: BLE001
+    except OSError:
+        exit_code = 1
         _write_failure(
             path,
             args,
@@ -327,10 +381,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             current_phase="producer_execution",
             child_exit_code=1,
             known_inactive=False,
-            reason="proof_bootstrap_producer_exception",
+            reason="proof_bootstrap_installed_runtime_failed",
         )
-        return 1
-    exit_code = raw_exit if isinstance(raw_exit, int) and not isinstance(raw_exit, bool) else 1
+        return exit_code
+
+    safe_stdout = _safe_child_stdout(child.stdout, args)
+    exit_code = _normalized_child_exit(child.returncode)
     if exit_code != 0:
         _write_failure(
             path,
@@ -339,8 +395,14 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
             current_phase="producer_execution",
             child_exit_code=exit_code,
             known_inactive=False,
-            reason="proof_bootstrap_producer_nonzero",
+            reason=(
+                "proof_bootstrap_invalid_arguments"
+                if exit_code == _ARGUMENT_FAILURE_EXIT
+                else "proof_bootstrap_producer_nonzero"
+            ),
         )
+        if safe_stdout:
+            sys.stdout.write(safe_stdout)
         return exit_code
     complete = _envelope(
         args,
@@ -351,7 +413,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         known_inactive=False,
         reason="proof_bootstrap_complete",
     )
-    return 0 if _atomic_write(path, complete) else _CONFIG_FAILURE_EXIT
+    if not _atomic_write(path, complete):
+        return _CONFIG_FAILURE_EXIT
+    if safe_stdout:
+        sys.stdout.write(safe_stdout)
+    return 0
 
 
 if __name__ == "__main__":

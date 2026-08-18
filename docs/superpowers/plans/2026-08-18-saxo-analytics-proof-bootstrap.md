@@ -88,6 +88,16 @@ BasedPyright.
 - [ ] Run one guarded full suite through the receipt runner and retain owner-only JUnit and receipt.
 - [ ] Run static, catalog, and privacy readbacks against the exact installed candidate.
 
+### Task 6A: Correct the pre-bootstrap launcher boundary
+
+- [x] Add RED real-subprocess coverage for missing and broken launchers plus isolated `PATH`.
+- [x] Invoke the stdlib bootstrap directly with one absolute Python interpreter and `-I -S`.
+- [x] Write and sync the owner-only entry envelope before any `uv` or installed-project command.
+- [x] Launch the heavy producer only through one absolute offline `uv --project` handoff.
+- [x] Suppress raw child stderr and untyped stdout; retain unknown facts after a launch attempt.
+- [x] Prove the focused boundary suite twice, broader related and privacy suites, Ruff,
+      BasedPyright, plugin/static/catalog/eval gates, and a bounded changed-file scan.
+
 ### Task 7: Run one sealed native proof attempt
 
 - [ ] Re-prove SIM-only status and current session capabilities before broker-bound activity.

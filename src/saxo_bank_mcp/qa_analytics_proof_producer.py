@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -2211,11 +2212,20 @@ def _codex_native_producer_command(  # noqa: PLR0913
     catalog_sha256: str,
     contract_sha256: str,
 ) -> tuple[str, ...]:
+    bootstrap_python = str(Path(sys.executable).resolve(strict=True))
+    discovered_uv = shutil.which("uv")
+    if discovered_uv is None:
+        uv_executable = str((cache_root.resolve() / ".missing-proof-uv").resolve())
+    else:
+        discovered_path = Path(discovered_uv)
+        try:
+            uv_executable = str(discovered_path.resolve(strict=True))
+        except OSError:
+            uv_executable = str(discovered_path.absolute())
     return (
-        "uv",
-        "run",
-        "--offline",
-        "python",
+        bootstrap_python,
+        "-I",
+        "-S",
         str((cache_root.resolve() / _BOOTSTRAP_MODULE_RELATIVE).resolve()),
         "--envelope-path",
         str(envelope_path.resolve()),
@@ -2231,6 +2241,10 @@ def _codex_native_producer_command(  # noqa: PLR0913
         catalog_sha256,
         "--contract-sha256",
         contract_sha256,
+        "--producer-root",
+        str(cache_root.resolve()),
+        "--uv-executable",
+        uv_executable,
         "--harness-policy",
         "codex_native_v1",
     )

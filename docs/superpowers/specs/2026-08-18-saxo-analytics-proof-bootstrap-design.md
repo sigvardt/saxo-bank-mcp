@@ -13,10 +13,12 @@ The legacy `dual_v1` producer, command, and publication shapes remain unchanged.
 
 ## Startup trust boundary
 
-The native sealed command invokes `qa_analytics_proof_bootstrap.py` by its exact installed file
-path. The bootstrap imports only Python standard-library modules. Its parent creates an owner-only
-directory and supplies a unique envelope path plus the expected policy, candidate commit, installed
-tree digest, bootstrap digest, producer digest, catalog digest, and contract digest.
+The native sealed command invokes `qa_analytics_proof_bootstrap.py` directly with the absolute
+interpreter already running the parent, isolated with `-I -S`. No `uv`, project launcher, or
+installed dependency runs before the bootstrap. The bootstrap imports only Python standard-library
+modules. Its parent creates an owner-only directory and supplies a unique envelope path plus the
+expected policy, candidate commit, installed tree digest, bootstrap digest, producer digest,
+catalog digest, and contract digest.
 
 Before importing the producer, the bootstrap atomically writes and durably syncs an entry envelope.
 The envelope is strict JSON, bound to every expected value, and protected by a digest over all
@@ -26,11 +28,13 @@ file under the parent-controlled runtime directory.
 The bootstrap advances through these states:
 
 1. `entered`: durable entry exists and no producer import has started.
-2. `producer_imported`: the exact expected producer bytes imported successfully.
-3. `producer_started`: control is about to enter producer `main`; proof, network, and broker facts
-   become unknown until stronger evidence resolves them.
-4. `failed`: the bootstrap caught and sanitized an import, argument, producer exception, or normal
-   nonzero return.
+2. `producer_imported`: compatibility state name meaning the exact installed producer file and
+   digest are bound; the heavy producer import still occurs only in the installed child.
+3. `producer_started`: the bootstrap is about to invoke the absolute `uv` executable in offline
+   mode against the exact installed project; proof, network, and broker facts become unknown until
+   stronger evidence resolves them.
+4. `failed`: the bootstrap caught and sanitized an installed-runtime launch failure, import or
+   pre-tracker failure, argument exit, child crash, or normal nonzero return.
 5. `complete`: producer `main` returned zero.
 
 An initial envelope-write failure stops before producer import. A hard child crash leaves the last
@@ -39,11 +43,14 @@ durable state. Import and binding failures can prove no proof execution or netwo
 
 ## Handoff to producer tracking
 
-After successful import and binding validation, the bootstrap invokes the existing producer entry
-point with reconstructed native arguments. The existing in-producer phase tracker remains the
-authoritative source for SIM preflight, model, MCP, Saxo, broker, purchase, disclaimer, and cleanup
-facts. On nonzero exit, the parent accepts those facts only when both the bootstrap envelope and the
-producer phase envelope validate against the same command exit and expected bindings.
+After producer-file binding, the bootstrap invokes the absolute installed-project launcher as
+`uv run --offline --project <exact cache> python -m ...` with reconstructed native arguments. This
+preserves locked offline dependency preparation while keeping the launcher outside the entry-proof
+boundary. A missing or broken launcher therefore cannot bypass the durable entry receipt. The
+existing in-producer phase tracker remains the authoritative source for SIM preflight, model, MCP,
+Saxo, broker, purchase, disclaimer, and cleanup facts. On nonzero exit, the parent accepts those
+facts only when both the bootstrap envelope and the producer phase envelope validate against the
+same command exit and expected bindings.
 
 The parent never publishes raw stdout, stderr, exception text, filesystem paths, account values,
 handles, credentials, tokens, URLs, or broker payloads. Fixed reason codes describe failures. A
@@ -76,9 +83,10 @@ documentation.
 ## Verification
 
 Real subprocess tests cover bootstrap import failure, producer argument `SystemExit`, pre-tracker
-failure, first-envelope write failure, hard child crash, normal nonzero, and normal success without
-model or Saxo activity. Publication tests cover round trip, nested-result binding, extras, and
-tampering. Full-suite receipt tests use a fake guarded launcher and JUnit fixture. Focused tests run
-twice after GREEN, then related proof, auth, privacy, static, catalog, Ruff, and BasedPyright gates.
-Only a committed clean candidate can proceed to one exact install, one retained full suite, and one
-sealed native proof attempt.
+failure, first-envelope write failure, missing and broken launchers, isolated `PATH`, hard child
+crash, normal nonzero, normal success, and untyped-output suppression without model or Saxo
+activity. A command-shape test forbids `uv` before the bootstrap. Publication tests cover round
+trip, nested-result binding, extras, and tampering. Full-suite receipt tests use a fake guarded
+launcher and JUnit fixture. Focused tests run twice after GREEN, then related proof, auth, privacy,
+static, catalog, Ruff, and BasedPyright gates. Only a committed clean candidate can proceed to one
+exact install, one retained full suite, and one sealed native proof attempt.
