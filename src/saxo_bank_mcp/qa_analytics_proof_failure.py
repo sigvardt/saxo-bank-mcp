@@ -71,6 +71,8 @@ _PHASES: Final[tuple[CodexNativeProofPhase, ...]] = (
 )
 _SAFE_REASON_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SAFE_REASON_PREFIXES: Final = ("installed_", "native_", "proof_")
+_SAFE_EVAL_CASE_ID_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9-]{0,95}$")
+_SAFE_LOGICAL_TOOL_ID_PATTERN: Final = re.compile(r"^saxo_[a-z0-9_]{1,95}$")
 _BOOTSTRAP_PHASES: Final[tuple[BootstrapPhase, ...]] = (
     "entry",
     "producer_import",
@@ -126,6 +128,75 @@ class CodexNativeSimPreflightReceipt(_StrictModel):
                 raise ValueError("native preflight pass requires current SIM capabilities")
         elif self.session_capabilities_proven or self.capabilities_status == "passed":
             raise ValueError("blocked native preflight cannot prove session capabilities")
+        return self
+
+
+class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
+    """Allowlisted per-case facts from one validated failed eval report."""
+
+    case_id: str = Field(pattern=_SAFE_EVAL_CASE_ID_PATTERN.pattern)
+    status: Literal["passed", "failed", "skipped", "planned"]
+    error: str = Field(max_length=128)
+    assertion_status: Literal["passed", "failed", "not_required"]
+    grant_status: Literal["passed", "failed", "not_required"]
+    required_logical_tool_ids: tuple[str, ...] = Field(max_length=64)
+    required_logical_tool_count: int = Field(ge=0, le=64)
+    invoked_logical_tool_ids: tuple[str, ...] = Field(max_length=128)
+    invoked_logical_tool_count: int = Field(ge=0, le=128)
+    model_tool_event_count: int | None = Field(ge=0)
+    model_command_event_count: int | None = Field(ge=0)
+    model_mcp_event_count: int | None = Field(ge=0)
+    model_saxo_event_count: int | None = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_allowlisted_case(self) -> Self:
+        logical_ids = (*self.required_logical_tool_ids, *self.invoked_logical_tool_ids)
+        if any(_SAFE_LOGICAL_TOOL_ID_PATTERN.fullmatch(tool_id) is None for tool_id in logical_ids):
+            raise ValueError("agent evaluation summary logical tool id is unsafe")
+        if len(set(self.required_logical_tool_ids)) != len(self.required_logical_tool_ids):
+            raise ValueError("agent evaluation summary required tools must be unique")
+        if self.required_logical_tool_count != len(self.required_logical_tool_ids):
+            raise ValueError("agent evaluation summary required tool count differs")
+        if self.invoked_logical_tool_count != len(self.invoked_logical_tool_ids):
+            raise ValueError("agent evaluation summary invoked tool count differs")
+        if self.error and _SAFE_REASON_PATTERN.fullmatch(self.error) is None:
+            raise ValueError("agent evaluation summary error is unsafe")
+        if self.status == "failed" and not self.error:
+            raise ValueError("failed agent evaluation case requires a safe error")
+        if self.status == "passed" and self.error:
+            raise ValueError("passed agent evaluation case cannot carry an error")
+        return self
+
+
+class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
+    """Authenticated redacted summary retained before failed eval cleanup."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_agent_evaluation_failure_summary"] = (
+        "codex_native_agent_evaluation_failure_summary"
+    )
+    report_sha256: str = Field(pattern=_SHA256_PATTERN)
+    report_status: Literal["failed"] = "failed"
+    case_count: int = Field(ge=1, le=64)
+    failed_case_count: int = Field(ge=0, le=64)
+    cases: tuple[CodexNativeAgentEvaluationCaseSummary, ...] = Field(
+        min_length=1,
+        max_length=64,
+    )
+    summary_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_summary(self) -> Self:
+        if self.case_count != len(self.cases):
+            raise ValueError("agent evaluation summary case count differs")
+        if self.failed_case_count != sum(case.status == "failed" for case in self.cases):
+            raise ValueError("agent evaluation summary failed case count differs")
+        case_ids = tuple(case.case_id for case in self.cases)
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("agent evaluation summary case ids must be unique")
+        material = self.model_dump(mode="json", exclude={"summary_sha256"})
+        if self.summary_sha256 != _digest(material):
+            raise ValueError("agent evaluation summary digest mismatch")
         return self
 
 
@@ -264,6 +335,7 @@ class CodexNativeChildFailureEnvelope(_StrictModel):
     model_event_count: int | None = Field(ge=0)
     mcp_event_count: int | None = Field(ge=0)
     saxo_event_count: int | None = Field(ge=0)
+    agent_evaluation_failure_summary: CodexNativeAgentEvaluationFailureSummary | None = None
     execution_performed: bool | None
     broker_write_made: bool | None
     live_mutation_calls: int | None = Field(ge=0)
@@ -295,6 +367,11 @@ class CodexNativeChildFailureEnvelope(_StrictModel):
                 raise ValueError("preflight network provenance mismatch")
         elif self.sim_preflight is not None:
             raise ValueError("unknown preflight cannot carry a typed receipt")
+        if (
+            self.agent_evaluation_failure_summary is not None
+            and self.current_phase != "agent_evaluation"
+        ):
+            raise ValueError("agent evaluation summary is out of phase")
         if self.execution_performed is False and (
             self.model_event_count != 0
             or self.mcp_event_count != 0
@@ -336,6 +413,7 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
     model_event_count: int | None = Field(ge=0)
     mcp_event_count: int | None = Field(ge=0)
     saxo_event_count: int | None = Field(ge=0)
+    agent_evaluation_failure_summary: CodexNativeAgentEvaluationFailureSummary | None = None
     execution_performed: bool | None
     broker_write_made: bool | None
     live_mutation_calls: int | None = Field(ge=0)
@@ -387,6 +465,7 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
                 self.model_event_count,
                 self.mcp_event_count,
                 self.saxo_event_count,
+                self.agent_evaluation_failure_summary,
                 self.execution_performed,
                 self.broker_write_made,
                 self.live_mutation_calls,
@@ -419,6 +498,10 @@ class CodexNativeProofProgress:
     model_event_count: int | None = field(default=0, init=False)
     mcp_event_count: int | None = field(default=0, init=False)
     saxo_event_count: int | None = field(default=0, init=False)
+    agent_evaluation_failure_summary: CodexNativeAgentEvaluationFailureSummary | None = field(
+        default=None,
+        init=False,
+    )
     execution_performed: bool | None = field(default=False, init=False)
     broker_write_made: bool | None = field(default=False, init=False)
     live_mutation_calls: int | None = field(default=0, init=False)
@@ -451,6 +534,7 @@ class CodexNativeProofProgress:
             self.model_event_count = None
             self.mcp_event_count = None
             self.saxo_event_count = None
+            self.agent_evaluation_failure_summary = None
             self._make_outcomes_unknown()
         elif phase == "sim_matrix":
             self._pre_matrix_mcp_event_count = self.mcp_event_count
@@ -488,6 +572,16 @@ class CodexNativeProofProgress:
         self.model_event_count = _nonnegative_or_none(model_event_count)
         self.mcp_event_count = _add_known(1, _nonnegative_or_none(mcp_event_count))
         self.saxo_event_count = _add_known(None, _nonnegative_or_none(saxo_event_count))
+
+    def record_agent_evaluation_failure(
+        self,
+        summary: CodexNativeAgentEvaluationFailureSummary,
+    ) -> None:
+        if self.current_phase != "agent_evaluation":
+            raise ValueError("agent evaluation failure summary is out of phase")
+        if self.agent_evaluation_failure_summary is not None:
+            raise ValueError("agent evaluation failure summary is already recorded")
+        self.agent_evaluation_failure_summary = summary
 
     def record_matrix(self, matrix: SimToolMatrixReceipt) -> None:
         if self.current_phase != "sim_matrix":
@@ -657,6 +751,11 @@ def build_child_failure_envelope(
         "model_event_count": progress.model_event_count,
         "mcp_event_count": progress.mcp_event_count,
         "saxo_event_count": progress.saxo_event_count,
+        "agent_evaluation_failure_summary": (
+            progress.agent_evaluation_failure_summary.model_dump(mode="python")
+            if progress.agent_evaluation_failure_summary is not None
+            else None
+        ),
         "execution_performed": progress.execution_performed,
         "broker_write_made": progress.broker_write_made,
         "live_mutation_calls": progress.live_mutation_calls,
@@ -739,8 +838,13 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
                 status = "malformed"
             else:
                 material = envelope.model_dump(mode="json", exclude={"envelope_sha256"})
+                accepted_digests = {_digest(material)}
+                if envelope.agent_evaluation_failure_summary is None:
+                    legacy_material = dict(material)
+                    legacy_material.pop("agent_evaluation_failure_summary")
+                    accepted_digests.add(_digest(legacy_material))
                 if (
-                    envelope.envelope_sha256 != _digest(material)
+                    envelope.envelope_sha256 not in accepted_digests
                     or envelope.child_exit_code != child_exit_code
                     or command_stdout_sha256 != actual_stdout_sha256
                 ):
@@ -801,6 +905,7 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913
         model_event_count=envelope.model_event_count,
         mcp_event_count=envelope.mcp_event_count,
         saxo_event_count=envelope.saxo_event_count,
+        agent_evaluation_failure_summary=envelope.agent_evaluation_failure_summary,
         execution_performed=envelope.execution_performed,
         broker_write_made=envelope.broker_write_made,
         live_mutation_calls=envelope.live_mutation_calls,
@@ -872,6 +977,7 @@ def _unknown_verified_failure(  # noqa: PLR0913
         model_event_count=None,
         mcp_event_count=None,
         saxo_event_count=None,
+        agent_evaluation_failure_summary=None,
         execution_performed=None,
         broker_write_made=None,
         live_mutation_calls=None,
@@ -924,6 +1030,7 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
         model_event_count=None,
         mcp_event_count=None,
         saxo_event_count=None,
+        agent_evaluation_failure_summary=envelope.agent_evaluation_failure_summary,
         execution_performed=True if envelope.execution_performed is True else None,
         broker_write_made=True if envelope.broker_write_made is True else None,
         live_mutation_calls=(
@@ -966,6 +1073,7 @@ def _verified_material(  # noqa: PLR0913
     model_event_count: int | None,
     mcp_event_count: int | None,
     saxo_event_count: int | None,
+    agent_evaluation_failure_summary: CodexNativeAgentEvaluationFailureSummary | None,
     execution_performed: bool | None,
     broker_write_made: bool | None,
     live_mutation_calls: int | None,
@@ -1009,6 +1117,11 @@ def _verified_material(  # noqa: PLR0913
         "model_event_count": model_event_count,
         "mcp_event_count": mcp_event_count,
         "saxo_event_count": saxo_event_count,
+        "agent_evaluation_failure_summary": (
+            agent_evaluation_failure_summary.model_dump(mode="python")
+            if agent_evaluation_failure_summary is not None
+            else None
+        ),
         "execution_performed": execution_performed,
         "broker_write_made": broker_write_made,
         "live_mutation_calls": live_mutation_calls,

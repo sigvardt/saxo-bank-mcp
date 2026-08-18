@@ -10,8 +10,10 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, NoReturn, cast
 
 import pytest
+from pydantic import ValidationError
 
 from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
+from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.qa_analytics_proof_failure import (
     CodexNativeBootstrapEnvelope,
@@ -39,6 +41,8 @@ CLI_TOTAL_MCP_EVENT_COUNT = 3
 CRASH_EXIT_CODE = -9
 FAILED_CHILD_EXIT_CODE = 7
 EXPECTED_BINDING_CALLS = 2
+FAILED_EVAL_CASE_COUNT = 2
+FAILED_EVAL_REQUIRED_TOOL_COUNT = 3
 
 
 def _bootstrap_envelope(
@@ -134,6 +138,114 @@ def _passed_preflight() -> CodexNativeSimPreflightReceipt:
         network_call_made=True,
         session_capabilities_proven=True,
     )
+
+
+def _failed_agent_evaluation_report() -> EvalRunReport:
+    records = (
+        EvalRunRecord(
+            case_id="options",
+            harness="codex",
+            status="passed",
+            execution_mode="model_execution",
+            expected_skill="saxo-analytics",
+            required_logical_tools=("saxo_model_derivatives",),
+            forbidden_logical_tools=(),
+            resolved_tool_grants=("mcp__saxo_bank_mcp__saxo_model_derivatives",),
+            transcript_assertions_passed=True,
+            no_model_call=False,
+            no_mcp_call=False,
+            no_saxo_call=False,
+            error="",
+            model_tool_event_count=1,
+            model_command_event_count=0,
+            model_mcp_event_count=1,
+            model_saxo_event_count=1,
+            client_version="PRIVATE_CLIENT_SENTINEL",
+            invoked_logical_tools=("saxo_model_derivatives",),
+            invoked_logical_tool_count=1,
+            grant_status="passed",
+            assertion_status="passed",
+        ),
+        EvalRunRecord(
+            case_id="cost-xray",
+            harness="codex",
+            status="failed",
+            execution_mode="model_execution",
+            expected_skill="saxo-analytics",
+            required_logical_tools=(
+                "saxo_get_research_dataset",
+                "saxo_analyze_portfolio",
+                "saxo_export_analysis",
+            ),
+            forbidden_logical_tools=(),
+            resolved_tool_grants=(
+                "mcp__saxo_bank_mcp__saxo_get_research_dataset",
+                "mcp__saxo_bank_mcp__saxo_analyze_portfolio",
+                "mcp__saxo_bank_mcp__saxo_export_analysis",
+            ),
+            transcript_assertions_passed=False,
+            no_model_call=False,
+            no_mcp_call=False,
+            no_saxo_call=False,
+            error="required_tool_missing",
+            model_tool_event_count=1,
+            model_command_event_count=0,
+            model_mcp_event_count=1,
+            model_saxo_event_count=1,
+            client_version="PRIVATE_CLIENT_SENTINEL",
+            invoked_logical_tools=("saxo_get_research_dataset",),
+            invoked_logical_tool_count=1,
+            grant_status="passed",
+            assertion_status="failed",
+        ),
+    )
+    return EvalRunReport(
+        status="failed",
+        harness="codex",
+        environment="LOCAL+SIM",
+        execution_mode="model_execution",
+        selected_case_count=len(records),
+        case_count=len(records),
+        records=records,
+        cleanup={
+            "complete": True,
+            "remaining_processes": 0,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={"private_marker": "DO_NOT_COPY"},
+        after_global_state={"private_marker": "DO_NOT_COPY"},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=CANDIDATE,
+    )
+
+
+def _write_failed_agent_report(path: Path) -> str:
+    payload = _failed_agent_evaluation_report().model_dump(mode="json")
+    payload["run_cleanup"] = {"complete": True, "remaining_processes": 0}
+    payload["installation_fixture_preserved"] = True
+    encoded = json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    path.write_text(encoded, encoding="utf-8")
+    path.chmod(0o600)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _progress_with_failed_agent_summary(tmp_path: Path) -> CodexNativeProofProgress:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    report_path = tmp_path / "failed-eval.json"
+    _write_failed_agent_report(report_path)
+    producer._record_failed_agent_report_progress(  # noqa: SLF001
+        progress,
+        report_path=report_path,
+        candidate_commit=CANDIDATE,
+    )
+    return progress
 
 
 def _failure(
@@ -244,6 +356,228 @@ def test_failure_after_model_and_mcp_activity_retains_exact_counts() -> None:
     assert envelope.live_mutation_calls is None
     assert envelope.purchase_occurred is None
     assert envelope.disclaimer_response_made is None
+
+
+def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    codex_home = tmp_path / "codex-home"
+    source_repo = tmp_path / "source-repo"
+    codex_home.mkdir(mode=0o700)
+    source_repo.mkdir(mode=0o700)
+    monkeypatch.setenv("SAXO_ANALYTICS_CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("SAXO_ANALYTICS_SOURCE_REPO", str(source_repo))
+    report_parent: Path | None = None
+    expected_report_sha256 = ""
+
+    def fail_after_report(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        nonlocal report_parent, expected_report_sha256
+        del env, timeout_seconds
+        report_path = Path(argv[argv.index("--out") + 1])
+        report_parent = report_path.parent
+        expected_report_sha256 = _write_failed_agent_report(report_path)
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=17,
+                pgid=17,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout="",
+            stderr="",
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    monkeypatch.setattr(producer, "run_command", fail_after_report)
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_agent_evaluation_command_failed",
+    ):
+        producer._run_installed_agent_evaluation(  # noqa: SLF001
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            harness_policy="codex_native_v1",
+            progress=progress,
+        )
+
+    summary = getattr(progress, "agent_evaluation_failure_summary", None)
+    assert report_parent is not None
+    assert not report_parent.exists()
+    assert summary is not None
+    assert summary.report_sha256 == expected_report_sha256
+    assert summary.report_status == "failed"
+    assert summary.case_count == FAILED_EVAL_CASE_COUNT
+    assert summary.failed_case_count == 1
+    assert tuple(item.case_id for item in summary.cases) == ("options", "cost-xray")
+    failed = summary.cases[1]
+    assert failed.error == "required_tool_missing"
+    assert failed.required_logical_tool_count == FAILED_EVAL_REQUIRED_TOOL_COUNT
+    assert failed.invoked_logical_tool_count == 1
+    assert failed.required_logical_tool_ids == (
+        "saxo_get_research_dataset",
+        "saxo_analyze_portfolio",
+        "saxo_export_analysis",
+    )
+    assert failed.invoked_logical_tool_ids == ("saxo_get_research_dataset",)
+    assert set(failed.model_dump(mode="json")) == {
+        "case_id",
+        "status",
+        "error",
+        "assertion_status",
+        "grant_status",
+        "required_logical_tool_ids",
+        "required_logical_tool_count",
+        "invoked_logical_tool_ids",
+        "invoked_logical_tool_count",
+        "model_tool_event_count",
+        "model_command_event_count",
+        "model_mcp_event_count",
+        "model_saxo_event_count",
+    }
+    assert set(summary.model_dump(mode="json")) == {
+        "schema_version",
+        "receipt_kind",
+        "report_sha256",
+        "report_status",
+        "case_count",
+        "failed_case_count",
+        "cases",
+        "summary_sha256",
+    }
+    rendered = summary.model_dump_json()
+    assert "PRIVATE_CLIENT_SENTINEL" not in rendered
+    assert "DO_NOT_COPY" not in rendered
+    assert "transcript" not in rendered
+    assert "stderr" not in rendered
+    assert "/" not in rendered
+
+
+def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    summary = getattr(progress, "agent_evaluation_failure_summary", None)
+    assert summary is not None
+    child = _failure(progress, reason="installed_agent_evaluation_command_failed")
+
+    verified = _verify(child.model_dump_json())
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert child.agent_evaluation_failure_summary == summary
+    assert verified.agent_evaluation_failure_summary == summary
+    assert parsed.result.agent_evaluation_failure_summary == summary
+    assert parsed.result.broker_write_made is None
+    assert parsed.result.live_mutation_calls is None
+    assert parsed.result.purchase_occurred is None
+    assert parsed.result.disclaimer_response_made is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("error", "transcript_assertion_failed"),
+        ("raw_transcript", "DO_NOT_PUBLISH"),
+    ],
+)
+def test_publication_rejects_tampered_or_extra_eval_failure_material(
+    tmp_path: Path,
+    mutation: str,
+    value: str,
+) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    child = _failure(progress, reason="installed_agent_evaluation_command_failed")
+    verified = _verify(child.model_dump_json())
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    payload = publication.model_dump(mode="json")
+    result = cast("dict[str, Any]", payload["result"])
+    summary = cast("dict[str, Any]", result["agent_evaluation_failure_summary"])
+    cases = cast("list[dict[str, Any]]", summary["cases"])
+    cases[1][mutation] = value
+
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(json.dumps(payload))
+
+
+def test_tampered_eval_failure_summary_publishes_unknown(tmp_path: Path) -> None:
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    child = _failure(progress, reason="installed_agent_evaluation_command_failed")
+    payload = child.model_dump(mode="json")
+    summary = cast("dict[str, Any]", payload["agent_evaluation_failure_summary"])
+    cases = cast("list[dict[str, Any]]", summary["cases"])
+    cases[1]["error"] = "transcript_assertion_failed"
+    raw = json.dumps(payload)
+
+    verified = _verify(
+        raw,
+        command_stdout_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+    )
+
+    assert verified.failure_evidence_status == "malformed"
+    assert verified.agent_evaluation_failure_summary is None
+    assert verified.model_event_count is None
+    assert verified.mcp_event_count is None
+    assert verified.broker_write_made is None
+    assert verified.purchase_occurred is None
+
+
+def test_legacy_child_without_eval_summary_remains_authenticated() -> None:
+    child = _failure(_progress(), reason="proof_before_preflight_injected")
+    payload = child.model_dump(mode="json")
+    payload.pop("agent_evaluation_failure_summary")
+    material = {key: value for key, value in payload.items() if key != "envelope_sha256"}
+    payload["envelope_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    raw = json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True)
+
+    verified = _verify(raw)
+
+    assert verified.failure_evidence_status == "authenticated"
+    assert verified.agent_evaluation_failure_summary is None
 
 
 @pytest.mark.parametrize(

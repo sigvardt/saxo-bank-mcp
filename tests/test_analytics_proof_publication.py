@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
+from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeBootstrapVerification,
+    CodexNativeVerifiedChildFailure,
+    verify_child_failure_envelope,
+)
 from saxo_bank_mcp.qa_analytics_proof_publication import (
     CodexNativeBoundaryFailureReceipt,
     CodexNativeProofPublication,
@@ -90,6 +97,57 @@ def test_native_publication_rejects_unsigned_extra_field() -> None:
 
     with pytest.raises(ValidationError):
         verify_codex_native_proof_publication(json.dumps(payload))
+
+
+def test_legacy_verified_failure_without_eval_summary_remains_verifiable() -> None:
+    bootstrap = CodexNativeBootstrapVerification(
+        status="missing",
+        envelope=None,
+    )
+    verified = verify_child_failure_envelope(
+        raw_stdout="",
+        candidate_commit=CANDIDATE,
+        installed_cache_sha256="2" * 64,
+        producer_module_sha256="3" * 64,
+        catalog_sha256="4" * 64,
+        contract_sha256=CONTRACT_SHA256,
+        child_exit_code=1,
+        command_timed_out=False,
+        command_cleanup_attempted=True,
+        command_stdout_sha256="0" * 64,
+        command_stderr_sha256="0" * 64,
+        remaining_process_count=0,
+        remaining_process_group_count=0,
+        runtime_cleanup_status="complete",
+        bootstrap_verification=bootstrap,
+    )
+    publication = build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=ANALYSIS_KIND_COUNT,
+        evidence_receipt_count=EVIDENCE_RECEIPT_COUNT,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    payload = publication.model_dump(mode="json")
+    assert isinstance(payload["result"], dict)
+    result = cast("dict[str, Any]", payload["result"])
+    result.pop("agent_evaluation_failure_summary")
+    material = {key: value for key, value in payload.items() if key != "publication_sha256"}
+    payload["publication_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+
+    parsed = verify_codex_native_proof_publication(json.dumps(payload))
+
+    assert parsed.result_kind == "verified_child_failure"
+    assert isinstance(parsed.result, CodexNativeVerifiedChildFailure)
+    assert parsed.result.agent_evaluation_failure_summary is None
 
 
 def test_native_publication_rejects_nested_candidate_mismatch() -> None:

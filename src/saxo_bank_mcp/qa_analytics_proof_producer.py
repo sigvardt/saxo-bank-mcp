@@ -68,6 +68,8 @@ from saxo_bank_mcp.qa_analytics_evidence import (
     validate_proof_matrix_bundle,
 )
 from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeAgentEvaluationCaseSummary,
+    CodexNativeAgentEvaluationFailureSummary,
     CodexNativeBootstrapEnvelope,
     CodexNativeProofProgress,
     CodexNativeSimPreflightReceipt,
@@ -1787,7 +1789,8 @@ def _record_failed_agent_report_progress(
             or stat.S_IMODE(metadata.st_mode) & 0o077
         ):
             return
-        raw = json.loads(report_path.read_bytes())
+        report_bytes = report_path.read_bytes()
+        raw = json.loads(report_bytes)
         if not isinstance(raw, dict):
             return
         payload = dict(cast("dict[str, object]", raw))
@@ -1799,6 +1802,60 @@ def _record_failed_agent_report_progress(
     if report.source_commit != candidate_commit:
         return
     _record_agent_report_progress(progress, report)
+    try:
+        summary = _agent_evaluation_failure_summary(
+            report_bytes=report_bytes,
+            report=report,
+        )
+    except ValidationError:
+        return
+    if summary is not None:
+        progress.record_agent_evaluation_failure(summary)
+
+
+def _agent_evaluation_failure_summary(
+    *,
+    report_bytes: bytes,
+    report: EvalRunReport,
+) -> CodexNativeAgentEvaluationFailureSummary | None:
+    """Select only allowlisted facts from one strict failed Codex eval report."""
+    if (
+        report.status != "failed"
+        or report.harness != "codex"
+        or report.execution_mode != "model_execution"
+    ):
+        return None
+    cases = tuple(
+        CodexNativeAgentEvaluationCaseSummary(
+            case_id=record.case_id,
+            status=record.status,
+            error=record.error,
+            assertion_status=record.assertion_status,
+            grant_status=record.grant_status,
+            required_logical_tool_ids=record.required_logical_tools,
+            required_logical_tool_count=len(record.required_logical_tools),
+            invoked_logical_tool_ids=record.invoked_logical_tools,
+            invoked_logical_tool_count=record.invoked_logical_tool_count,
+            model_tool_event_count=record.model_tool_event_count,
+            model_command_event_count=record.model_command_event_count,
+            model_mcp_event_count=record.model_mcp_event_count,
+            model_saxo_event_count=record.model_saxo_event_count,
+        )
+        for record in report.records
+    )
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_agent_evaluation_failure_summary",
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "report_status": "failed",
+        "case_count": report.case_count,
+        "failed_case_count": sum(record.status == "failed" for record in report.records),
+        "cases": tuple(case.model_dump(mode="python") for case in cases),
+    }
+    return CodexNativeAgentEvaluationFailureSummary.model_validate(
+        {**material, "summary_sha256": _digest(material)},
+        strict=True,
+    )
 
 
 def _sum_optional_counts(values: tuple[int | None, ...]) -> int | None:

@@ -132,7 +132,17 @@ class CodexNativeProofPublication(_StrictModel):
         if self.result.harness_policy != self.harness_policy:
             raise ValueError("native publication policy mismatch")
         material = self.model_dump(mode="json", exclude={"publication_sha256"})
-        if self.publication_sha256 != _digest(material):
+        accepted_digests = {_digest(material)}
+        if (
+            isinstance(self.result, CodexNativeVerifiedChildFailure)
+            and self.result.agent_evaluation_failure_summary is None
+        ):
+            legacy_material = dict(material)
+            legacy_result = dict(legacy_material["result"])
+            legacy_result.pop("agent_evaluation_failure_summary")
+            legacy_material["result"] = legacy_result
+            accepted_digests.add(_digest(legacy_material))
+        if self.publication_sha256 not in accepted_digests:
             raise ValueError("native publication digest mismatch")
         return self
 
