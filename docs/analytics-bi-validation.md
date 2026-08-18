@@ -5,173 +5,156 @@ Date: 2026-08-18
 Harness policy: `codex_native_v1`
 Independent review: pending the root orchestrator's separate native review
 
-Candidate `f24fddfeef2fff73af880e85db2b8a4a64d08d2a` passed focused, related,
-full-suite, static, privacy, and exact Codex-only installation checks. One sealed proof command
-then exited 1 and published an authenticated outer boundary refusal. No authenticated producer or
-bootstrap failure evidence survived, so every child phase, network, model, MCP, Saxo, execution,
-write, purchase, disclaimer, and cleanup fact remains unknown. No retry ran. All 54 proof profiles
-remain quarantined.
-
-Commit `e217ae9c1ea12467d14c0b85c71831e761e4ca24`, tree
-`23463a1bc236dcc03c6381eacb61b97c6e191e1a`, is the locally verified corrective source
-candidate. It preserves authenticated phase, reason, command, and cleanup discriminators at the
-native boundary and records a two-phase owner-only runtime-consumption receipt before deleting the
-bound runtime. It has not yet received an exact retained-runtime install, full-suite receipt, SIM
-preflight, or sealed proof. The `f24fddf` evidence below remains the latest sealed evidence and is
-not relabeled.
+Candidate `5853302f598a436179e15e75f22fdd91144e5354`, tree
+`a8bf6c1c489e63bb03c63149b271e7c08d9fffdb`, passed its exact Codex-only
+installation, quiet-window install readback, guarded 2,739-test full suite, and the required
+static, type, catalog, evaluation-manifest, and public-privacy gates. One sealed proof then exited
+1 with an authenticated producer failure in `agent_evaluation`. All 11 hard cases failed because
+none of their required logical tools were invoked. The failure occurred before offline numerical
+proof, the fresh SIM matrix, Saxo reconciliation, and activation. No retry ran. All 54 proof
+profiles remain quarantined.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
-private local paths, raw broker payloads, or private URLs.
+private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
 
 ## Candidate identity
 
 | Item | Value |
 | --- | --- |
-| Source candidate | `f24fddfeef2fff73af880e85db2b8a4a64d08d2a` |
-| Candidate tree | `5ba8b0e840e524b00c5028362b7d02155587cdbe` |
+| Source candidate | `5853302f598a436179e15e75f22fdd91144e5354` |
+| Candidate tree | `a8bf6c1c489e63bb03c63149b271e7c08d9fffdb` |
 | Harness policy | `codex_native_v1` |
-| Dependency lock fingerprint | `eb4584bf6f712062fac281b6ff1d2ba8205d91f026e115abae7fae201baa3482` |
 | Project version | `0.1.0` |
-| Tool catalog | 60 tools, including 21 analytics tools |
+| Installed surface | 60 tools, including 21 analytics tools; 9 skills; 1 MCP server |
+| Saxo operation catalog | 294 operations: 182 implemented and 112 refused |
 | Proof catalog | 54 analysis kinds and 54 proof profile IDs |
 | Activation state | 54 quarantined as `implementation_pending`; 0 active |
 
-The candidate retains one owner-only, install-probed Python runtime through the sealed proof
-boundary. Both the install probe and the sealed child use Python's explicit no-bytecode flag. This
-prevents imports from changing the exact installed source inventory. The stdlib bootstrap still
-starts directly before any project launcher. The historical `dual_v1` path remains unchanged.
+The historical `dual_v1` path and its evidence remain unchanged. The current native policy uses
+only the Codex harness. Shared package-inventory metadata does not constitute another client,
+account, process, or evaluation.
 
-## Current candidate checks
+## Exact installation and full suite
 
-All pytest runs used `scripts/run-pytest` with `TMPDIR`, `TMP`, and `TEMP` set to the required
-external temp root.
+The single retained-runtime installation passed with 611 exact compared files, no inventory
+mismatch, unchanged caller state during the install window, owner-only evidence, and zero residual
+install processes or process groups. Its proof interpreter was bound to the exact candidate, tree,
+installed inventory, dependency lock, producer module, interpreter identity, and install receipt.
 
-| Gate | Result for `f24fddf` |
+The first post-install verify-only attempt correctly refused because the caller plugin-cache digest
+changed during its verification window. Read-only inspection found a bulk caller-cache metadata
+refresh outside the finished installer. That failed receipt was preserved. After two stable
+read-only samples, the separately authorized quiet-window verify-only attempt passed against the
+same unchanged install. No second installation ran.
+
+The signed exact-candidate full-suite receipt reports:
+
+- 2,739 collected, executed, and passed tests;
+- zero failures, errors, or skips;
+- exact candidate and tree before and after;
+- clean exact source worktree before and after;
+- owner-only JUnit and command receipt; and
+- external test temporary storage with the system disk always above the 50 GiB guard.
+
+All pytest execution used `scripts/run-pytest` with `TMPDIR`, `TMP`, and `TEMP` set to the required
+external temporary root.
+
+## Post-suite local gates
+
+| Gate | Result |
 | --- | --- |
-| Bytecode-write regressions | 2 expected RED failures, then 2 passed |
-| Retained-runtime focused suite | 56 passed twice after final source changes |
-| Related proof, install, and evaluation tests | 245 passed |
-| Related auth, session, and privacy tests | 279 passed |
-| Guarded exact-candidate full suite | 2,713 passed; 0 failures, errors, or skips; exit 0 |
-| Ruff and Ruff format | passed |
+| Ruff check | passed |
 | BasedPyright | 0 errors, 0 warnings, 0 notes |
 | Plugin validator | passed |
 | Nine-skill static gate | 9 skills, 0 findings, 0 errors |
 | Generated catalogs | 60 tools, 21 analytics tools, 294 operations, 10 analytics scenarios |
 | Evaluation manifest | 34 cases, 60 tools, 9 skills, 0 errors |
-| Bounded changed-file scan | 0 findings, 0 scan errors |
-| System disk guard | 90.7 GiB free after the sealed attempt; minimum is 50 GiB |
+| Public privacy scan | 0 findings and 0 scan errors across 6 public paths |
+| Post-suite structural install readback | exact candidate, 611-file inventory, binding, modes, and retained runtime verified |
+| System disk guard | approximately 82 GiB free after the sealed attempt; minimum is 50 GiB |
 
-The retained full-suite receipt binds the exact candidate and tree, approved external temp root,
-exit, 2,713-test count, zero failure/error/skip counts, JUnit digest, clean worktree before and
-after, and its own digest. The JUnit and receipt are owner-only mode 0600. Raw suite output was not
-retained. External temp returned to its pre-suite baseline after completion.
+A separate whole-repository `ruff format --check .` observation reported 95 historical files that
+would be reformatted. Those files were not changed. This observation is not reported as a passed
+format gate and did not alter the exact candidate.
 
-## Local correction after the current evidence
+## SIM authorization gate
 
-The `e217ae9` correction began with failing real-boundary and durability regressions. One added
-regression proved the pre-delete intent needed authenticated readback before runtime deletion.
-After the correction:
+Before the sealed command, local status proved requested and effective environment `SIM`, LIVE
+reads disabled, LIVE writes disabled, and a fresh readable refresh-capable owner cache. One
+read-only session-capability call then passed with `network_call_made=true`, no login fallback, no
+token refresh, and no order or subscription creation.
 
-- 15 focused boundary and runtime-consumption tests passed twice;
-- 383 related proof, install, auth, session, and privacy tests passed;
-- Ruff and Ruff format passed;
-- BasedPyright reported 0 errors, 0 warnings, and 0 notes;
-- plugin, nine-skill static, catalog, and evaluation-manifest checks passed;
-- the bounded seven-file privacy scan reported 0 findings and 0 scan errors.
-
-These are local source gates only. No model, Saxo, browser, or network activity occurred during the
-corrective batch. They do not replace the exact install, signed full suite, SIM preflight, or sealed
-proof required for a new evidence candidate.
-
-## Exact Codex-only installation
-
-The one clean retained-runtime installation and its built-in independent readback passed before the
-sealed command.
-
-| Check | Result |
-| --- | --- |
-| Execution mode | `codex_installed_verification` |
-| Installed surface | 60 tools, 9 skills, 1 MCP server |
-| Startup readback | 60 tools from source, installed cache, and registered listing |
-| Byte inventory | 611 files compared, exact match, no mismatches |
-| Source and cache bytecode directories | 0 |
-| Caller Codex state | unchanged |
-| Owner-only storage | report and binding mode 0600; retained runtime mode 0700 |
-| Installation privacy scan | passed |
-| Install process cleanup | complete, 0 remaining process IDs and process groups |
-| Report errors | 0 |
-
-The installed report contains no second-client state, command, account, process, or evaluation
-receipt. Shared packaging metadata in the byte inventory does not prove or start another client.
-The retained proof runtime was removed after the sealed command, as required.
-
-## SIM preflight before the sealed command
-
-The network-free status receipt proved requested and effective environment `SIM`, LIVE reads and
-writes disabled, and a fresh readable refresh-capable SIM cache. One read-only session-capability
-call then passed with `network_call_made=true` and `session_capabilities_proven=true`.
-
-This external authorization gate does not substitute for child-local proof. The sealed result has
-no authenticated child preflight receipt, so the child's own session and network state remain
-unknown.
+The installed child repeated and authenticated its own SIM preflight before model work. Its typed
+failure receipt proves that child preflight passed and that a network request was made. Neither
+receipt authorizes or proves a broker write.
 
 ## One sealed proof attempt
 
-Exactly one Codex-native proof command ran against the verified retained install and exited 1. The
-strict outer publication passed digest and schema readback and binds all 54 analysis kinds and 54
-evidence receipt IDs.
+Exactly one sealed `codex_native_v1` command ran against the retained install and exited 1. Its
+strict outer publication passed schema, binding, and digest verification and retained an
+authenticated bootstrap envelope, producer failure envelope, and privacy-safe per-case summary.
 
-| Field | Value |
+| Field | Authenticated value |
 | --- | --- |
-| `result_kind` | `boundary_failure` |
-| outer `status` | `refused` |
-| outer `reason` | `proof_producer_native_boundary_failed` |
-| producer evidence | missing; producer not authenticated |
-| bootstrap evidence | missing |
-| child exit and phase | `unknown` |
-| child SIM preflight and network | `unknown` |
-| model, MCP, and Saxo event counts | `unknown` |
-| execution, write, mutation, purchase, and disclaimer facts | `unknown` |
-| child and outer runtime cleanup fields | `unknown` |
-| redacted publication | `true` |
+| Result kind | `verified_child_failure` |
+| Completed producer phases | `sim_preflight` |
+| Current producer phase | `agent_evaluation` |
+| Child exit | 1 |
+| Reason | `installed_agent_evaluation_command_failed` |
+| Child SIM preflight | passed |
+| Network provenance | `network_call_made=true` |
+| Execution performed | true |
+| Model events | 11 |
+| MCP events | 17 |
+| Saxo event count | unknown |
+| Broker write, LIVE mutation, purchase, disclaimer response | unknown |
+| Evaluation cases | 11 failed of 11 |
+| Required logical tools invoked | 0 in every case |
+| Outer cleanup | complete; 0 remaining processes and 0 remaining process groups |
 
-The receipt does not claim false zero values. A separate post-exit local process check found zero
-candidate processes, zero native temp-runtime residues, and the retained proof runtime removed.
-Those checks prove local cleanup after exit. They do not prove child execution or broker account
-state.
+The 11 failed case IDs were `artifact-delivery`, `backtest-limitations`, `cost-xray`, `deletion`,
+`market-comparison`, `optimization`, `options`, `portfolio-briefing`, `research-to-precheck`,
+`scenario`, and `codex-native-safety-boundary`. Every case reported
+`required_tool_missing`. Grants passed for all cases. The assertion gate passed for nine cases and
+failed for `research-to-precheck` and `scenario`. No case invoked a required logical tool.
 
-No second sealed command, diagnostic producer run, or after-only account read occurred. The
-publication privacy scan passed with 0 findings and 0 scan errors.
+The publication's counts of 54 analysis kinds and 54 expected evidence receipt IDs bind the proof
+contract; they are not completed numerical receipts. The producer stopped before offline proof, so
+the count of validated per-analysis numerical receipts is zero.
 
-## Broker proof and activation
+Saxo activity and all broker safety outcomes remain unknown where the authenticated child receipt
+does not prove them. No false zero, unchanged-account, no-purchase, no-disclaimer, or no-write claim
+is made for the sealed child. The separate preflight proves only its own read-only SIM call.
 
-No validated receipt was produced for the native hard workflow, 54 per-analysis numerical proofs,
-Saxo reconciliation, the fresh 60-tool SIM matrix, controlled lifecycle cleanup, or account-state
-equality.
+## Cleanup, broker proof, and activation
+
+The one-shot runtime consumption intent and cleanup receipt authenticate that the bound proof
+runtime was removed durably after the attempt. The proof temporary directory is absent, no exact
+candidate process remains, and the source worktree is clean. These local facts do not establish
+broker account equality.
+
+No attempt-bound before/after account fingerprint exists because the proof stopped during agent
+evaluation. No fresh 60-tool SIM matrix, controlled lifecycle, numerical proof, Saxo reconciliation,
+artifact parity proof, or account-state equality receipt ran for this candidate.
 
 | Gate | State |
 | --- | --- |
-| Real installed native hard workflow | not proved |
-| Full suite on exact candidate | passed, 2,713 tests |
-| 54 source-bound analysis receipts | 0 validated |
-| Saxo reconciliation | not proved |
-| Fresh 60-tool SIM matrix | not proved |
+| Real installed native hard workflow | failed: 11/11 required-tool invocation checks |
+| Exact-candidate full suite | passed: 2,739 tests |
+| Validated numerical receipts | 0 of 54 |
+| Saxo reconciliation | not run |
+| Fresh 60-tool SIM matrix | not run |
+| Controlled SIM lifecycle | not run |
 | Attempt-bound account equality | unavailable |
 | Proof profiles activated | 0 of 54 |
 | Separate native review | pending |
 
-The historical controlled SIM run keeps its own matrix, cleanup, and unchanged-account evidence.
-It is not evidence for `f24fddf` and is not relabeled here.
+The historical controlled SIM matrix keeps its own candidate binding and is not relabeled as
+evidence for `5853302`. No second sealed command, diagnostic model run, after-only account read, or
+activation occurred. The branch remains local and unpushed.
 
-## Privacy and next gate
-
-Private receipts remain owner-only in the ignored evidence area. Public documentation contains only
-safe counts, commit digests, result labels, and evidence-backed state.
-
-Do not rerun `f24fddf`. The next gate is one exact retained-runtime installation and one signed full
-suite for `e217ae9`, followed by static and privacy readback. Only if those gates pass may a newly
-authorized sealed proof run. Activation remains forbidden until all 54 receipts and every remaining
-Task 24 gate pass.
+The next candidate must correct the native hard-evaluation tool-invocation failure with local TDD
+and pass all exact-candidate gates before any separately authorized sealed attempt. Activation
+remains forbidden until all 54 numerical receipts and every Task 24 gate pass.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
