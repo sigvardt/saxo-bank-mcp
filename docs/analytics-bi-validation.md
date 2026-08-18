@@ -36,7 +36,8 @@ TDD began with eleven expected failures. Final local validation passed eleven fo
 BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, nine-skill static,
 60-tool/294-operation catalog, and 34-case evaluation-manifest gates passed. A bounded eight-path
 privacy scan reported 0 findings and 0 scan errors. No model, production MCP server, Saxo, browser,
-broker, install, proof, or external network activity ran in this correction.
+broker, install, proof, or broker/data network activity ran in the source and test correction. The
+required Knowledge Base readback was the only external documentation update.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
