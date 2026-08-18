@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from saxo_bank_mcp import agent_skill_install_probe as install_probe
 from saxo_bank_mcp.agent_skill_command_runner import CommandResult
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_probe import reuse_probe
@@ -71,6 +72,43 @@ def test_reuse_probe_starts_each_distinct_root_once(
     assert second is first
     assert len(calls) == 1
     assert calls[0][0] == "cache_mcp_probe"
+
+
+def test_probe_offline_mode_is_explicit_and_preserves_legacy_command_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "plugin"
+    root.mkdir()
+    (root / ".mcp.json").write_text("{}\n", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        **_kwargs: object,
+    ) -> CommandResult:
+        commands.append(argv)
+        return _probe_result(name, root)
+
+    monkeypatch.setattr(install_probe, "run_command", fake_run_command)
+
+    install_probe.probe_root_stdio(
+        "legacy",
+        root,
+        env={},
+        probe_env=tmp_path / "legacy-env",
+    )
+    install_probe.probe_root_stdio(
+        "native",
+        root,
+        env={},
+        probe_env=tmp_path / "native-env",
+        offline=True,
+    )
+
+    assert commands[0][:3] == ("uv", "run", "--project")
+    assert commands[1][:4] == ("uv", "run", "--offline", "--project")
 
 
 def test_reuse_probe_keeps_distinct_roots_independent(

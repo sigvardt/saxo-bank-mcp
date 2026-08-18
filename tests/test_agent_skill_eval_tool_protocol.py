@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Final
 
+import pytest
+
 from saxo_bank_mcp.agent_skill_eval_commands import (
     claude_non_router_command,
     codex_non_router_command,
@@ -14,6 +16,7 @@ from saxo_bank_mcp.agent_skill_eval_tool_protocol import (
 )
 
 TWO_EVENTS: Final = 2
+ROOT: Final = Path(__file__).resolve().parents[1]
 
 
 def test_codex_parser_dedupes_start_completion_and_keeps_order() -> None:
@@ -75,6 +78,42 @@ def test_codex_parser_dedupes_start_completion_and_keeps_order() -> None:
     assert trace.mcp_event_count == TWO_EVENTS
     assert trace.tool_event_count == TWO_EVENTS
     assert "session recovered" in trace.assistant_text
+
+
+def test_codex_0147_parser_fixture_reads_completed_mcp_identity() -> None:
+    stream = (ROOT / "tests/fixtures/codex-0.147-mcp-events.jsonl").read_text(encoding="utf-8")
+
+    trace = parse_codex_model_output(stream)
+
+    assert trace.parse_error == ""
+    assert trace.invoked_logical_tools == ("saxo_health",)
+    assert trace.mcp_event_count == 1
+    assert trace.saxo_event_count == 1
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"id": "unknown-empty", "type": "mcp_tool_call"},
+        {
+            "id": "unknown-saxo",
+            "type": "mcp_tool_call",
+            "server": "saxo-bank-mcp",
+            "tool": "unknown_tool",
+        },
+    ],
+)
+def test_codex_parser_fails_closed_for_unknown_or_empty_mcp_identity(
+    item: dict[str, str],
+) -> None:
+    stream = json.dumps({"type": "item.completed", "item": item})
+
+    trace = parse_codex_model_output(stream)
+
+    assert trace.invoked_logical_tools == ()
+    assert trace.mcp_event_count == 1
+    assert trace.non_saxo_mcp_event_count == 1
+    assert trace.parse_error == "unknown_mcp_event"
 
 
 def test_codex_parser_rejects_malicious_prose_without_events() -> None:

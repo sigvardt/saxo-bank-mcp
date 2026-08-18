@@ -21,6 +21,10 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     select_cases,
     selected_harnesses,
 )
+from saxo_bank_mcp.agent_skill_eval_native_preflight import (
+    CodexNativePreflightError,
+    preflight_codex_native_case,
+)
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
@@ -186,7 +190,9 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         record for record in records if record.router_source_mode == "source_equivalent"
     )
     model_records = tuple(
-        record for record in records if record.execution_mode == "model_execution"
+        record
+        for record in records
+        if record.execution_mode == "model_execution" and not record.no_model_call
     )
     installation_fixture_preserved = _installation_fixture_preserved(options.install_report)
     source_commit = "" if binding is None else binding.source_commit
@@ -519,6 +525,28 @@ def _execute_selected_cases(  # noqa: PLR0913
                     ),
                 )
                 continue
+            if (
+                options.harness_policy == "codex_native_v1"
+                and harness == "codex"
+                and execution_case.router_expectation is None
+            ):
+                try:
+                    preflight_codex_native_case(
+                        codex_home=runtime.codex_home,
+                        plugin_root=child_roots.codex_plugin_root,
+                        logical_grants=execution_case.exact_tool_grants["codex"],
+                        env=env,
+                        probe_env=runtime.probe_env,
+                    )
+                except CodexNativePreflightError as exc:
+                    records.append(
+                        _native_preflight_failed_record(
+                            execution_case,
+                            grants,
+                            exc,
+                        )
+                    )
+                    continue
             records.append(
                 execute_model_case(
                     execution_case,
@@ -533,6 +561,30 @@ def _execute_selected_cases(  # noqa: PLR0913
                 ),
             )
     return tuple(records)
+
+
+def _native_preflight_failed_record(
+    case: SkillEvalCase,
+    grants: tuple[str, ...],
+    failure: CodexNativePreflightError,
+) -> EvalRunRecord:
+    return EvalRunRecord(
+        case_id=case.id,
+        harness="codex",
+        status="failed",
+        execution_mode="model_execution",
+        expected_skill=case.expected_skill,
+        required_logical_tools=case.required_logical_tools,
+        forbidden_logical_tools=case.forbidden_logical_tools,
+        resolved_tool_grants=grants,
+        transcript_assertions_passed=False,
+        no_model_call=True,
+        no_mcp_call=failure.mcp_started is False,
+        no_saxo_call=True,
+        error=failure.reason,
+        grant_status="failed",
+        assertion_status="failed",
+    )
 
 
 def _codex_native_fixture_bound_case(
@@ -551,7 +603,7 @@ def _codex_native_fixture_bound_case(
     prompts = dict(case.harness_prompts)
     prompts["codex"] = (
         f"Use $saxo-bank-mcp:{case.expected_skill} for this installed Codex-native hard "
-        f"workflow.\n\n{prompts['codex']}"
+        f"workflow. Execute case ID {case.id}.\n\n{prompts['codex']}"
     )
     case = case.model_copy(update={"harness_prompts": prompts})
     if case.expected_skill != "saxo-analytics":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shutil
 import stat
 import tomllib
 from dataclasses import replace
@@ -16,6 +17,7 @@ import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
 import saxo_bank_mcp.agent_skill_matrix_env as matrix_env
 import saxo_bank_mcp.agent_skill_router_eval_execution as router_execution
+from saxo_bank_mcp import agent_skill_install_cli_driver as cli_driver
 from saxo_bank_mcp.agent_skill_command_runner import (
     process_group_members,
     process_still_running,
@@ -466,6 +468,51 @@ def test_prepare_codex_native_eval_runtime_never_reads_or_copies_claude_state(
         require_matrix_runtime_cleanup(runtime.run_root)
 
 
+def test_codex_native_runtime_uses_exact_marketplace_registration_flow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, _claude_src = _seed_cli_auth_sources(tmp_path)
+    retained_codex, _retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_install(marketplace: Path, env: dict[str, str]) -> tuple[object, ...]:
+        home = Path(env["CODEX_HOME"])
+        calls.append((marketplace.resolve(), home.resolve()))
+        target = home / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+        shutil.copytree(marketplace, target)
+        (home / "config.toml").write_text("# installed by exact CLI flow\n", encoding="utf-8")
+        (home / "config.toml").chmod(0o600)
+        return ()
+
+    monkeypatch.setattr(cli_driver, "run_codex_install", fake_install)
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=codex_src,
+        source_claude_home=None,
+        retained_codex_home=retained_codex,
+        retained_claude_home=None,
+        retained_codex_plugin_root=plugin_root,
+        harness_policy="codex_native_v1",
+    )
+    try:
+        assert len(calls) == 1
+        marketplace, home = calls[0]
+        assert home == runtime.codex_home.resolve()
+        assert marketplace.is_relative_to(runtime.run_root.resolve())
+        assert not marketplace.is_relative_to(runtime.codex_home.resolve() / "plugins/cache")
+        assert (
+            runtime.codex_home
+            / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0/skills/saxo-bank/SKILL.md"
+        ).is_file()
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+
+
 def test_prepare_eval_runtime_rejects_symlink_cli_auth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -576,8 +623,16 @@ def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
     def fake_codex_client_version(**_kwargs: object) -> str:
         return "codex-test"
 
+    def fake_native_preflight(**_kwargs: object) -> None:
+        return None
+
     monkeypatch.setattr(eval_runner, "codex_client_version", fake_codex_client_version)
     monkeypatch.setattr(eval_runner, "execute_model_case", fake_execute_model_case)
+    monkeypatch.setattr(
+        eval_runner,
+        "preflight_codex_native_case",
+        fake_native_preflight,
+    )
     options = EvalRunOptions(
         harness="codex",
         case_id="artifact-delivery",
@@ -615,6 +670,31 @@ def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
     assert "Call every required tool even when an earlier fixture is refused" in prompt
     assert "Do not pre-emptively refuse before making these controlled QA calls" in prompt
     assert "Final answer must include: analysis_id; owner-only; quality warnings" in prompt
+
+
+def test_codex_native_safety_execution_prompt_binds_exact_case_id() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-bank")
+        if candidate.id == "codex-native-safety-boundary"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    assert "Use $saxo-bank-mcp:saxo-qa-operations" in prompt
+    assert "case ID codex-native-safety-boundary" in prompt
+
+
+def test_saxo_qa_openai_metadata_invokes_skill_without_blanket_plan_only_mismatch() -> None:
+    metadata = (ROOT / "skills/saxo-qa-operations/agents/openai.yaml").read_text(encoding="utf-8")
+
+    assert "Use $saxo-bank-mcp:saxo-qa-operations" in metadata
+    assert "without executing model, MCP, or broker calls" not in metadata
 
 
 def test_codex_native_policy_rejects_explicit_live_selection(tmp_path: Path) -> None:

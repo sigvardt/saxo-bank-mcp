@@ -192,6 +192,13 @@ def test_native_command_has_no_claude_inputs(...) -> None:
 
 The native child command includes `--harness-policy codex_native_v1`. It receives only the Codex cache, Codex home, and clean source repo. The hard-task command uses `--harness codex`. Validation requires `report.harness == "codex"`, real model execution, no skipped cases, exact tool coverage, complete cleanup, unchanged state, and every record `record.harness == "codex"`.
 
+Each disposable native `CODEX_HOME` must register the exact retained plugin with the already-proved
+marketplace-add/plugin-add flow. Before every non-router model case, run a local-only preflight that
+requires the plugin to be enabled and the offline Saxo MCP `list_tools` set to equal that case's
+exact server-side grants. Registration, startup, or visibility failures stop before model work with
+typed provenance. Missing or unknown Codex MCP event identities fail closed; captured Codex 0.147
+JSON event shapes define the parser contract. Native execution prompts bind the exact case ID.
+
 Reuse the existing offline proof suite, installed SIM matrix, numerical receipts, Saxo reconciliation, artifact receipts, timeout reconciliation, and safety checks without changing their acceptance rules.
 
 - [ ] **Step 4: Run focused producer and evaluation tests twice**

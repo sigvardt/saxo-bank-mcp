@@ -44,6 +44,14 @@ The verified Codex cache starts a sealed child process. The child copies only th
 file-backed authentication and SIM files into a temporary owner-only runtime. It never prepares,
 copies, promotes, or executes Claude state.
 
+For every non-router `codex_native_v1` hard case, the disposable `CODEX_HOME` registers the exact
+retained plugin through the same marketplace-add and plugin-add CLI flow that the isolated install
+already proved. Before model work begins, a local-only preflight requires Codex to report that
+plugin enabled, starts its Saxo MCP server offline, and requires `list_tools` to expose exactly the
+case's server-side logical-tool grant set. Registration and tool-visibility failures are typed and
+stop before the model. A failed MCP-start probe keeps start provenance unknown unless the boundary
+can prove whether the server started.
+
 The child runs the existing proof work without changing its meaning:
 
 1. the installed offline proof suite emits measured receipts for every required proof case;
@@ -71,9 +79,10 @@ privacy, and review gates before release claims can use it.
 
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
-record, a skipped model call, incomplete tool coverage, failed proof measurement, Saxo mismatch,
-cleanup residue, state change, privacy finding, LIVE event, broker write, purchase, or disclaimer
-response.
+record, a skipped model call, an absent or unknown MCP event identity, incomplete tool coverage,
+failed proof measurement, Saxo mismatch, cleanup residue, state change, privacy finding, LIVE
+event, broker write, purchase, or disclaimer response. Each native execution prompt also binds the
+exact case ID; prose that merely names a tool cannot satisfy tool evidence.
 
 No browser is opened. No LIVE endpoint is allowed. Missing Saxo inputs never receive substitute
 market or account data.
@@ -85,6 +94,10 @@ dual report. New tests then require:
 
 - the exact `codex_native_v1` policy;
 - Codex-only runtime preparation with no Claude files or environment entries;
+- exact marketplace registration in each disposable `CODEX_HOME`;
+- a no-model preflight that proves the plugin enabled and exact filtered `list_tools` visibility;
+- fail-closed parsing of missing or unknown Codex MCP event identities using captured Codex 0.147
+  JSON shapes;
 - rejection of non-Codex or no-model evaluation records;
 - a trusted Codex-only installed cache with exact bytes and 60 tools;
 - unchanged numerical, reconciliation, cleanup, privacy, and safety gates;

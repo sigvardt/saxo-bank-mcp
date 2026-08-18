@@ -31,6 +31,7 @@ def probe_root_stdio(
     *,
     env: dict[str, str],
     probe_env: Path,
+    offline: bool = False,
 ) -> CommandResult:
     """Start MCP via each root's .mcp.json stdio contract and list tools."""
     probe_env.mkdir(parents=True, exist_ok=True)
@@ -71,7 +72,11 @@ async def main() -> None:
     async with Client(config) as client:
         tools = await client.list_tools()
     missing = [tool.name for tool in tools if getattr(tool, "annotations", None) is None]
-    print(json.dumps({{"tool_count": len(tools), "annotations_missing": missing}}))
+    print(json.dumps({{
+        "tool_count": len(tools),
+        "annotations_missing": missing,
+        "tool_names": [tool.name for tool in tools],
+    }}))
 anyio.run(main)
 """
     merged = dict(env)
@@ -79,7 +84,16 @@ anyio.run(main)
     merged["UV_NO_MODIFY_PATH"] = "1"
     result = run_command(
         name,
-        ("uv", "run", "--project", str(root), "python", "-c", code),
+        (
+            "uv",
+            "run",
+            *(("--offline",) if offline else ()),
+            "--project",
+            str(root),
+            "python",
+            "-c",
+            code,
+        ),
         cwd=root,
         env=merged,
         timeout_seconds=300,

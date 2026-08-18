@@ -1,0 +1,3 @@
+{"type":"item.started","item":{"id":"call-health","type":"mcp_tool_call","server":"saxo-bank-mcp","tool":"saxo_health","arguments":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"call-health","type":"mcp_tool_call","server":"saxo-bank-mcp","tool":"saxo_health","arguments":{},"result":{"content":[]},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"60 logical tools; SIM-only; LIVE disabled; no disclaimer response"}}

@@ -296,7 +296,6 @@ def prepare_eval_isolated_runtime(  # noqa: PLR0913
             _seed_codex_native_cli_home(
                 runtime,
                 source_codex_home=source_codex_home,
-                retained_codex_home=retained_codex_home,
                 retained_codex_plugin_root=retained_codex_plugin_root,
             )
             claude_auth_source = None
@@ -327,10 +326,9 @@ def _seed_codex_native_cli_home(
     runtime: MatrixIsolatedRuntime,
     *,
     source_codex_home: Path | None,
-    retained_codex_home: Path | None,
     retained_codex_plugin_root: Path | None,
 ) -> None:
-    """Seed only Codex auth and retained Codex plugin state."""
+    """Seed Codex auth, then register the retained plugin via the proven CLI flow."""
     codex_auth = _resolve_codex_source_home(source_codex_home)
     for name in _CODEX_AUTH_SEED_FILES:
         copied = _copy_optional_owner_only_file(
@@ -340,16 +338,90 @@ def _seed_codex_native_cli_home(
         )
         if copied is None:
             raise MatrixEnvError("codex_file_auth_missing")
-    _seed_retained_plugin_registration(runtime, retained_codex_home, None)
     if retained_codex_plugin_root is not None:
-        contained_plugin = _seed_codex_plugin_tree(
-            runtime,
-            retained_codex_home=retained_codex_home,
-            retained_plugin_root=retained_codex_plugin_root,
-        )
-        _write_codex_native_plugin_config(runtime, contained_plugin)
+        _register_codex_native_plugin(runtime, retained_codex_plugin_root)
     for path in (runtime.home, runtime.codex_home):
         path.chmod(OWNER_DIR_MODE)
+
+
+def _register_codex_native_plugin(
+    runtime: MatrixIsolatedRuntime,
+    retained_plugin_root: Path,
+) -> Path:
+    """Use the same marketplace-add/plugin-add flow as the isolated installer."""
+    from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError  # noqa: PLC0415
+    from saxo_bank_mcp.agent_skill_install_cli_driver import (  # noqa: PLC0415
+        run_codex_install,
+    )
+    from saxo_bank_mcp.agent_skill_install_paths import (  # noqa: PLC0415
+        MARKETPLACE_NAME,
+        PLUGIN_NAME,
+    )
+
+    source = runtime.codex_home / "marketplace-source"
+    try:
+        _copy_owner_only_tree(retained_plugin_root.expanduser().resolve(strict=True), source)
+        marketplace, plugin, version = _codex_plugin_identity(source)
+        if marketplace != MARKETPLACE_NAME or plugin != PLUGIN_NAME:
+            raise MatrixEnvError("codex_plugin_registration_invalid")  # noqa: TRY301
+        run_codex_install(source, runtime.env)
+        installed = (
+            runtime.codex_home / "plugins" / "cache" / marketplace / plugin / version
+        ).resolve(strict=True)
+        if not installed.is_dir() or not installed.is_relative_to(runtime.codex_home.resolve()):
+            raise MatrixEnvError("codex_plugin_registration_invalid")  # noqa: TRY301
+        _tighten_owner_only_tree(installed)
+    except MatrixEnvError:
+        raise
+    except (CommandFailureError, OSError, TypeError, ValueError) as exc:
+        raise MatrixEnvError("codex_plugin_registration_failed") from exc
+    return installed
+
+
+def _codex_plugin_identity(root: Path) -> tuple[str, str, str]:
+    marketplace_raw: object = json.loads(
+        (root / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+    )
+    plugin_raw: object = json.loads(
+        (root / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    if not isinstance(marketplace_raw, dict) or not isinstance(plugin_raw, dict):
+        raise MatrixEnvError("codex_plugin_registration_invalid")
+    marketplace = cast("dict[str, object]", marketplace_raw)
+    plugin_document = cast("dict[str, object]", plugin_raw)
+    marketplace_name = marketplace.get("name")
+    plugin_name = plugin_document.get("name")
+    version = plugin_document.get("version")
+    entries = marketplace.get("plugins")
+    matching_entry = isinstance(entries, list) and any(
+        isinstance(entry, dict)
+        and cast("dict[str, object]", entry).get("name") == plugin_name
+        and cast("dict[str, object]", entry).get("version") == version
+        for entry in cast("list[object]", entries)
+    )
+    if (
+        not isinstance(marketplace_name, str)
+        or not marketplace_name
+        or not isinstance(plugin_name, str)
+        or not plugin_name
+        or not isinstance(version, str)
+        or not version
+        or not matching_entry
+    ):
+        raise MatrixEnvError("codex_plugin_registration_invalid")
+    return marketplace_name, plugin_name, version
+
+
+def _tighten_owner_only_tree(root: Path) -> None:
+    for path in (root, *root.rglob("*")):
+        if path.is_symlink():
+            raise MatrixEnvError("codex_plugin_registration_invalid")
+        if path.is_dir():
+            path.chmod(OWNER_DIR_MODE)
+        elif path.is_file():
+            path.chmod(OWNER_FILE_MODE)
+        else:
+            raise MatrixEnvError("codex_plugin_registration_invalid")
 
 
 def apply_case_eval_allowlists(env: dict[str, str], *, case_id: str) -> dict[str, str]:
@@ -802,78 +874,6 @@ def _seed_codex_plugin_tree(
     target = runtime.codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
     _copy_owner_only_tree(plugin_resolved, target)
     return target
-
-
-def _write_codex_native_plugin_config(
-    runtime: MatrixIsolatedRuntime,
-    contained_plugin: Path,
-) -> None:
-    """Bind native Codex registration to the contained exact plugin, never deleted install input."""
-    try:
-        plugin = contained_plugin.resolve(strict=True)
-        if not plugin.is_relative_to(runtime.codex_home.resolve(strict=True)):
-            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
-        marketplace_raw: object = json.loads(
-            (plugin / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
-        )
-        plugin_raw: object = json.loads(
-            (plugin / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
-        )
-        if not isinstance(marketplace_raw, dict) or not isinstance(plugin_raw, dict):
-            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
-        marketplace = cast("dict[str, object]", marketplace_raw)
-        plugin_document = cast("dict[str, object]", plugin_raw)
-        marketplace_name = marketplace.get("name")
-        plugin_name = plugin_document.get("name")
-        listed = marketplace.get("plugins")
-        if (
-            not isinstance(marketplace_name, str)
-            or not marketplace_name
-            or not isinstance(plugin_name, str)
-            or not plugin_name
-            or not isinstance(listed, list)
-            or not any(
-                isinstance(entry, dict)
-                and cast("dict[str, object]", entry).get("name") == plugin_name
-                for entry in cast("list[object]", listed)
-            )
-        ):
-            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
-        config = (
-            f"[marketplaces.{json.dumps(marketplace_name)}]\n"
-            'source_type = "local"\n'
-            f"source = {json.dumps(str(plugin))}\n\n"
-            f"[plugins.{json.dumps(f'{plugin_name}@{marketplace_name}')}]\n"
-            "enabled = true\n"
-        ).encode()
-        config_path = runtime.codex_home / "config.toml"
-        if config_path.is_symlink():
-            raise MatrixEnvError("codex_plugin_config_failed")  # noqa: TRY301
-        descriptor, pending_raw = tempfile.mkstemp(
-            prefix=".config-native-",
-            dir=runtime.codex_home,
-        )
-        pending = Path(pending_raw)
-        try:
-            os.fchmod(descriptor, OWNER_FILE_MODE)
-            _write_all_and_fsync(descriptor, config)
-            os.close(descriptor)
-            descriptor = -1
-            pending.replace(config_path)
-            directory = os.open(runtime.codex_home, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            with suppress(OSError):
-                pending.unlink(missing_ok=True)
-    except MatrixEnvError:
-        raise
-    except (OSError, TypeError, ValueError) as exc:
-        raise MatrixEnvError("codex_plugin_config_failed") from exc
 
 
 def _copy_owner_only_tree(source: Path, target: Path) -> None:

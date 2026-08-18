@@ -278,7 +278,9 @@ def _classify_codex_item(item: _CodexItem, counts: _EventCounts, order: list[str
     if classification == "saxo_protocol":
         return
     counts.non_saxo_mcp += 1
-    counts.parse_error = counts.parse_error or "non_saxo_mcp_event"
+    counts.parse_error = counts.parse_error or (
+        "unknown_mcp_event" if classification == "unknown" else "non_saxo_mcp_event"
+    )
 
 
 def _codex_mcp_logical(item: _CodexItem) -> str | None:
@@ -307,7 +309,7 @@ def _is_saxo_mcp_server(server: str) -> bool:
 
 
 def _codex_mcp_classification(item: _CodexItem) -> str:
-    """Return saxo | saxo_protocol | non_saxo for an MCP tool event."""
+    """Return saxo | saxo_protocol | unknown | non_saxo for an MCP tool event."""
     logical = _codex_mcp_logical(item)
     if logical is not None:
         return "saxo"
@@ -315,16 +317,26 @@ def _codex_mcp_classification(item: _CodexItem) -> str:
     tool = (item.tool or "").strip()
     name = (item.name or "").strip()
     if not server and not tool and not name:
-        # Empty MCP wrapper rows are harness noise, not a foreign server.
-        return "saxo_protocol"
+        return "unknown"
     if _is_codex_mcp_discovery(server=server, tool=tool, name=name):
         # Exact known Codex discovery helpers only (server=codex + list_mcp_resources...).
         return "saxo_protocol"
     if _is_saxo_mcp_server(server) or _is_saxo_mcp_qualified_name(tool, name):
-        # Saxo server wrapper/protocol noise is not a foreign MCP. Real tools still
-        # grade via logical invocation + exact grants; unknown servers stay fail-closed.
-        return "saxo_protocol"
+        if _is_known_saxo_protocol_tool(tool, name):
+            return "saxo_protocol"
+        return "unknown"
     return "non_saxo"
+
+
+def _is_known_saxo_protocol_tool(*candidates: str) -> bool:
+    for candidate in candidates:
+        text = candidate.strip().lower()
+        if not text:
+            continue
+        bare = text.rsplit("__", 1)[-1] if "__" in text else text
+        if bare and bare in SAXO_SERVER_PROTOCOL_TOOLS:
+            return True
+    return False
 
 
 def _is_codex_mcp_discovery(*, server: str, tool: str, name: str) -> bool:
