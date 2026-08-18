@@ -17,26 +17,26 @@ No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation
 readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
 active.
 
-Local diagnostic source `bf721797ac27e23c4d79160f5f2697d86b139439`, tree
-`4d6c2a9ed92f3f6f8b15e91747254a6089bea7ae`, adds evidence needed to distinguish the two remaining
-local failure questions without changing the assertion, prompt, parser selection, cleanup
-behavior, or historical `dual_v1` path. It has not been installed and no proof has run for it, so
-the sealed evidence above remains bound to `06fb8e1`.
+Local corrective source `be6a6ab5bf74c7a3c752598eee4062c4a16feb17`, tree
+`f8092d6bcc5cb2a0efc168a4fb3f9241c958e618`, builds on the diagnostic source without changing the
+assertion, prompt, successful evaluation behavior, or historical `dual_v1` path. It has not been
+installed and no proof has run for it, so the sealed evidence above remains bound to `06fb8e1`.
 
-The diagnostic correction records separate content-free assertion vectors for decoded Codex
-assistant events and final parsed text, together with event counts and SHA-256 hashes. It also
-authenticates nested evaluation-cleanup status and counts. Command cleanup now retains an
-owner-only receipt binding PID, process group, hashed birth identity, terminal state, and
-termination outcome; only that receipt's digest may enter the public failure publication. Missing
-or unreadable process observation remains `unknown`, not absent. No transcript, arguments, raw
-output, account data, handles, payloads, or private paths are retained in these summaries.
+Malformed or partly malformed Codex output is now unobservable for assistant diagnostics: event
+counts, message presence, hashes, and positive or negative assertion vectors remain unknown rather
+than becoming false zeroes. Timeout and post-spawn operating-system failures perform cleanup once,
+then observe and persist terminal process evidence before raising. Cleanup evidence carries a
+strict authenticated status of `authenticated`, `no-target-observed`, `observation-unknown`, or
+`write-failed`; its optional digest is accepted only when consistent with that status and is bound
+through the strict failure and publication schemas. No transcript, arguments, raw output, account
+data, handles, payloads, or private paths are retained.
 
-TDD began with nine expected diagnostic failures. Final local validation passed ten focused tests
-twice, 233 related evaluation/proof tests, and 238 auth/privacy tests. Ruff and changed-file format
-passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, nine-skill static,
-60-tool/294-operation catalog, and 34-case evaluation-manifest gates passed. A bounded ten-path
-privacy scan reported 0 findings and 0 scan errors. No model, MCP server, Saxo, browser, broker, or
-network activity ran in this correction.
+TDD began with eleven expected failures. Final local validation passed eleven focused tests twice,
+139 related evaluation/proof tests, and 66 auth/privacy tests. Ruff and changed-file format passed;
+BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, nine-skill static,
+60-tool/294-operation catalog, and 34-case evaluation-manifest gates passed. A bounded eight-path
+privacy scan reported 0 findings and 0 scan errors. No model, production MCP server, Saxo, browser,
+broker, install, proof, or external network activity ran in this correction.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
