@@ -38,6 +38,24 @@ installed-byte parity and is not Claude runtime state or execution. The proof pr
 rechecks the candidate commit, clean source tree, installed inventory, cache digest, registration,
 and owner-only modes before it trusts the installation.
 
+## Candidate-bound invocation
+
+An executed `codex_native_v1` outer command must supply `--candidate-source-root`. Before install
+verification or proof-runtime consumption, the launcher reads only the owner-only install binding
+and requires that root to be an absolute, non-symlink Git top level in detached-HEAD state. Its
+commit and tree must exactly equal the install candidate and retained-runtime binding, its tracked
+and untracked status must be clean, and its proof runner and producer must be regular files.
+
+When orchestration starts from a later documentation commit, the launcher starts the exact
+candidate root's runner with that root as its working directory and source import root. The
+candidate runner revalidates its own script path, producer-module path, environment binding,
+commit, tree, detached state, and cleanliness. The producer checks the same root again before it
+can enter the one-shot runtime boundary and again after execution. A caller cannot use the hidden
+handoff flag to keep running later-commit code. Missing, mismatched, attached, or dirty roots
+publish a typed `not_started` boundary failure and cannot create a consumption intent.
+
+The historical `dual_v1` path and non-executing plan-only behavior are unchanged.
+
 ## Proof execution
 
 The verified Codex cache starts a sealed child process. The child copies only the minimum Codex

@@ -311,6 +311,34 @@ def _load_proof_matrix_script() -> ModuleType:
     return module
 
 
+def _patch_candidate_entrypoint_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    script: ModuleType,
+    candidate_root: Path,
+) -> None:
+    def load_binding(_path: Path, *, candidate_commit: str) -> tuple[str, str]:
+        assert candidate_commit == CANDIDATE
+        return CANDIDATE, "9" * 40
+
+    def validate_source(
+        source_root: Path,
+        *,
+        candidate_commit: str,
+        candidate_tree: str,
+    ) -> Path:
+        assert source_root == candidate_root
+        assert candidate_commit == CANDIDATE
+        assert candidate_tree == "9" * 40
+        return candidate_root
+
+    def require_entrypoint(source_root: Path) -> None:
+        assert source_root == candidate_root
+
+    monkeypatch.setattr(script, "_load_candidate_launch_binding", load_binding)
+    monkeypatch.setattr(script, "validate_codex_native_candidate_source_root", validate_source)
+    monkeypatch.setattr(script, "_require_candidate_entrypoint_binding", require_entrypoint)
+
+
 def test_failure_before_preflight_proves_only_no_execution() -> None:
     envelope = _failure(_progress(), reason="proof_before_preflight_injected")
 
@@ -1540,6 +1568,8 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
         return install, ()
 
     monkeypatch.setattr(script, "load_verified_codex_install_report", load_install)
+    candidate_root = tmp_path / "candidate"
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
 
     def fail_producer(*_args: object, **_kwargs: object) -> NoReturn:
         raise producer.CodexNativeProofFailureError(receipt)
@@ -1551,6 +1581,9 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
         [
             "--candidate-commit",
             CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--candidate-root-bound",
             "--install-report",
             str(tmp_path / "install.json"),
             "--codex-global-home",
@@ -1592,6 +1625,8 @@ def test_proof_matrix_cli_publishes_typed_native_boundary_discriminators(
         "load_verified_codex_install_report",
         load_install,
     )
+    candidate_root = tmp_path / "candidate"
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
 
     def fail_boundary(*_args: object, **_kwargs: object) -> NoReturn:
         raise producer.CodexNativeBoundaryFailureError(
@@ -1610,6 +1645,9 @@ def test_proof_matrix_cli_publishes_typed_native_boundary_discriminators(
         [
             "--candidate-commit",
             CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--candidate-root-bound",
             "--install-report",
             str(tmp_path / "install.json"),
             "--codex-global-home",

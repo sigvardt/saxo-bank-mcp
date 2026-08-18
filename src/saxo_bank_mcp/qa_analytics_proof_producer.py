@@ -94,6 +94,7 @@ _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _PRODUCER_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _BOOTSTRAP_MODULE_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
+_PROOF_MATRIX_RUNNER_RELATIVE = Path("scripts/run_analytics_proof_matrix.py")
 _COMMAND_NAME = "analytics_proof_producer"
 _AGENT_EVAL_COMMAND_NAME = "analytics_installed_dual_evaluation"
 _PROCESS_AUTHORITY = object()
@@ -608,6 +609,7 @@ def run_verified_codex_native_producer(  # noqa: C901
     *,
     candidate_commit: str,
     install_report_path: Path,
+    source_repo: Path,
 ) -> CodexNativeVerifiedInstalledProofValidation:
     """Execute the unchanged proof suite with the native Codex harness quorum."""
     if type(install) is not CodexInstallEvidenceReport:
@@ -617,12 +619,17 @@ def run_verified_codex_native_producer(  # noqa: C901
         or install.candidate_commit != candidate_commit
     ):
         raise ProofProducerError("proof_installed_candidate_mismatch")
-    _require_clean_source_commit(install.repo, candidate_commit)
+    if install.proof_runtime is None:
+        raise ProofProducerError("proof_retained_runtime_required")
+    candidate_tree = install.proof_runtime.binding.candidate_tree
+    validated_source = validate_codex_native_candidate_source_root(
+        source_repo,
+        candidate_commit=candidate_commit,
+        candidate_tree=candidate_tree,
+    )
     clone_digest, codex_digest = _verified_codex_install_digests(install)
     if clone_digest != codex_digest:
         raise ProofProducerError("proof_installed_cache_digest_mismatch")
-    if install.proof_runtime is None:
-        raise ProofProducerError("proof_retained_runtime_required")
     install_report = install_report_path.resolve()
     install_report_sha256 = _bound_codex_install_report_sha256(install_report, install)
     expected_module_sha256 = _installed_producer_module_sha256(install.codex.cache_root)
@@ -631,7 +638,7 @@ def run_verified_codex_native_producer(  # noqa: C901
     try:
         execution = _execute_codex_native_installed_child(
             install.codex.cache_root,
-            source_repo=install.clone.path,
+            source_repo=validated_source,
             retained_codex_home=install.run_root / "codex-home",
             install=install,
             install_report_path=install_report,
@@ -644,7 +651,11 @@ def run_verified_codex_native_producer(  # noqa: C901
             contract_sha256=contract_sha256,
         )
     except (CodexNativeBoundaryFailureError, CodexNativeProofFailureError):
-        _require_clean_source_commit(install.repo, candidate_commit)
+        validate_codex_native_candidate_source_root(
+            validated_source,
+            candidate_commit=candidate_commit,
+            candidate_tree=candidate_tree,
+        )
         if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
             raise ProofProducerError("proof_installed_cache_changed_during_execution") from None
         if _installed_producer_module_sha256(install.codex.cache_root) != expected_module_sha256:
@@ -655,7 +666,11 @@ def run_verified_codex_native_producer(  # noqa: C901
         ):
             raise ProofProducerError("proof_installed_bootstrap_changed_during_execution") from None
         raise
-    _require_clean_source_commit(install.repo, candidate_commit)
+    validate_codex_native_candidate_source_root(
+        validated_source,
+        candidate_commit=candidate_commit,
+        candidate_tree=candidate_tree,
+    )
     if _verified_codex_install_digests(install) != (clone_digest, codex_digest):
         raise ProofProducerError("proof_installed_cache_changed_during_execution")
     if _installed_producer_module_sha256(install.codex.cache_root) != expected_module_sha256:
@@ -2866,6 +2881,51 @@ def _require_clean_source_commit(repo: Path, candidate_commit: str) -> None:
         raise ProofProducerError("proof_source_candidate_mismatch")
     if git_output(resolved, "status", "--porcelain", "--untracked-files=no") != "":
         raise ProofProducerError("proof_source_worktree_not_clean")
+
+
+def validate_codex_native_candidate_source_root(
+    source_repo: Path,
+    *,
+    candidate_commit: str,
+    candidate_tree: str,
+) -> Path:
+    """Bind native proof execution to one clean detached candidate worktree."""
+    if (
+        not source_repo.is_absolute()
+        or _COMMIT_PATTERN.fullmatch(candidate_commit) is None
+        or _COMMIT_PATTERN.fullmatch(candidate_tree) is None
+    ):
+        raise ProofProducerError("proof_source_root_invalid")
+    try:
+        metadata = os.lstat(source_repo)
+        resolved = source_repo.resolve(strict=True)
+    except OSError as exc:
+        raise ProofProducerError("proof_source_root_invalid") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or source_repo.absolute() != resolved
+        or git_output(resolved, "rev-parse", "--show-toplevel") != str(resolved)
+    ):
+        raise ProofProducerError("proof_source_root_invalid")
+    if (
+        git_output(resolved, "rev-parse", "HEAD") != candidate_commit
+        or git_output(resolved, "rev-parse", "HEAD^{tree}") != candidate_tree
+    ):
+        raise ProofProducerError("proof_source_candidate_mismatch")
+    if git_output(resolved, "rev-parse", "--abbrev-ref", "HEAD") != "HEAD":
+        raise ProofProducerError("proof_source_worktree_not_detached")
+    if git_output(resolved, "status", "--porcelain", "--untracked-files=all") != "":
+        raise ProofProducerError("proof_source_worktree_not_clean")
+    for relative in (_PROOF_MATRIX_RUNNER_RELATIVE, _PRODUCER_MODULE_RELATIVE):
+        path = resolved / relative
+        try:
+            path_metadata = os.lstat(path)
+        except OSError as exc:
+            raise ProofProducerError("proof_source_entrypoint_invalid") from exc
+        if not stat.S_ISREG(path_metadata.st_mode) or stat.S_ISLNK(path_metadata.st_mode):
+            raise ProofProducerError("proof_source_entrypoint_invalid")
+    return resolved
 
 
 def _verified_install_digests(
