@@ -12,6 +12,14 @@ bootstrap failure evidence survived, so every child phase, network, model, MCP, 
 write, purchase, disclaimer, and cleanup fact remains unknown. No retry ran. All 54 proof profiles
 remain quarantined.
 
+Commit `e217ae9c1ea12467d14c0b85c71831e761e4ca24`, tree
+`23463a1bc236dcc03c6381eacb61b97c6e191e1a`, is the locally verified corrective source
+candidate. It preserves authenticated phase, reason, command, and cleanup discriminators at the
+native boundary and records a two-phase owner-only runtime-consumption receipt before deleting the
+bound runtime. It has not yet received an exact retained-runtime install, full-suite receipt, SIM
+preflight, or sealed proof. The `f24fddf` evidence below remains the latest sealed evidence and is
+not relabeled.
+
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, or private URLs.
 
@@ -58,6 +66,23 @@ The retained full-suite receipt binds the exact candidate and tree, approved ext
 exit, 2,713-test count, zero failure/error/skip counts, JUnit digest, clean worktree before and
 after, and its own digest. The JUnit and receipt are owner-only mode 0600. Raw suite output was not
 retained. External temp returned to its pre-suite baseline after completion.
+
+## Local correction after the current evidence
+
+The `e217ae9` correction began with failing real-boundary and durability regressions. One added
+regression proved the pre-delete intent needed authenticated readback before runtime deletion.
+After the correction:
+
+- 15 focused boundary and runtime-consumption tests passed twice;
+- 383 related proof, install, auth, session, and privacy tests passed;
+- Ruff and Ruff format passed;
+- BasedPyright reported 0 errors, 0 warnings, and 0 notes;
+- plugin, nine-skill static, catalog, and evaluation-manifest checks passed;
+- the bounded seven-file privacy scan reported 0 findings and 0 scan errors.
+
+These are local source gates only. No model, Saxo, browser, or network activity occurred during the
+corrective batch. They do not replace the exact install, signed full suite, SIM preflight, or sealed
+proof required for a new evidence candidate.
 
 ## Exact Codex-only installation
 
@@ -144,8 +169,9 @@ It is not evidence for `f24fddf` and is not relabeled here.
 Private receipts remain owner-only in the ignored evidence area. Public documentation contains only
 safe counts, commit digests, result labels, and evidence-backed state.
 
-Do not rerun this candidate. The next change must first explain and preserve the exact local native
-boundary failure without a model or Saxo proof run. Activation remains forbidden until all 54
-receipts and every remaining Task 24 gate pass.
+Do not rerun `f24fddf`. The next gate is one exact retained-runtime installation and one signed full
+suite for `e217ae9`, followed by static and privacy readback. Only if those gates pass may a newly
+authorized sealed proof run. Activation remains forbidden until all 54 receipts and every remaining
+Task 24 gate pass.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.

@@ -5,14 +5,14 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Evidence candidate `f24fddf` retains one install-probed Python runtime through the
-sealed proof boundary and suppresses import-time bytecode writes. Its exact Codex-only installation,
-guarded 2,713-test suite, static, type, catalog, and privacy gates pass. The one sealed proof command
-exited 1 with an authenticated outer boundary refusal but no authenticated producer or bootstrap
-failure evidence. Every child phase, network, event, execution, mutation, purchase, disclaimer, and
-cleanup fact remains unknown. Separate local cleanup checks found no candidate process or native
-runtime residue. No retry or activation ran. All 54 proof profiles remain quarantined. The exact
-result is recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Corrective source candidate `e217ae9` locally preserves authenticated native-boundary
+phase, reason, command, and cleanup state plus two-phase runtime-consumption evidence. Its focused,
+related, static, type, catalog, and privacy gates pass, but it has not yet received an exact install,
+full-suite receipt, SIM preflight, or sealed proof. Evidence candidate `f24fddf` remains the latest
+sealed attempt: its exact installation and guarded 2,713-test suite passed, then its one sealed proof
+exited 1 with an authenticated outer refusal and unknown child facts. No retry or activation ran.
+All 54 proof profiles remain quarantined. The exact distinction is recorded in
+`docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2323,11 +2323,18 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The current Codex-only candidate is `f24fddf`. Its retained runtime is bound to the exact candidate,
-installed inventory, dependency lock, producer, interpreter, and installation receipt. The install
-probe and sealed child both use Python's explicit no-bytecode flag, so imports do not change the
-installed source inventory. Focused, related, full-suite, static, privacy, and exact 60-tool
-installation checks pass. The historical dual policy and evidence remain unchanged.
+The current corrective source candidate is `e217ae9`. It preserves an authenticated privacy-safe
+native-boundary phase, reason, command, and cleanup discriminator. Runtime consumption now records
+and authenticates owner-only intent before deletion, writes an authenticated completion receipt
+after deletion, and verifies consumed state without requiring the deleted runtime to exist. Its 15
+focused tests passed twice, 383 related tests passed, and static, type, catalog, evaluation-manifest,
+and privacy checks passed. No model, Saxo, browser, or network activity occurred in that corrective
+batch. It has not yet received exact installed-candidate or full-suite proof.
+
+The latest sealed evidence remains `f24fddf`. Its retained runtime was bound to the exact candidate,
+installed inventory, dependency lock, producer, interpreter, and installation receipt. Focused,
+related, full-suite, static, privacy, and exact 60-tool installation checks passed. The historical
+dual policy and evidence remain unchanged.
 
 The required external SIM status and session-capability preflight passed. The one sealed proof
 command then exited 1. The strict outer publication authenticates a `boundary_failure` with reason
@@ -2337,11 +2344,11 @@ and cleanup remain unknown. Separate local checks after exit found zero candidat
 native temp-runtime residues, and the retained proof runtime removed. Do not retry this candidate or
 make an after-only account read.
 
-The next local change must explain and preserve the exact native boundary failure without model or
-Saxo proof activity. Only after another complete local gate set may a sealed run prove the native
-hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh 60-tool SIM matrix,
-cleanup, account equality, and the activation decision. The historical matrix remains historical
-and is not relabeled.
+The next gate is one exact retained-runtime installation and signed full suite for `e217ae9`, then
+static and privacy readback. Only if every local gate passes may one newly authorized sealed run
+attempt the native hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh
+60-tool SIM matrix, cleanup, account equality, and the activation decision. The historical matrix
+remains historical and is not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
