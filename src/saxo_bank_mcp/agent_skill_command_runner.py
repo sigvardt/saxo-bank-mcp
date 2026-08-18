@@ -51,6 +51,65 @@ class ProcessCleanupTargetReceipt(_StrictModel):
         "unknown",
     ]
 
+    @model_validator(mode="after")
+    def _validate_semantic_outcome(self) -> Self:
+        expected = {
+            "absent": "no_longer_running",
+            "zombie": "non_executing_zombie",
+            "identity_reused": "identity_changed",
+            "running": "still_running",
+            "unknown": "unknown",
+        }[self.terminal_state]
+        if self.termination_outcome != expected:
+            raise ValueError("cleanup terminal state and outcome differ")
+        if self.terminal_state in {"absent", "unknown"}:
+            if self.terminal_birth_identity_sha256 is not None:
+                raise ValueError("cleanup terminal identity must be absent")
+        elif self.terminal_birth_identity_sha256 is None:
+            raise ValueError("cleanup terminal identity is required")
+        elif self.terminal_state == "identity_reused":
+            if self.terminal_birth_identity_sha256 == self.birth_identity_sha256:
+                raise ValueError("cleanup reused identity must differ")
+        elif self.terminal_birth_identity_sha256 != self.birth_identity_sha256:
+            raise ValueError("cleanup same-birth terminal identity differs")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessCleanupTerminalSnapshot:
+    """One birth-bound terminal view used for cleanup status, receipt, and counts."""
+
+    targets: tuple[ProcessCleanupTargetReceipt, ...]
+    coverage_status: Literal["complete", "unknown"]
+
+    @property
+    def cleanup_status(self) -> Literal["complete", "failed", "unknown"]:
+        if self.coverage_status == "unknown" or any(
+            target.termination_outcome == "unknown" for target in self.targets
+        ):
+            return "unknown"
+        if any(target.termination_outcome == "still_running" for target in self.targets):
+            return "failed"
+        return "complete"
+
+    @property
+    def remaining_process_count(self) -> int | None:
+        if self.cleanup_status == "unknown":
+            return None
+        return sum(target.termination_outcome == "still_running" for target in self.targets)
+
+    @property
+    def remaining_process_group_count(self) -> int | None:
+        if self.cleanup_status == "unknown":
+            return None
+        return len(
+            {
+                target.pgid
+                for target in self.targets
+                if target.termination_outcome == "still_running"
+            },
+        )
+
 
 class CommandCleanupIdentityReceipt(_StrictModel):
     schema_version: Literal["1"] = "1"
@@ -68,10 +127,32 @@ class CommandCleanupIdentityReceipt(_StrictModel):
             raise ValueError("cleanup identity target count differs")
         if len({target.pid for target in self.targets}) != len(self.targets):
             raise ValueError("cleanup identity target pids must be unique")
+        if any(target.termination_outcome == "unknown" for target in self.targets):
+            raise ValueError("authenticated cleanup receipt cannot contain unknown targets")
         material = self.model_dump(mode="json", exclude={"receipt_sha256"})
         if self.receipt_sha256 != _digest(material):
             raise ValueError("cleanup identity receipt digest mismatch")
         return self
+
+    @property
+    def remaining_process_count(self) -> int:
+        """Derive candidate survivors only from authenticated semantic outcomes."""
+        return sum(target.termination_outcome == "still_running" for target in self.targets)
+
+    @property
+    def remaining_process_group_count(self) -> int:
+        """Derive candidate groups without a second raw PID or PGID liveness query."""
+        return len(
+            {
+                target.pgid
+                for target in self.targets
+                if target.termination_outcome == "still_running"
+            },
+        )
+
+    @property
+    def cleanup_status(self) -> Literal["complete", "failed"]:
+        return "failed" if self.remaining_process_count else "complete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,10 +258,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     process_error: OSError | None = None
     pids: tuple[int, ...] = ()
     pgids: tuple[int, ...] = ()
+    terminal_snapshot = ProcessCleanupTerminalSnapshot(targets=(), coverage_status="complete")
 
     def _capture_identities(pids: tuple[int, ...]) -> None:
-        if cleanup_identity_receipt_path is None:
-            return
         with watch_lock:
             prior = dict(tracked_identities)
         observations = tuple(
@@ -213,8 +293,6 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     def _write_cleanup_receipt() -> CommandCleanupIdentityEvidence:
         if cleanup_identity_receipt_path is None or root_pid is None or pgid is None:
             return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
-        with watch_lock:
-            identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
         return write_command_cleanup_identity_receipt(
             cleanup_identity_receipt_path,
             name=name,
@@ -222,7 +300,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cwd=cwd,
             root_pid=root_pid,
             root_pgid=pgid,
-            identities=identities,
+            terminal_snapshot=terminal_snapshot,
         )
 
     def _watch() -> None:
@@ -250,6 +328,10 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         )
         root_pid = process.pid
         pgid = os.getpgid(process.pid)
+        root_identity = capture_process_cleanup_identity(root_pid)
+        if root_identity is not None:
+            with watch_lock:
+                tracked_identities[root_identity.pid] = root_identity
         # Immediate snapshot so fast-exit parents still leave tracked members.
         first_pids, first_pgids = _snapshot_tree(root_pid, pgid)
         _capture_identities(first_pids)
@@ -305,10 +387,15 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             pgids = tuple(sorted(set(pgids) | {pgid}))
             pids = tuple(sorted(set(pids) | set(process_group_members(pgid))))
         _capture_identities(pids)
-        # One cleanup pass precedes every terminal observation. Background children must
-        # release inherited pipes before communicate, and no later cleanup may invalidate
-        # the recorded identity/count evidence.
-        _cleanup_tracked(pids, pgids, root_pid=root_pid, pgid=pgid)
+        with watch_lock:
+            identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
+        # Signal only still-running processes whose birth identity still matches. The returned
+        # terminal snapshot is the sole source for the receipt and remaining candidate counts.
+        terminal_snapshot = cleanup_birth_bound_processes(
+            identities,
+            tracked_pids=pids,
+            tracked_pgids=pgids,
+        )
         if process is not None:
             try:
                 stdout, stderr = process.communicate(
@@ -321,8 +408,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 process_error = process_error or exc
 
     cleanup_identity_evidence = _write_cleanup_receipt()
-    remaining_process_count = len(remaining_live_pids(pids))
-    remaining_process_group_count = len(remaining_live_pgids(pgids))
+    remaining_process_count = terminal_snapshot.remaining_process_count
+    remaining_process_group_count = terminal_snapshot.remaining_process_group_count
 
     if process_error is not None:
         safe_error = type(process_error).__name__
@@ -394,6 +481,25 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
         cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
     )
+    cleanup_closed = terminal_snapshot.cleanup_status == "complete" and (
+        cleanup_identity_receipt_path is None
+        or cleanup_identity_evidence.evidence_status in {"authenticated", "no-target-observed"}
+    )
+    if exit_code == 0 and not cleanup_closed:
+        safe_cleanup_error = (
+            "process_cleanup_failed"
+            if terminal_snapshot.cleanup_status == "failed"
+            else "process_cleanup_unknown"
+        )
+        raise CommandFailureError(
+            receipt=result.receipt,
+            stdout=result.stdout,
+            stderr=safe_cleanup_error,
+            remaining_process_count=remaining_process_count,
+            remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+        )
     if exit_code != 0:
         raise CommandFailureError(
             receipt=result.receipt,
@@ -490,6 +596,57 @@ def observe_process_cleanup_target(
     )
 
 
+def cleanup_birth_bound_processes(
+    identities: tuple[ProcessCleanupIdentity, ...],
+    *,
+    tracked_pids: tuple[int, ...],
+    tracked_pgids: tuple[int, ...],
+) -> ProcessCleanupTerminalSnapshot:
+    """Clean only same-birth targets, then publish one semantic terminal snapshot."""
+    _ = tracked_pgids  # Historical groups are evidence, never raw signal targets.
+    identity_by_pid = {identity.pid: identity for identity in identities}
+    coverage_unknown = len(identity_by_pid) != len(identities)
+
+    term_targets = tuple(
+        identity for identity in reversed(identities) if _same_birth_running(identity)
+    )
+    for identity in term_targets:
+        _signal_pid(identity.pid, signal.SIGTERM)
+    if term_targets:
+        time.sleep(TERM_WAIT_SECONDS)
+
+    kill_targets = tuple(
+        identity for identity in reversed(identities) if _same_birth_running(identity)
+    )
+    for identity in kill_targets:
+        _signal_pid(identity.pid, signal.SIGKILL)
+    if kill_targets:
+        time.sleep(KILL_WAIT_SECONDS)
+
+    targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
+    if any(target.termination_outcome == "unknown" for target in targets):
+        coverage_unknown = True
+
+    for pid in sorted(set(tracked_pids) - set(identity_by_pid)):
+        observation = read_process_observation(pid)
+        if observation is not None and observation.state != "zombie":
+            coverage_unknown = True
+
+    return ProcessCleanupTerminalSnapshot(
+        targets=targets,
+        coverage_status="unknown" if coverage_unknown else "complete",
+    )
+
+
+def _same_birth_running(identity: ProcessCleanupIdentity) -> bool:
+    observation = read_process_observation(identity.pid)
+    return bool(
+        observation is not None
+        and observation.state == "running"
+        and observation.birth_identity == identity.birth_identity
+    )
+
+
 def write_command_cleanup_identity_receipt(  # noqa: PLR0913
     path: Path,
     *,
@@ -498,18 +655,30 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
     cwd: Path,
     root_pid: int,
     root_pgid: int,
-    identities: tuple[ProcessCleanupIdentity, ...],
+    identities: tuple[ProcessCleanupIdentity, ...] | None = None,
+    terminal_snapshot: ProcessCleanupTerminalSnapshot | None = None,
 ) -> CommandCleanupIdentityEvidence:
-    if not identities:
-        return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
-    try:
-        targets = tuple(observe_process_cleanup_target(identity) for identity in identities)
-    except (OSError, ValueError):
+    if terminal_snapshot is None:
+        supplied_identities = identities or ()
+        try:
+            targets = tuple(
+                observe_process_cleanup_target(identity) for identity in supplied_identities
+            )
+        except (OSError, ValueError):
+            return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
+        terminal_snapshot = ProcessCleanupTerminalSnapshot(
+            targets=targets,
+            coverage_status=(
+                "unknown"
+                if any(target.termination_outcome == "unknown" for target in targets)
+                else "complete"
+            ),
+        )
+    if terminal_snapshot.cleanup_status == "unknown":
         return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
+    targets = terminal_snapshot.targets
     if not targets:
         return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
-    if any(target.termination_outcome == "unknown" for target in targets):
-        return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
     material = {
         "schema_version": "1",
         "receipt_kind": "command_cleanup_identity",
@@ -766,35 +935,6 @@ def _merge_snapshots(
     pgids_b: tuple[int, ...],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return tuple(sorted(set(pids_a) | set(pids_b))), tuple(sorted(set(pgids_a) | set(pgids_b)))
-
-
-def _cleanup_tracked(
-    tracked_pids: tuple[int, ...],
-    tracked_pgids: tuple[int, ...],
-    *,
-    root_pid: int | None,
-    pgid: int | None,
-) -> None:
-    pgids = set(tracked_pgids)
-    if pgid is not None:
-        pgids.add(pgid)
-    for group in sorted(pgids):
-        if remaining_live_pgids((group,)):
-            terminate_process_group(group, escalate=True)
-    pids = set(tracked_pids)
-    if root_pid is not None:
-        pids.update(descendant_pids(root_pid))
-        pids.add(root_pid)
-    live = remaining_live_pids(tuple(pids))
-    for pid in reversed(live):
-        _signal_pid(pid, signal.SIGTERM)
-    if remaining_live_pids(live):
-        time.sleep(TERM_WAIT_SECONDS)
-    for pid in reversed(remaining_live_pids(live)):
-        _signal_pid(pid, signal.SIGKILL)
-    for group in sorted(pgids):
-        if remaining_live_pgids((group,)):
-            terminate_process_group(group, escalate=True)
 
 
 def _process_table() -> tuple[tuple[int, int, int], ...]:

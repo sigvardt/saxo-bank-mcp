@@ -783,6 +783,27 @@ def test_codex_native_research_precheck_prompt_requires_exact_final_receipt() ->
     assert "stop before broker write" in prompt
 
 
+def test_codex_native_scenario_prompt_requires_exact_phrase_then_numeric_values() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-analytics")
+        if candidate.id == "scenario"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    assert (
+        "Final scenario receipt must contain this exact ordered text: "
+        "explicit numeric shocks -0.10 0.05."
+    ) in prompt
+    assert "Final scenario receipt" not in case.harness_prompts["claude"]
+
+
 def test_codex_native_safety_execution_prompt_binds_exact_case_id() -> None:
     case = next(
         candidate

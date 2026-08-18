@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -14,6 +16,7 @@ import saxo_bank_mcp.agent_skill_command_runner as command_runner
 MIN_ESCAPED_TARGET_COUNT = 2
 OWNER_FILE_MODE = 0o600
 REUSED_PID = 4242
+REUSED_PGID = 4343
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -119,6 +122,348 @@ def test_pid_reuse_is_bound_to_birth_identity(monkeypatch: pytest.MonkeyPatch) -
     assert evidence.birth_identity_sha256 != evidence.terminal_birth_identity_sha256
 
 
+def test_birth_bound_cleanup_does_not_signal_reused_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="original-birth",
+        initial_state="running",
+    )
+    replacement = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="replacement-birth",
+        state="running",
+    )
+    signals: list[tuple[int, object]] = []
+
+    def replacement_observation(_pid: int) -> command_runner.ProcessObservation:
+        return replacement
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", replacement_observation)
+    monkeypatch.setattr(
+        command_runner,
+        "_signal_pid",
+        record_signal,
+    )
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+    )
+
+    assert signals == []
+    assert snapshot.cleanup_status == "complete"
+    assert snapshot.remaining_process_count == 0
+    assert snapshot.remaining_process_group_count == 0
+    assert snapshot.targets[0].termination_outcome == "identity_changed"
+
+
+def test_birth_bound_cleanup_does_not_signal_reused_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="original-birth",
+        initial_state="running",
+    )
+    replacement_pid = REUSED_PID + 1
+    signals: list[tuple[int, object]] = []
+    group_signals: list[int] = []
+
+    def record_group_signal(pgid: int, *, escalate: bool) -> None:
+        _ = escalate
+        group_signals.append(pgid)
+
+    def absent_observation(_pid: int) -> None:
+        return None
+
+    def group_members(pgid: int) -> tuple[int, ...]:
+        return (replacement_pid,) if pgid == REUSED_PGID else ()
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    monkeypatch.setattr(command_runner, "read_process_observation", absent_observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members",
+        group_members,
+    )
+    monkeypatch.setattr(
+        command_runner,
+        "_signal_pid",
+        record_signal,
+    )
+    monkeypatch.setattr(
+        command_runner,
+        "terminate_process_group",
+        record_group_signal,
+    )
+
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+    )
+
+    assert signals == []
+    assert group_signals == []
+    assert snapshot.cleanup_status == "complete"
+    assert snapshot.remaining_process_count == 0
+    assert snapshot.remaining_process_group_count == 0
+
+
+def test_birth_bound_cleanup_same_birth_survivor_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="same-birth",
+        initial_state="running",
+    )
+    survivor = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="same-birth",
+        state="running",
+    )
+    signals: list[tuple[int, object]] = []
+
+    def survivor_observation(_pid: int) -> command_runner.ProcessObservation:
+        return survivor
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", survivor_observation)
+    monkeypatch.setattr(
+        command_runner,
+        "_signal_pid",
+        record_signal,
+    )
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+    )
+
+    assert [signal for _pid, signal in signals] == [
+        command_runner.signal.SIGTERM,
+        command_runner.signal.SIGKILL,
+    ]
+    assert snapshot.cleanup_status == "failed"
+    assert snapshot.remaining_process_count == 1
+    assert snapshot.remaining_process_group_count == 1
+    assert snapshot.targets[0].termination_outcome == "still_running"
+
+
+def test_birth_bound_cleanup_zombie_is_not_a_candidate_survivor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="same-birth",
+        initial_state="running",
+    )
+    zombie = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="same-birth",
+        state="zombie",
+    )
+    signals: list[tuple[int, object]] = []
+
+    def zombie_observation(_pid: int) -> command_runner.ProcessObservation:
+        return zombie
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    monkeypatch.setattr(command_runner, "read_process_observation", zombie_observation)
+    monkeypatch.setattr(
+        command_runner,
+        "_signal_pid",
+        record_signal,
+    )
+
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+    )
+
+    assert signals == []
+    assert snapshot.cleanup_status == "complete"
+    assert snapshot.remaining_process_count == 0
+    assert snapshot.remaining_process_group_count == 0
+    assert snapshot.targets[0].termination_outcome == "non_executing_zombie"
+
+
+def test_birth_bound_cleanup_unknown_identity_coverage_fails_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="same-birth",
+        initial_state="running",
+    )
+    unknown_pid = REUSED_PID + 1
+    unknown = command_runner.ProcessObservation(
+        pid=unknown_pid,
+        pgid=REUSED_PGID,
+        birth_identity="",
+        state="unknown",
+    )
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == REUSED_PID:
+            return None
+        return unknown
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID, unknown_pid),
+        tracked_pgids=(REUSED_PGID,),
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+
+
+def test_verified_cleanup_receipt_uses_authenticated_semantic_counts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleanup = getattr(command_runner, "cleanup_birth_bound_processes", None)
+    assert cleanup is not None
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="original-birth",
+        initial_state="running",
+    )
+    replacement = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="replacement-birth",
+        state="running",
+    )
+
+    def replacement_observation(_pid: int) -> command_runner.ProcessObservation:
+        return replacement
+
+    monkeypatch.setattr(command_runner, "read_process_observation", replacement_observation)
+    snapshot = cleanup(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+    )
+    receipt_path = (tmp_path / "semantic-cleanup.json").resolve()
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="semantic-counts",
+        argv=("python",),
+        cwd=tmp_path,
+        root_pid=REUSED_PID,
+        root_pgid=REUSED_PGID,
+        terminal_snapshot=snapshot,
+    )
+    assert evidence.receipt_sha256 is not None
+
+    def always_running(_pid: int) -> bool:
+        return True
+
+    monkeypatch.setattr(command_runner, "process_still_running", always_running)
+    verified = command_runner.verify_command_cleanup_identity_receipt(
+        receipt_path,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+
+    assert verified is not None
+    assert verified.remaining_process_count == 0
+    assert verified.remaining_process_group_count == 0
+
+    original_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    tampered = json.loads(json.dumps(original_payload))
+    tampered["targets"][0]["terminal_state"] = "running"
+    material = {key: value for key, value in tampered.items() if key != "receipt_sha256"}
+    tampered_digest = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    tampered["receipt_sha256"] = tampered_digest
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_identity_receipt(
+            receipt_path,
+            expected_receipt_sha256=tampered_digest,
+        )
+        is None
+    )
+
+    unknown = json.loads(json.dumps(original_payload))
+    unknown["targets"][0]["terminal_state"] = "unknown"
+    unknown["targets"][0]["termination_outcome"] = "unknown"
+    unknown["targets"][0]["terminal_birth_identity_sha256"] = None
+    material = {key: value for key, value in unknown.items() if key != "receipt_sha256"}
+    unknown_digest = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    unknown["receipt_sha256"] = unknown_digest
+    receipt_path.write_text(json.dumps(unknown), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_identity_receipt(
+            receipt_path,
+            expected_receipt_sha256=unknown_digest,
+        )
+        is None
+    )
+
+
 def test_process_observation_failure_remains_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
     identity = command_runner.ProcessCleanupIdentity(
         pid=REUSED_PID,
@@ -205,28 +550,26 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
     cleanup_complete = False
     inside_cleanup = False
     events: list[str] = []
-    original_cleanup = command_runner._cleanup_tracked  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    original_cleanup = command_runner.cleanup_birth_bound_processes
     original_write = command_runner.write_command_cleanup_identity_receipt
     original_remaining_pids = command_runner.remaining_live_pids
     original_remaining_pgids = command_runner.remaining_live_pgids
 
     def counted_cleanup(
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
-        *,
-        root_pid: int | None,
-        pgid: int | None,
-    ) -> None:
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls, cleanup_complete, inside_cleanup
         cleanup_calls += 1
         events.append("cleanup")
         inside_cleanup = True
         try:
-            original_cleanup(
-                tracked_pids,
-                tracked_pgids,
-                root_pid=root_pid,
-                pgid=pgid,
+            return original_cleanup(
+                identities,
+                tracked_pids=tracked_pids,
+                tracked_pgids=tracked_pgids,
             )
         finally:
             inside_cleanup = False
@@ -240,9 +583,11 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
         cwd: Path,
         root_pid: int,
         root_pgid: int,
-        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...] | None = None,
+        terminal_snapshot: command_runner.ProcessCleanupTerminalSnapshot | None = None,
     ) -> command_runner.CommandCleanupIdentityEvidence:
         assert cleanup_complete
+        assert terminal_snapshot is not None
         events.append("observe-write")
         return original_write(
             path,
@@ -252,6 +597,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
             root_pid=root_pid,
             root_pgid=root_pgid,
             identities=identities,
+            terminal_snapshot=terminal_snapshot,
         )
 
     def recorded_remaining_pids(pids: tuple[int, ...]) -> tuple[int, ...]:
@@ -264,7 +610,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
             events.append("terminal-count")
         return original_remaining_pgids(pgids)
 
-    monkeypatch.setattr(command_runner, "_cleanup_tracked", counted_cleanup)
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", counted_cleanup)
     monkeypatch.setattr(command_runner, "write_command_cleanup_identity_receipt", recorded_write)
     monkeypatch.setattr(command_runner, "remaining_live_pids", recorded_remaining_pids)
     monkeypatch.setattr(command_runner, "remaining_live_pgids", recorded_remaining_pgids)
@@ -282,8 +628,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
     assert caught.value.receipt.timed_out is True
     assert cleanup_calls == 1
     assert events.index("cleanup") < events.index("observe-write")
-    assert events.index("observe-write") < events.index("terminal-count")
-    assert events[-1] == "terminal-count"
+    assert "terminal-count" not in events
     assert caught.value.remaining_process_count == 0
     assert caught.value.remaining_process_group_count == 0
 
@@ -294,7 +639,7 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
 ) -> None:
     cleanup_roots: list[int] = []
     cleanup_calls = 0
-    original_cleanup = command_runner._cleanup_tracked  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    original_cleanup = command_runner.cleanup_birth_bound_processes
 
     def broken_snapshot(
         root_pid: int | None,
@@ -304,25 +649,22 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
         raise OSError("injected_post_spawn_observation_failure")
 
     def counted_cleanup(
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
-        *,
-        root_pid: int | None,
-        pgid: int | None,
-    ) -> None:
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls
         cleanup_calls += 1
-        if root_pid is not None:
-            cleanup_roots.append(root_pid)
-        original_cleanup(
-            tracked_pids,
-            tracked_pgids,
-            root_pid=root_pid,
-            pgid=pgid,
+        cleanup_roots.extend(identity.pid for identity in identities)
+        return original_cleanup(
+            identities,
+            tracked_pids=tracked_pids,
+            tracked_pgids=tracked_pgids,
         )
 
     monkeypatch.setattr(command_runner, "_snapshot_tree", broken_snapshot)
-    monkeypatch.setattr(command_runner, "_cleanup_tracked", counted_cleanup)
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", counted_cleanup)
 
     with pytest.raises(command_runner.CommandFailureError) as caught:
         command_runner.run_command(

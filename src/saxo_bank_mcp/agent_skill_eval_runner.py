@@ -763,6 +763,11 @@ def _codex_native_fixture_bound_case(
             " Final receipt: `analysis_id: <result analysis_id or fixture analysis_id>; "
             "state: <verified|degraded|refused>; stop before broker write`."
         )
+    if case.id == "scenario":
+        fixture_protocol += (
+            " Final scenario receipt must contain this exact ordered text: "
+            "explicit numeric shocks -0.10 0.05."
+        )
     prompts = dict(case.harness_prompts)
     prompts["codex"] = prompts["codex"] + fixture_protocol
     return case.model_copy(update={"harness_prompts": prompts})
