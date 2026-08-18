@@ -17,27 +17,32 @@ No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation
 readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
 active.
 
-Local corrective source `be6a6ab5bf74c7a3c752598eee4062c4a16feb17`, tree
-`f8092d6bcc5cb2a0efc168a4fb3f9241c958e618`, builds on the diagnostic source without changing the
+Local corrective source `c716047a332a78cccd0d1c94ed4348e7edbd1169`, tree
+`3170c9d4dc7d3ff63987999892209e7b19b98275`, builds on the diagnostic source without changing the
 assertion, prompt, successful evaluation behavior, or historical `dual_v1` path. It has not been
 installed and no proof has run for it, so the sealed evidence above remains bound to `06fb8e1`.
 
-Malformed or partly malformed Codex output is now unobservable for assistant diagnostics: event
-counts, message presence, hashes, and positive or negative assertion vectors remain unknown rather
-than becoming false zeroes. Timeout and post-spawn operating-system failures perform cleanup once,
-then observe and persist terminal process evidence before raising. Cleanup evidence carries a
-strict authenticated status of `authenticated`, `no-target-observed`, `observation-unknown`, or
-`write-failed`; its optional digest is accepted only when consistent with that status and is bound
-through the strict failure and publication schemas. No transcript, arguments, raw output, account
-data, handles, payloads, or private paths are retained.
+Malformed or partly malformed Codex output is now explicitly unobservable for all parse-derived
+tool, call, and count evidence. `no_mcp_call`, `no_saxo_call`, model/tool/MCP/Saxo event counts,
+invoked logical tool identifiers and counts, and their runner and proof aggregates remain unknown
+rather than becoming false zeroes or empty sets. The same state is authenticated through the
+privacy-safe per-case failure summary and outer publication. Fully decoded valid streams retain
+their prior behavior. A nonzero child exit cannot take precedence over a simultaneously malformed
+Codex event stream and reintroduce false counts.
 
-TDD began with eleven expected failures. Final local validation passed eleven focused tests twice,
-139 related evaluation/proof tests, and 66 auth/privacy tests. Ruff and changed-file format passed;
-BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, nine-skill static,
-60-tool/294-operation catalog, and 34-case evaluation-manifest gates passed. A bounded eight-path
-privacy scan reported 0 findings and 0 scan errors. No model, production MCP server, Saxo, browser,
-broker, install, proof, or broker/data network activity ran in the source and test correction. The
-required Knowledge Base readback was the only external documentation update.
+The earlier assistant-diagnostic and cleanup protections remain: message presence, hashes, and
+assertion vectors are unknown for malformed output; timeout and post-spawn operating-system
+failures clean up once before terminal evidence is recorded; and cleanup status and optional digest
+remain strictly bound. No transcript, arguments, raw output, account data, handles, payloads, or
+private paths are retained.
+
+Final local validation passed five focused tests twice, 232 related evaluation/proof tests, and 243
+auth/privacy tests. Ruff and changed-file format passed; BasedPyright reported 0 errors, 0 warnings,
+and 0 notes; plugin, nine-skill static, 60-tool/294-operation catalog, and 34-case
+evaluation-manifest gates passed. A bounded eight-path privacy scan reported 0 findings and 0 scan
+errors. No model, production MCP server, Saxo, browser, broker, install, proof, or broker/data
+network activity ran in the source and test correction. The required Knowledge Base readback was
+the only external documentation update.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.

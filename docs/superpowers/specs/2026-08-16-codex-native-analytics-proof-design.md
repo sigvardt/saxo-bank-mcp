@@ -113,14 +113,17 @@ privacy, and review gates before release claims can use it.
 ## Failure rules
 
 Diagnostic evidence is fail closed. If the Codex event stream is malformed or only partly
-observable, assistant-message presence, event counts, hashes, and assertion vectors are unknown;
-zero, false, and negative vectors require a completely decoded observable surface. Timeout and
-post-spawn operating-system failures clean up exactly once, observe terminal identities and counts,
-and persist cleanup evidence before they are raised. The authenticated cleanup-evidence status is
-one of `authenticated`, `no-target-observed`, `observation-unknown`, or `write-failed`. A receipt
-digest is present only for `authenticated`, and strict child-failure and outer-publication schemas
-bind and verify that relationship. Missing, inconsistent, or tampered cleanup evidence cannot prove
-absence or successful cleanup.
+observable, every parse-derived tool, call, and count field is unknown. This includes call-absence
+booleans, model/tool/MCP/Saxo event counts, invoked logical tool identities and counts, runner
+aggregates, assistant-message presence, hashes, and assertion vectors; zero, false, empty, and
+negative values require a completely decoded observable surface. The authenticated per-case
+failure summary and outer publication enforce the same observability state. Timeout and post-spawn
+operating-system failures clean up exactly once, observe terminal identities and counts, and persist
+cleanup evidence before they are raised. The authenticated cleanup-evidence status is one of
+`authenticated`, `no-target-observed`, `observation-unknown`, or `write-failed`. A receipt digest is
+present only for `authenticated`, and strict child-failure and outer-publication schemas bind and
+verify that relationship. Missing, inconsistent, or tampered cleanup evidence cannot prove absence
+or successful cleanup.
 
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
