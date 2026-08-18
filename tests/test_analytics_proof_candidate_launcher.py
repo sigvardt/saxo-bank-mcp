@@ -50,6 +50,7 @@ def _detached_candidate_with_runner(
     producer.parent.mkdir(parents=True)
     lines = [
         "from __future__ import annotations",
+        "import hashlib",
         "import json",
         "import os",
         "import sys",
@@ -87,7 +88,8 @@ def _detached_candidate_with_runner(
     if runner_kind != "stdlib":
         lines.extend(
             (
-                "receipt = out.with_name(f'{out.name}.candidate-runner.json')",
+                "outer_name = out.name.removesuffix('.candidate-result.json')",
+                "receipt = out.with_name(f'{outer_name}.candidate-runner.json')",
                 "entry = json.loads(receipt.read_text(encoding='utf-8'))",
                 "payload['entry_receipt_seen'] = (",
                 "    entry['phase'] == 'entry' and entry['spawned'] is False",
@@ -100,7 +102,80 @@ def _detached_candidate_with_runner(
         lines.append("raise SystemExit(7)")
     else:
         lines.extend(
-            ("out.write_text(json.dumps(payload, sort_keys=True), encoding='utf-8')",),
+            (
+                "def digest(value: object) -> str:",
+                (
+                    "    return hashlib.sha256(json.dumps(value, allow_nan=False, "
+                    "separators=(',', ':'), sort_keys=True).encode()).hexdigest()"
+                ),
+                "candidate_commit = os.environ['SAXO_ANALYTICS_CANDIDATE_COMMIT']",
+                "contract_sha256 = os.environ['SAXO_ANALYTICS_CANDIDATE_CONTRACT_SHA256']",
+                (
+                    "analysis_kind_count = int(os.environ["
+                    "'SAXO_ANALYTICS_CANDIDATE_ANALYSIS_KIND_COUNT'])"
+                ),
+                (
+                    "evidence_receipt_count = int(os.environ["
+                    "'SAXO_ANALYTICS_CANDIDATE_EVIDENCE_RECEIPT_COUNT'])"
+                ),
+                "boundary_material = {",
+                "    'schema_version': '1',",
+                "    'receipt_kind': 'codex_native_boundary_failure',",
+                "    'status': 'refused',",
+                "    'harness_policy': 'codex_native_v1',",
+                "    'candidate_commit': candidate_commit,",
+                "    'failure_evidence_status': 'missing',",
+                "    'producer_authenticated': False,",
+                "    'boundary_phase': 'producer_validation',",
+                "    'command_state': 'not_started',",
+                "    'cleanup_status': 'unknown',",
+                "    'candidate_runner_receipt_sha256': None,",
+                "    'candidate_runner_cleanup_status': 'unknown',",
+                "    'candidate_runner_result_status': 'unknown',",
+                "    'candidate_runner_result_sha256': None,",
+                "    'runtime_consumption_intent_sha256': None,",
+                "    'runtime_cleanup_receipt_sha256': None,",
+                "    'completed_phases': None,",
+                "    'current_phase': None,",
+                "    'sim_preflight_status': 'unknown',",
+                "    'sim_preflight': None,",
+                "    'network_call_made': None,",
+                "    'model_event_count': None,",
+                "    'mcp_event_count': None,",
+                "    'saxo_event_count': None,",
+                "    'execution_performed': None,",
+                "    'broker_write_made': None,",
+                "    'live_mutation_calls': None,",
+                "    'purchase_occurred': None,",
+                "    'disclaimer_response_made': None,",
+                "    'child_cleanup_status': 'unknown',",
+                "    'outer_runtime_cleanup_status': 'unknown',",
+                "    'reason': 'proof_candidate_fixture_success',",
+                "    'redacted_publication': True,",
+                "}",
+                (
+                    "boundary = {**boundary_material, 'boundary_receipt_sha256': "
+                    "digest(boundary_material)}"
+                ),
+                "publication_material = {",
+                "    'schema_version': '1',",
+                "    'receipt_kind': 'codex_native_proof_publication',",
+                "    'harness_policy': 'codex_native_v1',",
+                "    'candidate_commit': candidate_commit,",
+                "    'analysis_kind_count': analysis_kind_count,",
+                "    'evidence_receipt_count': evidence_receipt_count,",
+                "    'contract_sha256': contract_sha256,",
+                "    'result_kind': 'boundary_failure',",
+                "    'result': boundary,",
+                "    'redacted_publication': True,",
+                "}",
+                (
+                    "publication = {**publication_material, 'publication_sha256': "
+                    "digest(publication_material)}"
+                ),
+                "out.write_text(json.dumps(publication, sort_keys=True), encoding='utf-8')",
+                "out.chmod(0o600)",
+            ),
         )
     script.write_text("\n".join(lines) + "\n", encoding="utf-8")
     producer.write_text("# candidate proof producer fixture\n", encoding="utf-8")
@@ -208,14 +283,19 @@ def test_docs_head_launcher_executes_exact_detached_candidate_runner(
     )
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(output.read_text(encoding="utf-8")) == {
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
         "bound_flag_count": 1,
         "candidate_name": "candidate",
         "cwd_is_candidate": True,
         "runner_is_candidate": True,
         "source_root_is_candidate": True,
     }
-    assert marker.is_file()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    assert publication.candidate_commit == commit
+    assert publication.result.reason == "proof_candidate_fixture_success"
     assert not (run_root / INTENT_NAME).exists()
 
 
@@ -250,10 +330,10 @@ def test_candidate_launcher_preserves_venv_for_real_third_party_import(
 
     assert result.returncode == 0, result.stderr
     assert marker.is_file()
-    assert json.loads(output.read_text(encoding="utf-8"))["candidate_name"] == (
+    assert json.loads(marker.read_text(encoding="utf-8"))["candidate_name"] == (
         "dependency-candidate"
     )
-    assert json.loads(output.read_text(encoding="utf-8"))["entry_receipt_seen"] is True
+    assert json.loads(marker.read_text(encoding="utf-8"))["entry_receipt_seen"] is True
     receipt = output.with_name(f"{output.name}.candidate-runner.json")
     payload = json.loads(receipt.read_text(encoding="utf-8"))
     assert payload["spawned"] is True

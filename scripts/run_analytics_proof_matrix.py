@@ -22,7 +22,7 @@ from saxo_bank_mcp.agent_skill_codex_install import (
 from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.agent_skill_install_models import InstallEvidenceReport
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
-from saxo_bank_mcp.evidence_publication import write_scanned_json
+from saxo_bank_mcp.evidence_publication import write_scanned_json, write_scanned_text
 from saxo_bank_mcp.qa_analytics_evidence import (
     ANALYSIS_KIND_CATALOG_PATH,
     EvidenceCoverageError,
@@ -47,12 +47,18 @@ from saxo_bank_mcp.qa_analytics_proof_publication import (
     build_codex_native_candidate_runner_receipt,
     build_codex_native_proof_publication,
     candidate_runner_receipt_path,
+    verify_codex_native_proof_publication,
     write_codex_native_candidate_runner_receipt,
 )
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
 _CANDIDATE_SOURCE_ENV = "SAXO_ANALYTICS_CANDIDATE_SOURCE_ROOT"
+_CANDIDATE_COMMIT_ENV = "SAXO_ANALYTICS_CANDIDATE_COMMIT"
+_CANDIDATE_CONTRACT_ENV = "SAXO_ANALYTICS_CANDIDATE_CONTRACT_SHA256"
+_CANDIDATE_ANALYSIS_COUNT_ENV = "SAXO_ANALYTICS_CANDIDATE_ANALYSIS_KIND_COUNT"
+_CANDIDATE_RECEIPT_COUNT_ENV = "SAXO_ANALYTICS_CANDIDATE_EVIDENCE_RECEIPT_COUNT"
 _RUNNER_RELATIVE = Path("scripts/run_analytics_proof_matrix.py")
 _PRODUCER_RELATIVE = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _CANDIDATE_RUNNER_TIMEOUT_SECONDS = 7200
@@ -79,10 +85,25 @@ class _CandidateRunnerError(ProofProducerError):
         *,
         command_state: CodexNativeCommandState,
         receipt: CodexNativeCandidateRunnerReceipt | None = None,
+        authenticated_result_sha256: str | None = None,
     ) -> None:
         self.command_state = command_state
         self.receipt = receipt
+        self.authenticated_result_sha256 = authenticated_result_sha256
         super().__init__(reason)
+
+
+class _AuthenticatedCandidateResult:
+    __slots__ = ("raw", "sha256")
+
+    def __init__(
+        self,
+        *,
+        raw: str,
+        sha256: str,
+    ) -> None:
+        self.raw = raw
+        self.sha256 = sha256
 
 
 def _digest(value: object) -> str:
@@ -201,6 +222,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                     out=args.out,
                     candidate_commit=launch_commit,
                     candidate_tree=launch_tree,
+                    contract_sha256=contract_sha256,
+                    analysis_kind_count=len(contracts),
+                    evidence_receipt_count=len(catalog.evidence_receipt_ids),
                 )
         except _CandidateRunnerError as error:
             receipt = error.receipt
@@ -222,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                     candidate_runner_cleanup_status=(
                         receipt.cleanup_status if receipt is not None else "unknown"
                     ),
+                    candidate_runner_result_sha256=(error.authenticated_result_sha256),
                 ),
                 success=False,
             )
@@ -506,21 +531,27 @@ def _require_candidate_entrypoint_binding(candidate_source_root: Path) -> None:
         raise ProofProducerError("proof_source_entrypoint_mismatch")
 
 
-def _run_candidate_entrypoint(
+def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
     candidate_source_root: Path,
     *,
     argv: list[str],
     out: Path,
     candidate_commit: str,
     candidate_tree: str,
+    contract_sha256: str,
+    analysis_kind_count: int,
+    evidence_receipt_count: int,
 ) -> int:
     _require_absolute_forwarded_paths(argv, out=out)
+    candidate_result_path = _candidate_runner_result_path(out)
+    _prepare_candidate_result_path(candidate_result_path)
+    candidate_argv = _replace_candidate_output(argv, candidate_result_path)
     interpreter = Path(sys.executable).absolute()
     command = (
         str(interpreter),
         "-B",
         str(candidate_source_root / _RUNNER_RELATIVE),
-        *argv,
+        *candidate_argv,
         "--candidate-root-bound",
     )
     command_sha256 = _digest(command)
@@ -547,6 +578,10 @@ def _run_candidate_entrypoint(
     env["PYTHONPATH"] = str(candidate_source_root / "src")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env[_CANDIDATE_SOURCE_ENV] = str(candidate_source_root)
+    env[_CANDIDATE_COMMIT_ENV] = candidate_commit
+    env[_CANDIDATE_CONTRACT_ENV] = contract_sha256
+    env[_CANDIDATE_ANALYSIS_COUNT_ENV] = str(analysis_kind_count)
+    env[_CANDIDATE_RECEIPT_COUNT_ENV] = str(evidence_receipt_count)
     command_state: CodexNativeCommandState = "completed"
     cleanup_status: CodexNativeCleanupStatus = "complete"
     spawned = True
@@ -574,7 +609,17 @@ def _run_candidate_entrypoint(
             cleanup_status = "failed"
         else:
             cleanup_status = "unknown"
-    result_sha256 = _regular_file_sha256(out)
+    raw_result_sha256 = _regular_file_sha256(candidate_result_path)
+    authenticated_result = _load_authenticated_candidate_result(
+        candidate_result_path,
+        candidate_commit=candidate_commit,
+        contract_sha256=contract_sha256,
+        analysis_kind_count=analysis_kind_count,
+        evidence_receipt_count=evidence_receipt_count,
+    )
+    if raw_result_sha256 is not None and authenticated_result is None:
+        _discard_untrusted_candidate_result(candidate_result_path)
+    result_sha256 = authenticated_result.sha256 if authenticated_result is not None else None
     exit_receipt = build_codex_native_candidate_runner_receipt(
         candidate_commit=candidate_commit,
         candidate_tree=candidate_tree,
@@ -590,26 +635,188 @@ def _run_candidate_entrypoint(
         raise _CandidateRunnerError(
             "proof_candidate_runner_receipt_write_failed",
             command_state=command_state,
+            authenticated_result_sha256=(
+                authenticated_result.sha256 if authenticated_result is not None else None
+            ),
         )
     if not spawned:
         raise _CandidateRunnerError(
             "proof_candidate_runner_start_failed",
             command_state=command_state,
             receipt=exit_receipt,
+            authenticated_result_sha256=(
+                authenticated_result.sha256 if authenticated_result is not None else None
+            ),
         )
     if cleanup_status != "complete":
         raise _CandidateRunnerError(
             "proof_candidate_runner_cleanup_failed",
             command_state=command_state,
             receipt=exit_receipt,
+            authenticated_result_sha256=(
+                authenticated_result.sha256 if authenticated_result is not None else None
+            ),
         )
-    if result_sha256 is None:
+    if raw_result_sha256 is None:
         raise _CandidateRunnerError(
             "proof_candidate_runner_result_missing",
             command_state=command_state,
             receipt=exit_receipt,
         )
+    if authenticated_result is None:
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_invalid",
+            command_state=command_state,
+            receipt=exit_receipt,
+        )
+    if not _publish_authenticated_candidate_result(
+        out,
+        authenticated_result,
+        candidate_commit=candidate_commit,
+        contract_sha256=contract_sha256,
+        analysis_kind_count=analysis_kind_count,
+        evidence_receipt_count=evidence_receipt_count,
+    ):
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_publish_failed",
+            command_state=command_state,
+            receipt=exit_receipt,
+            authenticated_result_sha256=authenticated_result.sha256,
+        )
     return cast("int", exit_code)
+
+
+def _candidate_runner_result_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.candidate-result.json")
+
+
+def _prepare_candidate_result_path(path: Path) -> None:
+    try:
+        parent = os.lstat(path.parent)
+    except OSError as exc:
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_path_invalid",
+            command_state="not_started",
+        ) from exc
+    if (
+        not path.is_absolute()
+        or not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != _OWNER_DIRECTORY_MODE
+        or os.path.lexists(path)
+    ):
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_path_invalid",
+            command_state="not_started",
+        )
+
+
+def _replace_candidate_output(argv: list[str], result_path: Path) -> list[str]:
+    replaced = list(argv)
+    matches = 0
+    index = 0
+    while index < len(replaced):
+        argument = replaced[index]
+        if argument == "--out":
+            if index + 1 >= len(replaced):
+                break
+            replaced[index + 1] = str(result_path)
+            matches += 1
+            index += 2
+            continue
+        if argument.startswith("--out="):
+            replaced[index] = f"--out={result_path}"
+            matches += 1
+        index += 1
+    if matches != 1:
+        raise _CandidateRunnerError(
+            "proof_candidate_runner_result_path_invalid",
+            command_state="not_started",
+        )
+    return replaced
+
+
+def _load_authenticated_candidate_result(
+    path: Path,
+    *,
+    candidate_commit: str,
+    contract_sha256: str,
+    analysis_kind_count: int,
+    evidence_receipt_count: int,
+) -> _AuthenticatedCandidateResult | None:
+    try:
+        parent = os.lstat(path.parent)
+        metadata = os.lstat(path)
+        raw = path.read_text(encoding="utf-8")
+        publication = verify_codex_native_proof_publication(raw)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if (
+        not path.is_absolute()
+        or not stat.S_ISDIR(parent.st_mode)
+        or stat.S_ISLNK(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) != _OWNER_DIRECTORY_MODE
+        or not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
+        or publication.candidate_commit != candidate_commit
+        or publication.contract_sha256 != contract_sha256
+        or publication.harness_policy != "codex_native_v1"
+        or publication.analysis_kind_count != analysis_kind_count
+        or publication.evidence_receipt_count != evidence_receipt_count
+    ):
+        return None
+    return _AuthenticatedCandidateResult(
+        raw=raw,
+        sha256=hashlib.sha256(raw.encode()).hexdigest(),
+    )
+
+
+def _discard_untrusted_candidate_result(path: Path) -> None:
+    try:
+        parent = os.lstat(path.parent)
+        metadata = os.lstat(path)
+        if (
+            path.is_absolute()
+            and stat.S_ISDIR(parent.st_mode)
+            and not stat.S_ISLNK(parent.st_mode)
+            and parent.st_uid == os.getuid()
+            and stat.S_IMODE(parent.st_mode) == _OWNER_DIRECTORY_MODE
+            and metadata.st_uid == os.getuid()
+            and (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode))
+        ):
+            path.unlink()
+    except OSError:
+        return
+
+
+def _publish_authenticated_candidate_result(  # noqa: PLR0913
+    output: Path,
+    authenticated: _AuthenticatedCandidateResult,
+    *,
+    candidate_commit: str,
+    contract_sha256: str,
+    analysis_kind_count: int,
+    evidence_receipt_count: int,
+) -> bool:
+    if not write_scanned_text(output, authenticated.raw, json_output=True):
+        return False
+    try:
+        output.chmod(_OWNER_FILE_MODE)
+    except OSError:
+        return False
+    published = _load_authenticated_candidate_result(
+        output,
+        candidate_commit=candidate_commit,
+        contract_sha256=contract_sha256,
+        analysis_kind_count=analysis_kind_count,
+        evidence_receipt_count=evidence_receipt_count,
+    )
+    return published is not None and published.sha256 == authenticated.sha256
 
 
 def _require_absolute_forwarded_paths(argv: list[str], *, out: Path) -> None:

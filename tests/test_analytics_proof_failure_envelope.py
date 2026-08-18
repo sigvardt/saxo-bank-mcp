@@ -7,12 +7,16 @@ from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 
 import pytest
 from pydantic import ValidationError
 
-from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
+from saxo_bank_mcp.agent_skill_command_runner import (
+    CommandFailureError,
+    CommandResult,
+    run_command,
+)
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.qa_analytics_proof_failure import (
@@ -27,6 +31,10 @@ from saxo_bank_mcp.qa_analytics_proof_failure import (
     build_child_failure_envelope,
     verify_bootstrap_envelope_file,
     verify_child_failure_envelope,
+)
+from saxo_bank_mcp.qa_analytics_proof_publication import (
+    CodexNativeCandidateRunnerReceipt,
+    CodexNativeProofPublication,
 )
 
 CANDIDATE = "1" * 40
@@ -45,6 +53,8 @@ EXPECTED_BINDING_CALLS = 2
 FAILED_EVAL_CASE_COUNT = 2
 FAILED_EVAL_REQUIRED_TOOL_COUNT = 3
 FAILED_MCP_PROBE_EXIT_CODE = 23
+OWNER_FILE_MODE = 0o600
+EXPECTED_RECEIPT_WRITE_COUNT = 2
 
 
 def _bootstrap_envelope(
@@ -337,6 +347,492 @@ def _patch_candidate_entrypoint_binding(
     monkeypatch.setattr(script, "_load_candidate_launch_binding", load_binding)
     monkeypatch.setattr(script, "validate_codex_native_candidate_source_root", validate_source)
     monkeypatch.setattr(script, "_require_candidate_entrypoint_binding", require_entrypoint)
+
+
+def _candidate_publication(
+    script: ModuleType,
+    *,
+    result_kind: Literal["boundary_failure", "verified_child_failure", "verified_result"],
+    candidate_commit: str = CANDIDATE,
+    contract_sha256: str | None = None,
+) -> CodexNativeProofPublication:
+    publication = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    catalog = script.load_analysis_kind_catalog(script.ANALYSIS_KIND_CATALOG_PATH)
+    contracts = script.build_proof_execution_contracts(catalog=catalog)
+    actual_contract_sha256 = contract_sha256 or script._digest(  # noqa: SLF001
+        [contract.model_dump(mode="json") for contract in contracts]
+    )
+    if result_kind == "boundary_failure":
+        result = publication.build_codex_native_boundary_failure(
+            candidate_commit=candidate_commit,
+            reason="proof_inner_failure_retained",
+        )
+    elif result_kind == "verified_child_failure":
+        progress = CodexNativeProofProgress(
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=CACHE_SHA256,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=actual_contract_sha256,
+        )
+        child = _failure(progress, reason="proof_inner_failure_retained")
+        result = _verify(
+            child.model_dump_json(),
+            candidate_commit=candidate_commit,
+            contract_sha256=actual_contract_sha256,
+            bootstrap_verification=_bootstrap_verification(
+                contract_sha256=actual_contract_sha256,
+            ),
+        )
+    else:
+        bootstrap = _bootstrap_envelope(
+            child_exit_code=0,
+            state="complete",
+            contract_sha256=actual_contract_sha256,
+        )
+        result = producer.CodexNativeVerifiedInstalledProofValidation(
+            status="validated",
+            candidate_commit=candidate_commit,
+            installed_cache_sha256=CACHE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=actual_contract_sha256,
+            producer_authenticated=True,
+            execution_performed=True,
+            process_local_activation=True,
+            executed_receipt_count=len(catalog.evidence_receipt_ids),
+            proof_execution_sha256="a" * 64,
+            bundle_sha256="b" * 64,
+            validation_errors=(),
+            sim_preflight=_passed_preflight(),
+            network_call_made=True,
+            bootstrap_authenticated=True,
+            bootstrap_envelope=bootstrap,
+        )
+    return publication.build_codex_native_proof_publication(
+        candidate_commit=candidate_commit,
+        analysis_kind_count=len(contracts),
+        evidence_receipt_count=len(catalog.evidence_receipt_ids),
+        contract_sha256=actual_contract_sha256,
+        result_kind=result_kind,
+        result=result,
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "malformed",
+        "tampered",
+        "candidate",
+        "contract",
+        "policy",
+        "analysis_count",
+        "receipt_count",
+        "mode",
+    ],
+)
+def test_candidate_result_authentication_rejects_untrusted_output(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    script = _load_proof_matrix_script()
+    catalog = script.load_analysis_kind_catalog(script.ANALYSIS_KIND_CATALOG_PATH)
+    contracts = script.build_proof_execution_contracts(catalog=catalog)
+    contract_sha256 = script._digest(  # noqa: SLF001
+        [contract.model_dump(mode="json") for contract in contracts],
+    )
+    candidate_commit = "2" * 40 if mutation == "candidate" else CANDIDATE
+    candidate_contract = "3" * 64 if mutation == "contract" else contract_sha256
+    publication = _candidate_publication(
+        script,
+        result_kind="boundary_failure",
+        candidate_commit=candidate_commit,
+        contract_sha256=candidate_contract,
+    )
+    payload = publication.model_dump(mode="json")
+    if mutation == "tampered":
+        payload["publication_sha256"] = "f" * 64
+    elif mutation == "policy":
+        payload["harness_policy"] = "dual_v1"
+        payload["publication_sha256"] = script._digest(  # noqa: SLF001
+            {key: value for key, value in payload.items() if key != "publication_sha256"},
+        )
+    raw = "{" if mutation == "malformed" else json.dumps(payload, sort_keys=True)
+    inner_result = tmp_path / "proof.json.candidate-result.json"
+    inner_result.write_text(raw, encoding="utf-8")
+    inner_result.chmod(0o644 if mutation == "mode" else 0o600)
+
+    authenticated = script._load_authenticated_candidate_result(  # noqa: SLF001
+        inner_result,
+        candidate_commit=CANDIDATE,
+        contract_sha256=contract_sha256,
+        analysis_kind_count=(
+            len(contracts) + 1 if mutation == "analysis_count" else len(contracts)
+        ),
+        evidence_receipt_count=(
+            len(catalog.evidence_receipt_ids) + 1
+            if mutation == "receipt_count"
+            else len(catalog.evidence_receipt_ids)
+        ),
+    )
+
+    assert authenticated is None
+
+
+@pytest.mark.parametrize("result_kind", ["verified_result", "verified_child_failure"])
+def test_candidate_runner_cleanup_failure_preserves_authenticated_inner_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    result_kind: Literal["verified_result", "verified_child_failure"],
+) -> None:
+    script = _load_proof_matrix_script()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir(mode=0o700)
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
+    inner_publication = _candidate_publication(script, result_kind=result_kind)
+    output = tmp_path / "proof.json"
+
+    def fail_after_result(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        del env, timeout_seconds
+        result_path = Path(argv[argv.index("--out") + 1])
+        assert result_path == output.with_name(f"{output.name}.candidate-result.json")
+        assert result_path != output
+        result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
+        result_path.chmod(0o600)
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=17,
+                pgid=17,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=1,
+            remaining_process_group_count=1,
+        )
+
+    monkeypatch.setattr(script, "run_command", fail_after_result)
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    outer = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    retained_path = output.with_name(f"{output.name}.candidate-result.json")
+    retained = publication_module.verify_codex_native_proof_publication(
+        retained_path.read_text(encoding="utf-8"),
+    )
+    receipt_path = output.with_name(f"{output.name}.candidate-runner.json")
+    receipt = publication_module.verify_codex_native_candidate_runner_receipt(
+        receipt_path.read_text(encoding="utf-8"),
+    )
+    retained_sha256 = hashlib.sha256(retained_path.read_bytes()).hexdigest()
+
+    assert exit_code == 1
+    assert outer.result.reason == "proof_candidate_runner_cleanup_failed"
+    assert outer.result.candidate_runner_cleanup_status == "failed"
+    assert outer.result.candidate_runner_result_status == "authenticated"
+    assert retained == inner_publication
+    assert receipt.cleanup_status == "failed"
+    assert receipt.result_sha256 == retained_sha256
+    assert outer.result.candidate_runner_result_sha256 == retained_sha256
+    assert outer.result.execution_performed is None
+    assert outer.result.network_call_made is None
+    assert retained_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+
+
+@pytest.mark.parametrize("mutation", ["malformed", "tampered", "binding"])
+def test_candidate_runner_cleanup_failure_copies_no_untrusted_inner_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    script = _load_proof_matrix_script()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir(mode=0o700)
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
+    wrong_candidate = "2" * 40 if mutation == "binding" else CANDIDATE
+    untrusted = _candidate_publication(
+        script,
+        result_kind="boundary_failure",
+        candidate_commit=wrong_candidate,
+    ).model_dump(mode="json")
+    if mutation == "tampered":
+        untrusted["publication_sha256"] = "f" * 64
+    raw = "{" if mutation == "malformed" else json.dumps(untrusted, sort_keys=True)
+    output = tmp_path / "proof.json"
+
+    def fail_after_result(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        del env, timeout_seconds
+        result_path = Path(argv[argv.index("--out") + 1])
+        result_path.write_text(raw, encoding="utf-8")
+        result_path.chmod(0o600)
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=17,
+                pgid=17,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=1,
+            remaining_process_group_count=1,
+        )
+
+    monkeypatch.setattr(script, "run_command", fail_after_result)
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    outer = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    retained_path = output.with_name(f"{output.name}.candidate-result.json")
+    receipt_path = output.with_name(f"{output.name}.candidate-runner.json")
+    receipt = publication_module.verify_codex_native_candidate_runner_receipt(
+        receipt_path.read_text(encoding="utf-8"),
+    )
+
+    assert exit_code == 1
+    assert outer.result.reason == "proof_candidate_runner_cleanup_failed"
+    assert outer.result.candidate_runner_result_status == "unknown"
+    assert outer.result.candidate_runner_result_sha256 is None
+    assert outer.result.execution_performed is None
+    assert outer.result.network_call_made is None
+    assert receipt.result_present is False
+    assert receipt.result_sha256 is None
+    assert not retained_path.exists()
+
+
+def test_candidate_runner_receipt_write_failure_retains_authenticated_inner_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script = _load_proof_matrix_script()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir(mode=0o700)
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
+    inner_publication = _candidate_publication(
+        script,
+        result_kind="verified_child_failure",
+    )
+    output = tmp_path / "proof.json"
+
+    def child_result(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> CommandResult:
+        del env, timeout_seconds
+        result_path = Path(argv[argv.index("--out") + 1])
+        result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
+        result_path.chmod(0o600)
+        return CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=17,
+                pgid=17,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout="",
+            stderr="",
+        )
+
+    real_writer = script.write_codex_native_candidate_runner_receipt
+    write_count = 0
+
+    def fail_exit_receipt(
+        path: Path,
+        receipt: CodexNativeCandidateRunnerReceipt,
+    ) -> bool:
+        nonlocal write_count
+        write_count += 1
+        return real_writer(path, receipt) if write_count == 1 else False
+
+    monkeypatch.setattr(script, "run_command", child_result)
+    monkeypatch.setattr(
+        script,
+        "write_codex_native_candidate_runner_receipt",
+        fail_exit_receipt,
+    )
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    outer = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    retained_path = output.with_name(f"{output.name}.candidate-result.json")
+    retained_sha256 = hashlib.sha256(retained_path.read_bytes()).hexdigest()
+
+    assert exit_code == 1
+    assert outer.result.reason == "proof_candidate_runner_receipt_write_failed"
+    assert outer.result.candidate_runner_receipt_sha256 is None
+    assert outer.result.candidate_runner_result_status == "authenticated"
+    assert outer.result.candidate_runner_result_sha256 == retained_sha256
+    assert outer.result.execution_performed is None
+    assert retained_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert write_count == EXPECTED_RECEIPT_WRITE_COUNT
+
+
+def test_candidate_runner_cleanup_complete_publishes_authenticated_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script = _load_proof_matrix_script()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir(mode=0o700)
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
+    inner_publication = _candidate_publication(script, result_kind="verified_result")
+    output = tmp_path / "proof.json"
+
+    def child_result(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> CommandResult:
+        del env, timeout_seconds
+        result_path = Path(argv[argv.index("--out") + 1])
+        result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
+        result_path.chmod(0o600)
+        return CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=17,
+                pgid=17,
+                exit_code=0,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr(script, "run_command", child_result)
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    published = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    receipt_path = output.with_name(f"{output.name}.candidate-runner.json")
+    receipt = publication_module.verify_codex_native_candidate_runner_receipt(
+        receipt_path.read_text(encoding="utf-8"),
+    )
+
+    assert exit_code == 0
+    assert published == inner_publication
+    assert receipt.cleanup_status == "complete"
+    assert (
+        receipt.result_sha256
+        == hashlib.sha256(
+            output.with_name(f"{output.name}.candidate-result.json").read_bytes()
+        ).hexdigest()
+    )
 
 
 def test_failure_before_preflight_proves_only_no_execution() -> None:

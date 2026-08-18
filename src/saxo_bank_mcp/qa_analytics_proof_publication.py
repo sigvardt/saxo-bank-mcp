@@ -53,6 +53,11 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
         pattern=_SHA256_PATTERN,
     )
     candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown"
+    candidate_runner_result_status: Literal["unknown", "authenticated"] = "unknown"
+    candidate_runner_result_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
     runtime_consumption_intent_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     runtime_cleanup_receipt_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     completed_phases: None = None
@@ -81,6 +86,10 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
             and self.candidate_runner_cleanup_status != "unknown"
         ):
             raise ValueError("native candidate runner cleanup lacks receipt")
+        if (self.candidate_runner_result_status == "authenticated") != (
+            self.candidate_runner_result_sha256 is not None
+        ):
+            raise ValueError("native candidate runner result authentication mismatch")
         digests = (
             self.runtime_consumption_intent_sha256,
             self.runtime_cleanup_receipt_sha256,
@@ -100,7 +109,11 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
             raise ValueError("native boundary cleanup states do not match")
         material = self.model_dump(mode="json", exclude={"boundary_receipt_sha256"})
         accepted_digests = {_digest(material)}
-        legacy_material = dict(material)
+        previous_material = dict(material)
+        previous_material.pop("candidate_runner_result_status")
+        previous_material.pop("candidate_runner_result_sha256")
+        accepted_digests.add(_digest(previous_material))
+        legacy_material = dict(previous_material)
         legacy_material.pop("candidate_runner_receipt_sha256")
         legacy_material.pop("candidate_runner_cleanup_status")
         accepted_digests.add(_digest(legacy_material))
@@ -203,7 +216,13 @@ class CodexNativeProofPublication(_StrictModel):
             legacy_material["result"] = legacy_result
             accepted_digests.add(_digest(legacy_material))
         if isinstance(self.result, CodexNativeBoundaryFailureReceipt):
-            legacy_material = dict(material)
+            previous_material = dict(material)
+            previous_result = dict(previous_material["result"])
+            previous_result.pop("candidate_runner_result_status")
+            previous_result.pop("candidate_runner_result_sha256")
+            previous_material["result"] = previous_result
+            accepted_digests.add(_digest(previous_material))
+            legacy_material = dict(previous_material)
             legacy_result = dict(legacy_material["result"])
             legacy_result.pop("candidate_runner_receipt_sha256")
             legacy_result.pop("candidate_runner_cleanup_status")
@@ -223,6 +242,7 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
     cleanup_status: CodexNativeCleanupStatus = "unknown",
     candidate_runner_receipt_sha256: str | None = None,
     candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown",
+    candidate_runner_result_sha256: str | None = None,
     runtime_consumption_intent_sha256: str | None = None,
     runtime_cleanup_receipt_sha256: str | None = None,
 ) -> CodexNativeBoundaryFailureReceipt:
@@ -239,6 +259,10 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
         "cleanup_status": cleanup_status,
         "candidate_runner_receipt_sha256": candidate_runner_receipt_sha256,
         "candidate_runner_cleanup_status": candidate_runner_cleanup_status,
+        "candidate_runner_result_status": (
+            "authenticated" if candidate_runner_result_sha256 is not None else "unknown"
+        ),
+        "candidate_runner_result_sha256": candidate_runner_result_sha256,
         "runtime_consumption_intent_sha256": runtime_consumption_intent_sha256,
         "runtime_cleanup_receipt_sha256": runtime_cleanup_receipt_sha256,
         "completed_phases": None,
