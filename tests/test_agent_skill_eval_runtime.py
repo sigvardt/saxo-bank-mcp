@@ -9,7 +9,7 @@ import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import pytest
 
@@ -30,6 +30,10 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     RouterDecision,
     SkillEvalCase,
     load_eval_cases,
+)
+from saxo_bank_mcp.agent_skill_eval_native_preflight import (
+    CodexNativeCaseMcpBinding,
+    CodexNativePreflightReceipt,
 )
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions, run_eval_suite
@@ -623,8 +627,24 @@ def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
     def fake_codex_client_version(**_kwargs: object) -> str:
         return "codex-test"
 
-    def fake_native_preflight(**_kwargs: object) -> None:
-        return None
+    def fake_native_preflight(**kwargs: object) -> CodexNativePreflightReceipt:
+        binding = kwargs["mcp_config_binding"]
+        logical_grants = cast("tuple[object, ...]", kwargs["logical_grants"])
+        assert isinstance(binding, CodexNativeCaseMcpBinding)
+        assert isinstance(logical_grants, tuple)
+        assert all(isinstance(item, str) for item in logical_grants)
+        return CodexNativePreflightReceipt(
+            plugin_enabled=True,
+            mcp_started=True,
+            visible_logical_tools=cast("tuple[str, ...]", logical_grants),
+            plugin_list_exit_code=0,
+            plugin_list_stdout_schema_sha256="e" * 64,
+            mcp_probe_stage="complete",
+            mcp_probe_exit_code=0,
+            mcp_probe_stdout_schema_sha256="f" * 64,
+            mcp_config_sha256=binding.config_sha256,
+            mcp_config_path_identity_sha256=binding.path_identity_sha256,
+        )
 
     monkeypatch.setattr(eval_runner, "codex_client_version", fake_codex_client_version)
     monkeypatch.setattr(eval_runner, "execute_model_case", fake_execute_model_case)
@@ -669,7 +689,30 @@ def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
     ) in prompt
     assert "Call every required tool even when an earlier fixture is refused" in prompt
     assert "Do not pre-emptively refuse before making these controlled QA calls" in prompt
+    assert "The analytics capability context is already current for this case" in prompt
+    assert "The harness owns cleanup for this contained fixture" in prompt
+    assert "Never call an ungranted capability or deletion tool" in prompt
     assert "Final answer must include: analysis_id; owner-only; quality warnings" in prompt
+
+
+def test_codex_native_research_precheck_prompt_requires_exact_final_receipt() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-analytics")
+        if candidate.id == "research-to-precheck"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    assert "Final receipt:" in prompt
+    assert "analysis_id: <result analysis_id or fixture analysis_id>" in prompt
+    assert "state: <verified|degraded|refused>" in prompt
+    assert "stop before broker write" in prompt
 
 
 def test_codex_native_safety_execution_prompt_binds_exact_case_id() -> None:

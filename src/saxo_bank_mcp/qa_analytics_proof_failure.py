@@ -13,6 +13,7 @@ from typing import Final, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, EnvironmentName
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
@@ -169,6 +170,15 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
         default=None,
         pattern=_SHA256_PATTERN,
     )
+    mcp_config_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    mcp_config_path_identity_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    assistant_message_present: bool | None = None
+    required_all_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    required_any_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    forbidden_assertion_absent_results: tuple[bool, ...] = Field(default=(), max_length=64)
 
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
@@ -194,7 +204,37 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             exit_code=self.mcp_probe_exit_code,
             stdout_schema_sha256=self.mcp_probe_stdout_schema_sha256,
         )
+        _validate_mcp_config_binding_evidence(
+            config_sha256=self.mcp_config_sha256,
+            path_identity_sha256=self.mcp_config_path_identity_sha256,
+        )
+        _validate_assertion_result_evidence(
+            assistant_message_present=self.assistant_message_present,
+            required_all=self.required_all_assertion_results,
+            required_any=self.required_any_assertion_results,
+            forbidden_absent=self.forbidden_assertion_absent_results,
+        )
         return self
+
+
+def _validate_mcp_config_binding_evidence(
+    *,
+    config_sha256: str | None,
+    path_identity_sha256: str | None,
+) -> None:
+    if (config_sha256 is None) != (path_identity_sha256 is None):
+        raise ValueError("mcp config binding evidence must be complete")
+
+
+def _validate_assertion_result_evidence(
+    *,
+    assistant_message_present: bool | None,
+    required_all: tuple[bool, ...],
+    required_any: tuple[bool, ...],
+    forbidden_absent: tuple[bool, ...],
+) -> None:
+    if assistant_message_present is None and any((required_all, required_any, forbidden_absent)):
+        raise ValueError("assertion outcomes require assistant-message evidence")
 
 
 def _validate_mcp_probe_command_evidence(
@@ -248,7 +288,26 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             raise ValueError("agent evaluation summary case ids must be unique")
         material = self.model_dump(mode="json", exclude={"summary_sha256"})
         if self.summary_sha256 != _digest(material):
-            raise ValueError("agent evaluation summary digest mismatch")
+            legacy_fields = {
+                "mcp_config_sha256",
+                "mcp_config_path_identity_sha256",
+                "assistant_message_present",
+                "required_all_assertion_results",
+                "required_any_assertion_results",
+                "forbidden_assertion_absent_results",
+            }
+            if any(legacy_fields & case.model_fields_set for case in self.cases):
+                raise ValueError("agent evaluation summary digest mismatch")
+            legacy_material = dict(material)
+            legacy_cases: list[dict[str, JsonValue]] = []
+            for case in self.cases:
+                case_material = case.model_dump(mode="json")
+                for field in legacy_fields:
+                    case_material.pop(field, None)
+                legacy_cases.append(case_material)
+            legacy_material["cases"] = legacy_cases
+            if self.summary_sha256 != _digest(legacy_material):
+                raise ValueError("agent evaluation summary digest mismatch")
         return self
 
 

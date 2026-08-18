@@ -63,12 +63,19 @@ for index, arg in enumerate(args):
     fixed.append(arg)
 direct_server = {direct_server}
 if direct_server is not None:
-    if server.get("command") != "uv" or fixed != [
+    direct_args = ["-I", "-B", "-m", "saxo_bank_mcp", "--transport", "stdio"]
+    source_contract = server.get("command") == "uv" and fixed == [
         "run", "--project", str(root), "saxo-bank-mcp", "--transport", "stdio"
-    ]:
+    ]
+    bound_contract = (
+        server.get("command") == direct_server
+        and fixed == direct_args
+        and server.get("cwd") == str(root)
+    )
+    if not source_contract and not bound_contract:
         raise ValueError("mcp_stdio_contract_invalid")
     command = direct_server
-    fixed = ["-I", "-B", "-m", "saxo_bank_mcp", "--transport", "stdio"]
+    fixed = direct_args
 else:
     command = server["command"]
 server_config = {{
@@ -77,16 +84,25 @@ server_config = {{
     "cwd": str(root),
 }}
 if direct_server is not None:
-    server_config["env"] = {{
-        key: value
-        for key, value in os.environ.items()
-        if key.startswith("SAXO_MCP_")
-        or key in {{
-            "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-            "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
+    configured_env = server.get("env")
+    if configured_env is not None:
+        if not isinstance(configured_env, dict) or not all(
+            isinstance(key, str) and isinstance(value, str)
+            for key, value in configured_env.items()
+        ):
+            raise ValueError("mcp_stdio_env_invalid")
+        server_config["env"] = configured_env
+    else:
+        server_config["env"] = {{
+            key: value
+            for key, value in os.environ.items()
+            if key.startswith("SAXO_MCP_")
+            or key in {{
+                "HOME", "PATH", "TMPDIR", "TMP", "TEMP", "XDG_CONFIG_HOME",
+                "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                "PYTHONDONTWRITEBYTECODE", "PYTHONNOUSERSITE",
+            }}
         }}
-    }}
 config = {{
     "mcpServers": {{
         {PLUGIN_NAME!r}: server_config

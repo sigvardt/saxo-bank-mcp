@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,8 +23,12 @@ from saxo_bank_mcp.agent_skill_eval_models import (
     selected_harnesses,
 )
 from saxo_bank_mcp.agent_skill_eval_native_preflight import (
+    CodexNativeCaseMcpBinding,
     CodexNativePreflightError,
+    CodexNativePreflightReceipt,
+    codex_native_case_mcp_config,
     preflight_codex_native_case,
+    verify_codex_native_case_mcp_config,
 )
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_validation import validate_eval_suite
@@ -498,7 +503,6 @@ def _execute_selected_cases(  # noqa: PLR0913
     records: list[EvalRunRecord] = []
     for case in cases:
         for harness in selected_harnesses(options.harness):
-            native_preflight = None
             grants = resolve_tool_grants(harness, case.exact_tool_grants[harness])
             execution_case = _codex_native_fixture_bound_case(
                 case,
@@ -533,23 +537,85 @@ def _execute_selected_cases(  # noqa: PLR0913
                 and harness == "codex"
                 and execution_case.router_expectation is None
             ):
+                mcp_config_binding: CodexNativeCaseMcpBinding | None = None
+                native_preflight: CodexNativePreflightReceipt | None = None
+                model_record: EvalRunRecord | None = None
                 try:
-                    native_preflight = preflight_codex_native_case(
-                        codex_home=runtime.codex_home,
+                    with codex_native_case_mcp_config(
                         plugin_root=child_roots.codex_plugin_root,
                         logical_grants=execution_case.exact_tool_grants["codex"],
                         env=env,
-                        probe_env=runtime.probe_env,
-                    )
+                        interpreter=Path(sys.executable),
+                    ) as bound_config:
+                        mcp_config_binding = bound_config
+                        try:
+                            native_preflight = preflight_codex_native_case(
+                                codex_home=runtime.codex_home,
+                                plugin_root=child_roots.codex_plugin_root,
+                                logical_grants=execution_case.exact_tool_grants["codex"],
+                                env=env,
+                                probe_env=runtime.probe_env,
+                                mcp_config_binding=bound_config,
+                            )
+                        except CodexNativePreflightError as exc:
+                            record = _native_preflight_failed_record(
+                                execution_case,
+                                grants,
+                                exc,
+                                mcp_config_binding=bound_config,
+                            )
+                        else:
+                            verify_codex_native_case_mcp_config(
+                                bound_config,
+                                logical_grants=execution_case.exact_tool_grants["codex"],
+                                env=env,
+                            )
+                            model_record = execute_model_case(
+                                execution_case,
+                                harness,
+                                grants,
+                                roots=child_roots,
+                                env=env,
+                                expected_router_source_sha256=(
+                                    None if binding is None else binding.router_source_sha256
+                                ),
+                                process_manager=process_manager,
+                            )
+                            verify_codex_native_case_mcp_config(
+                                bound_config,
+                                logical_grants=execution_case.exact_tool_grants["codex"],
+                                env=env,
+                            )
+                            record = model_record.model_copy(
+                                update={
+                                    "mcp_probe_stage": native_preflight.mcp_probe_stage,
+                                    "mcp_probe_exit_code": native_preflight.mcp_probe_exit_code,
+                                    "mcp_probe_stdout_schema_sha256": (
+                                        native_preflight.mcp_probe_stdout_schema_sha256
+                                    ),
+                                    "mcp_config_sha256": bound_config.config_sha256,
+                                    "mcp_config_path_identity_sha256": (
+                                        bound_config.path_identity_sha256
+                                    ),
+                                },
+                            )
                 except CodexNativePreflightError as exc:
-                    records.append(
-                        _native_preflight_failed_record(
+                    if model_record is None:
+                        record = _native_preflight_failed_record(
                             execution_case,
                             grants,
                             exc,
+                            mcp_config_binding=mcp_config_binding,
                         )
-                    )
-                    continue
+                    else:
+                        record = _native_post_model_binding_failed_record(
+                            model_record,
+                            exc,
+                            mcp_config_binding=mcp_config_binding,
+                            native_preflight=native_preflight,
+                        )
+                records.append(record)
+                continue
             record = execute_model_case(
                 execution_case,
                 harness,
@@ -561,16 +627,6 @@ def _execute_selected_cases(  # noqa: PLR0913
                 ),
                 process_manager=process_manager,
             )
-            if native_preflight is not None:
-                record = record.model_copy(
-                    update={
-                        "mcp_probe_stage": native_preflight.mcp_probe_stage,
-                        "mcp_probe_exit_code": native_preflight.mcp_probe_exit_code,
-                        "mcp_probe_stdout_schema_sha256": (
-                            native_preflight.mcp_probe_stdout_schema_sha256
-                        ),
-                    },
-                )
             records.append(record)
     return tuple(records)
 
@@ -579,6 +635,8 @@ def _native_preflight_failed_record(
     case: SkillEvalCase,
     grants: tuple[str, ...],
     failure: CodexNativePreflightError,
+    *,
+    mcp_config_binding: CodexNativeCaseMcpBinding | None = None,
 ) -> EvalRunRecord:
     return EvalRunRecord(
         case_id=case.id,
@@ -599,8 +657,51 @@ def _native_preflight_failed_record(
         mcp_probe_stage=failure.mcp_probe_stage,
         mcp_probe_exit_code=failure.mcp_probe_exit_code,
         mcp_probe_stdout_schema_sha256=failure.mcp_probe_stdout_schema_sha256,
+        mcp_config_sha256=(
+            None if mcp_config_binding is None else mcp_config_binding.config_sha256
+        ),
+        mcp_config_path_identity_sha256=(
+            None if mcp_config_binding is None else mcp_config_binding.path_identity_sha256
+        ),
         grant_status="failed",
         assertion_status="failed",
+    )
+
+
+def _native_post_model_binding_failed_record(
+    record: EvalRunRecord,
+    failure: CodexNativePreflightError,
+    *,
+    mcp_config_binding: CodexNativeCaseMcpBinding | None,
+    native_preflight: CodexNativePreflightReceipt | None,
+) -> EvalRunRecord:
+    """Retain proven model facts when config verification or restoration fails afterward."""
+    return record.model_copy(
+        update={
+            "status": "failed",
+            "error": failure.reason,
+            "mcp_probe_stage": (
+                failure.mcp_probe_stage
+                if native_preflight is None
+                else native_preflight.mcp_probe_stage
+            ),
+            "mcp_probe_exit_code": (
+                failure.mcp_probe_exit_code
+                if native_preflight is None
+                else native_preflight.mcp_probe_exit_code
+            ),
+            "mcp_probe_stdout_schema_sha256": (
+                failure.mcp_probe_stdout_schema_sha256
+                if native_preflight is None
+                else native_preflight.mcp_probe_stdout_schema_sha256
+            ),
+            "mcp_config_sha256": (
+                None if mcp_config_binding is None else mcp_config_binding.config_sha256
+            ),
+            "mcp_config_path_identity_sha256": (
+                None if mcp_config_binding is None else mcp_config_binding.path_identity_sha256
+            ),
+        },
     )
 
 
@@ -637,6 +738,9 @@ def _codex_native_fixture_bound_case(
     optional_phrases = "; ".join(case.transcript_assertions.required_any)
     fixture_protocol = (
         "\n\nCodex-native proof fixture protocol:\n"
+        "The analytics capability context is already current for this case. "
+        "The harness owns cleanup for this contained fixture. "
+        "Never call an ungranted capability or deletion tool. "
         "Call every required tool even when an earlier fixture is refused. "
         "Use the calls below in order with exactly these schema-valid synthetic handles; "
         "a degraded or refused result is valid evidence and must never be relabelled as success. "
@@ -652,6 +756,11 @@ def _codex_native_fixture_bound_case(
     )
     if optional_phrases:
         fixture_protocol += f" Include at least one of: {optional_phrases}."
+    if case.id == "research-to-precheck":
+        fixture_protocol += (
+            " Final receipt: `analysis_id: <result analysis_id or fixture analysis_id>; "
+            "state: <verified|degraded|refused>; stop before broker write`."
+        )
     prompts = dict(case.harness_prompts)
     prompts["codex"] = prompts["codex"] + fixture_protocol
     return case.model_copy(update={"harness_prompts": prompts})

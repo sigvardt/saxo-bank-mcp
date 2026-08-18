@@ -3,21 +3,60 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp._evidence import JsonValue, write_text
 from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
 from saxo_bank_mcp.agent_skill_eval_commands import resolve_cli_executable
 from saxo_bank_mcp.agent_skill_install_paths import MARKETPLACE_NAME, PLUGIN_NAME
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
+from saxo_bank_mcp.server_eval_tool_filter import resolve_eval_tool_filter
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 
 _JSON_OBJECT: Final = TypeAdapter(dict[str, JsonValue])
+_OWNER_FILE_MODE: Final = 0o600
+_CASE_SERVER_ENV_KEYS: Final = frozenset(
+    {
+        "HOME",
+        "PATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "UV_CACHE_DIR",
+        "UV_OFFLINE",
+        "UV_PROJECT_ENVIRONMENT",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONNOUSERSITE",
+    }
+)
+_CASE_SAXO_ENV_KEYS: Final = frozenset(
+    {
+        "SAXO_MCP_ENVIRONMENT",
+        "SAXO_MCP_ENABLE_LIVE_READS",
+        "SAXO_MCP_ENABLE_LIVE_WRITES",
+        "SAXO_MCP_SIM_CREDENTIAL_FILE",
+        "SAXO_MCP_SIM_REDIRECT_URI",
+        "SAXO_MCP_TOKEN_CACHE_PATH",
+        "SAXO_MCP_SIM_AUTH_URL",
+        "SAXO_MCP_SIM_TOKEN_URL",
+        "SAXO_MCP_ACCOUNT_ALLOWLIST",
+        "SAXO_MCP_INSTRUMENT_ALLOWLIST",
+        "SAXO_MCP_EVAL_TOOL_FILTER",
+        "SAXO_MCP_EVAL_ALLOWED_TOOLS",
+    }
+)
 type McpProbeStage = Literal[
     "runtime_binding",
     "contract_validation",
@@ -56,9 +95,11 @@ class CodexNativePreflightReceipt:
     mcp_probe_stage: Literal["complete"]
     mcp_probe_exit_code: int
     mcp_probe_stdout_schema_sha256: str
+    mcp_config_sha256: str | None = None
+    mcp_config_path_identity_sha256: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CodexNativePreflightError(ValueError):
     reason: str
     mcp_started: bool | None = False
@@ -80,6 +121,191 @@ class _ExpectedPluginIdentity:
     plugin_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class CodexNativeCaseMcpBinding:
+    """Private path plus public digests for one case-scoped contained MCP config."""
+
+    path: Path
+    interpreter: Path
+    config_sha256: str
+    path_identity_sha256: str
+    original_bytes: bytes
+    original_mode: int
+
+
+@contextmanager
+def codex_native_case_mcp_config(
+    *,
+    plugin_root: Path,
+    logical_grants: tuple[str, ...],
+    env: Mapping[str, str],
+    interpreter: Path,
+) -> Generator[CodexNativeCaseMcpBinding]:
+    """Install one owner-only case config, then restore the registered plugin bytes."""
+    expected = _validated_grants(logical_grants)
+    try:
+        root = plugin_root.resolve(strict=True)
+        executable = interpreter.absolute()
+        executable_meta = executable.stat()
+        path = root / ".mcp.json"
+        metadata = os.lstat(path)
+        original_bytes = path.read_bytes()
+    except OSError as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_config_binding_invalid",
+            mcp_probe_stage="runtime_binding",
+        ) from exc
+    invalid_source = (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or not stat.S_ISREG(executable_meta.st_mode)
+        or not os.access(executable, os.X_OK)
+    )
+    if invalid_source:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_config_binding_invalid",
+            mcp_probe_stage="runtime_binding",
+        )
+    original_mode = stat.S_IMODE(metadata.st_mode)
+    payload = _case_mcp_payload(
+        root=root,
+        interpreter=executable,
+        logical_grants=expected,
+        env=env,
+    )
+    encoded = json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    path_identity_sha256 = _path_identity_sha256(path)
+    config_sha256 = hashlib.sha256(encoded.encode()).hexdigest()
+    binding = CodexNativeCaseMcpBinding(
+        path=path,
+        interpreter=executable,
+        config_sha256=config_sha256,
+        path_identity_sha256=path_identity_sha256,
+        original_bytes=original_bytes,
+        original_mode=original_mode,
+    )
+    try:
+        write_text(path, encoded)
+        path.chmod(_OWNER_FILE_MODE)
+        verify_codex_native_case_mcp_config(binding, logical_grants=expected, env=env)
+        yield binding
+    except CodexNativePreflightError:
+        raise
+    except OSError as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_config_binding_invalid",
+            mcp_probe_stage="contract_validation",
+        ) from exc
+    finally:
+        try:
+            write_text(path, original_bytes.decode("utf-8"))
+            path.chmod(original_mode)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise CodexNativePreflightError(
+                "codex_native_mcp_config_restore_failed",
+                mcp_probe_stage="contract_validation",
+            ) from exc
+
+
+def verify_codex_native_case_mcp_config(
+    binding: CodexNativeCaseMcpBinding,
+    *,
+    logical_grants: tuple[str, ...],
+    env: Mapping[str, str],
+) -> None:
+    """Fail closed when the installed case config changed after its binding."""
+    expected = _validated_grants(logical_grants)
+    try:
+        metadata = os.lstat(binding.path)
+        raw = binding.path.read_bytes()
+        payload = _JSON_OBJECT.validate_json(raw)
+    except (OSError, ValidationError) as exc:
+        raise CodexNativePreflightError(
+            "codex_native_mcp_config_binding_invalid",
+            mcp_probe_stage="contract_validation",
+        ) from exc
+    invalid_file = (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) != _OWNER_FILE_MODE
+    )
+    expected_payload = _case_mcp_payload(
+        root=binding.path.parent.resolve(),
+        interpreter=binding.interpreter,
+        logical_grants=expected,
+        env=env,
+    )
+    if (
+        invalid_file
+        or hashlib.sha256(raw).hexdigest() != binding.config_sha256
+        or _path_identity_sha256(binding.path) != binding.path_identity_sha256
+        or payload != expected_payload
+    ):
+        raise CodexNativePreflightError(
+            "codex_native_mcp_config_binding_invalid",
+            mcp_probe_stage="contract_validation",
+        )
+
+
+def _case_mcp_payload(
+    *,
+    root: Path,
+    interpreter: Path,
+    logical_grants: tuple[str, ...],
+    env: Mapping[str, str],
+) -> dict[str, JsonValue]:
+    if resolve_eval_tool_filter(env) != frozenset(logical_grants):
+        raise CodexNativePreflightError("codex_native_mcp_config_binding_invalid")
+    if (
+        env.get("SAXO_MCP_ENVIRONMENT") != "SIM"
+        or env.get("SAXO_MCP_ENABLE_LIVE_READS", "0") not in {"0", ""}
+        or env.get("SAXO_MCP_ENABLE_LIVE_WRITES", "") != ""
+        or any(
+            key.startswith("SAXO_MCP_") and key not in _CASE_SAXO_ENV_KEYS and value
+            for key, value in env.items()
+        )
+    ):
+        raise CodexNativePreflightError("codex_native_mcp_config_binding_invalid")
+    server_env = {
+        key: value
+        for key, value in env.items()
+        if key in _CASE_SAXO_ENV_KEYS or key in _CASE_SERVER_ENV_KEYS
+    }
+    required = {
+        "SAXO_MCP_ENVIRONMENT": "SIM",
+        "SAXO_MCP_ENABLE_LIVE_READS": env.get("SAXO_MCP_ENABLE_LIVE_READS", "0"),
+        "SAXO_MCP_ENABLE_LIVE_WRITES": "",
+        "SAXO_MCP_EVAL_TOOL_FILTER": "1",
+        "SAXO_MCP_EVAL_ALLOWED_TOOLS": ",".join(logical_grants),
+    }
+    server_env.update(required)
+    return {
+        "mcpServers": {
+            PLUGIN_NAME: {
+                "command": str(interpreter.absolute()),
+                "args": [
+                    "-I",
+                    "-B",
+                    "-m",
+                    "saxo_bank_mcp",
+                    "--transport",
+                    "stdio",
+                ],
+                "cwd": str(root),
+                "env": server_env,
+            }
+        }
+    }
+
+
+def _path_identity_sha256(path: Path) -> str:
+    return hashlib.sha256(str(path.absolute()).encode()).hexdigest()
+
+
 def preflight_codex_native_case(  # noqa: PLR0913
     *,
     codex_home: Path,
@@ -89,6 +315,7 @@ def preflight_codex_native_case(  # noqa: PLR0913
     probe_env: Path,
     retained_project_environment: Path | None = None,
     retained_interpreter: Path | None = None,
+    mcp_config_binding: CodexNativeCaseMcpBinding | None = None,
 ) -> CodexNativePreflightReceipt:
     """Prove native plugin registration and exact SIM-filtered tool visibility.
 
@@ -110,6 +337,12 @@ def preflight_codex_native_case(  # noqa: PLR0913
         retained_project_environment=retained_project_environment,
         retained_interpreter=retained_interpreter,
     )
+    if mcp_config_binding is not None:
+        verify_codex_native_case_mcp_config(
+            mcp_config_binding,
+            logical_grants=expected,
+            env=env,
+        )
     probe_env_vars = dict(env)
     probe_env_vars["UV_OFFLINE"] = "1"
     try:
@@ -193,6 +426,12 @@ def preflight_codex_native_case(  # noqa: PLR0913
         mcp_probe_stage="complete",
         mcp_probe_exit_code=probe_exit_code,
         mcp_probe_stdout_schema_sha256=probe_schema_sha256,
+        mcp_config_sha256=(
+            None if mcp_config_binding is None else mcp_config_binding.config_sha256
+        ),
+        mcp_config_path_identity_sha256=(
+            None if mcp_config_binding is None else mcp_config_binding.path_identity_sha256
+        ),
     )
 
 

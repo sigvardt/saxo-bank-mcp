@@ -169,11 +169,20 @@ class EvalRunRecord(BaseModel):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
+    mcp_config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    mcp_config_path_identity_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     client_version: str = ""
     invoked_logical_tools: tuple[str, ...] = ()
     invoked_logical_tool_count: int = 0
     grant_status: Literal["passed", "failed", "not_required"] = "not_required"
     assertion_status: Literal["passed", "failed", "not_required"] = "not_required"
+    assistant_message_present: bool | None = None
+    required_all_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    required_any_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
+    forbidden_assertion_absent_results: tuple[bool, ...] = Field(default=(), max_length=64)
 
     @model_validator(mode="after")
     def _validate_mcp_probe_evidence(self) -> EvalRunRecord:
@@ -194,6 +203,19 @@ class EvalRunRecord(BaseModel):
             self.mcp_probe_exit_code != 0
         ):
             raise ValueError("completed mcp probe command must have exit zero")
+        config_paired = (self.mcp_config_sha256 is None) == (
+            self.mcp_config_path_identity_sha256 is None
+        )
+        if not config_paired:
+            raise ValueError("mcp config binding evidence must be complete")
+        if self.assistant_message_present is None and any(
+            (
+                self.required_all_assertion_results,
+                self.required_any_assertion_results,
+                self.forbidden_assertion_absent_results,
+            )
+        ):
+            raise ValueError("assertion outcomes require assistant-message evidence")
         return self
 
 

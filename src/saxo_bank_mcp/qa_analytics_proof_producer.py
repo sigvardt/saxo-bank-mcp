@@ -1845,6 +1845,12 @@ def _agent_evaluation_failure_summary(
             mcp_probe_stage=record.mcp_probe_stage,
             mcp_probe_exit_code=record.mcp_probe_exit_code,
             mcp_probe_stdout_schema_sha256=record.mcp_probe_stdout_schema_sha256,
+            mcp_config_sha256=record.mcp_config_sha256,
+            mcp_config_path_identity_sha256=record.mcp_config_path_identity_sha256,
+            assistant_message_present=record.assistant_message_present,
+            required_all_assertion_results=record.required_all_assertion_results,
+            required_any_assertion_results=record.required_any_assertion_results,
+            forbidden_assertion_absent_results=(record.forbidden_assertion_absent_results),
         )
         for record in report.records
     )

@@ -26,7 +26,7 @@ from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
-from saxo_bank_mcp.agent_skill_matrix_env import MatrixIsolatedRuntime
+from saxo_bank_mcp.agent_skill_matrix_env import OWNER_FILE_MODE, MatrixIsolatedRuntime
 from saxo_bank_mcp.server_eval_tool_filter import derive_eval_tool_filter_env
 
 ROOT: Final = Path(__file__).resolve().parents[1]
@@ -34,6 +34,7 @@ CASE_ROOT: Final = ROOT / "evals/saxo-bank"
 GRANTS: Final = ("saxo_health", "saxo_list_registered_endpoints")
 CODEX_0147_PLUGIN_LIST: Final = ROOT / "tests/fixtures/codex-0.147-plugin-list.json"
 MCP_PROBE_FAILURE_EXIT_CODE: Final = 23
+BOUND_CONSUMER_COUNT: Final = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,253 @@ def test_native_preflight_uses_retained_interpreter_when_disposable_uv_env_is_em
     assert fullmatch(r"[0-9a-f]{64}", receipt.mcp_probe_stdout_schema_sha256)
     assert not any(empty_project_environment.iterdir())
     assert not any(empty_cache.iterdir())
+
+
+def test_native_case_mcp_config_binds_exact_filter_owner_only_and_restores(
+    tmp_path: Path,
+) -> None:
+    env = derive_eval_tool_filter_env(_env(tmp_path), GRANTS)
+    plugin_root = _plugin_root(env)
+    _write_plugin_identity(plugin_root)
+    original = (ROOT / ".mcp.json").read_bytes()
+    config_path = plugin_root / ".mcp.json"
+    config_path.write_bytes(original)
+    config_path.chmod(0o600)
+
+    with preflight.codex_native_case_mcp_config(
+        plugin_root=plugin_root,
+        logical_grants=GRANTS,
+        env=env,
+        interpreter=Path(sys.executable),
+    ) as binding:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        server = payload["mcpServers"]["saxo-bank-mcp"]
+        server_env = server["env"]
+
+        assert config_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+        assert server["command"] == str(Path(sys.executable).absolute())
+        assert server["args"] == [
+            "-I",
+            "-B",
+            "-m",
+            "saxo_bank_mcp",
+            "--transport",
+            "stdio",
+        ]
+        assert server_env["SAXO_MCP_ENVIRONMENT"] == "SIM"
+        assert server_env["SAXO_MCP_ENABLE_LIVE_READS"] == "0"
+        assert server_env["SAXO_MCP_ENABLE_LIVE_WRITES"] == ""
+        assert server_env["SAXO_MCP_EVAL_TOOL_FILTER"] == "1"
+        assert server_env["SAXO_MCP_EVAL_ALLOWED_TOOLS"] == ",".join(GRANTS)
+        assert binding.config_sha256 == hashlib.sha256(config_path.read_bytes()).hexdigest()
+        assert fullmatch(r"[0-9a-f]{64}", binding.path_identity_sha256)
+        preflight.verify_codex_native_case_mcp_config(
+            binding,
+            logical_grants=GRANTS,
+            env=env,
+        )
+        drifted_parent_env = derive_eval_tool_filter_env(env, (GRANTS[0],))
+        probe = probe_root_stdio(
+            "codex_native_bound_config_surface",
+            plugin_root,
+            env=drifted_parent_env,
+            probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+            offline=True,
+            interpreter=Path(sys.executable),
+        )
+        probe_payload = json.loads(probe.stdout.splitlines()[-1])
+        assert probe_payload["tool_names"] == list(GRANTS)
+
+    assert config_path.read_bytes() == original
+    assert config_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+
+
+def test_native_case_mcp_config_rejects_tamper_and_restores(tmp_path: Path) -> None:
+    env = derive_eval_tool_filter_env(_env(tmp_path), GRANTS)
+    plugin_root = _plugin_root(env)
+    _write_plugin_identity(plugin_root)
+    original = (ROOT / ".mcp.json").read_bytes()
+    config_path = plugin_root / ".mcp.json"
+    config_path.write_bytes(original)
+    config_path.chmod(0o600)
+
+    with preflight.codex_native_case_mcp_config(
+        plugin_root=plugin_root,
+        logical_grants=GRANTS,
+        env=env,
+        interpreter=Path(sys.executable),
+    ) as binding:
+        config_path.write_text("{}\n", encoding="utf-8")
+        config_path.chmod(0o600)
+        with pytest.raises(CodexNativePreflightError) as exc_info:
+            preflight.verify_codex_native_case_mcp_config(
+                binding,
+                logical_grants=GRANTS,
+                env=env,
+            )
+        assert exc_info.value.reason == "codex_native_mcp_config_binding_invalid"
+
+    assert config_path.read_bytes() == original
+    assert config_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+
+
+def test_native_case_mcp_config_refuses_unexpected_saxo_environment(
+    tmp_path: Path,
+) -> None:
+    env = derive_eval_tool_filter_env(_env(tmp_path), GRANTS)
+    env["SAXO_MCP_UNEXPECTED_FLAG"] = "fixture-value"
+    plugin_root = _plugin_root(env)
+    _write_plugin_identity(plugin_root)
+    config_path = plugin_root / ".mcp.json"
+    original = (ROOT / ".mcp.json").read_bytes()
+    config_path.write_bytes(original)
+    config_path.chmod(OWNER_FILE_MODE)
+
+    with (
+        pytest.raises(CodexNativePreflightError) as exc_info,
+        preflight.codex_native_case_mcp_config(
+            plugin_root=plugin_root,
+            logical_grants=GRANTS,
+            env=env,
+            interpreter=Path(sys.executable),
+        ),
+    ):
+        pytest.fail("unsafe environment reached bound config")
+
+    assert exc_info.value.reason == "codex_native_mcp_config_binding_invalid"
+    assert config_path.read_bytes() == original
+
+
+def test_runner_preflight_and_model_consume_same_case_mcp_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = derive_eval_tool_filter_env(_env(tmp_path), GRANTS)
+    plugin_root = _plugin_root(env)
+    _write_plugin_identity(plugin_root)
+    config_path = plugin_root / ".mcp.json"
+    original = (ROOT / ".mcp.json").read_bytes()
+    config_path.write_bytes(original)
+    config_path.chmod(0o600)
+    case = next(
+        item for item in load_eval_cases(CASE_ROOT) if item.id == "codex-native-safety-boundary"
+    ).model_copy(
+        update={
+            "required_logical_tools": GRANTS,
+            "exact_tool_grants": {"codex": GRANTS, "claude": GRANTS},
+        }
+    )
+    runtime = MatrixIsolatedRuntime(
+        run_root=tmp_path,
+        env=env,
+        home=Path(env["HOME"]),
+        codex_home=Path(env["CODEX_HOME"]),
+        probe_env=Path(env["UV_PROJECT_ENVIRONMENT"]),
+        auth_dir=tmp_path / "auth",
+        sim_credential_path=tmp_path / "auth" / "credentials",
+        token_cache_path=tmp_path / "auth" / "token.json",
+        sim_token_source=tmp_path / "source-token.json",
+        sim_token_source_digest="d" * 64,
+    )
+    options = EvalRunOptions(
+        harness="codex",
+        case_id=case.id,
+        tag=None,
+        environment="LOCAL",
+        case_root=CASE_ROOT,
+        codex_plugin_root=ROOT,
+        claude_plugin_root=ROOT,
+        codex_home=None,
+        claude_home=None,
+        out=tmp_path / "eval.json",
+        dry_run=False,
+        nonzero_on_skip=True,
+        credential_mode="ephemeral-owner-only-copy",
+        harness_policy="codex_native_v1",
+    )
+    observed: list[str] = []
+
+    def passing_record() -> EvalRunRecord:
+        return EvalRunRecord(
+            case_id=case.id,
+            harness="codex",
+            status="passed",
+            execution_mode="model_execution",
+            expected_skill=case.expected_skill,
+            required_logical_tools=case.required_logical_tools,
+            forbidden_logical_tools=case.forbidden_logical_tools,
+            resolved_tool_grants=GRANTS,
+            transcript_assertions_passed=True,
+            no_model_call=False,
+            no_mcp_call=False,
+            no_saxo_call=False,
+            grant_status="passed",
+            assertion_status="passed",
+        )
+
+    def passed_preflight(**kwargs: object) -> CodexNativePreflightReceipt:
+        binding = kwargs["mcp_config_binding"]
+        assert isinstance(binding, preflight.CodexNativeCaseMcpBinding)
+        observed.append(hashlib.sha256(config_path.read_bytes()).hexdigest())
+        assert observed[-1] == binding.config_sha256
+        return CodexNativePreflightReceipt(
+            plugin_enabled=True,
+            mcp_started=True,
+            visible_logical_tools=GRANTS,
+            plugin_list_exit_code=0,
+            plugin_list_stdout_schema_sha256="e" * 64,
+            mcp_probe_stage="complete",
+            mcp_probe_exit_code=0,
+            mcp_probe_stdout_schema_sha256="f" * 64,
+            mcp_config_sha256=binding.config_sha256,
+            mcp_config_path_identity_sha256=binding.path_identity_sha256,
+        )
+
+    def passed_model(*_args: object, **_kwargs: object) -> EvalRunRecord:
+        observed.append(hashlib.sha256(config_path.read_bytes()).hexdigest())
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        assert payload["mcpServers"]["saxo-bank-mcp"]["env"][
+            "SAXO_MCP_EVAL_ALLOWED_TOOLS"
+        ] == ",".join(GRANTS)
+        return passing_record()
+
+    monkeypatch.setattr(eval_runner, "preflight_codex_native_case", passed_preflight)
+    monkeypatch.setattr(eval_runner, "execute_model_case", passed_model)
+
+    records = eval_runner._execute_selected_cases(  # noqa: SLF001
+        options,
+        cases=(case,),
+        roots=HarnessRoots(ROOT, ROOT, None, None),
+        binding=None,
+        runtime=runtime,
+        process_manager=EvalProcessManager(),
+    )
+
+    assert records[0].status == "passed"
+    assert len(observed) == BOUND_CONSUMER_COUNT
+    assert observed[0] == observed[1]
+    assert records[0].mcp_config_sha256 == observed[0]
+    assert config_path.read_bytes() == original
+
+    def tampering_model(*_args: object, **_kwargs: object) -> EvalRunRecord:
+        config_path.write_text("{}\n", encoding="utf-8")
+        config_path.chmod(OWNER_FILE_MODE)
+        return passing_record()
+
+    monkeypatch.setattr(eval_runner, "execute_model_case", tampering_model)
+    failed = eval_runner._execute_selected_cases(  # noqa: SLF001
+        options,
+        cases=(case,),
+        roots=HarnessRoots(ROOT, ROOT, None, None),
+        binding=None,
+        runtime=runtime,
+        process_manager=EvalProcessManager(),
+    )
+
+    assert failed[0].status == "failed"
+    assert failed[0].error == "codex_native_mcp_config_binding_invalid"
+    assert failed[0].no_model_call is False
+    assert config_path.read_bytes() == original
 
 
 def test_native_preflight_proves_enabled_plugin_and_exact_filtered_tools(

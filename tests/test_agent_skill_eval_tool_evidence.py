@@ -179,6 +179,10 @@ def test_structured_exact_calls_pass_without_real_clients(
     assert record.grant_status == "passed"
     assert record.assertion_status == "passed"
     assert record.model_saxo_event_count == len(required)
+    assert record.assistant_message_present is True
+    assert record.required_all_assertion_results == (True, True, True, True)
+    assert record.required_any_assertion_results == (True, True)
+    assert record.forbidden_assertion_absent_results == (True, True)
 
 
 def test_out_of_grant_tool_fails(

@@ -217,7 +217,8 @@ def _evaluate_trace(
         grant_logical = frozenset(case.exact_tool_grants[harness])
     invoked = trace.invoked_logical_tools
     invoked_set = frozenset(invoked)
-    assertions_passed = transcript_passed(case, trace.assistant_text, invoked)
+    assertion_evidence = transcript_assertion_evidence(case, trace.assistant_text, invoked)
+    assertions_passed = assertion_evidence.passed
     error = non_router_error(
         case=case,
         trace=trace,
@@ -249,6 +250,10 @@ def _evaluate_trace(
         invoked_logical_tool_count=len(invoked),
         grant_status="passed" if grant_ok else "failed",
         assertion_status="passed" if assertions_passed else "failed",
+        assistant_message_present=assertion_evidence.assistant_message_present,
+        required_all_assertion_results=assertion_evidence.required_all,
+        required_any_assertion_results=assertion_evidence.required_any,
+        forbidden_assertion_absent_results=assertion_evidence.forbidden_absent,
     )
 
 
@@ -315,6 +320,11 @@ def _failed_record(  # noqa: PLR0913
     trace: ModelToolTrace | None = None,
     assertions_passed: bool = False,
 ) -> EvalRunRecord:
+    assertion_evidence = (
+        None
+        if trace is None
+        else transcript_assertion_evidence(case, trace.assistant_text, trace.invoked_logical_tools)
+    )
     return EvalRunRecord(
         case_id=case.id,
         harness=harness,
@@ -337,6 +347,58 @@ def _failed_record(  # noqa: PLR0913
         invoked_logical_tool_count=0 if trace is None else len(trace.invoked_logical_tools),
         grant_status="failed",
         assertion_status="failed" if not assertions_passed else "passed",
+        assistant_message_present=(
+            None if assertion_evidence is None else assertion_evidence.assistant_message_present
+        ),
+        required_all_assertion_results=(
+            () if assertion_evidence is None else assertion_evidence.required_all
+        ),
+        required_any_assertion_results=(
+            () if assertion_evidence is None else assertion_evidence.required_any
+        ),
+        forbidden_assertion_absent_results=(
+            () if assertion_evidence is None else assertion_evidence.forbidden_absent
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptAssertionEvidence:
+    assistant_message_present: bool
+    required_all: tuple[bool, ...]
+    required_any: tuple[bool, ...]
+    forbidden_absent: tuple[bool, ...]
+
+    @property
+    def passed(self) -> bool:
+        return (
+            all(self.required_all)
+            and (not self.required_any or any(self.required_any))
+            and all(self.forbidden_absent)
+        )
+
+
+def transcript_assertion_evidence(
+    case: SkillEvalCase,
+    transcript: str,
+    invoked_logical_tools: tuple[str, ...] | frozenset[str] = (),
+) -> TranscriptAssertionEvidence:
+    """Return only allowlisted booleans for each transcript assertion."""
+    lowered = transcript.lower()
+    invoked = frozenset(invoked_logical_tools)
+    return TranscriptAssertionEvidence(
+        assistant_message_present=bool(transcript.strip()),
+        required_all=tuple(
+            _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
+            for value in case.transcript_assertions.required_all
+        ),
+        required_any=tuple(
+            _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
+            for value in case.transcript_assertions.required_any
+        ),
+        forbidden_absent=tuple(
+            value.lower() not in lowered for value in case.transcript_assertions.forbidden
+        ),
     )
 
 
@@ -346,22 +408,7 @@ def transcript_passed(
     invoked_logical_tools: tuple[str, ...] | frozenset[str] = (),
 ) -> bool:
     """Require safety prose; tool-name requirements may be satisfied by real invocations."""
-    lowered = transcript.lower()
-    invoked = frozenset(invoked_logical_tools)
-    required_all = all(
-        _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
-        for value in case.transcript_assertions.required_all
-    )
-    required_any = (
-        True
-        if not case.transcript_assertions.required_any
-        else any(
-            _transcript_value_satisfied(value, lowered=lowered, invoked=invoked)
-            for value in case.transcript_assertions.required_any
-        )
-    )
-    forbidden = any(value.lower() in lowered for value in case.transcript_assertions.forbidden)
-    return required_all and required_any and not forbidden
+    return transcript_assertion_evidence(case, transcript, invoked_logical_tools).passed
 
 
 def _transcript_value_satisfied(

@@ -199,6 +199,10 @@ def _failed_agent_evaluation_report() -> EvalRunReport:
             invoked_logical_tool_count=1,
             grant_status="passed",
             assertion_status="failed",
+            assistant_message_present=True,
+            required_all_assertion_results=(True, False, True),
+            required_any_assertion_results=(True,),
+            forbidden_assertion_absent_results=(True, True),
         ),
     )
     return EvalRunReport(
@@ -454,6 +458,10 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
     assert failed.mcp_probe_stage == "command_exit"
     assert failed.mcp_probe_exit_code == FAILED_MCP_PROBE_EXIT_CODE
     assert failed.mcp_probe_stdout_schema_sha256 == "f" * 64
+    assert failed.assistant_message_present is True
+    assert failed.required_all_assertion_results == (True, False, True)
+    assert failed.required_any_assertion_results == (True,)
+    assert failed.forbidden_assertion_absent_results == (True, True)
     assert set(failed.model_dump(mode="json")) == {
         "case_id",
         "status",
@@ -473,6 +481,12 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
         "mcp_probe_stage",
         "mcp_probe_exit_code",
         "mcp_probe_stdout_schema_sha256",
+        "mcp_config_sha256",
+        "mcp_config_path_identity_sha256",
+        "assistant_message_present",
+        "required_all_assertion_results",
+        "required_any_assertion_results",
+        "forbidden_assertion_absent_results",
     }
     assert set(summary.model_dump(mode="json")) == {
         "schema_version",
@@ -533,6 +547,8 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
         },
         {"mcp_probe_stdout_schema_sha256": "invalid"},
         {"raw_stderr": "DO_NOT_PUBLISH"},
+        {"required_all_assertion_results": [True, "DO_NOT_PUBLISH"]},
+        {"assistant_message_present": "yes"},
     ],
 )
 def test_failed_eval_case_summary_rejects_incomplete_tampered_or_extra_mcp_probe_evidence(
