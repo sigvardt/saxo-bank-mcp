@@ -2325,26 +2325,25 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The latest sealed evidence remains `119e93d`. It passed an exact retained-runtime install, signed
-2,779-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM preflight gates.
-Its single native proof reached all 11 model cases: 3 passed, 7 failed because the Codex-spawned
-plugin exposed ungranted capability or deletion tools, and research-to-precheck failed its required
-final-receipt assertion. The producer stopped before the 54 numerical receipts, fresh SIM matrix,
-Saxo reconciliation, account equality, or activation. No retry ran, and unknown broker facts remain
-unknown. The historical dual policy and evidence remain unchanged.
+The latest sealed evidence remains `d62082f`. It passed an exact retained-runtime install, signed
+2,795-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM safety gates. Its
+single native proof ended with authenticated candidate-runner exit and cleanup failure evidence.
+The old launcher reused the child result path for the outer refusal and destroyed the authenticated
+child publication. Child model, MCP, Saxo, execution, mutation, purchase, disclaimer, and cleanup
+facts therefore remain unknown. No retry ran. The historical dual policy and evidence remain
+unchanged.
 
-The current corrective source candidate is `fb29483`. It atomically binds one owner-only per-case
-contained-plugin MCP config with SIM selected, LIVE reads and writes disabled, and the exact grant
-filter. Direct preflight and Codex model launch consume the same bound config; tamper and unexpected
-Saxo environment keys fail closed, and the original config is restored. Native prompts forbid
-ungranted capability or deletion calls, state that the harness owns cleanup, and require the exact
-research-to-precheck final receipt. Authenticated failure summaries add only allowlisted assertion
-booleans, message presence, and config digests. Eight focused tests passed twice, 200 related tests,
-239 auth/privacy tests, Ruff, BasedPyright, plugin/static/catalog/eval, and an 11-file privacy scan
-passed. No model, Saxo, browser, or network activity occurred in this corrective batch.
+The current corrective source is `06fb8e1`. It reserves the final output for the parent and gives
+the candidate child a separate owner-only result path. The parent accepts only a complete
+authenticated publication with the exact candidate, native policy, proof contract, analysis count,
+and receipt count. Cleanup failure publishes an overall refusal while retaining and digest-binding
+the authenticated inner result and runner receipt; malformed, tampered, mismatched, or unsafe
+output contributes no child facts. Ninety-five focused tests passed twice, 166 related tests, 245
+auth/privacy tests, Ruff, BasedPyright, plugin/static/catalog/eval, and a four-file privacy scan
+passed. No model, MCP server, Saxo, browser, or network activity occurred in this corrective batch.
 
-The next gate is one exact retained-runtime installation and signed full suite for `fb29483`, then
-static and privacy readback. Only if every local gate passes may one newly authorized sealed run
+The next gate is one exact retained-runtime installation and signed full suite for `06fb8e1`, then
+static and privacy readback. Only after those gates pass may a separately authorized sealed run
 attempt the native hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh
 60-tool SIM matrix, cleanup, account equality, and the activation decision. The historical matrix
 remains historical and is not relabeled.

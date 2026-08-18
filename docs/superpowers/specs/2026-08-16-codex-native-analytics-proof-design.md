@@ -56,6 +56,23 @@ publish a typed `not_started` boundary failure and cannot create a consumption i
 
 The historical `dual_v1` path and non-executing plan-only behavior are unchanged.
 
+## Candidate-result publication
+
+The outer launcher reserves the final publication path for parent-owned output. It gives the exact
+candidate runner a different owner-only result path and records only a schema digest for the
+path-bearing command. Before trusting candidate output, the parent verifies the complete native
+publication digest and exact candidate, policy, proof contract, analysis-kind count, and expected
+receipt count. The result and its directory must also be owner-only regular objects with no link or
+symlink ambiguity.
+
+After complete runner cleanup, the parent publishes the verified candidate bytes to the final path
+and verifies them again. If cleanup fails, the final publication is an overall boundary refusal;
+the authenticated candidate result remains separate, and the refusal binds both its byte digest
+and the candidate-runner cleanup receipt. A failed cleanup does not promote child facts into the
+outer refusal. Missing, malformed, tampered, mismatched, or incorrectly permissioned candidate
+output remains unknown and is not retained as trusted evidence. The historical `dual_v1` path is
+unchanged.
+
 ## Proof execution
 
 The verified Codex cache starts a sealed child process. The child copies only the minimum Codex
