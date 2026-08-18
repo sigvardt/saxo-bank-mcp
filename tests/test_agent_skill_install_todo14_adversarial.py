@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import string
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from saxo_bank_mcp import agent_skill_command_runner as command_runner
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
@@ -360,15 +362,63 @@ def test_version_cache_proof_rejects_registration_mismatch() -> None:
         )
 
 
-def test_failed_command_redirected_sleeper_cleaned(tmp_path: Path) -> None:
+def test_failed_command_redirected_sleeper_cleaned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_marker = tmp_path / "child-observed"
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(tmp_path),
+        "OBSERVED_MARKER": str(observed_marker),
     }
+    root_pid: int | None = None
+    child_seen = False
+    original_observation = command_runner.read_process_observation
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        nonlocal child_seen, root_pid
+        result = original_observation(pid)
+        if root_pid is None:
+            root_pid = pid
+        elif pid != root_pid and result is not None and result.state == "running":
+            child_seen = True
+        elif pid == root_pid and child_seen and result is not None and result.state == "running":
+            # This is the second birth-bound root observation bracketing admission.
+            observed_marker.touch(mode=0o600)
+        return result
+
+    code = (
+        "import os, subprocess, time\n"
+        "child = subprocess.Popen(\n"
+        "    ['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL\n"
+        ")\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not os.path.exists(os.environ['OBSERVED_MARKER']):\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        child.terminate()\n"
+        "        child.wait(timeout=2)\n"
+        "        raise SystemExit(99)\n"
+        "    time.sleep(0.001)\n"
+        f"raise SystemExit({NONZERO})\n"
+    )
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+
     with pytest.raises(CommandFailureError) as err:
         run_command(
             "nonzero_redirected_sleeper",
-            ("/bin/sh", "-c", f"sleep 60 >/dev/null 2>&1 & exit {NONZERO}"),
+            (sys.executable, "-c", code),
             cwd=tmp_path,
             env=env,
             timeout_seconds=5,

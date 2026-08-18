@@ -258,10 +258,12 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     process: subprocess.Popen[str] | None = None
     pgid: int | None = None
     root_pid: int | None = None
+    root_identity: ProcessCleanupIdentity | None = None
     tracked_pids: list[int] = []
     tracked_pgids: list[int] = []
     tracked_identities: dict[int, ProcessCleanupIdentity] = {}
     stop_watch = threading.Event()
+    identity_admission_closed = threading.Event()
     watch_lock = threading.Lock()
     timed_out = False
     stdout = ""
@@ -272,19 +274,51 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     pgids: tuple[int, ...] = ()
     terminal_snapshot = ProcessCleanupTerminalSnapshot(targets=(), coverage_status="complete")
 
+    def _poll_root_process() -> int | None:
+        if process is None:
+            identity_admission_closed.set()
+            return None
+        try:
+            return_code = process.poll()
+        except OSError:
+            identity_admission_closed.set()
+            raise
+        if return_code is not None:
+            identity_admission_closed.set()
+        return return_code
+
+    def _root_allows_new_identity() -> bool:
+        if identity_admission_closed.is_set() or root_identity is None or root_pid is None:
+            return False
+        if _poll_root_process() is not None:
+            return False
+        observation = read_process_observation(root_pid)
+        if not (
+            observation is not None
+            and observation.state == "running"
+            and observation.birth_identity == root_identity.birth_identity
+            and observation.pgid == root_identity.pgid
+        ):
+            identity_admission_closed.set()
+            return False
+        return not identity_admission_closed.is_set()
+
     def _capture_identities(pids: tuple[int, ...]) -> None:
-        with watch_lock:
-            prior = dict(tracked_identities)
+        allow_new = _root_allows_new_identity()
         observations = tuple(
             observation
             for pid in pids
             if (observation := read_process_observation(pid)) is not None
             and observation.state != "unknown"
         )
+        if allow_new:
+            allow_new = _root_allows_new_identity()
         with watch_lock:
             for observation in observations:
-                identity = prior.get(observation.pid)
+                identity = tracked_identities.get(observation.pid)
                 if identity is None:
+                    if not allow_new or identity_admission_closed.is_set():
+                        continue
                     tracked_identities[observation.pid] = ProcessCleanupIdentity(
                         pid=observation.pid,
                         pgid=observation.pgid,
@@ -353,7 +387,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
         watcher.start()
         deadline = time.monotonic() + timeout_seconds
-        while process.poll() is None:
+        while _poll_root_process() is None:
             # Continuous capture while parent is alive (escaped groups / new sessions).
             pids_now, pgids_now = _snapshot_tree(root_pid, pgid)
             _capture_identities(pids_now)

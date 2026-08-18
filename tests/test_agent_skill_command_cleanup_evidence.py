@@ -1115,6 +1115,268 @@ def test_cleanup_identity_receipt_rejects_tamper_binding_and_private_content(
     )
 
 
+@pytest.mark.parametrize("root_transition", ["exited-absent", "exited-reused", "birth-mismatch"])
+def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_transition: str,
+) -> None:
+    """A completed or birth-mismatched Popen root closes admission before scans."""
+    root_pid = REUSED_PGID
+    replacement_pid = root_pid + 1
+    root_state = "original"
+    replacement_running = True
+    admitted_for_cleanup: list[int] = []
+    signals: list[tuple[int, signal.Signals]] = []
+    original_cleanup = command_runner.cleanup_birth_bound_processes
+
+    class ExitedProcess:
+        pid = root_pid
+        returncode: int | None = None
+        poll_count = 0
+
+        def poll(self) -> int | None:
+            nonlocal root_state
+            self.poll_count += 1
+            root_state = "absent" if root_transition == "exited-absent" else "reused"
+            if root_transition == "birth-mismatch" and self.poll_count == 1:
+                return None
+            self.returncode = 0
+            return 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == root_pid:
+            if root_state == "absent":
+                return None
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=root_pid,
+                birth_identity=(
+                    "root-original" if root_state == "original" else "root-replacement"
+                ),
+                state="running",
+            )
+        assert pid == replacement_pid
+        if not replacement_running:
+            return None
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=root_pid,
+            birth_identity="unrelated-replacement-member",
+            state="running",
+        )
+
+    def snapshot(
+        observed_root_pid: int | None,
+        observed_pgid: int | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        assert observed_root_pid == root_pid
+        assert observed_pgid == root_pid
+        if root_state == "original":
+            return (root_pid,), (root_pid,)
+        current = (replacement_pid,) if root_state == "absent" else (root_pid, replacement_pid)
+        return current, (root_pid,)
+
+    def group_members(pgid: int) -> tuple[int, ...]:
+        assert pgid == root_pid
+        members: list[int] = []
+        if root_state == "reused":
+            members.append(root_pid)
+        if replacement_running:
+            members.append(replacement_pid)
+        return tuple(members)
+
+    def group_members_with_coverage(pgid: int) -> tuple[tuple[int, ...], bool]:
+        return group_members(pgid), True
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        nonlocal replacement_running
+        signals.append((pid, sig))
+        if pid == replacement_pid:
+            replacement_running = False
+
+    def record_cleanup(
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
+        tracked_pids: tuple[int, ...],
+        tracked_pgids: tuple[int, ...],
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        admitted_for_cleanup.extend(identity.pid for identity in identities)
+        return original_cleanup(
+            identities,
+            tracked_pids=tracked_pids,
+            tracked_pgids=tracked_pgids,
+        )
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ExitedProcess:
+        return ExitedProcess()
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    def root_group_id(_pid: int) -> int:
+        return root_pid
+
+    monkeypatch.setattr(command_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(command_runner, "_snapshot_tree", snapshot)
+    monkeypatch.setattr(command_runner, "process_group_members", group_members)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members_with_coverage,
+    )
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", record_cleanup)
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "post_exit_reuse",
+            (sys.executable, "-c", "raise SystemExit(0)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+        )
+
+    assert replacement_pid not in admitted_for_cleanup
+    assert all(pid != replacement_pid for pid, _sig in signals)
+    assert caught.value.stderr == "process_cleanup_unknown"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+
+
+def test_run_command_active_same_birth_root_may_admit_child(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legitimate child observed while the original root is active remains cleanable."""
+    root_pid = REUSED_PGID
+    child_pid = root_pid + 1
+    running = {root_pid: True, child_pid: True}
+    admitted_for_cleanup: list[int] = []
+    signals: list[tuple[int, signal.Signals]] = []
+    original_cleanup = command_runner.cleanup_birth_bound_processes
+
+    class ActiveProcess:
+        pid = root_pid
+        returncode: int | None = None
+
+        def poll(self) -> None:
+            return None
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if not running[pid]:
+            return None
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=root_pid,
+            birth_identity="root-original" if pid == root_pid else "child-original",
+            state="running",
+        )
+
+    def snapshot(
+        observed_root_pid: int | None,
+        observed_pgid: int | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        assert observed_root_pid == root_pid
+        assert observed_pgid == root_pid
+        return tuple(pid for pid, is_running in running.items() if is_running), (root_pid,)
+
+    def group_members(pgid: int) -> tuple[int, ...]:
+        assert pgid == root_pid
+        return tuple(pid for pid, is_running in running.items() if is_running)
+
+    def group_members_with_coverage(pgid: int) -> tuple[tuple[int, ...], bool]:
+        return group_members(pgid), True
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+        running[pid] = False
+
+    def record_cleanup(
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
+        tracked_pids: tuple[int, ...],
+        tracked_pgids: tuple[int, ...],
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        admitted_for_cleanup.extend(identity.pid for identity in identities)
+        return original_cleanup(
+            identities,
+            tracked_pids=tracked_pids,
+            tracked_pgids=tracked_pgids,
+        )
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ActiveProcess:
+        return ActiveProcess()
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    def root_group_id(_pid: int) -> int:
+        return root_pid
+
+    monkeypatch.setattr(command_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(command_runner, "_snapshot_tree", snapshot)
+    monkeypatch.setattr(command_runner, "process_group_members", group_members)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members_with_coverage,
+    )
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", record_cleanup)
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "active_root_child",
+            (sys.executable, "-c", "import time; time.sleep(60)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=0,
+        )
+
+    assert caught.value.receipt.timed_out is True
+    assert child_pid in admitted_for_cleanup
+    assert (child_pid, signal.SIGTERM) in signals
+    assert caught.value.remaining_process_count == 0
+    assert caught.value.remaining_process_group_count == 0
+
+
 def test_timeout_cleans_once_before_terminal_observation_write_and_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
