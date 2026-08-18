@@ -2325,28 +2325,25 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The current corrective source candidate is `e217ae9`. It preserves an authenticated privacy-safe
-native-boundary phase, reason, command, and cleanup discriminator. Runtime consumption now records
-and authenticates owner-only intent before deletion, writes an authenticated completion receipt
-after deletion, and verifies consumed state without requiring the deleted runtime to exist. Its 15
-focused tests passed twice, 383 related tests passed, and static, type, catalog, evaluation-manifest,
-and privacy checks passed. No model, Saxo, browser, or network activity occurred in that corrective
-batch. It has not yet received exact installed-candidate or full-suite proof.
+The latest sealed evidence remains `119e93d`. It passed an exact retained-runtime install, signed
+2,779-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM preflight gates.
+Its single native proof reached all 11 model cases: 3 passed, 7 failed because the Codex-spawned
+plugin exposed ungranted capability or deletion tools, and research-to-precheck failed its required
+final-receipt assertion. The producer stopped before the 54 numerical receipts, fresh SIM matrix,
+Saxo reconciliation, account equality, or activation. No retry ran, and unknown broker facts remain
+unknown. The historical dual policy and evidence remain unchanged.
 
-The latest sealed evidence remains `f24fddf`. Its retained runtime was bound to the exact candidate,
-installed inventory, dependency lock, producer, interpreter, and installation receipt. Focused,
-related, full-suite, static, privacy, and exact 60-tool installation checks passed. The historical
-dual policy and evidence remain unchanged.
+The current corrective source candidate is `fb29483`. It atomically binds one owner-only per-case
+contained-plugin MCP config with SIM selected, LIVE reads and writes disabled, and the exact grant
+filter. Direct preflight and Codex model launch consume the same bound config; tamper and unexpected
+Saxo environment keys fail closed, and the original config is restored. Native prompts forbid
+ungranted capability or deletion calls, state that the harness owns cleanup, and require the exact
+research-to-precheck final receipt. Authenticated failure summaries add only allowlisted assertion
+booleans, message presence, and config digests. Eight focused tests passed twice, 200 related tests,
+239 auth/privacy tests, Ruff, BasedPyright, plugin/static/catalog/eval, and an 11-file privacy scan
+passed. No model, Saxo, browser, or network activity occurred in this corrective batch.
 
-The required external SIM status and session-capability preflight passed. The one sealed proof
-command then exited 1. The strict outer publication authenticates a `boundary_failure` with reason
-`proof_producer_native_boundary_failed`, but no producer or bootstrap failure evidence survived.
-Child-local SIM preflight, network, event counts, execution, mutation, purchase, disclaimer response,
-and cleanup remain unknown. Separate local checks after exit found zero candidate processes, zero
-native temp-runtime residues, and the retained proof runtime removed. Do not retry this candidate or
-make an after-only account read.
-
-The next gate is one exact retained-runtime installation and signed full suite for `e217ae9`, then
+The next gate is one exact retained-runtime installation and signed full suite for `fb29483`, then
 static and privacy readback. Only if every local gate passes may one newly authorized sealed run
 attempt the native hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh
 60-tool SIM matrix, cleanup, account equality, and the activation decision. The historical matrix
