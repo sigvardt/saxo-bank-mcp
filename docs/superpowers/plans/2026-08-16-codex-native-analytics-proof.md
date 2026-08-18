@@ -202,13 +202,13 @@ JSON event shapes define the parser contract. Native execution prompts bind the 
 Reuse the existing offline proof suite, installed SIM matrix, numerical receipts, Saxo reconciliation, artifact receipts, timeout reconciliation, and safety checks without changing their acceptance rules.
 
 All exact-workflow subprocess cleanup uses the shared birth-bound cleanup primitive. The command
-runner, nested native evaluation, and exact installer capture process identities and group
-discovery hints at spawn, rediscover current owned-group members before signaling, recheck target
-birth identity inside every individual signal, and terminally rescan for late members. A present
-reused group leader blocks member signals; historical numeric process groups are never signaled.
-If the original captured leader is absent, current membership cannot add a cleanup target. Only an
-already captured member with the same birth identity and group remains eligible for an individual
-signal; every uncaptured or changed-identity member makes coverage unknown.
+runner, nested native evaluation, and exact installer capture process identities before cleanup,
+freeze that set as the only possible signal targets, recheck target birth identity inside every
+individual signal, and terminally rescan tracked groups for late members. Group discovery is
+detection only and never admits or signals a newly observed PID, regardless of leader presence,
+absence, reuse, or timing; historical numeric process groups are never signaled. Only an already
+captured member with the same birth identity and group remains eligible for an individual signal;
+every uncaptured or changed-identity member makes coverage unknown.
 Receipts publish semantic target outcomes, coverage, and optional remaining counts. Child-failure
 verification accepts cleanup success only from consistent `authenticated` or
 `no-target-observed` evidence with complete coverage and known zero process and group counts.

@@ -2340,22 +2340,23 @@ disclaimer-response facts remain unknown. Authenticated runtime-consumption and 
 cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
 process, or proof run root. No retry ran.
 
-Local corrective source `4d80141`, tree `f837177`, keeps the sealed `c716047` evidence unchanged
-while incorporating the `94a8643` scenario contract and the shared cleanup work from `003f8e8`.
-The final review correction separates two cases after the original process-group leader exits. A
-previously captured child can still be cleaned while its own birth identity and group match. A new
-same-group process is never discovered or signaled. Any uncaptured member or changed birth identity
-makes coverage unknown. The shared command, nested-evaluation, and exact-install cleanup paths keep
-their immediate per-signal identity checks, present-leader reuse checks, final membership scan, and
-strict authenticated zero-count rules.
+Local corrective source `d81621d`, tree `abb3909`, keeps the sealed `c716047` evidence unchanged
+while incorporating the `94a8643` scenario contract and all shared cleanup work through `4d80141`.
+The final cleanup boundary is absolute: only process identities captured before cleanup can ever
+be signal targets. Process-group scans detect membership but never admit a PID, regardless of
+leader presence, absence, reuse, or timing. Any uncaptured member, changed birth identity, or
+incomplete observation makes coverage unknown. A previously captured child can still be cleaned
+after leader exit while its own birth identity and group match. The shared command,
+nested-evaluation, and exact-install paths retain immediate per-signal identity checks, terminal
+membership scans, and strict authenticated zero-count rules.
 
-The local corrective source passed 113 focused tests twice, 346 related tests, 431 safe
+The local corrective source passed 117 focused tests twice, 350 related tests, 431 safe
 auth/privacy tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/
 0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No exact
 install, model, production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity
 ran. The source is not installed or sealed and does not relabel `c716047`.
 
-The independent native review should verify `4d80141` before any exact install or sealed attempt.
+The independent native review should verify `d81621d` before any exact install or sealed attempt.
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.

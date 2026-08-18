@@ -246,4 +246,30 @@ fresh 60-tool SIM matrix, Saxo reconciliation, account equality, controlled life
 activation ran. All 54 profiles remain quarantined and 0/54 are active. The branch remains local
 and unpushed.
 
+## Captured-target-only cleanup correction after `4d80141`
+
+Local source `d81621d549f771970cdd8bb4cb0470c8c5a6e9a3`, tree
+`abb390999b048d25593014feed9023230dc453d6`, strengthens the cleanup boundary without changing the
+sealed `c716047` result. The signal target mapping is an immutable projection of identities
+captured before cleanup starts. Process-group scans are detection only: they never add a PID,
+regardless of whether the captured leader is present, absent, or reused. Every uncaptured member,
+changed birth identity, or incomplete observation makes coverage unknown. Only a pre-captured PID
+whose own birth identity still matches can receive an individual signal. A pre-captured same-birth
+child remains individually cleanable after its leader exits while its own identity and group match.
+
+Deterministic timing regressions cover leader loss or reuse between classification and member
+observation, leader exit between member observation and signaling, and a stable leader with a new
+same-group member. The RED run failed all four cases on the former admission path. Final local
+verification passed 117 focused tests twice, 350 related cleanup/install/evaluation/proof tests,
+and 431 safe auth/privacy tests. Ruff check and changed-file format passed; BasedPyright reported
+0 errors, 0 warnings, and 0 notes; plugin, static, catalog, evaluation-manifest, bounded privacy,
+and `git diff --check` gates passed.
+
+No exact install, model, production MCP server, Saxo request, broker operation, browser, sealed
+proof, or broker/data network activity ran. This source is not installed or sealed and does not
+relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 hard cases with
+unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
+account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
+quarantined and 0/54 are active. The branch remains local and unpushed.
+
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
