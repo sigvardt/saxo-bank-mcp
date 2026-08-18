@@ -17,6 +17,27 @@ No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation
 readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
 active.
 
+Local diagnostic source `bf721797ac27e23c4d79160f5f2697d86b139439`, tree
+`4d6c2a9ed92f3f6f8b15e91747254a6089bea7ae`, adds evidence needed to distinguish the two remaining
+local failure questions without changing the assertion, prompt, parser selection, cleanup
+behavior, or historical `dual_v1` path. It has not been installed and no proof has run for it, so
+the sealed evidence above remains bound to `06fb8e1`.
+
+The diagnostic correction records separate content-free assertion vectors for decoded Codex
+assistant events and final parsed text, together with event counts and SHA-256 hashes. It also
+authenticates nested evaluation-cleanup status and counts. Command cleanup now retains an
+owner-only receipt binding PID, process group, hashed birth identity, terminal state, and
+termination outcome; only that receipt's digest may enter the public failure publication. Missing
+or unreadable process observation remains `unknown`, not absent. No transcript, arguments, raw
+output, account data, handles, payloads, or private paths are retained in these summaries.
+
+TDD began with nine expected diagnostic failures. Final local validation passed ten focused tests
+twice, 233 related evaluation/proof tests, and 238 auth/privacy tests. Ruff and changed-file format
+passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin, nine-skill static,
+60-tool/294-operation catalog, and 34-case evaluation-manifest gates passed. A bounded ten-path
+privacy scan reported 0 findings and 0 scan errors. No model, MCP server, Saxo, browser, broker, or
+network activity ran in this correction.
+
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
 
@@ -132,8 +153,9 @@ Those local cleanup facts do not prove broker account equality, no mutation, no 
 disclaimer response. No attempt-bound before/after account fingerprint exists, so account state is
 reported as unproved rather than unchanged.
 
-All 54 profiles remain quarantined and 0 are active. The branch remains local and unpushed. A new
-candidate or proof attempt requires separate authorization after the independent review identifies
-whether the remaining blocker is the scenario assertion, child cleanup evidence, or both.
+All 54 profiles remain quarantined and 0 are active. The branch remains local and unpushed. The
+local diagnostic source is ready for independent review; it must pass a separately authorized
+exact install and sealed run before its new evidence can answer whether the remaining blocker is
+the scenario assertion surface, child cleanup state, or both.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.

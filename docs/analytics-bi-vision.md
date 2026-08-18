@@ -2339,9 +2339,19 @@ candidate-runner cleanup completed. Aggregate model, MCP, Saxo, broker-write, mu
 and disclaimer-response facts remain unknown. A terminal local readback found no exact-candidate
 process, proof run root, or retained proof runtime. No retry ran.
 
-The independent native review should determine whether the next local correction must address the
-scenario response contract, the child cleanup failure transport, or both. A new exact candidate and
-sealed attempt require separate authorization. The all-54 numerical proof, Saxo reconciliation,
+Local diagnostic source `bf72179` adds the evidence needed for the next authorized attempt without
+changing the assertion, prompt, final-text parser, cleanup behavior, or historical dual policy. It
+separately authenticates content-free raw decoded-event and final parsed-text assertion vectors,
+evaluation-cleanup status/counts, and an owner-only PID/process-group/birth-identity/terminal-state
+cleanup receipt whose public surface is only a digest. Observation failure remains unknown rather
+than being treated as process absence. Ten focused tests passed twice, 233 related tests and 238
+auth/privacy tests passed, and type, static, catalog, evaluation-manifest, and bounded privacy gates
+were clean. This local source has no exact install or proof and does not relabel `06fb8e1`.
+
+The independent native review should verify the diagnostic source before any exact install or
+sealed attempt. A future authenticated run can then prove whether the required phrase existed in a
+decoded event but was absent from final parsed text, and whether remaining process identities were
+executing, zombies, reused, absent, or unknown. The all-54 numerical proof, Saxo reconciliation,
 fresh 60-tool SIM matrix, attempt-bound account equality, and activation decision remain unrun. The
 historical matrix remains historical and is not relabeled.
 
