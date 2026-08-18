@@ -1449,6 +1449,127 @@ def test_dependency_copy_cannot_overwrite_interpreter_with_unmanifested_file(
     assert (runtime_site / "package.py").read_bytes() == package.read_bytes()
 
 
+def test_dependency_copy_normalizes_allowlisted_outside_console_record_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    runtime_site = tmp_path / "runtime/lib/python3.12/site-packages"
+    runtime_site.mkdir(parents=True)
+    seed_root = tmp_path / "seed"
+    package = seed_root / "cyclopts/__init__.py"
+    record = seed_root / "cyclopts-4.20.0.dist-info/RECORD"
+    installer = seed_root / "cyclopts-4.20.0.dist-info/INSTALLER"
+    shim = seed_root / "bin/cyclopts"
+    for parent in {package.parent, record.parent, shim.parent}:
+        parent.mkdir(parents=True, exist_ok=True)
+    package.write_bytes(b"VERSION = '4.20.0'\n")
+    installer.write_text("uv\n", encoding="utf-8")
+    shim.write_bytes(b"#!/different/clean/worktree/python\n")
+    portable_record = (
+        b"cyclopts/__init__.py,sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,19\n"
+        b"cyclopts-4.20.0.dist-info/RECORD,,\n"
+    )
+    record.write_bytes(
+        b"../../../bin/cyclopts,sha256=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB,373\n"
+        + portable_record,
+    )
+    seed = _FakeDistribution(
+        {
+            "../../../bin/cyclopts": shim,
+            "cyclopts/__init__.py": package,
+            "cyclopts-4.20.0.dist-info/INSTALLER": installer,
+            "cyclopts-4.20.0.dist-info/RECORD": record,
+        },
+        version="4.20.0",
+    )
+
+    def find_seed(_name: str) -> _FakeDistribution:
+        return seed
+
+    monkeypatch.setattr(preparation, "distribution", find_seed)
+    copy_locked = cast(
+        "Callable[[Path, dict[str, object]], None]",
+        preparation._copy_locked_dependencies,  # noqa: SLF001
+    )
+
+    copy_locked(
+        tmp_path / "runtime",
+        {
+            "dependency_distributions": {
+                "cyclopts": {
+                    "files": {
+                        "cyclopts/__init__.py": hashlib.sha256(
+                            package.read_bytes(),
+                        ).hexdigest(),
+                        "cyclopts-4.20.0.dist-info/RECORD": hashlib.sha256(
+                            portable_record,
+                        ).hexdigest(),
+                    },
+                    "installer_metadata": {
+                        "INSTALLER": hashlib.sha256(b"uv").hexdigest(),
+                    },
+                    "version": "4.20.0",
+                },
+            },
+        },
+    )
+
+    copied_record = runtime_site / "cyclopts-4.20.0.dist-info/RECORD"
+    assert copied_record.read_bytes() == portable_record
+    assert not (tmp_path / "runtime/bin/cyclopts").exists()
+
+
+def test_dependency_copy_rejects_changed_portable_record_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preparation = _load_task_script("prepare_analytics_source_matrix_runtime.py")
+    runtime_site = tmp_path / "runtime/lib/python3.12/site-packages"
+    runtime_site.mkdir(parents=True)
+    record = tmp_path / "seed/cyclopts-4.20.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    expected_record = (
+        b"cyclopts/__init__.py,sha256=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA,19\n"
+        b"cyclopts-4.20.0.dist-info/RECORD,,\n"
+    )
+    record.write_bytes(
+        b"../../../bin/cyclopts,sha256=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB,373\n"
+        b"cyclopts/__init__.py,sha256=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC,19\n"
+        b"cyclopts-4.20.0.dist-info/RECORD,,\n",
+    )
+    seed = _FakeDistribution(
+        {"cyclopts-4.20.0.dist-info/RECORD": record},
+        version="4.20.0",
+    )
+
+    def find_seed(_name: str) -> _FakeDistribution:
+        return seed
+
+    monkeypatch.setattr(preparation, "distribution", find_seed)
+    copy_locked = cast(
+        "Callable[[Path, dict[str, object]], None]",
+        preparation._copy_locked_dependencies,  # noqa: SLF001
+    )
+
+    with pytest.raises(ValueError, match="seed is unsealed"):
+        copy_locked(
+            tmp_path / "runtime",
+            {
+                "dependency_distributions": {
+                    "cyclopts": {
+                        "files": {
+                            "cyclopts-4.20.0.dist-info/RECORD": hashlib.sha256(
+                                expected_record,
+                            ).hexdigest(),
+                        },
+                        "version": "4.20.0",
+                    },
+                },
+            },
+        )
+
+
 def test_dependency_copy_refuses_two_manifest_files_with_the_same_target(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

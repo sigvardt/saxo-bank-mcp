@@ -13,6 +13,9 @@ from importlib.metadata import distribution
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from saxo_bank_mcp.analytics_source_runtime import (
+    _portable_dependency_file_bytes,  # pyright: ignore[reportPrivateUsage]
+)
 from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
 
 _SEALED_DIRECTORY_MODE = 0o500
@@ -130,7 +133,7 @@ def _copy_locked_dependencies(  # noqa: C901, PLR0912, PLR0915
         "dict[str, dict[str, Any]]",
         manifest["dependency_distributions"],
     )
-    copy_plan: list[tuple[Path, Path]] = []
+    copy_plan: list[tuple[Path, Path, bytes | None]] = []
     claimed_targets: dict[PurePosixPath, str] = {}
     for name, expected in dependencies.items():
         seed = distribution(name)
@@ -171,10 +174,15 @@ def _copy_locked_dependencies(  # noqa: C901, PLR0912, PLR0915
                     f"locked dependency target collision between {previous} and {name}",
                 )
             source = Path(str(seed.locate_file(item)))
+            try:
+                source_content = source.read_bytes()
+                portable_content = _portable_dependency_file_bytes(relative, source_content)
+            except (OSError, ValueError):
+                raise ValueError(f"locked dependency {name} seed is unsealed") from None
             if (
                 not source.is_file()
                 or source.is_symlink()
-                or hashlib.sha256(source.read_bytes()).hexdigest() != expected_sha256
+                or hashlib.sha256(portable_content).hexdigest() != expected_sha256
             ):
                 raise ValueError(f"locked dependency {name} seed is unsealed")
             target = runtime_site.joinpath(*normalized.parts)
@@ -186,7 +194,9 @@ def _copy_locked_dependencies(  # noqa: C901, PLR0912, PLR0915
             ):
                 raise ValueError(f"locked dependency {name} path escapes the runtime")
             claimed_targets[normalized] = name
-            copy_plan.append((source, target))
+            copy_plan.append(
+                (source, target, portable_content if portable_content != source_content else None),
+            )
         installer_metadata = cast(
             "dict[str, str]",
             expected.get("installer_metadata", {}),
@@ -221,12 +231,15 @@ def _copy_locked_dependencies(  # noqa: C901, PLR0912, PLR0915
             if target.exists() or target.is_symlink():
                 raise ValueError(f"locked dependency {name} installer target collides")
             claimed_targets[relative] = name
-            copy_plan.append((source, target))
-    for source, target in copy_plan:
+            copy_plan.append((source, target, None))
+    for source, target, portable_content in copy_plan:
         target.parent.mkdir(parents=True, exist_ok=True)
         if not target.parent.resolve(strict=True).is_relative_to(resolved_site):
             raise ValueError("locked dependency target parent escapes site-packages")
-        shutil.copy2(source, target)
+        if portable_content is None:
+            shutil.copy2(source, target)
+        else:
+            target.write_bytes(portable_content)
 
 
 def _validate_internal_python_runtime(runtime: Path) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import importlib.machinery
 import io
@@ -78,6 +79,7 @@ _SEALED_DIRECTORY_MODE: Final = 0o500
 _SEALED_FILE_MODE: Final = 0o400
 _SEALED_EXECUTABLE_MODE: Final = 0o500
 _CPYTHON_312_DEFAULT_INT_MAX_STR_DIGITS: Final = 4300
+_DEPENDENCY_RECORD_COLUMN_COUNT: Final = 3
 _ALLOWED_INTERPRETER_LINKS: Final = {
     "bin/python": "python3.12",
     "bin/python3": "python3.12",
@@ -249,6 +251,63 @@ def _excluded_outside_site_record_path(value: str) -> bool:
         and target[0] in {"bin", "share"}
         and all(part not in {"", ".", ".."} and "\\" not in part for part in target[1:])
     )
+
+
+def _dependency_record_rows(content: bytes) -> list[list[str]]:
+    try:
+        text = content.decode("utf-8")
+        return list(csv.reader(io.StringIO(text, newline=""), strict=True))
+    except (UnicodeDecodeError, csv.Error):
+        raise ValueError("dependency RECORD is invalid") from None
+
+
+def _portable_dependency_record_rows(
+    relative: str,
+    rows: list[list[str]],
+) -> tuple[list[list[str]], int]:
+    portable_rows: list[list[str]] = []
+    excluded_rows = 0
+    seen: set[str] = set()
+    self_rows = 0
+    for row in rows:
+        if len(row) != _DEPENDENCY_RECORD_COLUMN_COUNT:
+            raise ValueError("dependency RECORD is invalid")
+        path = row[0]
+        if not path or path in seen:
+            raise ValueError("dependency RECORD is invalid")
+        seen.add(path)
+        if _excluded_outside_site_record_path(path):
+            excluded_rows += 1
+            continue
+        if not _safe_artifact_path(path):
+            raise ValueError("dependency RECORD is invalid")
+        if path == relative:
+            if row[1:] != ["", ""]:
+                raise ValueError("dependency RECORD is invalid")
+            self_rows += 1
+        portable_rows.append(row)
+    if self_rows != 1:
+        raise ValueError("dependency RECORD is invalid")
+    return portable_rows, excluded_rows
+
+
+def _portable_dependency_file_bytes(relative: str, content: bytes) -> bytes:
+    """Canonicalize only a dependency RECORD's excluded outside-site rows."""
+    record_path = PurePosixPath(relative)
+    if not (
+        record_path.name == "RECORD"
+        and any(part.endswith(".dist-info") for part in record_path.parts[:-1])
+    ):
+        return content
+    portable_rows, excluded_rows = _portable_dependency_record_rows(
+        relative,
+        _dependency_record_rows(content),
+    )
+    if excluded_rows == 0:
+        return content
+    output = io.StringIO(newline="")
+    csv.writer(output, lineterminator="\n").writerows(portable_rows)
+    return output.getvalue().encode("utf-8")
 
 
 def _official_launcher_record_path(value: str) -> bool:
@@ -1113,7 +1172,8 @@ def _dependency_distributions() -> dict[str, _DependencyDistribution]:  # noqa: 
                 continue
             if not _safe_artifact_path(relative) or not stat.S_ISREG(metadata.st_mode):
                 raise ValueError(f"source matrix dependency {name} file is invalid")
-            file_map[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            content = _portable_dependency_file_bytes(relative, path.read_bytes())
+            file_map[relative] = hashlib.sha256(content).hexdigest()
         if not file_map or installer_metadata.get("INSTALLER") is None:
             raise ValueError(f"source matrix dependency {name} projection is incomplete")
         result[name] = _DependencyDistribution(
