@@ -28,6 +28,11 @@ _PRODUCER_MODULE: Final = "saxo_bank_mcp.qa_analytics_proof_producer"
 _PRODUCER_MODULE_RELATIVE: Final = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
 _RUNTIME_BINDING_KIND: Final = "codex_native_proof_runtime"
 _MAX_BINDING_BYTES: Final = 65_536
+_PROOF_CHILD_RUNTIME_NAME: Final = "proof-child-runtime"
+_PROOF_CHILD_ENVIRONMENT_RELATIVES: Final = {
+    "UV_CACHE_DIR": "uv-cache",
+    "UV_PYTHON_INSTALL_DIR": "uv-python",
+}
 _BOOTSTRAP_PHASES: Final = (
     "entry",
     "producer_import",
@@ -152,6 +157,49 @@ def _safe_parent(path: Path) -> bool:
         and metadata.st_uid == os.getuid()
         and stat.S_IMODE(metadata.st_mode) == _OWNER_DIRECTORY_MODE
     )
+
+
+def _owner_directory(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        try:
+            path.mkdir(mode=_OWNER_DIRECTORY_MODE)
+            metadata = os.lstat(path)
+        except OSError:
+            return False
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_DIRECTORY_MODE
+    )
+
+
+def _proof_child_environment(
+    envelope_path: Path,
+    *,
+    project_environment: Path,
+) -> dict[str, str] | None:
+    """Derive uv write roots from the authenticated owner-only envelope parent."""
+    if not _safe_parent(envelope_path) or not _owner_directory(project_environment):
+        return None
+    runtime_root = envelope_path.parent / _PROOF_CHILD_RUNTIME_NAME
+    if not _owner_directory(runtime_root):
+        return None
+    environment: dict[str, str] = {}
+    for key, relative in _PROOF_CHILD_ENVIRONMENT_RELATIVES.items():
+        target = runtime_root / relative
+        if not _owner_directory(target):
+            return None
+        environment[key] = str(target)
+    environment["UV_PROJECT_ENVIRONMENT"] = str(project_environment)
+    environment["SAXO_ANALYTICS_PROOF_PROJECT_ENVIRONMENT"] = str(project_environment)
+    environment["UV_NO_MODIFY_PATH"] = "1"
+    environment["UV_OFFLINE"] = "1"
+    return environment
 
 
 def _atomic_write(path: Path, payload: dict[str, object]) -> bool:
@@ -465,6 +513,23 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         )
         return 1
 
+    proof_runtime_root, producer_python = bound_runtime
+    proof_environment = _proof_child_environment(
+        path,
+        project_environment=proof_runtime_root,
+    )
+    if proof_environment is None:
+        _write_failure(
+            path,
+            args,
+            completed_phases=("entry",),
+            current_phase="producer_import",
+            child_exit_code=1,
+            known_inactive=True,
+            reason="proof_bootstrap_run_root_environment_failed",
+        )
+        return 1
+
     imported = _envelope(
         args,
         state="producer_imported",
@@ -488,7 +553,6 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     if not _atomic_write(path, started):
         return _CONFIG_FAILURE_EXIT
 
-    _runtime_root, producer_python = bound_runtime
     producer_argv = (
         str(producer_python),
         "-I",
@@ -509,7 +573,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     }
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
     child_env["PYTHONNOUSERSITE"] = "1"
-    child_env["UV_OFFLINE"] = "1"
+    child_env.update(proof_environment)
     try:
         child = subprocess.run(
             producer_argv,

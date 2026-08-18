@@ -99,6 +99,8 @@ _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
 _MATRIX_CHILD_COMMAND_NAME = "analytics_installed_matrix_child"
 _MATRIX_CHILD_TIMEOUT_SECONDS = 1800
 _OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
+_NATIVE_PROOF_PROJECT_ENVIRONMENT = "SAXO_ANALYTICS_PROOF_PROJECT_ENVIRONMENT"
 _MATRIX_CHILD_ENV_KEYS: Final = (
     "HOME",
     "PATH",
@@ -1122,7 +1124,7 @@ def _execute_installed_proof_bundle(  # noqa: C901
     if progress is not None:
         progress.complete_phase("agent_evaluation")
         progress.begin_phase("offline_proof")
-    suite_evidence = _run_installed_offline_proof_suite()
+    suite_evidence = _run_installed_offline_proof_suite(harness_policy=harness_policy)
     if progress is not None:
         progress.complete_phase("offline_proof")
         progress.begin_phase("sim_matrix")
@@ -1164,9 +1166,43 @@ def _bundle_network_call_made(bundle: AnalyticsProofMatrixBundle) -> bool:
     )
 
 
-def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
+def _native_proof_project_environment(installed_root: Path) -> Path:
+    """Bind nested uv launches to the retained interpreter runtime, never the cache."""
+    declared = os.environ.get(_NATIVE_PROOF_PROJECT_ENVIRONMENT, "").strip()
+    uv_declared = os.environ.get("UV_PROJECT_ENVIRONMENT", "").strip()
+    if not declared or not uv_declared:
+        raise ProofProducerError("proof_run_root_environment_missing")
+    project_environment = Path(declared)
+    try:
+        expected = Path(sys.prefix).resolve(strict=True)
+        metadata = os.lstat(project_environment)
+        resolved = project_environment.resolve(strict=True)
+    except OSError as error:
+        raise ProofProducerError("proof_run_root_environment_invalid") from error
+    if (
+        not project_environment.is_absolute()
+        or Path(uv_declared).resolve() != resolved
+        or resolved != expected
+        or resolved == installed_root
+        or resolved.is_relative_to(installed_root)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != _OWNER_DIRECTORY_MODE
+    ):
+        raise ProofProducerError("proof_run_root_environment_invalid")
+    return resolved
+
+
+def _run_installed_offline_proof_suite(
+    *,
+    harness_policy: HarnessPolicy = "dual_v1",
+) -> InstalledProofSuiteEvidence:
     """Run the fixed candidate-local proof selection through the guarded launcher."""
     root = Path.cwd().resolve()
+    native_project_environment = (
+        _native_proof_project_environment(root) if harness_policy == "codex_native_v1" else None
+    )
     launcher = root / "scripts/run-pytest"
     tests_root = root / "tests"
     if launcher.is_symlink() or not launcher.is_file() or not tests_root.is_dir():
@@ -1196,6 +1232,11 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
     with tempfile.TemporaryDirectory(prefix="analytics-proof-suite-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
         runtime_root.chmod(0o700)
+        native_uv_cache = runtime_root / "uv-cache"
+        native_uv_python = runtime_root / "uv-python"
+        if native_project_environment is not None:
+            for path in (native_uv_cache, native_uv_python):
+                path.mkdir(mode=0o700)
         junit = runtime_root / "proof-suite.xml"
         command = (
             str(launcher),
@@ -1215,6 +1256,15 @@ def _run_installed_offline_proof_suite() -> InstalledProofSuiteEvidence:
         }
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             env["UV_CACHE_DIR"] = uv_cache
+        if native_project_environment is not None:
+            env.update(
+                {
+                    "UV_CACHE_DIR": str(native_uv_cache),
+                    "UV_NO_MODIFY_PATH": "1",
+                    "UV_PROJECT_ENVIRONMENT": str(native_project_environment),
+                    "UV_PYTHON_INSTALL_DIR": str(native_uv_python),
+                },
+            )
         try:
             executed = run_command(
                 "analytics_proof_suite",

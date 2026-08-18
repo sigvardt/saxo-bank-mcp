@@ -59,8 +59,18 @@ def _run_bootstrap(
         encoding="utf-8",
     )
     producer_sha256 = hashlib.sha256(producer.read_bytes()).hexdigest()
+    (producer_root / "pyproject.toml").write_text(
+        '[project]\nname = "proof-env-test"\nversion = "0.1.0"\n'
+        'requires-python = ">=3.12"\ndependencies = []\n',
+        encoding="utf-8",
+    )
     lock = producer_root / "uv.lock"
-    lock.write_text("version = 1\n", encoding="utf-8")
+    lock.write_text(
+        'version = 1\nrevision = 3\nrequires-python = ">=3.12"\n\n'
+        '[[package]]\nname = "proof-env-test"\nversion = "0.1.0"\n'
+        'source = { virtual = "." }\n',
+        encoding="utf-8",
+    )
     lock_sha256 = hashlib.sha256(lock.read_bytes()).hexdigest()
     bootstrap_sha256 = hashlib.sha256(BOOTSTRAP.read_bytes()).hexdigest()
     evidence = tmp_path / "private-evidence"
@@ -424,6 +434,66 @@ def test_bootstrap_direct_invocation_works_with_isolated_path(tmp_path: Path) ->
     envelope = _read_authenticated_envelope(result.envelope_path)
     assert result.process.returncode == 0
     assert envelope["bootstrap_state"] == "complete"
+
+
+def test_bootstrap_uv_child_writes_only_below_owner_run_root(tmp_path: Path) -> None:
+    uv_raw = shutil.which("uv")
+    assert uv_raw is not None
+    uv = str(Path(uv_raw).resolve(strict=True))
+    result = _run_bootstrap(
+        tmp_path,
+        "import os\n"
+        "import subprocess\n"
+        "from pathlib import Path\n"
+        "def main(argv):\n"
+        "    del argv\n"
+        "    root = Path(__file__).resolve().parents[2]\n"
+        f"    child = subprocess.run(({uv!r}, 'run', '--offline', '--project', "
+        "str(root), 'python', '-c', 'pass'), cwd=root, env=dict(os.environ), "
+        "capture_output=True, text=True, check=False)\n"
+        "    return child.returncode\n",
+    )
+
+    envelope = _read_authenticated_envelope(result.envelope_path)
+    installed_root = tmp_path / "installed-root"
+    proof_environment = tmp_path / "proof-runtime"
+    proof_child_runtime = result.envelope_path.parent / "proof-child-runtime"
+    expected_installed_files = {
+        Path("pyproject.toml"),
+        Path("src/saxo_bank_mcp/__init__.py"),
+        Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py"),
+        Path("uv.lock"),
+    }
+
+    def installed_files() -> set[Path]:
+        return {
+            path.relative_to(installed_root)
+            for path in installed_root.rglob("*")
+            if path.is_file() or path.is_symlink()
+        }
+
+    assert result.process.returncode == 0
+    assert envelope["bootstrap_state"] == "complete"
+    assert not (installed_root / ".venv").exists()
+    assert installed_files() == expected_installed_files
+    assert proof_environment.is_dir()
+    assert not proof_environment.resolve().is_relative_to(installed_root.resolve())
+    assert stat.S_IMODE(proof_environment.stat().st_mode) == OWNER_DIRECTORY_MODE
+    assert stat.S_IMODE(proof_child_runtime.stat().st_mode) == OWNER_DIRECTORY_MODE
+    assert {path.name for path in proof_child_runtime.iterdir() if path.is_dir()} == {
+        "uv-cache",
+        "uv-python",
+    }
+    assert all(
+        stat.S_IMODE(path.stat().st_mode) == OWNER_DIRECTORY_MODE
+        for path in proof_child_runtime.iterdir()
+    )
+
+    shutil.rmtree(proof_child_runtime)
+    shutil.rmtree(proof_environment)
+    assert not proof_child_runtime.exists()
+    assert not proof_environment.exists()
+    assert installed_files() == expected_installed_files
 
 
 def test_real_uv_offline_post_cleanup_launch_uses_bound_retained_interpreter(

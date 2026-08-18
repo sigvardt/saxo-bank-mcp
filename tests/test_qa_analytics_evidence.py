@@ -1213,6 +1213,86 @@ def test_installed_proof_suite_preserves_measured_junit_properties() -> None:
     assert '"junit_family=legacy"' in source
 
 
+def test_installed_offline_proof_suite_roots_uv_environment_below_run_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    bound_runtime = tmp_path / "bound-proof-runtime"
+    bound_runtime.mkdir(mode=0o700)
+
+    def bound_project_environment(_installed_root: Path) -> Path:
+        return bound_runtime
+
+    monkeypatch.setattr(
+        producer,
+        "_native_proof_project_environment",
+        bound_project_environment,
+    )
+
+    class EnvironmentObservedError(Exception):
+        pass
+
+    def observe_environment(
+        _name: str,
+        _command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        del timeout_seconds
+        run_root = Path(env["HOME"]).resolve()
+        project_environment = Path(env["UV_PROJECT_ENVIRONMENT"]).resolve()
+        python_install = Path(env["UV_PYTHON_INSTALL_DIR"]).resolve()
+        assert cwd.resolve() == Path.cwd().resolve()
+        assert project_environment == bound_runtime
+        assert python_install == run_root / "uv-python"
+        assert project_environment.is_dir()
+        assert python_install.is_dir()
+        assert project_environment.stat().st_mode & 0o077 == 0
+        assert python_install.stat().st_mode & 0o077 == 0
+        raise EnvironmentObservedError
+
+    monkeypatch.setattr(producer, "run_command", observe_environment)
+
+    with pytest.raises(EnvironmentObservedError):
+        producer._run_installed_offline_proof_suite(  # noqa: SLF001
+            harness_policy="codex_native_v1",
+        )
+
+
+def test_native_proof_project_environment_binds_exact_interpreter_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    installed_root = tmp_path / "installed-cache"
+    retained_runtime = tmp_path / "retained-proof-runtime"
+    installed_root.mkdir(mode=0o700)
+    retained_runtime.mkdir(mode=0o700)
+    monkeypatch.setattr(producer.sys, "prefix", str(retained_runtime))
+    monkeypatch.setenv(
+        "SAXO_ANALYTICS_PROOF_PROJECT_ENVIRONMENT",
+        str(retained_runtime),
+    )
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(retained_runtime))
+
+    assert (
+        producer._native_proof_project_environment(  # noqa: SLF001
+            installed_root,
+        )
+        == retained_runtime.resolve()
+    )
+
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(installed_root))
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="proof_run_root_environment_invalid",
+    ):
+        producer._native_proof_project_environment(installed_root)  # noqa: SLF001
+
+
 def test_aggregate_marker_nodes_cannot_mint_contract_keyed_proof() -> None:
     """One passing marker node per category is not evidence for every analysis."""
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
