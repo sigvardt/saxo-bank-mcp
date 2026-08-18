@@ -236,10 +236,10 @@ def test_birth_bound_cleanup_rechecks_identity_immediately_before_signal(
     assert snapshot.targets[0].termination_outcome == "identity_changed"
 
 
-def test_birth_bound_cleanup_terminal_rescan_detects_late_group_member(
+def test_birth_bound_cleanup_terminal_rescan_rejects_late_member_after_leader_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A member appearing after TERM is retained as failed/unknown coverage, never lost."""
+    """A member appearing after leader exit is not captured and makes coverage unknown."""
     late_pid = REUSED_PID + 1
     identity = command_runner.ProcessCleanupIdentity(
         pid=REUSED_PID,
@@ -296,9 +296,10 @@ def test_birth_bound_cleanup_terminal_rescan_detects_late_group_member(
     )
 
     assert group_scans >= MIN_GROUP_SCANS
-    assert any(target.pid == late_pid for target in snapshot.targets)
-    assert snapshot.cleanup_status in {"failed", "unknown"}
-    assert snapshot.remaining_process_count in {1, None}
+    assert all(target.pid != late_pid for target in snapshot.targets)
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
 
 
 def test_birth_bound_cleanup_reused_group_leader_never_signals_members(
@@ -350,6 +351,127 @@ def test_birth_bound_cleanup_reused_group_leader_never_signals_members(
     assert snapshot.remaining_process_count == 0
     assert tuple(target.pid for target in snapshot.targets) == (REUSED_PGID,)
     assert snapshot.targets[0].termination_outcome == "identity_changed"
+
+
+def test_absent_group_leader_never_discovers_or_signals_uncaptured_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader_pid = REUSED_PGID
+    unrelated_pid = REUSED_PID
+    leader = command_runner.ProcessCleanupIdentity(
+        pid=leader_pid,
+        pgid=leader_pid,
+        birth_identity="leader-original",
+        initial_state="running",
+    )
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == leader_pid:
+            return None
+        assert pid == unrelated_pid
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=leader_pid,
+            birth_identity="unrelated-current-member",
+            state="running",
+        )
+
+    def group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
+        assert pgid == leader_pid
+        return (unrelated_pid,), True
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (leader,),
+        tracked_pids=(leader_pid,),
+        tracked_pgids=(leader_pid,),
+    )
+
+    assert signals == []
+    assert tuple(target.pid for target in snapshot.targets) == (leader_pid,)
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+
+
+def test_absent_group_leader_still_cleans_captured_same_birth_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader_pid = REUSED_PGID
+    child_pid = REUSED_PID
+    leader = command_runner.ProcessCleanupIdentity(
+        pid=leader_pid,
+        pgid=leader_pid,
+        birth_identity="leader-original",
+        initial_state="running",
+    )
+    child = command_runner.ProcessCleanupIdentity(
+        pid=child_pid,
+        pgid=leader_pid,
+        birth_identity="child-original",
+        initial_state="running",
+    )
+    child_running = True
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == leader_pid or not child_running:
+            return None
+        assert pid == child_pid
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=leader_pid,
+            birth_identity="child-original",
+            state="running",
+        )
+
+    def group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
+        assert pgid == leader_pid
+        return ((child_pid,) if child_running else ()), True
+
+    def signal_pid(pid: int, sig: signal.Signals) -> None:
+        nonlocal child_running
+        signals.append((pid, sig))
+        child_running = False
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", signal_pid)
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (leader, child),
+        tracked_pids=(leader_pid, child_pid),
+        tracked_pgids=(leader_pid,),
+    )
+
+    assert signals == [(child_pid, signal.SIGTERM)]
+    assert snapshot.cleanup_status == "complete"
+    assert snapshot.remaining_process_count == 0
+    assert snapshot.remaining_process_group_count == 0
+    assert tuple(target.pid for target in snapshot.targets) == (child_pid, leader_pid)
 
 
 def test_group_leader_reuse_after_member_selection_prevents_member_signal(

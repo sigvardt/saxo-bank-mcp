@@ -733,11 +733,11 @@ def _discover_owned_group_members(
     tracked_pgids: tuple[int, ...],
     identities: dict[int, ProcessCleanupIdentity],
 ) -> tuple[set[int], bool]:
-    """Capture current members of every leader-bound group before any signal."""
+    """Classify current members of every leader-bound group before any signal."""
     safe_groups: set[int] = set()
     coverage_unknown = False
     for pgid in sorted(set(tracked_pgids)):
-        owned, ownership_unknown = _group_is_identity_owned(pgid, identities)
+        owned, ownership_unknown, leader_absent = _group_is_identity_owned(pgid, identities)
         coverage_unknown = coverage_unknown or ownership_unknown
         if not owned:
             continue
@@ -747,7 +747,13 @@ def _discover_owned_group_members(
             coverage_unknown = True
             continue
         coverage_unknown = (
-            _capture_group_members(members, pgid=pgid, identities=identities) or coverage_unknown
+            _capture_group_members(
+                members,
+                pgid=pgid,
+                identities=identities,
+                allow_new_members=not leader_absent,
+            )
+            or coverage_unknown
         )
     return safe_groups, coverage_unknown
 
@@ -756,10 +762,10 @@ def _terminal_rescan_owned_groups(
     safe_groups: set[int],
     identities: dict[int, ProcessCleanupIdentity],
 ) -> bool:
-    """Capture late group members so incomplete cleanup cannot publish a false zero."""
+    """Account for late group members so incomplete cleanup cannot publish a false zero."""
     coverage_unknown = False
     for pgid in sorted(safe_groups):
-        owned, ownership_unknown = _group_is_identity_owned(pgid, identities)
+        owned, ownership_unknown, leader_absent = _group_is_identity_owned(pgid, identities)
         coverage_unknown = coverage_unknown or ownership_unknown
         if not owned:
             continue
@@ -768,7 +774,13 @@ def _terminal_rescan_owned_groups(
             coverage_unknown = True
             continue
         coverage_unknown = (
-            _capture_group_members(members, pgid=pgid, identities=identities) or coverage_unknown
+            _capture_group_members(
+                members,
+                pgid=pgid,
+                identities=identities,
+                allow_new_members=not leader_absent,
+            )
+            or coverage_unknown
         )
     return coverage_unknown
 
@@ -776,24 +788,24 @@ def _terminal_rescan_owned_groups(
 def _group_is_identity_owned(
     pgid: int,
     identities: dict[int, ProcessCleanupIdentity],
-) -> tuple[bool, bool]:
-    """Bind group discovery to its captured leader; reused leaders are unrelated."""
+) -> tuple[bool, bool, bool]:
+    """Return owned, unknown, and captured-leader-absent state for one group."""
     leader = identities.get(pgid)
     if leader is None or leader.pgid != pgid:
         members, group_observed = process_group_members_with_coverage(pgid)
         if not group_observed:
-            return False, True
-        return False, bool(members)
+            return False, True, False
+        return False, bool(members), False
     observation = read_process_observation(leader.pid)
     if observation is None:
-        # A process group may outlive its leader; the ID cannot be safely reused while the
-        # old group still exists, so current members remain within the captured group scope.
-        return True, False
+        # The old group may outlive its leader. Existing captured children remain eligible,
+        # but numeric group membership cannot establish ownership of any new identity.
+        return True, False, True
     if observation.state == "unknown":
-        return False, True
+        return False, True, False
     if observation.birth_identity != leader.birth_identity or observation.pgid != pgid:
-        return False, False
-    return True, False
+        return False, False, False
+    return True, False, False
 
 
 def _capture_group_members(
@@ -801,8 +813,9 @@ def _capture_group_members(
     *,
     pgid: int,
     identities: dict[int, ProcessCleanupIdentity],
+    allow_new_members: bool,
 ) -> bool:
-    """Capture current group members before signalling; return unknown-coverage state."""
+    """Match group members to captured births, optionally capturing leader-owned additions."""
     unknown = False
     for pid in sorted(set(members)):
         existing = identities.get(pid)
@@ -815,13 +828,19 @@ def _capture_group_members(
         if observation.pgid != pgid:
             unknown = True
             continue
-        if existing is None:
-            identities[pid] = ProcessCleanupIdentity(
-                pid=pid,
-                pgid=pgid,
-                birth_identity=observation.birth_identity,
-                initial_state=observation.state,
-            )
+        if existing is not None:
+            if existing.pgid != pgid or existing.birth_identity != observation.birth_identity:
+                unknown = True
+            continue
+        if not allow_new_members:
+            unknown = True
+            continue
+        identities[pid] = ProcessCleanupIdentity(
+            pid=pid,
+            pgid=pgid,
+            birth_identity=observation.birth_identity,
+            initial_state=observation.state,
+        )
     return unknown
 
 
