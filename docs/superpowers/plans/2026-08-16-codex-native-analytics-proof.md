@@ -202,13 +202,15 @@ JSON event shapes define the parser contract. Native execution prompts bind the 
 Reuse the existing offline proof suite, installed SIM matrix, numerical receipts, Saxo reconciliation, artifact receipts, timeout reconciliation, and safety checks without changing their acceptance rules.
 
 All exact-workflow subprocess cleanup uses the shared birth-bound cleanup primitive. The command
-runner, nested native evaluation, and exact installer capture process identities before cleanup,
-freeze that set as the only possible signal targets, recheck target birth identity inside every
-individual signal, and terminally rescan tracked groups for late members. Group discovery is
-detection only and never admits or signals a newly observed PID, regardless of leader presence,
-absence, reuse, or timing; historical numeric process groups are never signaled. Only an already
-captured member with the same birth identity and group remains eligible for an individual signal;
-every uncaptured or changed-identity member makes coverage unknown.
+runner admits new identities only while the original `Popen` root is unreaped, `poll()` reports it
+active, and bracketing observations match the captured root birth identity and group. That
+admission gate closes permanently on completion, reaping, absence, reuse, unknown observation, or
+birth mismatch. The resulting set is frozen as the only possible signal targets before cleanup;
+nested native evaluation and exact install consume the same primitive. Every signal rechecks the
+target birth identity, and terminal tracked-group scans detect late members without admitting
+them. Historical numeric process groups are never signaled. Only a member admitted during the
+valid root window with the same current birth identity and group remains eligible for an
+individual signal; every uncaptured or changed-identity member makes coverage unknown.
 Receipts publish semantic target outcomes, coverage, and optional remaining counts. Child-failure
 verification accepts cleanup success only from consistent `authenticated` or
 `no-target-observed` evidence with complete coverage and known zero process and group counts.

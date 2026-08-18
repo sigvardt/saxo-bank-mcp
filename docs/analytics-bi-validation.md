@@ -272,4 +272,35 @@ unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Sax
 account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
 quarantined and 0/54 are active. The branch remains local and unpushed.
 
+## Root-bound identity admission correction after `d81621d`
+
+Local source `d3efb6ebb2fde2bb679c0b6019a309ac41723062`, tree
+`24343112fa3faf0efd5d895f1c4043498ca0c2e3`, closes the remaining upstream admission window without
+changing the sealed `c716047` result. `run_command` now keeps a sticky admission gate bound to the
+original `Popen` root. A new PID can enter the immutable cleanup target set only while that root is
+unreaped, `poll()` still reports it active, and bracketing process observations retain the captured
+birth identity and process group. A completed, reaped, absent, reused, unknown, or birth-mismatched
+root permanently closes admission. Every later PID and process-group scan is detection only; an
+uncaptured or replacement member is never signaled and makes cleanup coverage unknown.
+
+The deterministic RED covered post-exit absent and reused roots plus a birth mismatch; three of
+four cases failed before the correction. Companion coverage proves that a legitimate child
+observed while the same-birth root remains active can still be admitted and cleaned. The real
+redirected-child regression now uses an observation handshake rather than a timing delay: the root
+exits nonzero only after the child's admission has been bracketed by matching root observations,
+then the already captured child is safely cleaned.
+
+Final local verification passed 121 focused cleanup/migration/failure-envelope tests twice, 354
+related cleanup/install/evaluation/proof tests, and 431 safe auth/privacy tests. Ruff check and
+changed-file format passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin,
+nine-skill static, 60-tool/294-operation catalog, 34-case evaluation-manifest, bounded privacy,
+and `git diff --check` gates passed.
+
+No exact install, model, production MCP server, Saxo request, broker operation, browser, sealed
+proof, or broker/data network activity ran. This source is not installed or sealed and does not
+relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 hard cases with
+unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
+account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
+quarantined and 0/54 are active. The branch remains local and unpushed.
+
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
