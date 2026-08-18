@@ -141,6 +141,8 @@ class CodexNativeBootstrapEnvelope(_StrictModel):
     producer_module_sha256: str = Field(pattern=_SHA256_PATTERN)
     catalog_sha256: str = Field(pattern=_SHA256_PATTERN)
     contract_sha256: str = Field(pattern=_SHA256_PATTERN)
+    runtime_binding_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    install_report_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     bootstrap_state: BootstrapState
     completed_bootstrap_phases: tuple[BootstrapPhase, ...]
     current_bootstrap_phase: BootstrapPhase | Literal["complete"]
@@ -165,7 +167,11 @@ class CodexNativeBootstrapEnvelope(_StrictModel):
     @model_validator(mode="after")
     def _validate_bootstrap_state(self) -> Self:  # noqa: C901
         material = self.model_dump(mode="json", exclude={"envelope_sha256"})
-        if self.envelope_sha256 != _digest(material):
+        legacy_material = dict(material)
+        if self.runtime_binding_sha256 is None and self.install_report_sha256 is None:
+            legacy_material.pop("runtime_binding_sha256")
+            legacy_material.pop("install_report_sha256")
+        if self.envelope_sha256 not in {_digest(material), _digest(legacy_material)}:
             raise ValueError("bootstrap envelope digest mismatch")
         indexes = tuple(_BOOTSTRAP_PHASES.index(phase) for phase in self.completed_bootstrap_phases)
         if indexes != tuple(range(len(indexes))):
@@ -541,6 +547,8 @@ def verify_bootstrap_envelope_file(  # noqa: C901, PLR0911, PLR0912, PLR0913
     catalog_sha256: str,
     contract_sha256: str,
     child_exit_code: int | None,
+    runtime_binding_sha256: str | None = None,
+    install_report_sha256: str | None = None,
 ) -> CodexNativeBootstrapVerification:
     """Verify one owner-only startup file and discard its filesystem location."""
     try:
@@ -601,6 +609,10 @@ def verify_bootstrap_envelope_file(  # noqa: C901, PLR0911, PLR0912, PLR0913
         "catalog_sha256": catalog_sha256,
         "contract_sha256": contract_sha256,
     }
+    if runtime_binding_sha256 is not None:
+        expected["runtime_binding_sha256"] = runtime_binding_sha256
+    if install_report_sha256 is not None:
+        expected["install_report_sha256"] = install_report_sha256
     if any(decoded.get(key) != value for key, value in expected.items()):
         return CodexNativeBootstrapVerification(status="tampered", envelope=None)
     claimed_digest = decoded.get("envelope_sha256")

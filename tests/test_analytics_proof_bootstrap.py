@@ -4,9 +4,11 @@ import ast
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import venv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,34 +59,85 @@ def _run_bootstrap(
         encoding="utf-8",
     )
     producer_sha256 = hashlib.sha256(producer.read_bytes()).hexdigest()
+    lock = producer_root / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    lock_sha256 = hashlib.sha256(lock.read_bytes()).hexdigest()
     bootstrap_sha256 = hashlib.sha256(BOOTSTRAP.read_bytes()).hexdigest()
     evidence = tmp_path / "private-evidence"
     evidence.mkdir(mode=OWNER_DIRECTORY_MODE)
     target = envelope_path or evidence / "bootstrap.json"
     marker = tmp_path / "producer-imported"
-    launcher = tmp_path / "fixed-uv"
-    if launcher_mode == "working":
-        launcher.write_text(
-            f"#!{sys.executable}\n"
-            "import os, sys\n"
-            "from pathlib import Path\n"
-            "arguments = sys.argv[1:]\n"
-            "project = Path(arguments[arguments.index('--project') + 1])\n"
-            "python_index = arguments.index('python')\n"
-            "child = arguments[python_index + 1:]\n"
-            "environment = dict(os.environ)\n"
-            "environment['PYTHONPATH'] = str(project / 'src')\n"
-            f"os.execve({sys.executable!r}, [{sys.executable!r}, *child], environment)\n",
-            encoding="utf-8",
-        )
-        launcher.chmod(0o755)
+    runtime_root = tmp_path / "proof-runtime"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime_root)
+    runtime_root.chmod(OWNER_DIRECTORY_MODE)
+    producer_python = runtime_root / "bin/python"
+    site = subprocess.run(
+        (
+            str(producer_python),
+            "-I",
+            "-c",
+            "import site; print(site.getsitepackages()[0])",
+        ),
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    Path(site.stdout.strip(), "proof-runtime.pth").write_text(
+        str((producer_root / "src").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    interpreter = producer_python.resolve(strict=True)
+    binding_material: dict[str, object] = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": CANDIDATE,
+        "candidate_tree": "a" * 40,
+        "runtime_root": str(runtime_root.resolve()),
+        "producer_root": str(producer_root.resolve()),
+        "interpreter": str(producer_python.absolute()),
+        "source_inventory_sha256": CACHE_SHA256,
+        "installed_cache_sha256": CACHE_SHA256,
+        "dependency_lock_sha256": lock_sha256,
+        "producer_module_sha256": producer_sha256,
+        "interpreter_sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        "interpreter_identity_sha256": hashlib.sha256(str(interpreter).encode()).hexdigest(),
+        "python_implementation": "CPython",
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "python_cache_tag": sys.implementation.cache_tag,
+        "probe_receipt_sha256": hashlib.sha256(b"bootstrap-test-probe").hexdigest(),
+        "owner_only": True,
+    }
+    binding_sha256 = hashlib.sha256(
+        json.dumps(
+            binding_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    binding_path = tmp_path / "proof-runtime-binding.json"
+    binding_path.write_text(
+        json.dumps({**binding_material, "binding_sha256": binding_sha256}, sort_keys=True),
+        encoding="utf-8",
+    )
+    binding_path.chmod(OWNER_FILE_MODE)
+    install_report = tmp_path / "install-report.json"
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(OWNER_FILE_MODE)
+    if launcher_mode == "missing":
+        producer_python.unlink()
     elif launcher_mode == "broken":
-        launcher.write_text(
-            f"#!{sys.executable}\nraise SystemExit(73)\n",
-            encoding="utf-8",
-        )
-        launcher.chmod(0o755)
-    elif launcher_mode != "missing":
+        payload = json.loads(binding_path.read_text(encoding="utf-8"))
+        payload["candidate_tree"] = "b" * 40
+        binding_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        binding_path.chmod(OWNER_FILE_MODE)
+    elif launcher_mode != "working":
         raise AssertionError("unknown launcher fixture")
     environment = {
         "PATH": "" if isolated_path else os.environ.get("PATH", ""),
@@ -114,8 +167,16 @@ def _run_bootstrap(
             "codex_native_v1",
             "--producer-root",
             str(producer_root),
-            "--uv-executable",
-            str(launcher),
+            "--producer-python",
+            str(producer_python),
+            "--runtime-binding-path",
+            str(binding_path),
+            "--runtime-binding-sha256",
+            binding_sha256,
+            "--install-report-path",
+            str(install_report),
+            "--install-report-sha256",
+            hashlib.sha256(install_report.read_bytes()).hexdigest(),
         ),
         cwd=tmp_path,
         env=environment,
@@ -328,7 +389,7 @@ def test_bootstrap_normal_success_retains_completed_receipt(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("launcher_mode", ["missing", "broken"])
-def test_bootstrap_launcher_failure_retains_authenticated_entry_with_unknown_outcomes(
+def test_bootstrap_runtime_binding_failure_retains_authenticated_inactivity(
     tmp_path: Path,
     launcher_mode: str,
 ) -> None:
@@ -345,20 +406,11 @@ def test_bootstrap_launcher_failure_retains_authenticated_entry_with_unknown_out
     assert result.process.stdout == ""
     assert result.process.stderr == ""
     assert envelope["bootstrap_state"] == "failed"
-    assert envelope["completed_bootstrap_phases"] == [
-        "entry",
-        "producer_import",
-        "producer_handoff",
-    ]
-    assert envelope["current_bootstrap_phase"] == "producer_execution"
-    assert envelope["execution_performed"] is None
-    assert envelope["network_call_made"] is None
-    expected_reason = (
-        "proof_bootstrap_installed_runtime_failed"
-        if launcher_mode == "missing"
-        else "proof_bootstrap_producer_nonzero"
-    )
-    assert envelope["reason"] == expected_reason
+    assert envelope["completed_bootstrap_phases"] == ["entry"]
+    assert envelope["current_bootstrap_phase"] == "producer_import"
+    assert envelope["execution_performed"] is False
+    assert envelope["network_call_made"] is False
+    assert envelope["reason"] == "proof_bootstrap_producer_binding_failed"
     assert not marker.exists()
 
 
@@ -372,3 +424,212 @@ def test_bootstrap_direct_invocation_works_with_isolated_path(tmp_path: Path) ->
     envelope = _read_authenticated_envelope(result.envelope_path)
     assert result.process.returncode == 0
     assert envelope["bootstrap_state"] == "complete"
+
+
+def test_real_uv_offline_post_cleanup_launch_uses_bound_retained_interpreter(
+    tmp_path: Path,
+) -> None:
+    """Catch any return to an offline uv launch after install cleanup.
+
+    The old producer command must fail with a fresh cache and project environment. The
+    bootstrap is expected to succeed through the already-probed retained interpreter without
+    PYTHONPATH or either fresh uv directory.
+    """
+    uv_raw = shutil.which("uv")
+    assert uv_raw is not None
+    uv = Path(uv_raw).resolve(strict=True)
+    producer_root = tmp_path / "clean-installed-root"
+    package = producer_root / "src/saxo_bank_mcp"
+    package.mkdir(parents=True)
+    producer_root.chmod(OWNER_DIRECTORY_MODE)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    producer = package / "qa_analytics_proof_producer.py"
+    producer.write_text(
+        "def main(argv):\n"
+        "    del argv\n"
+        "    return 0\n"
+        "if __name__ == '__main__':\n"
+        "    import sys\n"
+        "    raise SystemExit(main(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    shutil.copy2(repo_root / "pyproject.toml", producer_root / "pyproject.toml")
+    shutil.copy2(repo_root / "uv.lock", producer_root / "uv.lock")
+
+    runtime_root = tmp_path / "proof-runtime"
+    uv_cache = tmp_path / "fresh-uv-cache"
+    uv_project = tmp_path / "fresh-project-env"
+    uv_python = tmp_path / "fresh-uv-python"
+    task_home = tmp_path / "home"
+    task_tmp = tmp_path / "tmp"
+    for directory in (uv_cache, uv_project, uv_python, task_home, task_tmp):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE)
+    environment = {
+        "HOME": str(task_home),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "TMPDIR": str(task_tmp),
+        "TMP": str(task_tmp),
+        "TEMP": str(task_tmp),
+        "UV_CACHE_DIR": str(uv_cache),
+        "UV_PROJECT_ENVIRONMENT": str(uv_project),
+        "UV_PYTHON_INSTALL_DIR": str(uv_python),
+        "UV_OFFLINE": "1",
+    }
+    created = subprocess.run(
+        (
+            str(uv),
+            "venv",
+            "--offline",
+            "--python",
+            sys.executable,
+            str(runtime_root),
+        ),
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert created.returncode == 0
+    runtime_root.chmod(OWNER_DIRECTORY_MODE)
+    producer_python = runtime_root / "bin/python"
+    site = subprocess.run(
+        (
+            str(producer_python),
+            "-I",
+            "-c",
+            "import site; print(site.getsitepackages()[0])",
+        ),
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=10,
+    )
+    Path(site.stdout.strip(), "proof-runtime.pth").write_text(
+        str((producer_root / "src").resolve()) + "\n",
+        encoding="utf-8",
+    )
+
+    old_launch = subprocess.run(
+        (
+            str(uv),
+            "run",
+            "--offline",
+            "--project",
+            str(producer_root),
+            "python",
+            "-m",
+            "saxo_bank_mcp.qa_analytics_proof_producer",
+            "--candidate-commit",
+            CANDIDATE,
+            "--installed-cache-sha256",
+            CACHE_SHA256,
+            "--harness-policy",
+            "codex_native_v1",
+        ),
+        cwd=producer_root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert old_launch.returncode != 0
+    assert "PYTHONPATH" not in environment
+
+    interpreter = producer_python.resolve(strict=True)
+    lock_sha256 = hashlib.sha256((producer_root / "uv.lock").read_bytes()).hexdigest()
+    binding_material: dict[str, object] = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": CANDIDATE,
+        "candidate_tree": "a" * 40,
+        "runtime_root": str(runtime_root.resolve()),
+        "producer_root": str(producer_root.resolve()),
+        "interpreter": str(producer_python.absolute()),
+        "source_inventory_sha256": CACHE_SHA256,
+        "installed_cache_sha256": CACHE_SHA256,
+        "dependency_lock_sha256": lock_sha256,
+        "producer_module_sha256": hashlib.sha256(producer.read_bytes()).hexdigest(),
+        "interpreter_sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        "interpreter_identity_sha256": hashlib.sha256(str(interpreter).encode()).hexdigest(),
+        "python_implementation": "CPython",
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "python_cache_tag": sys.implementation.cache_tag,
+        "probe_receipt_sha256": hashlib.sha256(b"retained-runtime-probe").hexdigest(),
+        "owner_only": True,
+    }
+    binding_sha256 = hashlib.sha256(
+        json.dumps(
+            binding_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    binding = {**binding_material, "binding_sha256": binding_sha256}
+    binding_path = tmp_path / "proof-runtime-binding.json"
+    binding_path.write_text(json.dumps(binding, sort_keys=True), encoding="utf-8")
+    binding_path.chmod(OWNER_FILE_MODE)
+    install_report = tmp_path / "install-report.json"
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(OWNER_FILE_MODE)
+    evidence = tmp_path / "private-evidence-real"
+    evidence.mkdir(mode=OWNER_DIRECTORY_MODE)
+    bootstrap_sha256 = hashlib.sha256(BOOTSTRAP.read_bytes()).hexdigest()
+    process = subprocess.run(
+        (
+            sys.executable,
+            "-I",
+            "-S",
+            str(BOOTSTRAP),
+            "--envelope-path",
+            str(evidence / "bootstrap.json"),
+            "--candidate-commit",
+            CANDIDATE,
+            "--installed-cache-sha256",
+            CACHE_SHA256,
+            "--bootstrap-module-sha256",
+            bootstrap_sha256,
+            "--producer-module-sha256",
+            str(binding["producer_module_sha256"]),
+            "--catalog-sha256",
+            CATALOG_SHA256,
+            "--contract-sha256",
+            CONTRACT_SHA256,
+            "--producer-root",
+            str(producer_root),
+            "--producer-python",
+            str(producer_python),
+            "--runtime-binding-path",
+            str(binding_path),
+            "--runtime-binding-sha256",
+            binding_sha256,
+            "--install-report-path",
+            str(install_report),
+            "--install-report-sha256",
+            hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            "--harness-policy",
+            "codex_native_v1",
+        ),
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert process.returncode == 0
+    envelope = _read_authenticated_envelope(evidence / "bootstrap.json")
+    assert envelope["bootstrap_state"] == "complete"
+    assert envelope["runtime_binding_sha256"] == binding_sha256

@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-global-home", type=Path, required=True)
     parser.add_argument("--expected-skills", type=int, default=9)
     parser.add_argument("--expected-tools", type=int, default=60)
+    parser.add_argument("--retain-proof-runtime", action="store_true")
     parser.add_argument("--verify-only", action="store_true")
     parser.add_argument("--install-report", type=Path, default=None)
     parser.add_argument("--out", type=Path, required=True)
@@ -61,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             out=args.out,
             expected_skills=int(args.expected_skills),
             expected_tools=int(args.expected_tools),
+            retain_proof_runtime=bool(args.retain_proof_runtime),
         ),
     )
 

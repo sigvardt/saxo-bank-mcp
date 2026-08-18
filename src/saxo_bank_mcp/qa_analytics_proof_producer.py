@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import sys
 import tempfile
@@ -22,7 +21,11 @@ import anyio
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.agent_skill_codex_install import CodexInstallEvidenceReport
+from saxo_bank_mcp.agent_skill_codex_install import (
+    CodexInstallEvidenceReport,
+    ProofRuntimeCleanupError,
+    cleanup_codex_proof_runtime,
+)
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
@@ -94,6 +97,7 @@ _PROCESS_AUTHORITY = object()
 _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
 _MATRIX_CHILD_COMMAND_NAME = "analytics_installed_matrix_child"
 _MATRIX_CHILD_TIMEOUT_SECONDS = 1800
+_OWNER_FILE_MODE = 0o600
 _MATRIX_CHILD_ENV_KEYS: Final = (
     "HOME",
     "PATH",
@@ -515,6 +519,7 @@ def run_verified_codex_native_producer(  # noqa: C901
     install: CodexInstallEvidenceReport,
     *,
     candidate_commit: str,
+    install_report_path: Path,
 ) -> CodexNativeVerifiedInstalledProofValidation:
     """Execute the unchanged proof suite with the native Codex harness quorum."""
     if type(install) is not CodexInstallEvidenceReport:
@@ -528,6 +533,10 @@ def run_verified_codex_native_producer(  # noqa: C901
     clone_digest, codex_digest = _verified_codex_install_digests(install)
     if clone_digest != codex_digest:
         raise ProofProducerError("proof_installed_cache_digest_mismatch")
+    if install.proof_runtime is None:
+        raise ProofProducerError("proof_retained_runtime_required")
+    install_report = install_report_path.resolve()
+    install_report_sha256 = _bound_codex_install_report_sha256(install_report, install)
     expected_module_sha256 = _installed_producer_module_sha256(install.codex.cache_root)
     expected_bootstrap_sha256 = _installed_bootstrap_module_sha256(install.codex.cache_root)
     catalog_sha256, contract_sha256 = _installed_contract_digests()
@@ -536,6 +545,9 @@ def run_verified_codex_native_producer(  # noqa: C901
             install.codex.cache_root,
             source_repo=install.clone.path,
             retained_codex_home=install.run_root / "codex-home",
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=install_report_sha256,
             candidate_commit=candidate_commit,
             installed_cache_sha256=codex_digest,
             bootstrap_module_sha256=expected_bootstrap_sha256,
@@ -572,6 +584,30 @@ def run_verified_codex_native_producer(  # noqa: C901
         bootstrap_envelope=execution.bootstrap_envelope,
         authority=_PROCESS_AUTHORITY,
     )
+
+
+def _bound_codex_install_report_sha256(
+    path: Path,
+    install: CodexInstallEvidenceReport,
+) -> str:
+    """Bind one owner-only report file to the already-verified install object."""
+    try:
+        metadata = os.lstat(path)
+        raw = path.read_bytes()
+        on_disk = CodexInstallEvidenceReport.model_validate_json(raw)
+    except (OSError, ValidationError) as exc:
+        raise ProofProducerError("proof_install_report_binding_invalid") from exc
+    if not (
+        path.is_absolute()
+        and stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+        and on_disk == install
+    ):
+        raise ProofProducerError("proof_install_report_binding_invalid")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def produce_installed_result(
@@ -2211,17 +2247,14 @@ def _codex_native_producer_command(  # noqa: PLR0913
     producer_module_sha256: str,
     catalog_sha256: str,
     contract_sha256: str,
+    *,
+    producer_python: Path,
+    runtime_binding_path: Path,
+    runtime_binding_sha256: str,
+    install_report_path: Path,
+    install_report_sha256: str,
 ) -> tuple[str, ...]:
     bootstrap_python = str(Path(sys.executable).resolve(strict=True))
-    discovered_uv = shutil.which("uv")
-    if discovered_uv is None:
-        uv_executable = str((cache_root.resolve() / ".missing-proof-uv").resolve())
-    else:
-        discovered_path = Path(discovered_uv)
-        try:
-            uv_executable = str(discovered_path.resolve(strict=True))
-        except OSError:
-            uv_executable = str(discovered_path.absolute())
     return (
         bootstrap_python,
         "-I",
@@ -2243,8 +2276,16 @@ def _codex_native_producer_command(  # noqa: PLR0913
         contract_sha256,
         "--producer-root",
         str(cache_root.resolve()),
-        "--uv-executable",
-        uv_executable,
+        "--producer-python",
+        str(producer_python.absolute()),
+        "--runtime-binding-path",
+        str(runtime_binding_path.absolute()),
+        "--runtime-binding-sha256",
+        runtime_binding_sha256,
+        "--install-report-path",
+        str(install_report_path.absolute()),
+        "--install-report-sha256",
+        install_report_sha256,
         "--harness-policy",
         "codex_native_v1",
     )
@@ -2326,11 +2367,14 @@ def _execute_installed_child(  # noqa: C901, PLR0912, PLR0913
         return result
 
 
-def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
+def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0915
     cache_root: Path,
     *,
     source_repo: Path,
     retained_codex_home: Path,
+    install: CodexInstallEvidenceReport,
+    install_report_path: Path,
+    install_report_sha256: str,
     candidate_commit: str,
     installed_cache_sha256: str,
     bootstrap_module_sha256: str,
@@ -2338,6 +2382,9 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
     catalog_sha256: str,
     contract_sha256: str,
 ) -> _CodexNativeChildExecution:
+    proof_runtime = install.proof_runtime
+    if proof_runtime is None:
+        raise ProofProducerError("proof_retained_runtime_required")
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
     with tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
@@ -2353,6 +2400,12 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
                 harness_policy="codex_native_v1",
             )
         except MatrixEnvError as error:
+            try:
+                cleanup_codex_proof_runtime(install)
+            except ProofRuntimeCleanupError as proof_cleanup_error:
+                raise ProofProducerError(
+                    "proof_retained_runtime_cleanup_failed",
+                ) from proof_cleanup_error
             raise ProofProducerError("proof_sim_auth_lease_unavailable") from error
         bootstrap_path = runtime_root / "proof-bootstrap.json"
         command = _codex_native_producer_command(
@@ -2364,11 +2417,17 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
             producer_module_sha256,
             catalog_sha256,
             contract_sha256,
+            producer_python=proof_runtime.binding.interpreter,
+            runtime_binding_path=proof_runtime.binding_path,
+            runtime_binding_sha256=proof_runtime.binding.binding_sha256,
+            install_report_path=install_report_path,
+            install_report_sha256=install_report_sha256,
         )
         command_error: CommandFailureError | None = None
         result: CommandResult | None = None
         promotion_error: MatrixEnvError | None = None
         cleanup_error: MatrixEnvError | None = None
+        retained_runtime_cleanup_error: ProofRuntimeCleanupError | None = None
         env = dict(runtime.env)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["UV_OFFLINE"] = "1"
@@ -2396,6 +2455,10 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
                 require_matrix_runtime_cleanup(runtime.run_root)
             except MatrixEnvError as error:
                 cleanup_error = error
+            try:
+                cleanup_codex_proof_runtime(install)
+            except ProofRuntimeCleanupError as error:
+                retained_runtime_cleanup_error = error
         if command_error is not None:
             command_receipt = command_error.receipt
             command_trusted = (
@@ -2421,6 +2484,8 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
                 catalog_sha256=catalog_sha256,
                 contract_sha256=contract_sha256,
                 child_exit_code=command_receipt.exit_code,
+                runtime_binding_sha256=proof_runtime.binding.binding_sha256,
+                install_report_sha256=install_report_sha256,
             )
             verified_failure = verify_child_failure_envelope(
                 raw_stdout=command_error.stdout if command_trusted else "",
@@ -2437,7 +2502,13 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
                 remaining_process_count=command_error.remaining_process_count,
                 remaining_process_group_count=command_error.remaining_process_group_count,
                 runtime_cleanup_status=(
-                    "complete" if promotion_error is None and cleanup_error is None else "failed"
+                    "complete"
+                    if (
+                        promotion_error is None
+                        and cleanup_error is None
+                        and retained_runtime_cleanup_error is None
+                    )
+                    else "failed"
                 ),
                 bootstrap_verification=bootstrap_verification,
             )
@@ -2446,6 +2517,10 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
             raise ProofProducerError("proof_sim_token_promotion_failed") from promotion_error
         if cleanup_error is not None:
             raise ProofProducerError("proof_sim_auth_lease_cleanup_failed") from cleanup_error
+        if retained_runtime_cleanup_error is not None:
+            raise ProofProducerError(
+                "proof_retained_runtime_cleanup_failed",
+            ) from retained_runtime_cleanup_error
         if result is None:
             raise ProofProducerError("proof_producer_result_missing")
         bootstrap_verification = verify_bootstrap_envelope_file(
@@ -2458,6 +2533,8 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0913, PLR0915
             catalog_sha256=catalog_sha256,
             contract_sha256=contract_sha256,
             child_exit_code=result.receipt.exit_code,
+            runtime_binding_sha256=proof_runtime.binding.binding_sha256,
+            install_report_sha256=install_report_sha256,
         )
         if (
             bootstrap_verification.status != "authenticated"

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NoReturn, Self, cast
@@ -15,6 +19,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     cleanup_recorded_groups,
     remaining_live_pgids,
     remaining_live_pids,
+    run_command,
 )
 from saxo_bank_mcp.agent_skill_evidence_io import git_output, resolve_commit
 from saxo_bank_mcp.agent_skill_install_cli_driver import (
@@ -52,6 +57,7 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     installed_inventory_check,
     owner_only_mode,
     publishable_tracked_files,
+    tree_digest,
 )
 from saxo_bank_mcp.agent_skill_install_privacy import scan_directory_normalized
 from saxo_bank_mcp.agent_skill_install_probe import (
@@ -66,6 +72,12 @@ from saxo_bank_mcp.secret_scan import scan_secret_text
 EXPECTED_SKILLS = 9
 EXPECTED_MCP_SERVERS = 1
 EXPECTED_TOOLS = 60
+_COMMIT_PATTERN = r"^[a-f0-9]{40}$"
+_SHA256_PATTERN = r"^[a-f0-9]{64}$"
+_PROOF_RUNTIME_NAME = "proof-runtime"
+_PROOF_RUNTIME_BINDING_NAME = "proof-runtime-binding.json"
+_OWNER_FILE_MODE = 0o600
+_OWNER_DIRECTORY_MODE = 0o700
 
 
 class _StrictModel(BaseModel):
@@ -75,6 +87,55 @@ class _StrictModel(BaseModel):
         strict=True,
         hide_input_in_errors=True,
     )
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+
+
+class CodexProofRuntimeBinding(_StrictModel):
+    """One install-time probed interpreter retained only through the sealed proof."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["codex_native_proof_runtime"] = "codex_native_proof_runtime"
+    harness_policy: Literal["codex_native_v1"] = "codex_native_v1"
+    candidate_commit: str = Field(pattern=_COMMIT_PATTERN)
+    candidate_tree: str = Field(pattern=_COMMIT_PATTERN)
+    runtime_root: Path
+    producer_root: Path
+    interpreter: Path
+    source_inventory_sha256: str = Field(pattern=_SHA256_PATTERN)
+    installed_cache_sha256: str = Field(pattern=_SHA256_PATTERN)
+    dependency_lock_sha256: str = Field(pattern=_SHA256_PATTERN)
+    producer_module_sha256: str = Field(pattern=_SHA256_PATTERN)
+    interpreter_sha256: str = Field(pattern=_SHA256_PATTERN)
+    interpreter_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    python_implementation: str = Field(min_length=1)
+    python_version: str = Field(min_length=1)
+    python_cache_tag: str = Field(min_length=1)
+    probe_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+    owner_only: Literal[True]
+    binding_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"binding_sha256"})
+        if self.binding_sha256 != _digest(material):
+            raise ValueError("codex_proof_runtime_binding_digest_invalid")
+        if self.source_inventory_sha256 != self.installed_cache_sha256:
+            raise ValueError("codex_proof_runtime_inventory_mismatch")
+        return self
+
+
+class CodexProofRuntimeEvidence(_StrictModel):
+    binding_path: Path
+    binding: CodexProofRuntimeBinding
+
+
+class ProofRuntimeCleanupError(ValueError):
+    """The one exact retained proof runtime could not be safely removed."""
 
 
 class CodexInstallEvidenceReport(_StrictModel):
@@ -99,10 +160,11 @@ class CodexInstallEvidenceReport(_StrictModel):
     preserved_modes: dict[str, str]
     owner_only: Literal[True]
     privacy_scan_passed: Literal[True]
+    proof_runtime: CodexProofRuntimeEvidence | None = None
     errors: tuple[str, ...]
 
     @model_validator(mode="after")
-    def _require_exact_native_install(self) -> Self:
+    def _require_exact_native_install(self) -> Self:  # noqa: C901, PLR0912
         startup = self.codex.startup
         if self.errors:
             raise ValueError("codex_install_errors_not_empty")
@@ -127,10 +189,34 @@ class CodexInstallEvidenceReport(_StrictModel):
             if check.tool_count != EXPECTED_TOOLS or check.annotations_missing:
                 raise ValueError("codex_startup_contract_invalid")
         expected_modes = {"run_root", "clone", "home", "codex_home", "codex_cache"}
+        if self.proof_runtime is not None:
+            expected_modes.add("proof_runtime")
         if set(self.preserved_modes) != expected_modes or set(self.preserved_modes.values()) != {
             OWNER_ONLY_MODE
         }:
             raise ValueError("codex_owner_only_modes_invalid")
+        if self.proof_runtime is not None:
+            runtime = self.proof_runtime
+            binding = runtime.binding
+            expected_root = self.run_root.resolve() / _PROOF_RUNTIME_NAME
+            expected_binding = self.run_root.resolve() / _PROOF_RUNTIME_BINDING_NAME
+            if (
+                binding.candidate_commit != self.candidate_commit
+                or binding.runtime_root != expected_root
+                or binding.producer_root != self.codex.cache_root.resolve()
+                or not binding.interpreter.absolute().is_relative_to(expected_root)
+                or runtime.binding_path != expected_binding
+            ):
+                raise ValueError("codex_proof_runtime_report_binding_invalid")
+            receipts = tuple(
+                receipt
+                for receipt in self.codex.command_receipts
+                if receipt.name == "codex_proof_runtime_probe"
+            )
+            if len(receipts) != 1 or _digest(receipts[0].model_dump(mode="json")) != (
+                binding.probe_receipt_sha256
+            ):
+                raise ValueError("codex_proof_runtime_probe_receipt_invalid")
         for receipt in self.codex.command_receipts:
             command_surface = (receipt.name, *receipt.argv)
             if any("claude" in value.lower() for value in command_surface):
@@ -147,6 +233,128 @@ class CodexInstallOptions:
     out: Path
     expected_skills: int = EXPECTED_SKILLS
     expected_tools: int = EXPECTED_TOOLS
+    retain_proof_runtime: bool = False
+
+
+def build_codex_proof_runtime_evidence(  # noqa: PLR0913
+    *,
+    run_root: Path,
+    runtime_root: Path,
+    producer_root: Path,
+    candidate_commit: str,
+    candidate_tree: str,
+    source_inventory_sha256: str,
+    installed_cache_sha256: str,
+    dependency_lock_sha256: str,
+    producer_module_sha256: str,
+    env: dict[str, str],
+) -> tuple[CodexProofRuntimeEvidence, CommandReceipt]:
+    """Probe and bind the exact retained interpreter without caller Python/uv paths."""
+    runtime = runtime_root.resolve()
+    producer = producer_root.resolve()
+    expected_runtime = run_root.resolve() / _PROOF_RUNTIME_NAME
+    interpreter_path = runtime / "bin/python"
+    if runtime != expected_runtime or runtime.is_symlink() or not runtime.is_dir():
+        raise ValueError("codex_proof_runtime_root_invalid")
+    if owner_only_mode(runtime) != OWNER_ONLY_MODE:
+        raise ValueError("codex_proof_runtime_mode_invalid")
+    try:
+        interpreter = interpreter_path.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("codex_proof_runtime_interpreter_missing") from exc
+    if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+        raise ValueError("codex_proof_runtime_interpreter_invalid")
+    clean_env = {
+        key: value
+        for key, value in env.items()
+        if key not in {"PYTHONPATH", "PYTHONHOME"} and not key.startswith("UV_")
+    }
+    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    clean_env["PYTHONNOUSERSITE"] = "1"
+    code = (
+        "import hashlib, importlib.util, json, platform, sys\n"
+        "from pathlib import Path\n"
+        "spec = importlib.util.find_spec('saxo_bank_mcp.qa_analytics_proof_producer')\n"
+        "assert spec is not None and spec.origin is not None\n"
+        "module_path = Path(spec.origin).resolve(strict=True)\n"
+        "executable = Path(sys.executable).resolve(strict=True)\n"
+        "print(json.dumps({\n"
+        "  'status': 'passed',\n"
+        "  'producer_module_path': str(module_path),\n"
+        "  'producer_module_sha256': hashlib.sha256(module_path.read_bytes()).hexdigest(),\n"
+        "  'interpreter_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),\n"
+        "  'interpreter_identity_sha256': "
+        "hashlib.sha256(str(executable).encode()).hexdigest(),\n"
+        "  'python_implementation': platform.python_implementation(),\n"
+        "  'python_version': platform.python_version(),\n"
+        "  'python_cache_tag': sys.implementation.cache_tag,\n"
+        "}, sort_keys=True))\n"
+    )
+    result = run_command(
+        "codex_proof_runtime_probe",
+        (str(interpreter_path), "-I", "-c", code),
+        cwd=producer,
+        env=clean_env,
+        timeout_seconds=60,
+    )
+    try:
+        decoded: object = json.loads(result.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError) as exc:
+        raise ValueError("codex_proof_runtime_probe_invalid") from exc
+    if not isinstance(decoded, dict):
+        raise TypeError("codex_proof_runtime_probe_invalid")
+    payload = cast("dict[str, object]", decoded)
+    actual_lock = hashlib.sha256((producer / "uv.lock").read_bytes()).hexdigest()
+    actual_producer = hashlib.sha256(
+        (producer / "src/saxo_bank_mcp/qa_analytics_proof_producer.py").read_bytes(),
+    ).hexdigest()
+    expected_payload = {
+        "status": "passed",
+        "producer_module_path": str(
+            (producer / "src/saxo_bank_mcp/qa_analytics_proof_producer.py").resolve(strict=True),
+        ),
+        "producer_module_sha256": producer_module_sha256,
+        "interpreter_sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        "interpreter_identity_sha256": hashlib.sha256(str(interpreter).encode()).hexdigest(),
+    }
+    if (
+        any(payload.get(key) != value for key, value in expected_payload.items())
+        or actual_lock != dependency_lock_sha256
+        or actual_producer != producer_module_sha256
+    ):
+        raise ValueError("codex_proof_runtime_probe_binding_invalid")
+    receipt_sha256 = _digest(result.receipt.model_dump(mode="json"))
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": candidate_commit,
+        "candidate_tree": candidate_tree,
+        "runtime_root": str(runtime),
+        "producer_root": str(producer),
+        "interpreter": str(interpreter_path.absolute()),
+        "source_inventory_sha256": source_inventory_sha256,
+        "installed_cache_sha256": installed_cache_sha256,
+        "dependency_lock_sha256": dependency_lock_sha256,
+        "producer_module_sha256": producer_module_sha256,
+        "interpreter_sha256": str(payload["interpreter_sha256"]),
+        "interpreter_identity_sha256": str(payload["interpreter_identity_sha256"]),
+        "python_implementation": str(payload.get("python_implementation", "")),
+        "python_version": str(payload.get("python_version", "")),
+        "python_cache_tag": str(payload.get("python_cache_tag", "")),
+        "probe_receipt_sha256": receipt_sha256,
+        "owner_only": True,
+    }
+    binding = CodexProofRuntimeBinding.model_validate_json(
+        json.dumps({**material, "binding_sha256": _digest(material)}, sort_keys=True),
+    )
+    binding_path = run_root.resolve() / _PROOF_RUNTIME_BINDING_NAME
+    write_json(
+        binding_path,
+        cast("dict[str, JsonValue]", binding.model_dump(mode="json")),
+    )
+    binding_path.chmod(_OWNER_FILE_MODE)
+    return CodexProofRuntimeEvidence(binding_path=binding_path, binding=binding), result.receipt
 
 
 def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: C901, PLR0911, PLR0912, PLR0915
@@ -164,9 +372,11 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
     marketplace = run_root / "marketplace-source"
     home = run_root / "home"
     codex_home = run_root / "codex-home"
-    probe_env = run_root / "probe-env"
+    probe_env = run_root / (_PROOF_RUNTIME_NAME if options.retain_proof_runtime else "probe-env")
+    retained_runtime = probe_env if options.retain_proof_runtime else None
     before_state = codex_global_state_fingerprint(options.codex_global_home)
     receipts: list[CommandReceipt] = []
+    proof_runtime: CodexProofRuntimeEvidence | None = None
     try:
         for root in (run_root, home, codex_home, probe_env):
             ensure_owner_only(root)
@@ -208,6 +418,25 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
         inventory = installed_inventory_check(clone, cache, publishable=publishable)
         if inventory.get("inventory_exact_match") is not True:
             _fail("installed_inventory_mismatch")
+        if options.retain_proof_runtime:
+            candidate_tree = git_output(clone, "rev-parse", "HEAD^{tree}")
+            if candidate_tree is None:
+                _fail("codex_proof_runtime_candidate_tree_missing")
+            proof_runtime, proof_receipt = build_codex_proof_runtime_evidence(
+                run_root=run_root,
+                runtime_root=probe_env,
+                producer_root=cache,
+                candidate_commit=commit,
+                candidate_tree=candidate_tree,
+                source_inventory_sha256=tree_digest(clone, publishable),
+                installed_cache_sha256=tree_digest(cache, publishable),
+                dependency_lock_sha256=hashlib.sha256((cache / "uv.lock").read_bytes()).hexdigest(),
+                producer_module_sha256=hashlib.sha256(
+                    (cache / "src/saxo_bank_mcp/qa_analytics_proof_producer.py").read_bytes(),
+                ).hexdigest(),
+                env=env,
+            )
+            receipts.append(proof_receipt)
         client_payload = build_client_report(
             cache=cache,
             cache_source=cache_source,
@@ -218,7 +447,12 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
         )
         client = ClientInstallEvidence.model_validate(client_payload)
     except CommandFailureError as exc:
-        _cleanup_failed_run(run_root, marketplace, exc.receipt.pgid)
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            exc.receipt.pgid,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, "codex_install_command_failed")
         return 1
     except (
@@ -228,9 +462,15 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
         PermissionError,
         ProbePayloadError,
         ValidationError,
+        TypeError,
         ValueError,
     ) as exc:
-        _cleanup_failed_run(run_root, marketplace, None)
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, str(getattr(exc, "reason", exc)))
         return 1
 
@@ -244,13 +484,31 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
     try:
         require_disposable_cleanup(run_root, extra_paths=(marketplace,))
     except DisposableCleanupError:
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, "codex_install_disposable_cleanup_failed")
         return 1
     after_state = codex_global_state_fingerprint(options.codex_global_home)
     if before_state.get("codex") != after_state.get("codex"):
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, "codex_global_state_changed")
         return 1
     if remaining_pids or remaining_pgids:
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, "codex_install_process_cleanup_failed")
         return 1
 
@@ -261,6 +519,9 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
             home=home,
             codex_home=codex_home,
             cache=cache,
+            proof_runtime=(
+                proof_runtime.binding.runtime_root if proof_runtime is not None else None
+            ),
         )
         identity, version = identity_version(clone)
         if identity != PLUGIN_NAME:
@@ -304,12 +565,19 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
             preserved_modes=modes,
             owner_only=True,
             privacy_scan_passed=True,
+            proof_runtime=proof_runtime,
             errors=(),
         )
         privacy_errors = _privacy_errors(report, clone=clone, cache=cache)
         if privacy_errors:
             _fail("codex_install_privacy_scan_failed")
     except (OSError, ValidationError, ValueError) as exc:
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, str(exc))
         return 1
     write_json(options.out, cast("dict[str, JsonValue]", report.model_dump(mode="json")))
@@ -319,6 +587,12 @@ def produce_codex_install_report(options: CodexInstallOptions) -> int:  # noqa: 
         codex_global_home=options.codex_global_home,
     )
     if verified is None:
+        _cleanup_failed_run(
+            run_root,
+            marketplace,
+            None,
+            retained_runtime=retained_runtime,
+        )
         _write_failure(options.out, "codex_install_self_verify_failed", errors=errors)
         return 1
     return 0
@@ -361,6 +635,7 @@ def load_verified_codex_install_report(  # noqa: C901, PLR0912
     identity, version = identity_version(cache)
     if identity != PLUGIN_NAME or version != report.project_version:
         errors.append("codex_identity_version_mismatch")
+    errors.extend(_proof_runtime_errors(report, clone=clone, cache=cache))
     errors.extend(
         codex_registration_errors(
             codex_home=codex_home,
@@ -375,6 +650,11 @@ def load_verified_codex_install_report(  # noqa: C901, PLR0912
             home=run_root / "home",
             codex_home=codex_home,
             cache=cache,
+            proof_runtime=(
+                report.proof_runtime.binding.runtime_root
+                if report.proof_runtime is not None
+                else None
+            ),
         )
     except (FileNotFoundError, OSError, PermissionError):
         errors.append("codex_owner_only_modes_invalid")
@@ -392,6 +672,97 @@ def load_verified_codex_install_report(  # noqa: C901, PLR0912
         if start_state.get("codex") != end_state.get("codex"):
             errors.append("codex_global_state_verify_window_mismatch")
     return (report, ()) if not errors else (None, tuple(dict.fromkeys(errors)))
+
+
+def cleanup_codex_proof_runtime(report: CodexInstallEvidenceReport) -> None:
+    """Remove only the verified one-shot runtime, retaining its binding receipt."""
+    evidence = report.proof_runtime
+    if evidence is None:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_missing")
+    expected = report.run_root.resolve() / _PROOF_RUNTIME_NAME
+    declared = evidence.binding.runtime_root
+    if declared != expected or declared.is_symlink():
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_target_invalid")
+    try:
+        metadata = os.lstat(declared)
+    except OSError as exc:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_target_missing") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != _OWNER_DIRECTORY_MODE
+    ):
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_target_unsafe")
+    try:
+        shutil.rmtree(declared)
+    except OSError as exc:
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_failed") from exc
+    if os.path.lexists(declared):
+        raise ProofRuntimeCleanupError("codex_proof_runtime_cleanup_residue")
+
+
+def _proof_runtime_errors(
+    report: CodexInstallEvidenceReport,
+    *,
+    clone: Path,
+    cache: Path,
+) -> list[str]:
+    evidence = report.proof_runtime
+    if evidence is None:
+        return []
+    binding = evidence.binding
+    run_root = report.run_root.resolve()
+    runtime_root = run_root / _PROOF_RUNTIME_NAME
+    binding_path = run_root / _PROOF_RUNTIME_BINDING_NAME
+    try:
+        runtime_metadata = os.lstat(runtime_root)
+        binding_metadata = os.lstat(binding_path)
+        interpreter_metadata = os.lstat(binding.interpreter)
+        interpreter = binding.interpreter.resolve(strict=True)
+        interpreter_target_metadata = interpreter.stat()
+        on_disk = CodexProofRuntimeBinding.model_validate_json(
+            binding_path.read_text(encoding="utf-8"),
+        )
+    except (OSError, ValidationError):
+        return ["codex_proof_runtime_binding_invalid"]
+    publishable = publishable_tracked_files(clone)
+    producer = cache / "src/saxo_bank_mcp/qa_analytics_proof_producer.py"
+    candidate_tree = git_output(clone, "rev-parse", "HEAD^{tree}")
+    receipt = tuple(
+        item for item in report.codex.command_receipts if item.name == "codex_proof_runtime_probe"
+    )
+    invalid = (
+        on_disk != binding or binding.runtime_root != runtime_root or binding.producer_root != cache
+    )
+    invalid = bool(invalid) or (
+        not stat.S_ISDIR(runtime_metadata.st_mode)
+        or stat.S_ISLNK(runtime_metadata.st_mode)
+        or runtime_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_metadata.st_mode) != _OWNER_DIRECTORY_MODE
+        or not stat.S_ISREG(binding_metadata.st_mode)
+        or stat.S_ISLNK(binding_metadata.st_mode)
+        or binding_metadata.st_uid != os.getuid()
+        or binding_metadata.st_nlink != 1
+        or stat.S_IMODE(binding_metadata.st_mode) != _OWNER_FILE_MODE
+        or not binding.interpreter.absolute().is_relative_to(runtime_root)
+        or not (
+            stat.S_ISREG(interpreter_metadata.st_mode) or stat.S_ISLNK(interpreter_metadata.st_mode)
+        )
+        or not stat.S_ISREG(interpreter_target_metadata.st_mode)
+        or not os.access(interpreter, os.X_OK)
+        or candidate_tree != binding.candidate_tree
+        or tree_digest(clone, publishable) != binding.source_inventory_sha256
+        or tree_digest(cache, publishable) != binding.installed_cache_sha256
+        or hashlib.sha256((clone / "uv.lock").read_bytes()).hexdigest()
+        != binding.dependency_lock_sha256
+        or hashlib.sha256(producer.read_bytes()).hexdigest() != binding.producer_module_sha256
+        or hashlib.sha256(interpreter.read_bytes()).hexdigest() != binding.interpreter_sha256
+        or hashlib.sha256(str(interpreter).encode()).hexdigest()
+        != binding.interpreter_identity_sha256
+        or len(receipt) != 1
+        or _digest(receipt[0].model_dump(mode="json")) != binding.probe_receipt_sha256
+    )
+    return ["codex_proof_runtime_binding_invalid"] if invalid else []
 
 
 def _planning_error(options: CodexInstallOptions) -> str | None:
@@ -427,13 +798,14 @@ def _installed_byte_checks(inventory: dict[str, JsonValue]) -> InstalledByteChec
     )
 
 
-def _preserved_modes(
+def _preserved_modes(  # noqa: PLR0913
     *,
     run_root: Path,
     clone: Path,
     home: Path,
     codex_home: Path,
     cache: Path,
+    proof_runtime: Path | None = None,
 ) -> dict[str, str]:
     roots = {
         "run_root": run_root,
@@ -442,6 +814,8 @@ def _preserved_modes(
         "codex_home": codex_home,
         "codex_cache": cache,
     }
+    if proof_runtime is not None:
+        roots["proof_runtime"] = proof_runtime
     modes: dict[str, str] = {}
     for label, root in roots.items():
         if not root.is_dir():
@@ -534,11 +908,20 @@ def _privacy_errors(
     return ["codex_install_privacy_scan_failed"] if findings or scan_errors else []
 
 
-def _cleanup_failed_run(run_root: Path, marketplace: Path, pgid: int | None) -> None:
+def _cleanup_failed_run(
+    run_root: Path,
+    marketplace: Path,
+    pgid: int | None,
+    *,
+    retained_runtime: Path | None = None,
+) -> None:
     if pgid is not None:
         cleanup_recorded_groups((pgid,))
     try:
-        require_disposable_cleanup(run_root, extra_paths=(marketplace,))
+        extra_paths = (
+            (marketplace,) if retained_runtime is None else (marketplace, retained_runtime)
+        )
+        require_disposable_cleanup(run_root, extra_paths=extra_paths)
     except DisposableCleanupError:
         return
 

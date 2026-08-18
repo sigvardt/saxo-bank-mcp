@@ -31,6 +31,8 @@ CACHE_SHA256 = "2" * 64
 MODULE_SHA256 = "3" * 64
 CATALOG_SHA256 = "4" * 64
 CONTRACT_SHA256 = "5" * 64
+RUNTIME_BINDING_SHA256 = "7" * 64
+INSTALL_REPORT_SHA256 = "8" * 64
 AGENT_MODEL_EVENT_COUNT = 2
 AGENT_TOTAL_MCP_EVENT_COUNT = 4
 CLI_TOTAL_MCP_EVENT_COUNT = 3
@@ -45,6 +47,11 @@ def _bootstrap_envelope(
     state: str = "failed",
     contract_sha256: str = CONTRACT_SHA256,
 ) -> CodexNativeBootstrapEnvelope:
+    completed_phases = (
+        ("entry", "producer_import", "producer_handoff", "producer_execution")
+        if state == "complete"
+        else ("entry", "producer_import", "producer_handoff")
+    )
     material: dict[str, object] = {
         "schema_version": "1",
         "receipt_kind": "codex_native_proof_bootstrap",
@@ -55,13 +62,11 @@ def _bootstrap_envelope(
         "producer_module_sha256": MODULE_SHA256,
         "catalog_sha256": CATALOG_SHA256,
         "contract_sha256": contract_sha256,
+        "runtime_binding_sha256": RUNTIME_BINDING_SHA256,
+        "install_report_sha256": INSTALL_REPORT_SHA256,
         "bootstrap_state": state,
-        "completed_bootstrap_phases": (
-            "entry",
-            "producer_import",
-            "producer_handoff",
-        ),
-        "current_bootstrap_phase": "producer_execution",
+        "completed_bootstrap_phases": completed_phases,
+        "current_bootstrap_phase": "complete" if state == "complete" else "producer_execution",
         "child_exit_code": child_exit_code,
         "sim_preflight_status": "unknown",
         "network_call_made": None,
@@ -77,9 +82,7 @@ def _bootstrap_envelope(
         "child_remaining_process_count": None,
         "child_remaining_process_group_count": None,
         "reason": (
-            "proof_bootstrap_producer_nonzero"
-            if state == "failed"
-            else "proof_bootstrap_producer_started"
+            "proof_bootstrap_producer_nonzero" if state == "failed" else "proof_bootstrap_complete"
         ),
         "redacted_publication": True,
     }
@@ -558,6 +561,18 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     cache_root = tmp_path / "cache"
     source_repo = tmp_path / "source"
     retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
     for path in (cache_root, source_repo, retained_codex_home):
         path.mkdir(mode=0o700)
 
@@ -602,7 +617,7 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
     monkeypatch.setattr(producer, "run_command", fail_command)
 
-    def native_command(*_args: object) -> tuple[str, ...]:
+    def native_command(*_args: object, **_kwargs: object) -> tuple[str, ...]:
         return command
 
     def bootstrap_verifier(
@@ -623,6 +638,12 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
 
     monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", no_op)
     monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_op)
+    cleanup_calls: list[object] = []
+
+    def cleanup_proof_runtime(value: object) -> None:
+        cleanup_calls.append(value)
+
+    monkeypatch.setattr(producer, "cleanup_codex_proof_runtime", cleanup_proof_runtime)
     monkeypatch.setattr(
         producer,
         "_installed_contract_digests",
@@ -634,6 +655,9 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
             cache_root,
             source_repo=source_repo,
             retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
             candidate_commit=CANDIDATE,
             installed_cache_sha256=CACHE_SHA256,
             bootstrap_module_sha256="6" * 64,
@@ -648,6 +672,304 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     assert receipt.network_call_made is True
     assert receipt.execution_performed is True
     assert receipt.outer_runtime_cleanup_status == "complete"
+    assert cleanup_calls == [install]
+
+
+def test_native_wrapper_cleans_retained_runtime_when_eval_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    for directory in (cache_root, source_repo, retained_codex_home):
+        directory.mkdir(mode=0o700)
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+
+    def fail_prepare(*_args: object, **_kwargs: object) -> NoReturn:
+        raise producer.MatrixEnvError("injected_prepare_failure")
+
+    cleanup_calls: list[object] = []
+
+    def cleanup_proof_runtime(value: object) -> None:
+        cleanup_calls.append(value)
+
+    monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", fail_prepare)
+    monkeypatch.setattr(
+        producer,
+        "cleanup_codex_proof_runtime",
+        cleanup_proof_runtime,
+    )
+
+    with pytest.raises(producer.ProofProducerError, match="proof_sim_auth_lease_unavailable"):
+        producer._execute_codex_native_installed_child(  # noqa: SLF001
+            cache_root,
+            source_repo=source_repo,
+            retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
+        )
+
+    assert cleanup_calls == [install]
+
+
+def test_native_wrapper_cleans_retained_runtime_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    for directory in (cache_root, source_repo, retained_codex_home):
+        directory.mkdir(mode=0o700)
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+    command = ("proof-child",)
+
+    def prepare(runtime_root: Path, **_kwargs: object) -> SimpleNamespace:
+        codex_home = runtime_root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        return SimpleNamespace(
+            env={"PATH": "/usr/bin:/bin"},
+            codex_home=codex_home,
+            run_root=runtime_root,
+        )
+
+    def pass_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> object:
+        del env, timeout_seconds
+        return producer.CommandResult(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=12,
+                pgid=12,
+                exit_code=0,
+                stdout_sha256=hashlib.sha256(b"{}").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=False,
+            ),
+            stdout="{}",
+            stderr="",
+        )
+
+    cleanup_calls: list[object] = []
+
+    def native_command(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return command
+
+    def bootstrap_verifier(
+        *_args: object,
+        **_kwargs: object,
+    ) -> CodexNativeBootstrapVerification:
+        return CodexNativeBootstrapVerification(
+            status="authenticated",
+            envelope=_bootstrap_envelope(child_exit_code=0, state="complete"),
+        )
+
+    def no_op(_value: object) -> None:
+        return
+
+    def cleanup_proof_runtime(value: object) -> None:
+        cleanup_calls.append(value)
+
+    monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
+    monkeypatch.setattr(producer, "run_command", pass_command)
+    monkeypatch.setattr(
+        producer,
+        "_codex_native_producer_command",
+        native_command,
+    )
+    monkeypatch.setattr(
+        producer,
+        "verify_bootstrap_envelope_file",
+        bootstrap_verifier,
+    )
+    monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", no_op)
+    monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_op)
+    monkeypatch.setattr(
+        producer,
+        "cleanup_codex_proof_runtime",
+        cleanup_proof_runtime,
+    )
+
+    execution = producer._execute_codex_native_installed_child(  # noqa: SLF001
+        cache_root,
+        source_repo=source_repo,
+        retained_codex_home=retained_codex_home,
+        install=install,
+        install_report_path=install_report,
+        install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+        candidate_commit=CANDIDATE,
+        installed_cache_sha256=CACHE_SHA256,
+        bootstrap_module_sha256="6" * 64,
+        producer_module_sha256=MODULE_SHA256,
+        catalog_sha256=CATALOG_SHA256,
+        contract_sha256=CONTRACT_SHA256,
+    )
+
+    assert execution.result.receipt.exit_code == 0
+    assert cleanup_calls == [install]
+
+
+def test_native_wrapper_cleans_retained_runtime_after_child_crash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    for directory in (cache_root, source_repo, retained_codex_home):
+        directory.mkdir(mode=0o700)
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+    command = ("proof-child",)
+
+    def prepare(runtime_root: Path, **_kwargs: object) -> SimpleNamespace:
+        codex_home = runtime_root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        return SimpleNamespace(
+            env={"PATH": "/usr/bin:/bin"},
+            codex_home=codex_home,
+            run_root=runtime_root,
+        )
+
+    def crash_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        del env, timeout_seconds
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=13,
+                pgid=13,
+                exit_code=CRASH_EXIT_CODE,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout="",
+            stderr="",
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    cleanup_calls: list[object] = []
+
+    def native_command(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return command
+
+    def bootstrap_verifier(
+        *_args: object,
+        **_kwargs: object,
+    ) -> CodexNativeBootstrapVerification:
+        return CodexNativeBootstrapVerification(
+            status="authenticated",
+            envelope=_bootstrap_envelope(child_exit_code=CRASH_EXIT_CODE),
+        )
+
+    def no_op(_value: object) -> None:
+        return
+
+    def cleanup_proof_runtime(value: object) -> None:
+        cleanup_calls.append(value)
+
+    monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
+    monkeypatch.setattr(producer, "run_command", crash_command)
+    monkeypatch.setattr(
+        producer,
+        "_codex_native_producer_command",
+        native_command,
+    )
+    monkeypatch.setattr(
+        producer,
+        "verify_bootstrap_envelope_file",
+        bootstrap_verifier,
+    )
+    monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", no_op)
+    monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_op)
+    monkeypatch.setattr(
+        producer,
+        "cleanup_codex_proof_runtime",
+        cleanup_proof_runtime,
+    )
+
+    with pytest.raises(producer.CodexNativeProofFailureError) as caught:
+        producer._execute_codex_native_installed_child(  # noqa: SLF001
+            cache_root,
+            source_repo=source_repo,
+            retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
+        )
+
+    assert caught.value.receipt.failure_evidence_status == "crashed"
+    assert caught.value.receipt.outer_runtime_cleanup_status == "complete"
+    assert cleanup_calls == [install]
 
 
 def test_proof_matrix_cli_publishes_typed_native_failure(
@@ -736,13 +1058,36 @@ def test_bootstrap_file_verifier_authenticates_bindings_and_owner_mode(
         catalog_sha256=CATALOG_SHA256,
         contract_sha256=CONTRACT_SHA256,
         child_exit_code=1,
+        runtime_binding_sha256=RUNTIME_BINDING_SHA256,
+        install_report_sha256=INSTALL_REPORT_SHA256,
     )
 
     assert verified.status == "authenticated"
     assert verified.envelope == envelope
 
 
-@pytest.mark.parametrize("mutation", ["digest", "binding", "mode"])
+def test_legacy_bootstrap_round_trip_keeps_original_digest_contract() -> None:
+    payload = _bootstrap_envelope().model_dump(mode="json")
+    payload.pop("runtime_binding_sha256")
+    payload.pop("install_report_sha256")
+    material = {key: value for key, value in payload.items() if key != "envelope_sha256"}
+    payload["envelope_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    legacy = CodexNativeBootstrapEnvelope.model_validate_json(json.dumps(payload))
+
+    round_tripped = CodexNativeBootstrapEnvelope.model_validate_json(legacy.model_dump_json())
+
+    assert round_tripped.envelope_sha256 == payload["envelope_sha256"]
+    assert round_tripped.runtime_binding_sha256 is None
+
+
+@pytest.mark.parametrize("mutation", ["digest", "binding", "runtime_binding", "mode"])
 def test_bootstrap_file_verifier_rejects_tampering_or_unsafe_mode(
     tmp_path: Path,
     mutation: str,
@@ -753,6 +1098,8 @@ def test_bootstrap_file_verifier_rejects_tampering_or_unsafe_mode(
         payload["envelope_sha256"] = "f" * 64
     elif mutation == "binding":
         payload["candidate_commit"] = "a" * 40
+    elif mutation == "runtime_binding":
+        payload["runtime_binding_sha256"] = "a" * 64
     path = tmp_path / "bootstrap.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     path.chmod(0o644 if mutation == "mode" else 0o600)
@@ -767,6 +1114,8 @@ def test_bootstrap_file_verifier_rejects_tampering_or_unsafe_mode(
         catalog_sha256=CATALOG_SHA256,
         contract_sha256=CONTRACT_SHA256,
         child_exit_code=1,
+        runtime_binding_sha256=RUNTIME_BINDING_SHA256,
+        install_report_sha256=INSTALL_REPORT_SHA256,
     )
 
     assert verified.status in {"tampered", "unsafe"}
@@ -808,6 +1157,11 @@ def test_native_sealed_command_invokes_direct_bootstrap_before_producer(
         MODULE_SHA256,
         CATALOG_SHA256,
         CONTRACT_SHA256,
+        producer_python=tmp_path / "proof-runtime/bin/python",
+        runtime_binding_path=tmp_path / "proof-runtime-binding.json",
+        runtime_binding_sha256="7" * 64,
+        install_report_path=tmp_path / "install.json",
+        install_report_sha256="8" * 64,
     )
 
     assert Path(command[0]).is_absolute()
@@ -815,23 +1169,26 @@ def test_native_sealed_command_invokes_direct_bootstrap_before_producer(
     assert command[3].endswith("src/saxo_bank_mcp/qa_analytics_proof_bootstrap.py")
     assert command[4:6] == ("--envelope-path", str(envelope_path.resolve()))
     assert command[0] != "uv"
-    assert "uv" not in command[:4]
-    assert "--uv-executable" in command
+    assert "uv" not in command
+    assert "--uv-executable" not in command
     assert "--producer-root" in command
+    assert command[command.index("--producer-python") + 1] == str(
+        (tmp_path / "proof-runtime/bin/python").absolute(),
+    )
+    assert command[command.index("--runtime-binding-sha256") + 1] == "7" * 64
+    assert command[command.index("--install-report-sha256") + 1] == "8" * 64
     assert command[-2:] == ("--harness-policy", "codex_native_v1")
 
 
-def test_native_sealed_command_keeps_bootstrap_first_when_uv_is_missing(
+def test_native_sealed_command_is_independent_of_caller_python_and_uv_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
-
-    def _missing_uv(_name: str) -> None:
-        return None
-
-    monkeypatch.setattr(producer.shutil, "which", _missing_uv)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "caller-pythonpath"))
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "caller-uv-cache"))
     cache_root = tmp_path / "cache"
+    producer_python = tmp_path / "proof-runtime/bin/python"
 
     command = producer._codex_native_producer_command(  # noqa: SLF001
         cache_root,
@@ -842,11 +1199,16 @@ def test_native_sealed_command_keeps_bootstrap_first_when_uv_is_missing(
         MODULE_SHA256,
         CATALOG_SHA256,
         CONTRACT_SHA256,
+        producer_python=producer_python,
+        runtime_binding_path=tmp_path / "proof-runtime-binding.json",
+        runtime_binding_sha256="7" * 64,
+        install_report_path=tmp_path / "install.json",
+        install_report_sha256="8" * 64,
     )
 
     assert Path(command[0]).is_absolute()
     assert command[1:3] == ("-I", "-S")
     assert command[3].endswith("qa_analytics_proof_bootstrap.py")
-    launcher = Path(command[command.index("--uv-executable") + 1])
-    assert launcher.is_absolute()
-    assert launcher.name == ".missing-proof-uv"
+    assert "PYTHONPATH" not in " ".join(command)
+    assert "UV_CACHE_DIR" not in " ".join(command)
+    assert command[command.index("--producer-python") + 1] == str(producer_python.absolute())

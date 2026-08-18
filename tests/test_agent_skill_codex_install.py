@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tomllib
+import venv
 from pathlib import Path
 
+import pytest
+
+from saxo_bank_mcp import agent_skill_codex_install as codex_install
 from saxo_bank_mcp._evidence import JsonValue, write_json
 from saxo_bank_mcp.agent_skill_codex_install import (
     CodexInstallEvidenceReport,
@@ -17,10 +24,14 @@ from saxo_bank_mcp.agent_skill_install_paths import (
     codex_global_state_fingerprint,
     export_publishable_tree,
     installed_inventory_check,
+    publishable_tracked_files,
+    tree_digest,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TOOL_COUNT = 60
+OWNER_DIRECTORY_MODE = 0o700
+OWNER_FILE_MODE = 0o600
 
 
 def _build_report_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -147,6 +158,75 @@ def _build_report_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     return report, cache, global_home
 
 
+def _digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+
+
+def _add_proof_runtime(report_path: Path, cache: Path) -> tuple[Path, Path]:
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    run_root = Path(payload["run_root"])
+    clone = Path(payload["clone"]["path"])
+    runtime_root = run_root / "proof-runtime"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime_root)
+    runtime_root.chmod(0o700)
+    interpreter_path = runtime_root / "bin/python"
+    interpreter = interpreter_path.resolve(strict=True)
+    publishable = publishable_tracked_files(clone)
+    source_digest = tree_digest(clone, publishable)
+    cache_digest = tree_digest(cache, publishable)
+    producer = cache / "src/saxo_bank_mcp/qa_analytics_proof_producer.py"
+    receipt: dict[str, JsonValue] = {
+        "name": "codex_proof_runtime_probe",
+        "argv": [str(interpreter_path), "-I", "-c", "<bound-runtime-probe>"],
+        "cwd": str(cache),
+        "pid": 101,
+        "pgid": 101,
+        "exit_code": 0,
+        "stdout_sha256": "c" * 64,
+        "stderr_sha256": "d" * 64,
+        "timed_out": False,
+        "cleanup_attempted": False,
+    }
+    payload["codex"]["command_receipts"].append(receipt)
+    binding_material: dict[str, JsonValue] = {
+        "schema_version": "1",
+        "receipt_kind": "codex_native_proof_runtime",
+        "harness_policy": "codex_native_v1",
+        "candidate_commit": payload["candidate_commit"],
+        "candidate_tree": git_output(clone, "rev-parse", "HEAD^{tree}"),
+        "runtime_root": str(runtime_root.resolve()),
+        "producer_root": str(cache.resolve()),
+        "interpreter": str(interpreter_path.absolute()),
+        "source_inventory_sha256": source_digest,
+        "installed_cache_sha256": cache_digest,
+        "dependency_lock_sha256": hashlib.sha256((clone / "uv.lock").read_bytes()).hexdigest(),
+        "producer_module_sha256": hashlib.sha256(producer.read_bytes()).hexdigest(),
+        "interpreter_sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+        "interpreter_identity_sha256": hashlib.sha256(str(interpreter).encode()).hexdigest(),
+        "python_implementation": "CPython",
+        "python_version": (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        ),
+        "python_cache_tag": sys.implementation.cache_tag or "unknown",
+        "probe_receipt_sha256": _digest(receipt),
+        "owner_only": True,
+    }
+    binding = {**binding_material, "binding_sha256": _digest(binding_material)}
+    binding_path = run_root / "proof-runtime-binding.json"
+    write_json(binding_path, binding)
+    binding_path.chmod(0o600)
+    payload["proof_runtime"] = {
+        "binding_path": str(binding_path),
+        "binding": binding,
+    }
+    payload["preserved_modes"]["proof_runtime"] = "0o700"
+    write_json(report_path, payload)
+    report_path.chmod(0o600)
+    return runtime_root, binding_path
+
+
 def test_codex_install_report_has_no_claude_surface(tmp_path: Path) -> None:
     report_path, _cache, _global_home = _build_report_fixture(tmp_path)
     report = CodexInstallEvidenceReport.model_validate_json(
@@ -182,3 +262,181 @@ def test_codex_install_script_contains_no_claude_arguments() -> None:
 
     assert "--claude" not in script.lower()
     assert "claude_home" not in script.lower()
+
+
+def test_codex_install_report_accepts_bound_owner_only_proof_runtime(tmp_path: Path) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    runtime_root, binding_path = _add_proof_runtime(report_path, cache)
+
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+
+    assert report.proof_runtime is not None
+    assert report.proof_runtime.binding.runtime_root == runtime_root.resolve()
+    assert report.proof_runtime.binding_path == binding_path
+    assert report.proof_runtime.binding.owner_only is True
+    assert (runtime_root.stat().st_mode & 0o777) == OWNER_DIRECTORY_MODE
+    assert (binding_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
+
+
+def test_codex_install_verifier_rejects_tampered_proof_runtime_binding(
+    tmp_path: Path,
+) -> None:
+    report_path, cache, global_home = _build_report_fixture(tmp_path)
+    _runtime_root, binding_path = _add_proof_runtime(report_path, cache)
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["candidate_tree"] = "f" * 40
+    write_json(binding_path, binding)
+    binding_path.chmod(0o600)
+
+    report, errors = load_verified_codex_install_report(
+        report_path,
+        codex_global_home=global_home,
+    )
+
+    assert report is None
+    assert "codex_proof_runtime_binding_invalid" in errors
+
+
+def test_codex_proof_runtime_cleanup_is_exact_and_keeps_binding(tmp_path: Path) -> None:
+    report_path, cache, _global_home = _build_report_fixture(tmp_path)
+    runtime_root, binding_path = _add_proof_runtime(report_path, cache)
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+    cleanup = getattr(codex_install, "cleanup_codex_proof_runtime", None)
+    assert callable(cleanup)
+    unrelated = report.run_root / "unrelated-retained"
+    unrelated.mkdir(mode=0o700)
+
+    cleanup(report)
+
+    assert not os.path.lexists(runtime_root)
+    assert binding_path.is_file()
+    assert unrelated.is_dir()
+
+
+def test_normal_codex_install_report_keeps_existing_cleanup_contract(tmp_path: Path) -> None:
+    report_path, _cache, _global_home = _build_report_fixture(tmp_path)
+
+    report = CodexInstallEvidenceReport.model_validate_json(
+        report_path.read_text(encoding="utf-8"),
+    )
+
+    assert getattr(report, "proof_runtime", None) is None
+    assert set(report.preserved_modes) == {
+        "run_root",
+        "clone",
+        "home",
+        "codex_home",
+        "codex_cache",
+    }
+
+
+def test_proof_runtime_builder_probes_exact_interpreter_without_caller_pythonpath(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_root = tmp_path / "run"
+    runtime_root = run_root / "proof-runtime"
+    producer_root = run_root / "cache"
+    package = producer_root / "src/saxo_bank_mcp"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    producer = package / "qa_analytics_proof_producer.py"
+    producer.write_text("BOUND_RUNTIME = True\n", encoding="utf-8")
+    lock = producer_root / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime_root)
+    runtime_root.chmod(0o700)
+    interpreter = runtime_root / "bin/python"
+    site = subprocess.run(
+        (str(interpreter), "-I", "-c", "import site; print(site.getsitepackages()[0])"),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    Path(site.stdout.strip(), "proof-runtime.pth").write_text(
+        str((producer_root / "src").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "must-not-be-used"))
+    evidence, receipt = codex_install.build_codex_proof_runtime_evidence(
+        run_root=run_root,
+        runtime_root=runtime_root,
+        producer_root=producer_root,
+        candidate_commit="1" * 40,
+        candidate_tree="2" * 40,
+        source_inventory_sha256="3" * 64,
+        installed_cache_sha256="3" * 64,
+        dependency_lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest(),
+        producer_module_sha256=hashlib.sha256(producer.read_bytes()).hexdigest(),
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+    )
+
+    assert receipt.name == "codex_proof_runtime_probe"
+    assert receipt.exit_code == 0
+    assert evidence.binding.probe_receipt_sha256 == _digest(receipt.model_dump(mode="json"))
+    assert evidence.binding.interpreter == interpreter.absolute()
+    assert evidence.binding_path.is_file()
+    assert (evidence.binding_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
+    assert "PYTHONPATH" not in receipt.argv
+
+
+def test_proof_runtime_builder_rejects_matching_module_from_wrong_root(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    runtime_root = run_root / "proof-runtime"
+    producer_root = run_root / "cache"
+    shadow_root = run_root / "shadow"
+    for root in (producer_root, shadow_root):
+        package = root / "src/saxo_bank_mcp"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "qa_analytics_proof_producer.py").write_text(
+            "BOUND_RUNTIME = True\n",
+            encoding="utf-8",
+        )
+    lock = producer_root / "uv.lock"
+    lock.write_text("version = 1\n", encoding="utf-8")
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(runtime_root)
+    runtime_root.chmod(0o700)
+    interpreter = runtime_root / "bin/python"
+    site = subprocess.run(
+        (str(interpreter), "-I", "-c", "import site; print(site.getsitepackages()[0])"),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    Path(site.stdout.strip(), "proof-runtime.pth").write_text(
+        str((shadow_root / "src").resolve()) + "\n",
+        encoding="utf-8",
+    )
+    producer = producer_root / "src/saxo_bank_mcp/qa_analytics_proof_producer.py"
+
+    with pytest.raises(ValueError, match="codex_proof_runtime_probe_binding_invalid"):
+        codex_install.build_codex_proof_runtime_evidence(
+            run_root=run_root,
+            runtime_root=runtime_root,
+            producer_root=producer_root,
+            candidate_commit="1" * 40,
+            candidate_tree="2" * 40,
+            source_inventory_sha256="3" * 64,
+            installed_cache_sha256="3" * 64,
+            dependency_lock_sha256=hashlib.sha256(lock.read_bytes()).hexdigest(),
+            producer_module_sha256=hashlib.sha256(producer.read_bytes()).hexdigest(),
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        )
+
+
+def test_codex_install_cli_selects_one_shot_proof_runtime_retention() -> None:
+    process = subprocess.run(
+        (sys.executable, str(ROOT / "scripts/qa_codex_plugin_install.py"), "--help"),
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert process.returncode == 0
+    assert "--retain-proof-runtime" in process.stdout

@@ -188,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912
             run_verified_codex_native_producer(
                 cast("CodexInstallEvidenceReport", install),
                 candidate_commit=args.candidate_commit,
+                install_report_path=cast("Path", args.install_report).resolve(),
             )
             if args.harness_policy == "codex_native_v1"
             else run_verified_installed_producer(

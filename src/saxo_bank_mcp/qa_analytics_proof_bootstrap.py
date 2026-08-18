@@ -26,6 +26,8 @@ _OWNER_FILE_MODE: Final = 0o600
 _OWNER_DIRECTORY_MODE: Final = 0o700
 _PRODUCER_MODULE: Final = "saxo_bank_mcp.qa_analytics_proof_producer"
 _PRODUCER_MODULE_RELATIVE: Final = Path("src/saxo_bank_mcp/qa_analytics_proof_producer.py")
+_RUNTIME_BINDING_KIND: Final = "codex_native_proof_runtime"
+_MAX_BINDING_BYTES: Final = 65_536
 _BOOTSTRAP_PHASES: Final = (
     "entry",
     "producer_import",
@@ -45,7 +47,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract-sha256", required=True)
     parser.add_argument("--harness-policy", required=True)
     parser.add_argument("--producer-root", required=True)
-    parser.add_argument("--uv-executable", required=True)
+    parser.add_argument("--producer-python", required=True)
+    parser.add_argument("--runtime-binding-path", required=True)
+    parser.add_argument("--runtime-binding-sha256", required=True)
+    parser.add_argument("--install-report-path", required=True)
+    parser.add_argument("--install-report-sha256", required=True)
     return parser
 
 
@@ -70,6 +76,8 @@ def _base_material(args: argparse.Namespace) -> dict[str, object]:
         "producer_module_sha256": args.producer_module_sha256,
         "catalog_sha256": args.catalog_sha256,
         "contract_sha256": args.contract_sha256,
+        "runtime_binding_sha256": args.runtime_binding_sha256,
+        "install_report_sha256": args.install_report_sha256,
     }
 
 
@@ -195,6 +203,8 @@ def _valid_bindings(args: argparse.Namespace) -> bool:
                 args.producer_module_sha256,
                 args.catalog_sha256,
                 args.contract_sha256,
+                args.runtime_binding_sha256,
+                args.install_report_sha256,
             )
         )
         and hashlib.sha256(Path(__file__).read_bytes()).hexdigest() == args.bootstrap_module_sha256
@@ -228,6 +238,142 @@ def _bound_producer_root(args: argparse.Namespace) -> Path | None:
     ):
         return None
     return root
+
+
+def _safe_owner_input(path: Path) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        path.is_absolute()
+        and stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+    )
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _runtime_binding(  # noqa: C901, PLR0911, PLR0912
+    args: argparse.Namespace,
+    producer_root: Path,
+) -> tuple[Path, Path] | None:
+    binding_path = Path(args.runtime_binding_path)
+    install_report_path = Path(args.install_report_path)
+    if (
+        not _safe_owner_input(binding_path)
+        or not _safe_owner_input(install_report_path)
+        or _sha256_file(binding_path) is None
+        or _sha256_file(install_report_path) != args.install_report_sha256
+    ):
+        return None
+    try:
+        if binding_path.stat().st_size > _MAX_BINDING_BYTES:
+            return None
+        decoded: object = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    binding = cast("dict[str, object]", decoded)
+    expected_keys = {
+        "schema_version",
+        "receipt_kind",
+        "harness_policy",
+        "candidate_commit",
+        "candidate_tree",
+        "runtime_root",
+        "producer_root",
+        "interpreter",
+        "source_inventory_sha256",
+        "installed_cache_sha256",
+        "dependency_lock_sha256",
+        "producer_module_sha256",
+        "interpreter_sha256",
+        "interpreter_identity_sha256",
+        "python_implementation",
+        "python_version",
+        "python_cache_tag",
+        "probe_receipt_sha256",
+        "owner_only",
+        "binding_sha256",
+    }
+    if set(binding) != expected_keys:
+        return None
+    material = dict(binding)
+    claimed_digest = material.pop("binding_sha256", None)
+    if (
+        claimed_digest != args.runtime_binding_sha256
+        or _digest(material) != args.runtime_binding_sha256
+        or binding.get("schema_version") != "1"
+        or binding.get("receipt_kind") != _RUNTIME_BINDING_KIND
+        or binding.get("harness_policy") != "codex_native_v1"
+        or binding.get("candidate_commit") != args.candidate_commit
+        or binding.get("installed_cache_sha256") != args.installed_cache_sha256
+        or binding.get("producer_module_sha256") != args.producer_module_sha256
+        or binding.get("producer_root") != str(producer_root)
+        or binding.get("owner_only") is not True
+    ):
+        return None
+    digest_fields = (
+        "source_inventory_sha256",
+        "installed_cache_sha256",
+        "dependency_lock_sha256",
+        "producer_module_sha256",
+        "interpreter_sha256",
+        "interpreter_identity_sha256",
+        "probe_receipt_sha256",
+    )
+    if any(
+        not isinstance(binding.get(key), str)
+        or _SHA256_PATTERN.fullmatch(cast("str", binding[key])) is None
+        for key in digest_fields
+    ):
+        return None
+    candidate_tree = binding.get("candidate_tree")
+    if not isinstance(candidate_tree, str) or _COMMIT_PATTERN.fullmatch(candidate_tree) is None:
+        return None
+    for key in ("python_implementation", "python_version", "python_cache_tag"):
+        if not isinstance(binding.get(key), str) or not cast("str", binding[key]):
+            return None
+    runtime_root = Path(cast("str", binding.get("runtime_root")))
+    producer_python = Path(args.producer_python).absolute()
+    if binding.get("interpreter") != str(producer_python):
+        return None
+    try:
+        runtime_metadata = os.lstat(runtime_root)
+        interpreter_metadata = os.lstat(producer_python)
+        interpreter = producer_python.resolve(strict=True)
+        resolved_metadata = interpreter.stat()
+    except OSError:
+        return None
+    if (
+        not runtime_root.is_absolute()
+        or not stat.S_ISDIR(runtime_metadata.st_mode)
+        or stat.S_ISLNK(runtime_metadata.st_mode)
+        or runtime_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(runtime_metadata.st_mode) != _OWNER_DIRECTORY_MODE
+        or not producer_python.is_relative_to(runtime_root)
+        or not (
+            stat.S_ISREG(interpreter_metadata.st_mode) or stat.S_ISLNK(interpreter_metadata.st_mode)
+        )
+        or not stat.S_ISREG(resolved_metadata.st_mode)
+        or not os.access(interpreter, os.X_OK)
+        or _sha256_file(interpreter) != binding.get("interpreter_sha256")
+        or hashlib.sha256(str(interpreter).encode()).hexdigest()
+        != binding.get("interpreter_identity_sha256")
+        or _sha256_file(producer_root / "uv.lock") != binding.get("dependency_lock_sha256")
+    ):
+        return None
+    return runtime_root, producer_python
 
 
 def _safe_child_stdout(raw: str, args: argparse.Namespace) -> str:
@@ -306,7 +452,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         return _CONFIG_FAILURE_EXIT
 
     producer_root = _bound_producer_root(args)
-    if producer_root is None:
+    bound_runtime = None if producer_root is None else _runtime_binding(args, producer_root)
+    if producer_root is None or bound_runtime is None:
         _write_failure(
             path,
             args,
@@ -341,13 +488,10 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     if not _atomic_write(path, started):
         return _CONFIG_FAILURE_EXIT
 
+    _runtime_root, producer_python = bound_runtime
     producer_argv = (
-        str(args.uv_executable),
-        "run",
-        "--offline",
-        "--project",
-        str(producer_root),
-        "python",
+        str(producer_python),
+        "-I",
         "-m",
         _PRODUCER_MODULE,
         "--candidate-commit",
@@ -357,8 +501,13 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
         "--harness-policy",
         "codex_native_v1",
     )
-    child_env = dict(os.environ)
+    child_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"PYTHONPATH", "PYTHONHOME"} and not key.startswith("UV_")
+    }
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    child_env["PYTHONNOUSERSITE"] = "1"
     child_env["UV_OFFLINE"] = "1"
     try:
         child = subprocess.run(
