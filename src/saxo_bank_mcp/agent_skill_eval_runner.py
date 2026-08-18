@@ -230,21 +230,23 @@ def run_eval_suite(options: EvalRunOptions) -> int:
                 harness: sum(1 for record in model_records if record.harness == harness)
                 for harness in ("codex", "claude")
             },
-            "model_tool_events": sum(
-                record.model_tool_event_count or 0 for record in model_records
+            "model_tool_events": _sum_observable_counts(
+                record.model_tool_event_count for record in model_records
             ),
-            "model_command_events": sum(
-                record.model_command_event_count or 0 for record in model_records
+            "model_command_events": _sum_observable_counts(
+                record.model_command_event_count for record in model_records
             ),
             "created_mcp_calls": (
                 0
                 if options.dry_run
-                else sum(record.model_mcp_event_count or 0 for record in model_records)
+                else _sum_observable_counts(
+                    record.model_mcp_event_count for record in model_records
+                )
             ),
-            "model_saxo_events": sum(
-                record.model_saxo_event_count or 0 for record in model_records
+            "model_saxo_events": _sum_observable_counts(
+                record.model_saxo_event_count for record in model_records
             ),
-            "invoked_logical_tool_count": sum(
+            "invoked_logical_tool_count": _sum_observable_counts(
                 record.invoked_logical_tool_count for record in model_records
             ),
             "client_versions": outcome.versions,
@@ -903,6 +905,15 @@ def _cleanup_int(cleanup: dict[str, JsonValue], key: str) -> int:
     return value if isinstance(value, int) else 0
 
 
+def _sum_observable_counts(values: Iterable[int | None]) -> int | None:
+    total = 0
+    for value in values:
+        if value is None:
+            return None
+        total += value
+    return total
+
+
 def _credential_mode_error(mode: str) -> str:
     if mode not in ALLOWED_CREDENTIAL_MODES:
         return "credential_mode_unknown"
@@ -978,6 +989,7 @@ def _rewrite_digest_mismatches(
             no_model_call=record.no_model_call,
             no_mcp_call=record.no_mcp_call,
             no_saxo_call=record.no_saxo_call,
+            model_output_observability=record.model_output_observability,
             error="router_source_digest_mismatch",
             router_decision=record.router_decision,
             router_source_mode=record.router_source_mode,

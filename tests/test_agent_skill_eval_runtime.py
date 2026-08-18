@@ -9,6 +9,7 @@ import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Final, cast
 
 import pytest
@@ -559,6 +560,73 @@ def test_unknown_credential_mode_fails_closed(tmp_path: Path) -> None:
     assert code != 0
     assert payload["status"] == "failed"
     assert payload["cleanup"]["source_binding"]["error"] == "credential_mode_unknown"
+
+
+def test_malformed_model_output_keeps_runner_event_aggregates_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
+    record = EvalRunRecord(
+        case_id=case.id,
+        harness="codex",
+        status="failed",
+        execution_mode="model_execution",
+        expected_skill=case.expected_skill,
+        required_logical_tools=case.required_logical_tools,
+        forbidden_logical_tools=case.forbidden_logical_tools,
+        resolved_tool_grants=(),
+        transcript_assertions_passed=False,
+        no_model_call=False,
+        no_mcp_call=None,
+        no_saxo_call=None,
+        model_output_observability="unknown",
+        error="malformed_output",
+        model_tool_event_count=None,
+        model_command_event_count=None,
+        model_mcp_event_count=None,
+        model_saxo_event_count=None,
+        invoked_logical_tools=None,
+        invoked_logical_tool_count=None,
+        grant_status="unknown",
+        assertion_status="unknown",
+    )
+
+    def malformed_outcome(_options: object, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            records=(record,),
+            enforced_mode="none",
+            versions={"codex": "test"},
+            cleanup={
+                "complete": True,
+                "process_cleanup": "passed",
+                "runtime_cleanup": "not_required",
+                "token_promote": "not_required",
+                "created_processes": 1,
+                "terminated_processes": 1,
+                "remaining_processes": 0,
+            },
+            error="malformed_output",
+        )
+
+    monkeypatch.setattr(eval_runner, "_select_execution_outcome", malformed_outcome)
+    options = _options(
+        tmp_path,
+        dry_run=False,
+        credential_mode="ephemeral-owner-only-copy",
+        harness="codex",
+    )
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["cleanup"]["model_tool_events"] is None
+    assert payload["cleanup"]["model_command_events"] is None
+    assert payload["cleanup"]["created_mcp_calls"] is None
+    assert payload["cleanup"]["model_saxo_events"] is None
+    assert payload["cleanup"]["invoked_logical_tool_count"] is None
 
 
 def test_codex_native_policy_rejects_non_codex_harness(tmp_path: Path) -> None:

@@ -91,6 +91,9 @@ _COMMIT_PATTERN = r"^[a-f0-9]{40}$"
 _OWNER_FILE_MODE: Final = 0o600
 _OWNER_DIRECTORY_MODE: Final = 0o700
 _MAX_BOOTSTRAP_BYTES: Final = 32_768
+_MODEL_OUTPUT_OBSERVABILITY_FIELDS: Final = frozenset(
+    {"model_output_observability", "no_mcp_call", "no_saxo_call"},
+)
 
 
 class _StrictModel(BaseModel):
@@ -144,12 +147,15 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
     case_id: str = Field(pattern=_SAFE_EVAL_CASE_ID_PATTERN.pattern)
     status: Literal["passed", "failed", "skipped", "planned"]
     error: str = Field(max_length=128)
-    assertion_status: Literal["passed", "failed", "not_required"]
-    grant_status: Literal["passed", "failed", "not_required"]
+    assertion_status: Literal["passed", "failed", "not_required", "unknown"]
+    grant_status: Literal["passed", "failed", "not_required", "unknown"]
+    model_output_observability: Literal["observable", "unknown"] = "observable"
+    no_mcp_call: bool | None = None
+    no_saxo_call: bool | None = None
     required_logical_tool_ids: tuple[str, ...] = Field(max_length=64)
     required_logical_tool_count: int = Field(ge=0, le=64)
-    invoked_logical_tool_ids: tuple[str, ...] = Field(max_length=128)
-    invoked_logical_tool_count: int = Field(ge=0, le=128)
+    invoked_logical_tool_ids: tuple[str, ...] | None = Field(max_length=128)
+    invoked_logical_tool_count: int | None = Field(ge=0, le=128)
     model_tool_event_count: int | None = Field(ge=0)
     model_command_event_count: int | None = Field(ge=0)
     model_mcp_event_count: int | None = Field(ge=0)
@@ -210,15 +216,15 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
 
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
-        logical_ids = (*self.required_logical_tool_ids, *self.invoked_logical_tool_ids)
+        self._validate_model_output_observability()
+        invoked_ids = self.invoked_logical_tool_ids or ()
+        logical_ids = (*self.required_logical_tool_ids, *invoked_ids)
         if any(_SAFE_LOGICAL_TOOL_ID_PATTERN.fullmatch(tool_id) is None for tool_id in logical_ids):
             raise ValueError("agent evaluation summary logical tool id is unsafe")
         if len(set(self.required_logical_tool_ids)) != len(self.required_logical_tool_ids):
             raise ValueError("agent evaluation summary required tools must be unique")
         if self.required_logical_tool_count != len(self.required_logical_tool_ids):
             raise ValueError("agent evaluation summary required tool count differs")
-        if self.invoked_logical_tool_count != len(self.invoked_logical_tool_ids):
-            raise ValueError("agent evaluation summary invoked tool count differs")
         if self.error and _SAFE_REASON_PATTERN.fullmatch(self.error) is None:
             raise ValueError("agent evaluation summary error is unsafe")
         if self.status == "failed" and not self.error:
@@ -252,6 +258,42 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             forbidden_absent=self.raw_assistant_forbidden_assertion_absent_results,
         )
         return self
+
+    def _validate_model_output_observability(self) -> None:
+        parse_derived_fields = (
+            self.no_mcp_call,
+            self.no_saxo_call,
+            self.invoked_logical_tool_ids,
+            self.invoked_logical_tool_count,
+            self.model_tool_event_count,
+            self.model_command_event_count,
+            self.model_mcp_event_count,
+            self.model_saxo_event_count,
+        )
+        if self.model_output_observability == "unknown":
+            if any(value is not None for value in parse_derived_fields):
+                raise ValueError("unknown model output cannot carry parse-derived summary evidence")
+            if self.grant_status != "unknown" or self.assertion_status != "unknown":
+                raise ValueError("unknown model output requires unknown summary grading evidence")
+            if self.error != "malformed_output":
+                raise ValueError("unknown model output summary requires malformed output")
+        else:
+            has_modern_observability = bool(
+                {
+                    "model_output_observability",
+                    "no_mcp_call",
+                    "no_saxo_call",
+                }
+                & self.model_fields_set
+            )
+            if has_modern_observability and (self.no_mcp_call is None or self.no_saxo_call is None):
+                raise ValueError("observable model output requires summary call and tool evidence")
+            if self.invoked_logical_tool_ids is None or self.invoked_logical_tool_count is None:
+                raise ValueError("observable model output requires invoked tool evidence")
+            if self.invoked_logical_tool_count != len(self.invoked_logical_tool_ids):
+                raise ValueError("agent evaluation summary invoked tool count differs")
+            if self.grant_status == "unknown" or self.assertion_status == "unknown":
+                raise ValueError("observable model output cannot carry unknown summary grading")
 
 
 def _validate_mcp_config_binding_evidence(
@@ -383,7 +425,11 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             raise ValueError("agent evaluation summary case ids must be unique")
         material = self.model_dump(mode="json", exclude={"summary_sha256"})
         if self.summary_sha256 != _digest(material):
+            if self._matches_prior_observability_digest(material):
+                return self
+            observability_fields = _MODEL_OUTPUT_OBSERVABILITY_FIELDS
             legacy_fields = {
+                *observability_fields,
                 "mcp_config_sha256",
                 "mcp_config_path_identity_sha256",
                 "assistant_message_present",
@@ -414,6 +460,19 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             if self.summary_sha256 != _digest(legacy_material):
                 raise ValueError("agent evaluation summary digest mismatch")
         return self
+
+    def _matches_prior_observability_digest(self, material: dict[str, JsonValue]) -> bool:
+        if any(_MODEL_OUTPUT_OBSERVABILITY_FIELDS & case.model_fields_set for case in self.cases):
+            return False
+        prior_material = dict(material)
+        prior_cases: list[dict[str, JsonValue]] = []
+        for case in self.cases:
+            case_material = case.model_dump(mode="json")
+            for evidence_field in _MODEL_OUTPUT_OBSERVABILITY_FIELDS:
+                case_material.pop(evidence_field, None)
+            prior_cases.append(case_material)
+        prior_material["cases"] = prior_cases
+        return self.summary_sha256 == _digest(prior_material)
 
 
 class CodexNativeBootstrapEnvelope(_StrictModel):

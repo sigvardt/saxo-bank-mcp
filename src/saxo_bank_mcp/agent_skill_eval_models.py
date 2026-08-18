@@ -12,6 +12,7 @@ from saxo_bank_mcp._evidence import JsonValue
 type Harness = Literal["codex", "claude"]
 type HarnessSelector = Literal["codex", "claude", "both"]
 type EvalEnvironment = Literal["LOCAL", "SIM", "LIVE"]
+type ModelOutputObservability = Literal["observable", "unknown"]
 type RouterEnvironment = Literal["LOCAL", "SIM", "LIVE", "AMBIGUOUS"]
 type RouterIntent = Literal[
     "analytics", "auth", "read", "stream", "trade", "recovery", "QA", "unsupported"
@@ -138,8 +139,9 @@ class EvalRunRecord(BaseModel):
     resolved_tool_grants: tuple[str, ...]
     transcript_assertions_passed: bool
     no_model_call: bool
-    no_mcp_call: bool
-    no_saxo_call: bool
+    no_mcp_call: bool | None
+    no_saxo_call: bool | None
+    model_output_observability: ModelOutputObservability = "observable"
     error: str = ""
     router_decision: RouterDecision | None = None
     router_source_mode: Literal["source_equivalent"] | None = None
@@ -176,10 +178,10 @@ class EvalRunRecord(BaseModel):
         pattern=r"^[0-9a-f]{64}$",
     )
     client_version: str = ""
-    invoked_logical_tools: tuple[str, ...] = ()
-    invoked_logical_tool_count: int = 0
-    grant_status: Literal["passed", "failed", "not_required"] = "not_required"
-    assertion_status: Literal["passed", "failed", "not_required"] = "not_required"
+    invoked_logical_tools: tuple[str, ...] | None = ()
+    invoked_logical_tool_count: int | None = 0
+    grant_status: Literal["passed", "failed", "not_required", "unknown"] = "not_required"
+    assertion_status: Literal["passed", "failed", "not_required", "unknown"] = "not_required"
     assistant_message_present: bool | None = None
     required_all_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
     required_any_assertion_results: tuple[bool, ...] = Field(default=(), max_length=64)
@@ -203,6 +205,7 @@ class EvalRunRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mcp_probe_evidence(self) -> EvalRunRecord:  # noqa: C901
+        self._validate_model_output_observability()
         paired = (self.mcp_probe_exit_code is None) == (self.mcp_probe_stdout_schema_sha256 is None)
         completed_command = self.mcp_probe_stage in {
             "command_exit",
@@ -277,6 +280,43 @@ class EvalRunRecord(BaseModel):
         ):
             raise ValueError("malformed Codex output cannot carry assistant diagnostics")
         return self
+
+    def _validate_model_output_observability(self) -> None:
+        parse_derived_fields = (
+            self.no_mcp_call,
+            self.no_saxo_call,
+            self.model_tool_event_count,
+            self.model_command_event_count,
+            self.model_mcp_event_count,
+            self.model_saxo_event_count,
+            self.invoked_logical_tools,
+            self.invoked_logical_tool_count,
+        )
+        if self.model_output_observability == "unknown":
+            if any(value is not None for value in parse_derived_fields):
+                raise ValueError("unknown model output cannot carry parse-derived evidence")
+            if self.grant_status != "unknown" or self.assertion_status != "unknown":
+                raise ValueError("unknown model output requires unknown grading evidence")
+            if self.harness != "codex" or self.error != "malformed_output":
+                raise ValueError("unknown model output requires malformed Codex output")
+        else:
+            if (
+                self.no_mcp_call is None
+                or self.no_saxo_call is None
+                or self.invoked_logical_tools is None
+                or self.invoked_logical_tool_count is None
+            ):
+                raise ValueError("observable model output requires call and tool evidence")
+            if self.invoked_logical_tool_count != len(self.invoked_logical_tools):
+                raise ValueError("invoked logical tool count differs")
+            if self.grant_status == "unknown" or self.assertion_status == "unknown":
+                raise ValueError("observable model output cannot carry unknown grading evidence")
+        if (
+            self.harness == "codex"
+            and self.error == "malformed_output"
+            and self.model_output_observability != "unknown"
+        ):
+            raise ValueError("malformed Codex output requires unknown parse evidence")
 
 
 class EvalRunReport(BaseModel):

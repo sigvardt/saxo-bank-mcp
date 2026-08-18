@@ -173,6 +173,7 @@ def test_structured_exact_calls_pass_without_real_clients(
     # Then: structured events make the case pass with truthful evidence fields.
     assert record.status == "passed", record.error
     assert record.error == ""
+    assert record.model_output_observability == "observable"
     assert record.no_mcp_call is False
     assert record.no_saxo_call is False
     assert record.invoked_logical_tools == required
@@ -289,31 +290,53 @@ def test_codex_assertion_diagnostics_prove_phrase_absent_from_both_surfaces(
 
 
 @pytest.mark.parametrize(
-    "stream",
+    ("stream", "returncode"),
     [
-        "not-json",
-        "\n".join(
-            (
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": {
-                            "id": "answer",
-                            "type": "agent_message",
-                            "text": (
-                                "analysis_id explicit numeric shocks model distribution refused"
-                            ),
+        ("not-json", 0),
+        (
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "id": "tool-before-malformed",
+                                "type": "mcp_tool_call",
+                                "server": "saxo_bank_mcp",
+                                "tool": "saxo_run_scenario",
+                            },
                         },
-                    },
+                    ),
+                    "not-json-private-transcript-sentinel",
                 ),
-                "not-json",
             ),
+            0,
+        ),
+        (
+            "\n".join(
+                (
+                    json.dumps(
+                        {
+                            "type": "item.completed",
+                            "item": {
+                                "id": "tool-before-malformed-nonzero",
+                                "type": "mcp_tool_call",
+                                "server": "saxo_bank_mcp",
+                                "tool": "saxo_run_scenario",
+                            },
+                        },
+                    ),
+                    "not-json-private-transcript-sentinel",
+                ),
+            ),
+            1,
         ),
     ],
-    ids=("malformed-only", "valid-then-malformed"),
+    ids=("malformed-only", "valid-tool-then-malformed", "nonzero-valid-tool-then-malformed"),
 )
-def test_codex_malformed_output_keeps_assistant_diagnostics_unknown(
+def test_codex_malformed_output_keeps_all_parse_derived_evidence_unknown(
     stream: str,
+    returncode: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,7 +355,7 @@ def test_codex_malformed_output_keeps_assistant_diagnostics_unknown(
         timeout_seconds: float,
     ) -> ManagedProcessResult:
         _ = (self, command, cwd, env, timeout_seconds)
-        return _managed(stream)
+        return _managed(stream, returncode=returncode)
 
     monkeypatch.setattr(EvalProcessManager, "run", fake_run)
 
@@ -347,6 +370,17 @@ def test_codex_malformed_output_keeps_assistant_diagnostics_unknown(
 
     assert record.status == "failed"
     assert record.error == "malformed_output"
+    assert record.model_output_observability == "unknown"
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
     assert record.assistant_message_present is None
     assert record.required_all_assertion_results == ()
     assert record.required_any_assertion_results == ()
@@ -358,6 +392,7 @@ def test_codex_malformed_output_keeps_assistant_diagnostics_unknown(
     assert record.raw_assistant_required_all_assertion_results == ()
     assert record.raw_assistant_required_any_assertion_results == ()
     assert record.raw_assistant_forbidden_assertion_absent_results == ()
+    assert "private-transcript-sentinel" not in record.model_dump_json()
 
 
 def test_out_of_grant_tool_fails(

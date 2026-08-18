@@ -190,6 +190,8 @@ def _record_from_stdout(
     except (ValueError, TypeError):
         error = "process_nonzero_exit" if result.returncode != 0 else "malformed_output"
         return _failed_record(case, harness, grants, error)
+    if harness == "codex" and trace.parse_error == "malformed_output":
+        return _failed_record(case, harness, grants, trace.parse_error, trace=trace)
     if result.returncode != 0 and not _claude_nonzero_output_usable(harness, trace):
         return _failed_record(case, harness, grants, "process_nonzero_exit", trace=trace)
     if trace.parse_error:
@@ -347,7 +349,10 @@ def _failed_record(  # noqa: PLR0913
     trace: ModelToolTrace | None = None,
     assertions_passed: bool = False,
 ) -> EvalRunRecord:
-    assistant_output_observable = trace is not None and trace.parse_error != "malformed_output"
+    model_output_observable = not (harness == "codex" and error == "malformed_output")
+    assistant_output_observable = (
+        model_output_observable and trace is not None and trace.parse_error != "malformed_output"
+    )
     assertion_evidence = (
         None
         if not assistant_output_observable or trace is None
@@ -381,17 +386,48 @@ def _failed_record(  # noqa: PLR0913
         resolved_tool_grants=grants,
         transcript_assertions_passed=assertions_passed,
         no_model_call=False,
-        no_mcp_call=True if trace is None else trace.mcp_event_count == 0,
-        no_saxo_call=True if trace is None else trace.saxo_event_count == 0,
+        no_mcp_call=(
+            None if not model_output_observable else trace is None or trace.mcp_event_count == 0
+        ),
+        no_saxo_call=(
+            None if not model_output_observable else trace is None or trace.saxo_event_count == 0
+        ),
+        model_output_observability=("observable" if model_output_observable else "unknown"),
         error=error,
-        model_tool_event_count=None if trace is None else trace.tool_event_count,
-        model_command_event_count=None if trace is None else trace.command_event_count,
-        model_mcp_event_count=None if trace is None else trace.mcp_event_count,
-        model_saxo_event_count=None if trace is None else trace.saxo_event_count,
-        invoked_logical_tools=() if trace is None else trace.invoked_logical_tools,
-        invoked_logical_tool_count=0 if trace is None else len(trace.invoked_logical_tools),
-        grant_status="failed",
-        assertion_status="failed" if not assertions_passed else "passed",
+        model_tool_event_count=(
+            None if not model_output_observable or trace is None else trace.tool_event_count
+        ),
+        model_command_event_count=(
+            None if not model_output_observable or trace is None else trace.command_event_count
+        ),
+        model_mcp_event_count=(
+            None if not model_output_observable or trace is None else trace.mcp_event_count
+        ),
+        model_saxo_event_count=(
+            None if not model_output_observable or trace is None else trace.saxo_event_count
+        ),
+        invoked_logical_tools=(
+            None
+            if not model_output_observable
+            else ()
+            if trace is None
+            else trace.invoked_logical_tools
+        ),
+        invoked_logical_tool_count=(
+            None
+            if not model_output_observable
+            else 0
+            if trace is None
+            else len(trace.invoked_logical_tools)
+        ),
+        grant_status="failed" if model_output_observable else "unknown",
+        assertion_status=(
+            "unknown"
+            if not model_output_observable
+            else "failed"
+            if not assertions_passed
+            else "passed"
+        ),
         assistant_message_present=(
             None if assertion_evidence is None else assertion_evidence.assistant_message_present
         ),

@@ -1590,6 +1590,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
         forbidden_by_tool: dict[str, list[EvalRunRecord]] = {}
         required_by_tool: dict[str, list[EvalRunRecord]] = {}
         for record in report.records:
+            invoked_logical_tools = record.invoked_logical_tools or ()
             if (
                 record.status != "passed"
                 or record.execution_mode != "model_execution"
@@ -1600,7 +1601,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
                 or record.grant_status not in {"passed", "not_required"}
             ):
                 raise ProofProducerError("installed_agent_evaluation_not_passed")
-            if "saxo_register_disclaimer_response" in record.invoked_logical_tools or any(
+            if "saxo_register_disclaimer_response" in invoked_logical_tools or any(
                 grant == "saxo_register_disclaimer_response"
                 or grant.endswith("__saxo_register_disclaimer_response")
                 for grant in record.resolved_tool_grants
@@ -1608,7 +1609,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
                 raise ProofProducerError(
                     "installed_agent_evaluation_disclaimer_response_forbidden",
                 )
-            for tool_id in record.invoked_logical_tools:
+            for tool_id in invoked_logical_tools:
                 invoked_by_tool.setdefault(tool_id, []).append(record)
             for tool_id in record.forbidden_logical_tools:
                 forbidden_by_tool.setdefault(tool_id, []).append(record)
@@ -1621,7 +1622,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
             invoked = invoked_by_tool.get(tool_id, [])
             forbidden = forbidden_by_tool.get(tool_id, [])
             if required:
-                if any(tool_id not in record.invoked_logical_tools for record in required):
+                if any(tool_id not in (record.invoked_logical_tools or ()) for record in required):
                     raise ProofProducerError("installed_agent_evaluation_required_tool_missing")
                 observed = required
                 observation_kind = "invoked"
@@ -1856,6 +1857,9 @@ def _agent_evaluation_failure_summary(
             error=record.error,
             assertion_status=record.assertion_status,
             grant_status=record.grant_status,
+            model_output_observability=record.model_output_observability,
+            no_mcp_call=record.no_mcp_call,
+            no_saxo_call=record.no_saxo_call,
             required_logical_tool_ids=record.required_logical_tools,
             required_logical_tool_count=len(record.required_logical_tools),
             invoked_logical_tool_ids=record.invoked_logical_tools,
