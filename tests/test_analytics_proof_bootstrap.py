@@ -632,4 +632,7 @@ def test_real_uv_offline_post_cleanup_launch_uses_bound_retained_interpreter(
     assert process.returncode == 0
     envelope = _read_authenticated_envelope(evidence / "bootstrap.json")
     assert envelope["bootstrap_state"] == "complete"
-    assert envelope["runtime_binding_sha256"] == binding_sha256
+    assert (envelope["runtime_binding_sha256"], tuple(producer_root.rglob("__pycache__"))) == (
+        binding_sha256,
+        (),
+    )

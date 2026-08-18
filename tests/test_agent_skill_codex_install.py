@@ -377,11 +377,13 @@ def test_proof_runtime_builder_probes_exact_interpreter_without_caller_pythonpat
 
     assert receipt.name == "codex_proof_runtime_probe"
     assert receipt.exit_code == 0
+    assert receipt.argv[1:3] == ("-I", "-B")
     assert evidence.binding.probe_receipt_sha256 == _digest(receipt.model_dump(mode="json"))
     assert evidence.binding.interpreter == interpreter.absolute()
     assert evidence.binding_path.is_file()
     assert (evidence.binding_path.stat().st_mode & 0o777) == OWNER_FILE_MODE
     assert "PYTHONPATH" not in receipt.argv
+    assert not tuple(producer_root.rglob("__pycache__"))
 
 
 def test_proof_runtime_builder_rejects_matching_module_from_wrong_root(tmp_path: Path) -> None:

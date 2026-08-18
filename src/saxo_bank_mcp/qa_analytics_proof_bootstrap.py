@@ -492,6 +492,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911
     producer_argv = (
         str(producer_python),
         "-I",
+        "-B",
         "-m",
         _PRODUCER_MODULE,
         "--candidate-commit",

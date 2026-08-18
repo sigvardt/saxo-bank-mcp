@@ -292,7 +292,7 @@ def build_codex_proof_runtime_evidence(  # noqa: PLR0913
     )
     result = run_command(
         "codex_proof_runtime_probe",
-        (str(interpreter_path), "-I", "-c", code),
+        (str(interpreter_path), "-I", "-B", "-c", code),
         cwd=producer,
         env=clean_env,
         timeout_seconds=60,
