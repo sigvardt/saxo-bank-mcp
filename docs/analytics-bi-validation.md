@@ -5,17 +5,17 @@ Date: 2026-08-18
 Harness policy: `codex_native_v1`
 Independent review: pending the root orchestrator's separate native review
 
-Latest sealed evidence candidate `d62082f2af861d5dfa088855c89dbe5d0451ffac`, tree
-`02b85b84266c733118fd5430a6710a13f1031e8b`, passed its exact Codex-only install,
-signed 2,795-test full suite, and required local gates. Its one sealed proof command ended at an
-authenticated candidate-runner boundary failure. The old launcher then overwrote the child result,
-so child model, MCP, Saxo, mutation, purchase, disclaimer, and cleanup facts are unknown.
+Candidate `06fb8e1731af158825d4c83a6f01cadb489dec83`, tree
+`db36b068962bdb266d5f7b49da4d0e9b2234b738`, passed its exact Codex-only retained-runtime
+installation, signed 2,810-test full suite, required local gates, and current SIM safety preflight.
+Its one sealed proof command then returned an authenticated `verified_child_failure`. Ten of eleven
+native hard cases passed. The `scenario` case failed `transcript_assertion_failed` despite a passed
+grant check and exact invocation of its two required logical tools. The outer failure reason is
+`proof_child_cleanup_failed`.
 
-Local corrective source `06fb8e1731af158825d4c83a6f01cadb489dec83`, tree
-`db36b068962bdb266d5f7b49da4d0e9b2234b738`, separates the child result from the final
-publication, verifies its complete native binding, and retains only authenticated child evidence
-when runner cleanup or receipt publication fails. It has passed local tests and static checks only.
-It has not had an exact install, signed full suite, SIM preflight, or sealed proof.
+No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, account-equality
+readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
+active.
 
 This document contains no credentials, account identifiers, balances, holdings, money values,
 private local paths, raw broker payloads, transcripts, model arguments, or private URLs.
@@ -24,12 +24,11 @@ private local paths, raw broker payloads, transcripts, model arguments, or priva
 
 | Item | Value |
 | --- | --- |
-| Latest sealed source | `d62082f2af861d5dfa088855c89dbe5d0451ffac` |
-| Latest sealed tree | `02b85b84266c733118fd5430a6710a13f1031e8b` |
-| Local corrective source | `06fb8e1731af158825d4c83a6f01cadb489dec83` |
-| Local corrective tree | `db36b068962bdb266d5f7b49da4d0e9b2234b738` |
+| Sealed source | `06fb8e1731af158825d4c83a6f01cadb489dec83` |
+| Sealed tree | `db36b068962bdb266d5f7b49da4d0e9b2234b738` |
 | Harness policy | `codex_native_v1` |
 | Installed surface | 60 tools, including 21 analytics tools; 9 skills; 1 MCP server |
+| Installed inventory | 616 exact compared files |
 | Saxo operation catalog | 294 operations: 182 implemented and 112 refused |
 | Proof catalog | 54 analysis kinds and 54 proof profile IDs |
 | Activation state | 54 quarantined as `implementation_pending`; 0 active |
@@ -38,15 +37,16 @@ The historical `dual_v1` policy and its evidence remain unchanged. The native po
 the Codex harness. Shared package inventory metadata does not constitute another client, account,
 process, or evaluation.
 
-## Exact sealed-candidate gates
+## Exact candidate gates
 
-The retained-runtime installation for `d62082f` passed with 60 tools, 9 skills, 1 MCP server, 616
-exact compared files, no inventory mismatch, unchanged caller state during the install window,
-owner-only evidence, and complete install-process cleanup.
+The retained-runtime installation passed with exact candidate and tree binding, 60 tools, 9 skills,
+1 MCP server, 616 exact compared files, no inventory mismatch, unchanged caller state during the
+install window, owner-only evidence, and complete install-process cleanup. Verify-only readback
+passed before the retained runtime was consumed.
 
 The signed exact-candidate full-suite receipt reports:
 
-- 2,795 tests passed;
+- 2,810 tests passed;
 - zero failures, errors, or skips;
 - the exact candidate and tree before and after;
 - a clean source worktree before and after;
@@ -54,7 +54,9 @@ The signed exact-candidate full-suite receipt reports:
 - no retained raw test output.
 
 All pytest execution used `scripts/run-pytest` with `TMPDIR`, `TMP`, and `TEMP` set to the required
-external temporary root. The system disk stayed above the 50 GiB guard.
+external temporary root. Candidate-attributed temporary storage returned to its baseline, no
+candidate-owned system-temporary pytest directory appeared, and the system disk stayed above the
+50 GiB guard.
 
 | Local gate | Result |
 | --- | --- |
@@ -65,7 +67,7 @@ external temporary root. The system disk stayed above the 50 GiB guard.
 | Generated catalogs | 60 tools, 21 analytics tools, 294 operations, 10 analytics scenarios |
 | Evaluation manifest | 34 cases, 60 tools, 9 skills, 0 errors |
 | Public privacy scan | passed with 0 findings and 0 scan errors |
-| Structural install readback | exact candidate, inventory, binding, modes, and retained runtime verified |
+| Structural install readback | exact candidate, inventory, binding, modes, and unconsumed runtime verified |
 
 ## SIM authorization gate
 
@@ -73,78 +75,65 @@ Before the sealed command, local status proved requested and effective environme
 LIVE reads disabled and LIVE writes disabled. One separate read-only session-capability call passed
 and truthfully recorded `network_call_made=true`.
 
-That receipt proves only its own SIM request. Because the child publication was lost at the later
-runner boundary, it does not prove the child's preflight, broker writes, account equality, or any
-later proof phase.
+The sealed producer then performed its own required SIM preflight before model work. The
+authenticated child receipt records requested and effective `SIM`, LIVE reads false, LIVE writes
+false, session capabilities passed, and `network_call_made=true`. These receipts prove only their
+own read-only capability requests. They do not prove account equality or the later unknown broker
+facts.
 
 ## One sealed proof attempt
 
-Exactly one sealed `codex_native_v1` command ran for `d62082f` and exited 1. The final outer
-publication and candidate-runner receipt authenticate only this boundary:
+Exactly one sealed `codex_native_v1` command ran for `06fb8e1` and exited 1. The authenticated outer
+publication has the complete 54-analysis and 54-receipt contract counts and result kind
+`verified_child_failure`.
 
 | Field | Authenticated value |
 | --- | --- |
-| Result kind | `boundary_failure` |
-| Boundary phase | `candidate_runner` |
-| Reason | `proof_candidate_runner_cleanup_failed` |
-| Candidate runner command state | completed |
-| Candidate runner spawned | true |
-| Candidate runner exit | 1 |
-| Candidate runner cleanup | failed |
-| Candidate result presence | true, with a bound digest in the runner receipt |
-| Child publication after outer handling | unavailable because the final path was overwritten |
-| Child model, MCP, and Saxo events | unknown |
-| Child execution and SIM network provenance | unknown |
-| Broker write, LIVE mutation, purchase, disclaimer response | unknown |
+| Status | refused |
+| Reason | `proof_child_cleanup_failed` |
+| Completed phase | SIM preflight |
+| Current phase | agent evaluation |
+| Child exit | 1 |
+| Execution performed | true |
+| SIM preflight | passed |
+| Network call made | true |
+| Hard-case summary | 10 passed, 1 failed |
+| Failing case | `scenario`: `transcript_assertion_failed` |
+| Failing-case grant | passed |
+| Failing-case required tools | exact two logical tools invoked |
+| Child cleanup status | not started |
+| Outer retained-runtime cleanup | complete |
+| Candidate-runner cleanup | complete |
 
-The old candidate runner passed the final publication path directly to the child. After the child
-wrote a result, runner cleanup failed and the outer exception handler published its refusal to the
-same path. This destroyed the only child publication while retaining only its digest and presence
-in the runner receipt. No child fact is reconstructed from that digest.
+The strict privacy-safe per-case summary contains only case identifiers, assertion and grant
+outcomes, required and invoked logical tool identifiers and counts, safe event counts, and bound
+digests. It contains no transcript, arguments, handles, broker payload, account data, raw output,
+or private path.
 
-The producer did not deliver authenticated numerical receipts, a fresh 60-tool SIM matrix, Saxo
-reconciliation, account equality, or activation to the final publication. No retry ran.
+The overall receipt deliberately leaves aggregate model, MCP, and Saxo event counts, broker-write
+state, LIVE mutation count, purchase state, and disclaimer-response state unknown. The per-case
+summary is not used to invent those aggregate or broker facts. The failure receipt recorded two
+remaining child processes and zero process groups at capture. After the command terminated, an
+independent local readback found no exact-candidate process, no proof run root, and no retained
+proof runtime.
 
-## Local corrective source
-
-Source `06fb8e1` gives the candidate child a distinct owner-only sidecar. The final output is
-reserved for the parent publication. Before trusting the sidecar, the parent verifies:
-
-- regular-file, single-link, owner, directory, and mode requirements;
-- the complete authenticated native publication schema and digest;
-- exact candidate commit, `codex_native_v1` policy, proof contract, analysis-kind count, and
-  evidence-receipt count.
-
-If runner cleanup completes, the parent publishes the verified bytes and verifies them again. If
-cleanup fails, the parent publishes an overall refusal while retaining the authenticated sidecar
-and binding both its digest and the candidate-runner cleanup receipt. A runner-receipt write failure
-can bind the verified sidecar without inventing cleanup facts. Missing, malformed, tampered,
-mismatched, linked, or incorrectly permissioned output is not trusted, and no child execution,
-network, model, MCP, Saxo, mutation, purchase, or disclaimer fact is copied from it.
-
-Local validation for `06fb8e1` reports:
-
-- 95 focused publication, failure-envelope, and candidate-launcher tests passed twice;
-- 166 related proof, bootstrap, profile, launcher, publication, and install tests passed;
-- 245 auth, session, redaction, privacy, and secret-scan tests passed;
-- Ruff passed and the four changed files match Ruff format;
-- BasedPyright reported 0 errors, 0 warnings, and 0 notes;
-- plugin, nine-skill static, 60-tool/294-operation catalog, and 34-case evaluation-manifest checks
-  passed; and
-- a bounded four-file privacy scan reported 0 findings and 0 scan errors.
-
-No model, MCP server, Saxo API, browser, broker, or network activity ran in this corrective batch.
-The source requires a new exact retained-runtime install, signed full suite, local readbacks, SIM
-safety preflight, and separately authorized sealed proof before any downstream gate can resume.
+No second proof, diagnostic model run, numerical proof, fresh SIM matrix, account read, or
+activation ran.
 
 ## Cleanup and activation
 
-Post-attempt local receipts prove the consumed proof runtime was removed, the proof temporary root
-was absent, and no exact-candidate process remained. Those local facts do not prove broker account
-equality or any unknown child behavior.
+Authenticated consumption intent and cleanup receipts bind the exact candidate, tree, policy,
+runtime binding, and durable removal of the one-shot proof runtime. The candidate-runner receipt
+binds the authenticated child-result digest, child exit 1, and completed runner cleanup. Retained
+receipts are owner-only. The candidate worktree remained clean and no exact-candidate process was
+present at final local readback.
 
-No fresh controlled SIM lifecycle, 60-tool matrix, numerical proof, Saxo reconciliation, artifact
-parity proof, or attempt-bound account equality receipt exists for the latest sealed attempt. All
-54 profiles remain quarantined and 0 are active. The branch remains local and unpushed.
+Those local cleanup facts do not prove broker account equality, no mutation, no purchase, or no
+disclaimer response. No attempt-bound before/after account fingerprint exists, so account state is
+reported as unproved rather than unchanged.
+
+All 54 profiles remain quarantined and 0 are active. The branch remains local and unpushed. A new
+candidate or proof attempt requires separate authorization after the independent review identifies
+whether the remaining blocker is the scenario assertion, child cleanup evidence, or both.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.

@@ -2325,28 +2325,25 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The latest sealed evidence remains `d62082f`. It passed an exact retained-runtime install, signed
-2,795-test full suite, static, type, catalog, evaluation-manifest, privacy, and SIM safety gates. Its
-single native proof ended with authenticated candidate-runner exit and cleanup failure evidence.
-The old launcher reused the child result path for the outer refusal and destroyed the authenticated
-child publication. Child model, MCP, Saxo, execution, mutation, purchase, disclaimer, and cleanup
-facts therefore remain unknown. No retry ran. The historical dual policy and evidence remain
-unchanged.
+The latest sealed evidence is `06fb8e1`. It passed an exact retained-runtime install with 60 tools,
+9 skills, 1 MCP server, and 616 exact files; a signed 2,810-test full suite; static, type, catalog,
+evaluation-manifest, privacy, install-readback, and SIM safety gates. The source kept the child
+result separate from the final publication, so the terminal child failure remained authenticated
+and was not overwritten. The historical dual policy and evidence remain unchanged.
 
-The current corrective source is `06fb8e1`. It reserves the final output for the parent and gives
-the candidate child a separate owner-only result path. The parent accepts only a complete
-authenticated publication with the exact candidate, native policy, proof contract, analysis count,
-and receipt count. Cleanup failure publishes an overall refusal while retaining and digest-binding
-the authenticated inner result and runner receipt; malformed, tampered, mismatched, or unsafe
-output contributes no child facts. Ninety-five focused tests passed twice, 166 related tests, 245
-auth/privacy tests, Ruff, BasedPyright, plugin/static/catalog/eval, and a four-file privacy scan
-passed. No model, MCP server, Saxo, browser, or network activity occurred in this corrective batch.
+The single sealed native proof passed its child SIM preflight and recorded truthful network
+provenance. Ten of eleven hard cases passed. The `scenario` case failed its transcript assertion
+despite a passed grant check and exact invocation of both required tools. The outer publication
+refused with `proof_child_cleanup_failed`; child cleanup was not started, while retained-runtime and
+candidate-runner cleanup completed. Aggregate model, MCP, Saxo, broker-write, mutation, purchase,
+and disclaimer-response facts remain unknown. A terminal local readback found no exact-candidate
+process, proof run root, or retained proof runtime. No retry ran.
 
-The next gate is one exact retained-runtime installation and signed full suite for `06fb8e1`, then
-static and privacy readback. Only after those gates pass may a separately authorized sealed run
-attempt the native hard workflow, all 54 per-analysis receipts, Saxo reconciliation, the fresh
-60-tool SIM matrix, cleanup, account equality, and the activation decision. The historical matrix
-remains historical and is not relabeled.
+The independent native review should determine whether the next local correction must address the
+scenario response contract, the child cleanup failure transport, or both. A new exact candidate and
+sealed attempt require separate authorization. The all-54 numerical proof, Saxo reconciliation,
+fresh 60-tool SIM matrix, attempt-bound account equality, and activation decision remain unrun. The
+historical matrix remains historical and is not relabeled.
 
 Only after all 54 per-analysis profiles pass may the checked-in proof catalog be regenerated as
 active. Activation is a source change, not a runtime toggle. Until that happens, structured
