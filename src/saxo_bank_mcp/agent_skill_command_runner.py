@@ -142,16 +142,22 @@ class ProcessCleanupOffendingObservation(_StrictModel):
 
     pid: int = Field(gt=0)
     pgid: int = Field(gt=0)
+    expected_pgid: int | None = Field(default=None, gt=0)
     ppid: int | None = Field(default=None, ge=0)
     birth_identity_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
+    expected_birth_identity_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
     detection_source: CleanupObservationDetectionSource
     observation_state: CleanupObservationState
     admission_phase: CleanupAdmissionPhase
+    occurrence_count: int = Field(default=1, ge=1)
     process_category: CleanupProcessCategory | None = None
     process_identity_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_private_identity(self) -> Self:
+    def _validate_private_identity(self) -> Self:  # noqa: C901
         if self.process_category is not None and self.process_identity_sha256 is not None:
             raise ValueError("cleanup process category and identity hash are exclusive")
         if self.observation_state not in {"absent", "unknown"}:
@@ -159,6 +165,29 @@ class ProcessCleanupOffendingObservation(_StrictModel):
                 raise ValueError("observed cleanup process requires a birth identity hash")
             if self.process_category is None and self.process_identity_sha256 is None:
                 raise ValueError("observed cleanup process requires a safe process identity")
+        correlation_fields = {
+            "expected_pgid",
+            "expected_birth_identity_sha256",
+            "occurrence_count",
+        }
+        present_correlation_fields = correlation_fields & self.model_fields_set
+        if present_correlation_fields and present_correlation_fields != correlation_fields:
+            raise ValueError("cleanup observation correlation fields must be complete")
+        if not present_correlation_fields:
+            return self
+        if self.expected_pgid is None:
+            raise ValueError("current cleanup observation requires an expected process group")
+        if self.observation_state == "group_changed" and self.expected_pgid == self.pgid:
+            raise ValueError("changed-group cleanup observation requires different groups")
+        if self.observation_state == "identity_changed":
+            if (
+                self.expected_birth_identity_sha256 is None
+                or self.birth_identity_sha256 is None
+                or self.expected_birth_identity_sha256 == self.birth_identity_sha256
+            ):
+                raise ValueError("changed-identity cleanup observation requires different births")
+            if self.expected_pgid != self.pgid:
+                raise ValueError("changed-identity cleanup observation requires the same group")
         return self
 
 
@@ -296,7 +325,7 @@ class CommandCleanupUnknownReceipt(_StrictModel):
     receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_receipt(self) -> Self:
+    def _validate_receipt(self) -> Self:  # noqa: C901, PLR0912
         expected = _cleanup_unknown_reason(
             watcher_drain_status=self.watcher_drain_status,
             coverage_status=self.coverage_status,
@@ -322,8 +351,50 @@ class CommandCleanupUnknownReceipt(_StrictModel):
             raise ValueError("current cleanup receipt requires an observation array")
         if self.offending_observations and self.coverage_status != "unknown":
             raise ValueError("cleanup observations require unknown coverage")
+        correlation_fields = {
+            "expected_pgid",
+            "expected_birth_identity_sha256",
+            "occurrence_count",
+        }
+        current_observations = bool(self.offending_observations) and all(
+            correlation_fields <= observation.model_fields_set
+            for observation in self.offending_observations or ()
+        )
+        if (
+            observation_field_present
+            and self.coverage_stage == "group_member"
+            and not self.offending_observations
+        ):
+            raise ValueError("group-member cleanup evidence requires observations")
+        if current_observations and self.coverage_stage == "group_member":
+            states: set[CleanupObservationState] = {
+                item.observation_state for item in self.offending_observations or ()
+            }
+            if not _observation_states_match_group_member_diagnostic(
+                self.coverage_subreason,
+                states,
+            ):
+                raise ValueError("group-member cleanup evidence differs from its diagnostic")
         material = self.model_dump(mode="json", exclude={"receipt_sha256"})
         accepted_materials = [material]
+        if (
+            observation_field_present
+            and self.offending_observations
+            and any(
+                not (correlation_fields & observation.model_fields_set)
+                for observation in self.offending_observations
+            )
+        ):
+            prior_observation_material = dict(material)
+            prior_observations: list[dict[str, JsonValue]] = []
+            for observation in self.offending_observations:
+                observation_material = observation.model_dump(mode="json")
+                if not (correlation_fields & observation.model_fields_set):
+                    for field in correlation_fields:
+                        observation_material.pop(field)
+                prior_observations.append(observation_material)
+            prior_observation_material["offending_observations"] = prior_observations
+            accepted_materials.append(prior_observation_material)
         if not observation_field_present and self.offending_observations is None:
             legacy_observations = dict(material)
             legacy_observations.pop("offending_observations")
@@ -337,6 +408,84 @@ class CommandCleanupUnknownReceipt(_StrictModel):
         accepted = {_digest(candidate) for candidate in accepted_materials}
         if self.receipt_sha256 not in accepted:
             raise ValueError("cleanup unknown receipt digest mismatch")
+        return self
+
+
+class EvalProcessCleanupSnapshotEvidence(_StrictModel):
+    coverage_stage: CleanupCoverageStage
+    coverage_subreason: CleanupCoverageSubreason
+    offending_observation_count: int = Field(ge=0)
+    offending_observations: tuple[ProcessCleanupOffendingObservation, ...]
+
+    @model_validator(mode="after")
+    def _validate_snapshot(self) -> Self:
+        _require_cleanup_coverage_diagnostic(
+            coverage_status="unknown",
+            stage=self.coverage_stage,
+            subreason=self.coverage_subreason,
+        )
+        if self.offending_observation_count != sum(
+            item.occurrence_count for item in self.offending_observations
+        ):
+            raise ValueError("nested cleanup snapshot observation count differs")
+        if self.coverage_stage == "group_member" and not self.offending_observations:
+            raise ValueError("nested group-member snapshot requires observations")
+        if self.coverage_stage == "group_member" and not (
+            _observation_states_match_group_member_diagnostic(
+                self.coverage_subreason,
+                {item.observation_state for item in self.offending_observations},
+            )
+        ):
+            raise ValueError("nested cleanup snapshot differs from its diagnostic")
+        return self
+
+
+class EvalProcessCleanupUnknownReceipt(_StrictModel):
+    """Owner-only aggregate of nested eval cleanup observations."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["eval_process_cleanup_unknown"] = "eval_process_cleanup_unknown"
+    snapshot_count: int = Field(ge=1)
+    unknown_snapshot_count: int = Field(ge=1)
+    cleanup_snapshots: tuple[EvalProcessCleanupSnapshotEvidence, ...] = Field(min_length=1)
+    offending_observation_count: int = Field(ge=1)
+    offending_observations: tuple[ProcessCleanupOffendingObservation, ...] = Field(
+        min_length=1,
+    )
+    receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> Self:
+        if self.unknown_snapshot_count > self.snapshot_count:
+            raise ValueError("nested cleanup unknown snapshots exceed total snapshots")
+        if len(self.cleanup_snapshots) > self.unknown_snapshot_count:
+            raise ValueError("nested cleanup evidence snapshots exceed unknown snapshots")
+        if self.offending_observation_count != sum(
+            item.occurrence_count for item in self.offending_observations
+        ):
+            raise ValueError("nested cleanup observation count differs")
+        if any(
+            not {
+                "expected_pgid",
+                "expected_birth_identity_sha256",
+                "occurrence_count",
+            }
+            <= item.model_fields_set
+            for item in self.offending_observations
+        ):
+            raise ValueError("nested cleanup observations require current correlation fields")
+        merged = merge_process_cleanup_observations(
+            [
+                observation
+                for snapshot in self.cleanup_snapshots
+                for observation in snapshot.offending_observations
+            ],
+        )
+        if merged != self.offending_observations:
+            raise ValueError("nested cleanup aggregate observations differ")
+        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
+        if self.receipt_sha256 != _digest(material):
+            raise ValueError("nested cleanup receipt digest mismatch")
         return self
 
 
@@ -460,6 +609,7 @@ class RootBoundProcessCleanupAdmission:
                         detection_source="first_snapshot",
                         admission_phase="admission_open",
                         observation_state="unknown",
+                        expected_birth_identity=observation.birth_identity,
                     ),
                 )
                 continue
@@ -532,6 +682,7 @@ class RootBoundProcessCleanupAdmission:
                         detection_source="second_snapshot",
                         admission_phase="admission_open",
                         observation_state="unknown",
+                        expected_birth_identity=observation.birth_identity,
                     ),
                 )
                 continue
@@ -557,6 +708,7 @@ class RootBoundProcessCleanupAdmission:
                             if reobserved.pgid != observation.pgid
                             else "identity_changed"
                         ),
+                        expected_birth_identity=observation.birth_identity,
                     ),
                 )
                 continue
@@ -1518,6 +1670,9 @@ def _compare_group_members(
                     detection_source=detection_source,
                     admission_phase="admission_closed",
                     observation_state="unknown",
+                    expected_birth_identity=(
+                        existing.birth_identity if existing is not None else None
+                    ),
                 ),
             )
             continue
@@ -1534,6 +1689,9 @@ def _compare_group_members(
                     detection_source=detection_source,
                     admission_phase="admission_closed",
                     observation_state="group_changed",
+                    expected_birth_identity=(
+                        existing.birth_identity if existing is not None else None
+                    ),
                 ),
             )
             continue
@@ -1553,6 +1711,7 @@ def _compare_group_members(
                         observation_state=(
                             "group_changed" if existing.pgid != pgid else "identity_changed"
                         ),
+                        expected_birth_identity=existing.birth_identity,
                     ),
                 )
             continue
@@ -1577,16 +1736,25 @@ def _offending_process_observation(  # noqa: PLR0913
     detection_source: CleanupObservationDetectionSource,
     admission_phase: CleanupAdmissionPhase,
     observation_state: CleanupObservationState | None = None,
+    expected_birth_identity: str | None = None,
 ) -> ProcessCleanupOffendingObservation:
+    expected_birth_sha256 = (
+        hashlib.sha256(expected_birth_identity.encode()).hexdigest()
+        if expected_birth_identity
+        else None
+    )
     if observation is None:
         return ProcessCleanupOffendingObservation(
             pid=pid,
             pgid=expected_pgid,
+            expected_pgid=expected_pgid,
             ppid=None,
             birth_identity_sha256=None,
+            expected_birth_identity_sha256=expected_birth_sha256,
             detection_source=detection_source,
             observation_state=observation_state or "absent",
             admission_phase=admission_phase,
+            occurrence_count=1,
             process_category=None,
             process_identity_sha256=None,
         )
@@ -1607,11 +1775,14 @@ def _offending_process_observation(  # noqa: PLR0913
     return ProcessCleanupOffendingObservation(
         pid=pid,
         pgid=observation.pgid,
+        expected_pgid=expected_pgid,
         ppid=observation.ppid,
         birth_identity_sha256=birth_sha256,
+        expected_birth_identity_sha256=expected_birth_sha256,
         detection_source=detection_source,
         observation_state=observation_state or observation.state,
         admission_phase=admission_phase,
+        occurrence_count=1,
         process_category=observation.process_category,
         process_identity_sha256=(
             None if observation.process_category is not None else process_identity_sha256
@@ -1623,9 +1794,28 @@ def _dedupe_offending_observations(
     observations: list[ProcessCleanupOffendingObservation]
     | tuple[ProcessCleanupOffendingObservation, ...],
 ) -> tuple[ProcessCleanupOffendingObservation, ...]:
+    return merge_process_cleanup_observations(observations)
+
+
+def merge_process_cleanup_observations(
+    observations: list[ProcessCleanupOffendingObservation]
+    | tuple[ProcessCleanupOffendingObservation, ...],
+) -> tuple[ProcessCleanupOffendingObservation, ...]:
+    """Merge identical private observations while preserving occurrence counts."""
     unique: dict[str, ProcessCleanupOffendingObservation] = {}
     for observation in observations:
-        unique.setdefault(observation.model_dump_json(), observation)
+        material = observation.model_dump(mode="json", exclude={"occurrence_count"})
+        key = _digest(material)
+        existing = unique.get(key)
+        unique[key] = (
+            observation
+            if existing is None
+            else existing.model_copy(
+                update={
+                    "occurrence_count": existing.occurrence_count + observation.occurrence_count,
+                },
+            )
+        )
     return tuple(unique.values())
 
 
@@ -1833,6 +2023,106 @@ def verify_command_cleanup_unknown_receipt(
     return receipt
 
 
+def write_eval_process_cleanup_receipt(
+    path: Path,
+    *,
+    snapshots: tuple[ProcessCleanupTerminalSnapshot, ...],
+) -> CommandCleanupIdentityEvidence:
+    """Persist nested cleanup observations without command text or raw process identity."""
+    unknown_snapshots = tuple(
+        snapshot for snapshot in snapshots if snapshot.cleanup_status == "unknown"
+    )
+    observations = _dedupe_offending_observations(
+        [
+            observation
+            for snapshot in unknown_snapshots
+            for observation in snapshot.offending_observations
+        ],
+    )
+    evidence_snapshots = tuple(
+        snapshot
+        for snapshot in unknown_snapshots
+        if snapshot.coverage_stage is not None
+        and snapshot.coverage_subreason is not None
+        and snapshot.offending_observations
+    )
+    if not observations or not evidence_snapshots:
+        return CommandCleanupIdentityEvidence(
+            evidence_status="write-failed",
+            unknown_reason="cleanup_evidence_unavailable",
+        )
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "eval_process_cleanup_unknown",
+        "snapshot_count": len(snapshots),
+        "unknown_snapshot_count": len(unknown_snapshots),
+        "cleanup_snapshots": tuple(
+            {
+                "coverage_stage": snapshot.coverage_stage,
+                "coverage_subreason": snapshot.coverage_subreason,
+                "offending_observation_count": sum(
+                    observation.occurrence_count for observation in snapshot.offending_observations
+                ),
+                "offending_observations": tuple(
+                    observation.model_dump(mode="python")
+                    for observation in snapshot.offending_observations
+                ),
+            }
+            for snapshot in evidence_snapshots
+        ),
+        "offending_observation_count": sum(
+            observation.occurrence_count for observation in observations
+        ),
+        "offending_observations": tuple(
+            observation.model_dump(mode="python") for observation in observations
+        ),
+    }
+    receipt = EvalProcessCleanupUnknownReceipt.model_validate(
+        {**material, "receipt_sha256": _digest(material)},
+        strict=True,
+    )
+    if not _atomic_owner_only_write(path, receipt.model_dump_json() + "\n"):
+        return CommandCleanupIdentityEvidence(
+            evidence_status="write-failed",
+            unknown_reason="cleanup_receipt_write_failed",
+        )
+    first_diagnostic = receipt.cleanup_snapshots[0]
+    return CommandCleanupIdentityEvidence(
+        evidence_status="observation-unknown",
+        receipt_sha256=receipt.receipt_sha256,
+        unknown_reason="coverage_unknown",
+        cleanup_coverage_stage=first_diagnostic.coverage_stage,
+        cleanup_coverage_subreason=first_diagnostic.coverage_subreason,
+    )
+
+
+def verify_eval_process_cleanup_receipt(
+    path: Path,
+    *,
+    expected_receipt_sha256: str,
+) -> EvalProcessCleanupUnknownReceipt | None:
+    """Verify one owner-only nested cleanup diagnostic receipt."""
+    try:
+        metadata = os.lstat(path)
+        receipt = EvalProcessCleanupUnknownReceipt.model_validate_json(
+            path.read_bytes(),
+            strict=True,
+        )
+    except (OSError, ValidationError):
+        return None
+    if not (
+        path.is_absolute()
+        and stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+        and receipt.receipt_sha256 == expected_receipt_sha256
+    ):
+        return None
+    return receipt
+
+
 def _atomic_owner_only_write(path: Path, text: str) -> bool:
     if not path.is_absolute():
         return False
@@ -1973,6 +2263,22 @@ def _require_cleanup_coverage_diagnostic(
     }
     if subreason not in allowed[stage]:
         raise ValueError("cleanup coverage stage and subreason differ")
+
+
+def _observation_states_match_group_member_diagnostic(
+    subreason: CleanupCoverageSubreason | None,
+    states: set[CleanupObservationState],
+) -> bool:
+    expected_states: set[CleanupObservationState] | None = (
+        {"running", "zombie", "absent"}
+        if subreason == "uncaptured_member"
+        else {"identity_changed", "group_changed"}
+        if subreason == "changed_identity_or_group_member"
+        else {"unknown"}
+        if subreason == "observation_unknown"
+        else None
+    )
+    return expected_states is not None and bool(states & expected_states)
 
 
 def _cleanup_unknown_reason(

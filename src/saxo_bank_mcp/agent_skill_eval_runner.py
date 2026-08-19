@@ -225,6 +225,21 @@ def run_eval_suite(options: EvalRunOptions) -> int:
             "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
             "remaining_processes": _cleanup_remaining_count(outcome.cleanup),
             "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
+            "process_cleanup_evidence_status": outcome.cleanup.get(
+                "process_cleanup_evidence_status",
+            ),
+            "process_cleanup_receipt_sha256": outcome.cleanup.get(
+                "process_cleanup_receipt_sha256",
+            ),
+            "process_cleanup_unknown_reason": outcome.cleanup.get(
+                "process_cleanup_unknown_reason",
+            ),
+            "process_cleanup_coverage_stage": outcome.cleanup.get(
+                "process_cleanup_coverage_stage",
+            ),
+            "process_cleanup_coverage_subreason": outcome.cleanup.get(
+                "process_cleanup_coverage_subreason",
+            ),
             "process_timed_out": bool(outcome.cleanup.get("process_timed_out", False)),
             "raw_transcripts_persisted": 0,
             "model_prompt_count": len(model_records),
@@ -306,6 +321,21 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
         "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
         "remaining_processes": _cleanup_remaining_count(outcome.cleanup),
+        "process_cleanup_evidence_status": outcome.cleanup.get(
+            "process_cleanup_evidence_status",
+        ),
+        "process_cleanup_receipt_sha256": outcome.cleanup.get(
+            "process_cleanup_receipt_sha256",
+        ),
+        "process_cleanup_unknown_reason": outcome.cleanup.get(
+            "process_cleanup_unknown_reason",
+        ),
+        "process_cleanup_coverage_stage": outcome.cleanup.get(
+            "process_cleanup_coverage_stage",
+        ),
+        "process_cleanup_coverage_subreason": outcome.cleanup.get(
+            "process_cleanup_coverage_subreason",
+        ),
     }
     payload["installation_fixture_preserved"] = installation_fixture_preserved
     write_json(options.out, payload)
@@ -373,7 +403,11 @@ def _execute_with_ephemeral_runtime(
     roots: HarnessRoots,
     binding: RouterSourceBinding | None,
 ) -> _RuntimeOutcome:
-    process_manager = EvalProcessManager()
+    process_manager = EvalProcessManager(
+        cleanup_receipt_path=options.out.with_name(
+            f"{options.out.name}.process-cleanup.json",
+        ).resolve(),
+    )
     try:
         # source_* = actual CLI auth (omit -> global). *_home = retained install plugin state.
         runtime = prepare_eval_isolated_runtime(
@@ -870,6 +904,11 @@ def _cleanup_fields(
         "terminated_processes": process_manager.terminated_processes,
         "remaining_processes": process_manager.remaining_processes,
         "process_timed_out": process_manager.timed_out,
+        "process_cleanup_evidence_status": process_manager.process_cleanup_evidence_status,
+        "process_cleanup_receipt_sha256": process_manager.process_cleanup_receipt_sha256,
+        "process_cleanup_unknown_reason": process_manager.process_cleanup_unknown_reason,
+        "process_cleanup_coverage_stage": process_manager.process_cleanup_coverage_stage,
+        "process_cleanup_coverage_subreason": process_manager.process_cleanup_coverage_subreason,
     }
 
 
@@ -927,6 +966,11 @@ def _idle_cleanup() -> dict[str, JsonValue]:
         "terminated_processes": 0,
         "remaining_processes": 0,
         "process_timed_out": False,
+        "process_cleanup_evidence_status": None,
+        "process_cleanup_receipt_sha256": None,
+        "process_cleanup_unknown_reason": None,
+        "process_cleanup_coverage_stage": None,
+        "process_cleanup_coverage_subreason": None,
     }
 
 

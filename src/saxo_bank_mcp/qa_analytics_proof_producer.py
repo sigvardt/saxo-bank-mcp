@@ -1926,6 +1926,11 @@ def _agent_evaluation_cleanup_summary(
     remaining = raw.get("remaining_processes")
     timed_out = raw.get("process_timed_out")
     persisted = raw.get("raw_transcripts_persisted")
+    evidence_status = raw.get("process_cleanup_evidence_status")
+    evidence_digest = raw.get("process_cleanup_receipt_sha256")
+    evidence_reason = raw.get("process_cleanup_unknown_reason")
+    evidence_stage = raw.get("process_cleanup_coverage_stage")
+    evidence_subreason = raw.get("process_cleanup_coverage_subreason")
     remaining_is_known = type(remaining) is int and remaining >= 0
     remaining_is_unknown = remaining is None and process_cleanup == "unknown"
     valid = (
@@ -1971,6 +1976,11 @@ def _agent_evaluation_cleanup_summary(
             "remaining_process_count": remaining,
             "process_timed_out": timed_out,
             "persisted_raw_output_count": persisted,
+            "process_cleanup_evidence_status": evidence_status,
+            "process_cleanup_receipt_sha256": evidence_digest,
+            "process_cleanup_unknown_reason": evidence_reason,
+            "process_cleanup_coverage_stage": evidence_stage,
+            "process_cleanup_coverage_subreason": evidence_subreason,
         }
     else:
         material = {
@@ -1985,11 +1995,40 @@ def _agent_evaluation_cleanup_summary(
             "remaining_process_count": None,
             "process_timed_out": None,
             "persisted_raw_output_count": None,
+            "process_cleanup_evidence_status": None,
+            "process_cleanup_receipt_sha256": None,
+            "process_cleanup_unknown_reason": None,
+            "process_cleanup_coverage_stage": None,
+            "process_cleanup_coverage_subreason": None,
         }
-    return CodexNativeAgentEvaluationCleanupSummary.model_validate(
-        {**material, "cleanup_sha256": _digest(material)},
-        strict=True,
-    )
+    try:
+        return CodexNativeAgentEvaluationCleanupSummary.model_validate(
+            {**material, "cleanup_sha256": _digest(material)},
+            strict=True,
+        )
+    except ValidationError:
+        unknown_material = {
+            "schema_version": "1",
+            "receipt_kind": "codex_native_agent_evaluation_cleanup",
+            "status": "unknown",
+            "process_cleanup": "unknown",
+            "runtime_cleanup": "unknown",
+            "token_promote": "unknown",
+            "created_process_count": None,
+            "terminated_process_count": None,
+            "remaining_process_count": None,
+            "process_timed_out": None,
+            "persisted_raw_output_count": None,
+            "process_cleanup_evidence_status": None,
+            "process_cleanup_receipt_sha256": None,
+            "process_cleanup_unknown_reason": None,
+            "process_cleanup_coverage_stage": None,
+            "process_cleanup_coverage_subreason": None,
+        }
+        return CodexNativeAgentEvaluationCleanupSummary.model_validate(
+            {**unknown_material, "cleanup_sha256": _digest(unknown_material)},
+            strict=True,
+        )
 
 
 def _sum_optional_counts(values: tuple[int | None, ...]) -> int | None:

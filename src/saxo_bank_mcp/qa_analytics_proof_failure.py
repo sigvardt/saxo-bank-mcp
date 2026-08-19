@@ -414,6 +414,14 @@ class CodexNativeAgentEvaluationCleanupSummary(_StrictModel):
     remaining_process_count: int | None = Field(default=None, ge=0)
     process_timed_out: bool | None = None
     persisted_raw_output_count: int | None = Field(default=None, ge=0)
+    process_cleanup_evidence_status: OuterProcessCleanupEvidenceStatus | None = None
+    process_cleanup_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    process_cleanup_unknown_reason: CleanupUnknownReason | None = None
+    process_cleanup_coverage_stage: CleanupCoverageStage | None = None
+    process_cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     cleanup_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -426,8 +434,54 @@ class CodexNativeAgentEvaluationCleanupSummary(_StrictModel):
             or self.persisted_raw_output_count != 0
         ):
             raise ValueError("complete evaluation cleanup requires zero residue")
+        evidence_values = (
+            self.process_cleanup_evidence_status,
+            self.process_cleanup_receipt_sha256,
+            self.process_cleanup_unknown_reason,
+            self.process_cleanup_coverage_stage,
+            self.process_cleanup_coverage_subreason,
+        )
+        evidence_present = any(value is not None for value in evidence_values)
+        if evidence_present:
+            if self.process_cleanup != "unknown" or self.status != "unknown":
+                raise ValueError("nested cleanup evidence requires unknown cleanup")
+            valid_observation = (
+                self.process_cleanup_evidence_status == "observation-unknown"
+                and self.process_cleanup_receipt_sha256 is not None
+                and self.process_cleanup_unknown_reason == "coverage_unknown"
+                and self.process_cleanup_coverage_stage is not None
+                and self.process_cleanup_coverage_subreason is not None
+            )
+            valid_write_failure = (
+                self.process_cleanup_evidence_status == "write-failed"
+                and self.process_cleanup_receipt_sha256 is None
+                and self.process_cleanup_unknown_reason
+                in {
+                    "cleanup_receipt_path_missing",
+                    "cleanup_receipt_write_failed",
+                    "cleanup_evidence_inconsistent",
+                    "cleanup_evidence_unavailable",
+                }
+                and self.process_cleanup_coverage_stage is None
+                and self.process_cleanup_coverage_subreason is None
+            )
+            if not (valid_observation or valid_write_failure):
+                raise ValueError("nested cleanup evidence status and digest differ")
         material = self.model_dump(mode="json", exclude={"cleanup_sha256"})
-        if self.cleanup_sha256 != _digest(material):
+        accepted_materials = [material]
+        evidence_fields = {
+            "process_cleanup_evidence_status",
+            "process_cleanup_receipt_sha256",
+            "process_cleanup_unknown_reason",
+            "process_cleanup_coverage_stage",
+            "process_cleanup_coverage_subreason",
+        }
+        if not (evidence_fields & self.model_fields_set):
+            legacy = dict(material)
+            for field in evidence_fields:
+                legacy.pop(field)
+            accepted_materials.append(legacy)
+        if self.cleanup_sha256 not in {_digest(item) for item in accepted_materials}:
             raise ValueError("agent evaluation cleanup digest mismatch")
         return self
 
@@ -451,7 +505,7 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
     summary_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_summary(self) -> Self:  # noqa: C901
+    def _validate_summary(self) -> Self:  # noqa: C901, PLR0912
         if self.case_count != len(self.cases):
             raise ValueError("agent evaluation summary case count differs")
         if self.failed_case_count != sum(case.status == "failed" for case in self.cases):
@@ -461,6 +515,22 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             raise ValueError("agent evaluation summary case ids must be unique")
         material = self.model_dump(mode="json", exclude={"summary_sha256"})
         if self.summary_sha256 != _digest(material):
+            if self.cleanup is not None:
+                evidence_fields = {
+                    "process_cleanup_evidence_status",
+                    "process_cleanup_receipt_sha256",
+                    "process_cleanup_unknown_reason",
+                    "process_cleanup_coverage_stage",
+                    "process_cleanup_coverage_subreason",
+                }
+                if not (evidence_fields & self.cleanup.model_fields_set):
+                    prior_cleanup_material = dict(material)
+                    cleanup_material = self.cleanup.model_dump(mode="json")
+                    for field in evidence_fields:
+                        cleanup_material.pop(field)
+                    prior_cleanup_material["cleanup"] = cleanup_material
+                    if self.summary_sha256 == _digest(prior_cleanup_material):
+                        return self
             prior_descriptor_material = legacy_agent_evaluation_summary_material(
                 summary=self,
                 material=material,

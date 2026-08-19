@@ -2198,6 +2198,77 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
     assert parsed.result.disclaimer_response_made is None
 
 
+def test_nested_cleanup_receipt_digest_survives_signed_failure_publication(
+    tmp_path: Path,
+) -> None:
+    """Private nested observations stay private while their receipt digest survives."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cleanup_digest = "d" * 64
+    cleanup = producer._agent_evaluation_cleanup_summary(  # noqa: SLF001
+        {
+            "complete": False,
+            "process_cleanup": "unknown",
+            "runtime_cleanup": "passed",
+            "token_promote": "passed",
+            "created_processes": 3,
+            "terminated_processes": 1,
+            "remaining_processes": None,
+            "process_timed_out": False,
+            "raw_transcripts_persisted": 0,
+            "process_cleanup_evidence_status": "observation-unknown",
+            "process_cleanup_receipt_sha256": cleanup_digest,
+            "process_cleanup_unknown_reason": "coverage_unknown",
+            "process_cleanup_coverage_stage": "group_member",
+            "process_cleanup_coverage_subreason": "uncaptured_member",
+        },
+    )
+    assert cleanup.process_cleanup_receipt_sha256 == cleanup_digest
+    assert cleanup.process_cleanup_evidence_status == "observation-unknown"
+
+    original = _progress_with_failed_agent_summary(tmp_path).agent_evaluation_failure_summary
+    assert original is not None
+    material = original.model_dump(mode="python", exclude={"summary_sha256"})
+    material["cleanup"] = cleanup.model_dump(mode="python")
+    material["summary_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in material.items() if key != "summary_sha256"},
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    summary = CodexNativeAgentEvaluationFailureSummary.model_validate(material, strict=True)
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    progress.record_agent_evaluation_failure(summary)
+    verified = _verify(
+        _failure(progress, reason="installed_agent_evaluation_command_failed").model_dump_json(),
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+    parsed_summary = parsed.result.agent_evaluation_failure_summary
+    assert parsed_summary is not None
+    assert parsed_summary.cleanup is not None
+    assert parsed_summary.cleanup.process_cleanup_receipt_sha256 == cleanup_digest
+    rendered = publication.model_dump_json()
+    assert "offending_observations" not in rendered
+    assert "birth_identity" not in rendered
+    assert "process_identity" not in rendered
+
+
 def test_descriptor_free_historical_eval_summary_keeps_descriptors_none(
     tmp_path: Path,
 ) -> None:

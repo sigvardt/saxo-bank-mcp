@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import signal
 from pathlib import Path
 
@@ -7,12 +9,15 @@ import pytest
 
 import saxo_bank_mcp.agent_skill_command_runner as command_runner
 import saxo_bank_mcp.agent_skill_eval_process as eval_process
+import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
 
 ROOT_PID = 73_100
 CHILD_PID = ROOT_PID + 1
 MOVED_PGID = ROOT_PID + 2
 MINIMUM_ROOT_CHECKS = 3
 REQUIRED_SCOPE_SNAPSHOTS = 2
+EXPECTED_OBSERVATION_COUNT = 2
+OWNER_FILE_MODE = 0o600
 
 
 @pytest.mark.parametrize(
@@ -265,3 +270,196 @@ def test_nested_eval_records_pending_cleanup_before_post_spawn_scope_failure(
     assert snapshot["terminated_processes"] == 0
     assert snapshot["remaining_processes"] is None
     assert snapshot["process_cleanup"] == "unknown"
+
+
+def test_nested_eval_cleanup_writes_digest_bound_private_observation_receipt(
+    tmp_path: Path,
+) -> None:
+    """Nested offending observations survive only in one owner-only authenticated receipt."""
+    receipt_path = (tmp_path / "nested-cleanup.json").resolve()
+    expected_birth = "a" * 64
+    observed_birth = "b" * 64
+    offender = command_runner.ProcessCleanupOffendingObservation(
+        pid=74_001,
+        pgid=74_002,
+        expected_pgid=74_000,
+        ppid=74_000,
+        birth_identity_sha256=observed_birth,
+        expected_birth_identity_sha256=expected_birth,
+        detection_source="second_snapshot",
+        observation_state="group_changed",
+        admission_phase="admission_open",
+        occurrence_count=2,
+        process_category=None,
+        process_identity_sha256="c" * 64,
+    )
+    manager = eval_process.EvalProcessManager(cleanup_receipt_path=receipt_path)
+    manager._cleanup_snapshots.append(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        command_runner.ProcessCleanupTerminalSnapshot(
+            targets=(),
+            coverage_status="unknown",
+            coverage_stage="group_member",
+            coverage_subreason="changed_identity_or_group_member",
+            offending_observations=(offender,),
+        ),
+    )
+
+    snapshot = manager.finalize()
+
+    digest = snapshot["process_cleanup_receipt_sha256"]
+    assert isinstance(digest, str)
+    assert snapshot["process_cleanup_evidence_status"] == "observation-unknown"
+    assert snapshot["process_cleanup_unknown_reason"] == "coverage_unknown"
+    cleanup_fields = eval_runner._cleanup_fields(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        process_manager=manager,
+        process_error="process_cleanup_unknown",
+        promote_error=None,
+        cleanup_error=None,
+    )
+    assert cleanup_fields["process_cleanup_receipt_sha256"] == digest
+    assert cleanup_fields["process_cleanup_evidence_status"] == "observation-unknown"
+    receipt = command_runner.verify_eval_process_cleanup_receipt(
+        receipt_path,
+        expected_receipt_sha256=digest,
+    )
+    assert receipt is not None
+    assert receipt.snapshot_count == 1
+    assert receipt.offending_observation_count == EXPECTED_OBSERVATION_COUNT
+    assert receipt.offending_observations == (offender,)
+    assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    raw = receipt_path.read_text(encoding="utf-8")
+    assert "PRIVATE" not in raw
+    assert str(tmp_path) not in raw
+
+    diagnostic_tamper = json.loads(raw)
+    diagnostic_tamper["cleanup_snapshots"][0]["coverage_subreason"] = "uncaptured_member"
+    diagnostic_material = {
+        key: value for key, value in diagnostic_tamper.items() if key != "receipt_sha256"
+    }
+    diagnostic_tamper["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            diagnostic_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(diagnostic_tamper), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_eval_process_cleanup_receipt(
+            receipt_path,
+            expected_receipt_sha256=diagnostic_tamper["receipt_sha256"],
+        )
+        is None
+    )
+
+    tampered = json.loads(raw)
+    tampered["offending_observations"][0]["occurrence_count"] = 3
+    tampered_material = {key: value for key, value in tampered.items() if key != "receipt_sha256"}
+    tampered["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            tampered_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_eval_process_cleanup_receipt(
+            receipt_path,
+            expected_receipt_sha256=tampered["receipt_sha256"],
+        )
+        is None
+    )
+
+    receipt_path.write_text(raw, encoding="utf-8")
+    receipt_path.chmod(0o644)
+    assert (
+        command_runner.verify_eval_process_cleanup_receipt(
+            receipt_path,
+            expected_receipt_sha256=digest,
+        )
+        is None
+    )
+
+
+def test_nested_eval_merge_preserves_repeated_observation_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same observation at admission and cleanup remains one item with count two."""
+    offender = command_runner.ProcessCleanupOffendingObservation(
+        pid=75_001,
+        pgid=75_000,
+        expected_pgid=75_000,
+        ppid=75_000,
+        birth_identity_sha256="a" * 64,
+        expected_birth_identity_sha256=None,
+        detection_source="historical_pid_check",
+        observation_state="running",
+        admission_phase="admission_closed",
+        occurrence_count=1,
+        process_category=None,
+        process_identity_sha256="b" * 64,
+    )
+
+    class FakeProcess:
+        pid = 75_000
+        returncode: int | None = 0
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            _ = timeout
+            return "", ""
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    def fake_getpgid(_pid: int) -> int:
+        return 75_000
+
+    def fake_scope(
+        _process: FakeProcess,
+        _pgid: int,
+    ) -> command_runner.ProcessCleanupScope:
+        return command_runner.ProcessCleanupScope(
+            identities=(),
+            tracked_pids=(75_000, 75_001),
+            tracked_pgids=(75_000,),
+            coverage_status="unknown",
+            coverage_stage="group_member",
+            coverage_subreason="uncaptured_member",
+            offending_observations=(offender,),
+        )
+
+    def fake_cleanup(
+        _identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        **_kwargs: object,
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        return command_runner.ProcessCleanupTerminalSnapshot(
+            targets=(),
+            coverage_status="unknown",
+            coverage_stage="group_member",
+            coverage_subreason="uncaptured_member",
+            offending_observations=(offender,),
+        )
+
+    monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(eval_process.os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(eval_process, "capture_process_cleanup_scope", fake_scope)
+    monkeypatch.setattr(eval_process, "cleanup_birth_bound_processes", fake_cleanup)
+    manager = eval_process.EvalProcessManager()
+
+    manager.run(
+        ("/bin/true",),
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path)},
+        timeout_seconds=1,
+    )
+
+    terminal = manager._cleanup_snapshots[0]  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert terminal.offending_observations == (
+        offender.model_copy(update={"occurrence_count": EXPECTED_OBSERVATION_COUNT}),
+    )

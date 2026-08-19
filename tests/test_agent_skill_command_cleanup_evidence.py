@@ -22,6 +22,8 @@ REUSED_PGID = 4343
 LEADER_REUSE_AFTER_READS = 2
 ROOT_BINDING_POLL_COUNT = 2
 POST_AND_FINAL_SNAPSHOT_COUNT = 2
+EXPECTED_DEDUPED_OBSERVATION_COUNT = 2
+DUPLICATE_OCCURRENCE_COUNT = 2
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -2602,11 +2604,37 @@ def test_unknown_cleanup_receipt_authenticates_allowlisted_coverage_diagnostic(
 ) -> None:
     """Every cleanup uncertainty class remains distinct in the digest-bound receipt."""
     receipt_path = (tmp_path / f"{stage}-{subreason}.json").resolve()
+    observations: tuple[command_runner.ProcessCleanupOffendingObservation, ...] = ()
+    if stage == "group_member":
+        state: command_runner.CleanupObservationState = (
+            "running"
+            if subreason == "uncaptured_member"
+            else "identity_changed"
+            if subreason == "changed_identity_or_group_member"
+            else "unknown"
+        )
+        observations = (
+            command_runner.ProcessCleanupOffendingObservation(
+                pid=113,
+                pgid=111,
+                expected_pgid=111,
+                ppid=111,
+                birth_identity_sha256="a" * 64,
+                expected_birth_identity_sha256=("b" * 64 if state == "identity_changed" else None),
+                detection_source="historical_pid_check",
+                observation_state=state,
+                admission_phase="admission_closed",
+                occurrence_count=1,
+                process_category=None,
+                process_identity_sha256="c" * 64,
+            ),
+        )
     snapshot = command_runner.ProcessCleanupTerminalSnapshot(
         targets=(),
         coverage_status="unknown",
         coverage_stage=stage,
         coverage_subreason=subreason,
+        offending_observations=observations,
     )
 
     evidence = command_runner.write_command_cleanup_identity_receipt(
@@ -2635,11 +2663,26 @@ def test_unknown_cleanup_receipt_rejects_diagnostic_tamper_and_reads_legacy(
     tmp_path: Path,
 ) -> None:
     receipt_path = (tmp_path / "coverage-diagnostic.json").resolve()
+    observation = command_runner.ProcessCleanupOffendingObservation(
+        pid=113,
+        pgid=112,
+        expected_pgid=112,
+        ppid=112,
+        birth_identity_sha256="a" * 64,
+        expected_birth_identity_sha256=None,
+        detection_source="historical_pid_check",
+        observation_state="running",
+        admission_phase="admission_closed",
+        occurrence_count=1,
+        process_category=None,
+        process_identity_sha256="b" * 64,
+    )
     snapshot = command_runner.ProcessCleanupTerminalSnapshot(
         targets=(),
         coverage_status="unknown",
         coverage_stage="group_member",
         coverage_subreason="uncaptured_member",
+        offending_observations=(observation,),
     )
     evidence = command_runner.write_command_cleanup_identity_receipt(
         receipt_path,
@@ -2999,11 +3042,14 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
     observation = command_runner.ProcessCleanupOffendingObservation(
         pid=7401,
         pgid=7400,
+        expected_pgid=7400,
         ppid=7400,
         birth_identity_sha256="d" * 64,
+        expected_birth_identity_sha256=None,
         detection_source="historical_pid_check",
         observation_state="running",
         admission_phase="admission_closed",
+        occurrence_count=1,
         process_category=None,
         process_identity_sha256="e" * 64,
     )
@@ -3055,6 +3101,35 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
         is None
     )
 
+    prior_observation_shape = json.loads(json.dumps(original))
+    for field in (
+        "expected_pgid",
+        "expected_birth_identity_sha256",
+        "occurrence_count",
+    ):
+        prior_observation_shape["offending_observations"][0].pop(field)
+    material = {
+        key: value for key, value in prior_observation_shape.items() if key != "receipt_sha256"
+    }
+    prior_observation_shape["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(prior_observation_shape), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    prior_verified = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=prior_observation_shape["receipt_sha256"],
+    )
+    assert prior_verified is not None
+    assert prior_verified.offending_observations is not None
+    assert prior_verified.offending_observations[0].expected_pgid is None
+    assert prior_verified.offending_observations[0].occurrence_count == 1
+
     legacy = json.loads(json.dumps(original))
     legacy.pop("offending_observations")
     material = {key: value for key, value in legacy.items() if key != "receipt_sha256"}
@@ -3082,11 +3157,14 @@ def test_run_command_binds_scope_observations_only_into_private_unknown_receipt(
     offender = command_runner.ProcessCleanupOffendingObservation(
         pid=7501,
         pgid=root_pid,
+        expected_pgid=root_pid + 2,
         ppid=root_pid,
         birth_identity_sha256="f" * 64,
+        expected_birth_identity_sha256="e" * 64,
         detection_source="second_snapshot",
         observation_state="group_changed",
         admission_phase="admission_open",
+        occurrence_count=1,
         process_category=None,
         process_identity_sha256="a" * 64,
     )
@@ -3212,6 +3290,136 @@ def test_run_command_binds_scope_observations_only_into_private_unknown_receipt(
         expected_receipt_sha256=digest,
     )
     assert receipt is not None
-    assert receipt.offending_observations == (offender,)
+    assert receipt.offending_observations == (offender.model_copy(update={"occurrence_count": 2}),)
     assert caught.value.remaining_process_count is None
     assert caught.value.remaining_process_group_count is None
+
+
+def test_cleanup_observations_bind_expected_identity_and_multiplicity() -> None:
+    """Changed-process evidence must prove what changed and how often it was seen."""
+    expected_birth = hashlib.sha256(b"expected-birth").hexdigest()
+    observed_birth = hashlib.sha256(b"observed-birth").hexdigest()
+    changed_group = command_runner.ProcessCleanupOffendingObservation(
+        pid=7601,
+        pgid=7602,
+        expected_pgid=7600,
+        ppid=7600,
+        birth_identity_sha256=observed_birth,
+        expected_birth_identity_sha256=expected_birth,
+        detection_source="post_signal_group_rescan",
+        observation_state="group_changed",
+        admission_phase="admission_closed",
+        occurrence_count=1,
+        process_category=None,
+        process_identity_sha256="a" * 64,
+    )
+    changed_identity = command_runner.ProcessCleanupOffendingObservation(
+        pid=7603,
+        pgid=7600,
+        expected_pgid=7600,
+        ppid=7600,
+        birth_identity_sha256=observed_birth,
+        expected_birth_identity_sha256=expected_birth,
+        detection_source="historical_pid_check",
+        observation_state="identity_changed",
+        admission_phase="admission_closed",
+        occurrence_count=1,
+        process_category=None,
+        process_identity_sha256="b" * 64,
+    )
+
+    combined = command_runner._dedupe_offending_observations(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        [changed_group, changed_group, changed_identity],
+    )
+
+    assert len(combined) == EXPECTED_DEDUPED_OBSERVATION_COUNT
+    assert combined[0].expected_pgid == changed_group.expected_pgid
+    assert combined[0].pgid == changed_group.pgid
+    assert combined[0].occurrence_count == DUPLICATE_OCCURRENCE_COUNT
+    assert combined[1].expected_birth_identity_sha256 == expected_birth
+    assert combined[1].birth_identity_sha256 == observed_birth
+    assert combined[1].occurrence_count == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "pid": 7701,
+            "pgid": 7700,
+            "expected_pgid": 7700,
+            "ppid": 7700,
+            "birth_identity_sha256": "c" * 64,
+            "expected_birth_identity_sha256": "d" * 64,
+            "detection_source": "post_signal_group_rescan",
+            "observation_state": "group_changed",
+            "admission_phase": "admission_closed",
+            "occurrence_count": 1,
+            "process_category": None,
+            "process_identity_sha256": "e" * 64,
+        },
+        {
+            "pid": 7702,
+            "pgid": 7700,
+            "expected_pgid": 7700,
+            "ppid": 7700,
+            "birth_identity_sha256": "f" * 64,
+            "expected_birth_identity_sha256": "f" * 64,
+            "detection_source": "historical_pid_check",
+            "observation_state": "identity_changed",
+            "admission_phase": "admission_closed",
+            "occurrence_count": 1,
+            "process_category": None,
+            "process_identity_sha256": "a" * 64,
+        },
+        {
+            "pid": 7703,
+            "pgid": 7700,
+            "expected_pgid": 7700,
+            "ppid": 7700,
+            "birth_identity_sha256": "b" * 64,
+            "detection_source": "historical_pid_check",
+            "observation_state": "running",
+            "admission_phase": "admission_closed",
+            "process_category": None,
+            "process_identity_sha256": "c" * 64,
+        },
+    ],
+)
+def test_cleanup_observation_rejects_uncorrelated_changed_state(
+    payload: dict[str, object],
+) -> None:
+    """Changed-group and changed-identity states require a real before/after delta."""
+    with pytest.raises(ValueError, match=r"changed-(group|identity)|correlation fields"):
+        command_runner.ProcessCleanupOffendingObservation.model_validate(payload, strict=True)
+
+
+def test_current_group_member_unknown_receipt_requires_correlated_observation() -> None:
+    """A current process-caused unknown receipt cannot authenticate an empty observation set."""
+    material: dict[str, object] = {
+        "schema_version": "1",
+        "receipt_kind": "command_cleanup_unknown",
+        "command_identity_sha256": "a" * 64,
+        "root_pid": 7800,
+        "root_pgid": 7800,
+        "unknown_reason": "coverage_unknown",
+        "watcher_drain_status": "drained",
+        "coverage_status": "unknown",
+        "coverage_stage": "group_member",
+        "coverage_subreason": "uncaptured_member",
+        "target_count": 1,
+        "remaining_process_count": None,
+        "remaining_process_group_count": None,
+        "offending_observations": (),
+    }
+    material["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in material.items() if key != "receipt_sha256"},
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="group-member cleanup evidence"):
+        command_runner.CommandCleanupUnknownReceipt.model_validate(material, strict=True)

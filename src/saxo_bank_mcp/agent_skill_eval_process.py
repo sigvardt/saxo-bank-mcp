@@ -6,10 +6,17 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupCoverageStage,
+    CleanupCoverageSubreason,
+    CleanupIdentityEvidenceKind,
+    CleanupUnknownReason,
+    CommandCleanupIdentityEvidence,
     ProcessCleanupTerminalSnapshot,
     capture_process_cleanup_scope,
     cleanup_birth_bound_processes,
+    merge_process_cleanup_observations,
     shutil_which,
+    write_eval_process_cleanup_receipt,
 )
 from saxo_bank_mcp.agent_skill_eval_commands import path_with_cli_dirs
 from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environment
@@ -33,11 +40,17 @@ class ManagedProcessResult:
 class EvalProcessManager:
     """Process-group manager for eval model, router, and client-version paths."""
 
+    cleanup_receipt_path: Path | None = None
     created_processes: int = 0
     terminated_processes: int = 0
     remaining_processes: int | None = 0
     timed_out: bool = False
     process_cleanup: str = "not_required"
+    process_cleanup_evidence_status: CleanupIdentityEvidenceKind | None = None
+    process_cleanup_receipt_sha256: str | None = None
+    process_cleanup_unknown_reason: CleanupUnknownReason | None = None
+    process_cleanup_coverage_stage: CleanupCoverageStage | None = None
+    process_cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     _cleanup_snapshots: list[ProcessCleanupTerminalSnapshot] = field(
         default_factory=list,
         repr=False,
@@ -103,13 +116,11 @@ class EvalProcessManager:
             coverage_subreason=scope.coverage_subreason,
         )
         if scope.offending_observations:
-            observations = {
-                item.model_dump_json(): item
-                for item in (*scope.offending_observations, *snapshot.offending_observations)
-            }
             snapshot = replace(
                 snapshot,
-                offending_observations=tuple(observations.values()),
+                offending_observations=merge_process_cleanup_observations(
+                    (*scope.offending_observations, *snapshot.offending_observations),
+                ),
             )
         self._cleanup_snapshots.append(snapshot)
         terminated = snapshot.signaled_process_count
@@ -163,7 +174,39 @@ class EvalProcessManager:
             if any(status == "failed" for status in cleanup_statuses)
             else "passed"
         )
+        self._publish_cleanup_evidence()
         return self.snapshot()
+
+    def _publish_cleanup_evidence(self) -> None:
+        if self.process_cleanup != "unknown" or self.process_cleanup_evidence_status is not None:
+            return
+        observations_present = any(
+            snapshot.offending_observations for snapshot in self._cleanup_snapshots
+        )
+        if self.cleanup_receipt_path is None:
+            evidence = CommandCleanupIdentityEvidence(
+                evidence_status="write-failed",
+                unknown_reason=(
+                    "cleanup_receipt_path_missing"
+                    if observations_present
+                    else "cleanup_evidence_unavailable"
+                ),
+            )
+        elif observations_present:
+            evidence = write_eval_process_cleanup_receipt(
+                self.cleanup_receipt_path,
+                snapshots=tuple(self._cleanup_snapshots),
+            )
+        else:
+            evidence = CommandCleanupIdentityEvidence(
+                evidence_status="write-failed",
+                unknown_reason="cleanup_evidence_unavailable",
+            )
+        self.process_cleanup_evidence_status = evidence.evidence_status
+        self.process_cleanup_receipt_sha256 = evidence.receipt_sha256
+        self.process_cleanup_unknown_reason = evidence.unknown_reason
+        self.process_cleanup_coverage_stage = evidence.cleanup_coverage_stage
+        self.process_cleanup_coverage_subreason = evidence.cleanup_coverage_subreason
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -172,6 +215,11 @@ class EvalProcessManager:
             "remaining_processes": self.remaining_processes,
             "timed_out": self.timed_out,
             "process_cleanup": self.process_cleanup,
+            "process_cleanup_evidence_status": self.process_cleanup_evidence_status,
+            "process_cleanup_receipt_sha256": self.process_cleanup_receipt_sha256,
+            "process_cleanup_unknown_reason": self.process_cleanup_unknown_reason,
+            "process_cleanup_coverage_stage": self.process_cleanup_coverage_stage,
+            "process_cleanup_coverage_subreason": self.process_cleanup_coverage_subreason,
         }
 
 
