@@ -9,3 +9,10 @@
 4. Make child-failure verification fail closed unless cleanup evidence is authenticated or proves that no target was observed, with consistent digest and known complete semantic counts. Preserve any unknown result in a separate owner-only digest-bound receipt with one fixed allowlisted reason, watcher-drain state, coverage state, target count, and null remaining counts. Propagate its digest and reason through child, candidate-runner, and outer failure receipts without promoting any event or broker-safety negative.
 5. Run focused tests twice, broader local auth/privacy tests, Ruff/format, BasedPyright, plugin/static/catalog/eval/privacy checks, then update tracked docs, ignored Task 24 evidence, and existing Knowledge Base rows with readback.
 6. Commit the verified source and documentation, report exact SHA/tree/clean state, and stop before install or proof.
+
+Coverage completion rule: every checked process-table snapshot contributes to one sticky coverage
+state. Failure or incomplete coverage in the first snapshot, second snapshot, watcher, or terminal
+observation cannot be erased by a later successful observation. Terminal cleanup still runs, but
+the owner-only digest-bound receipt reports a fixed unknown reason and null remaining counts.
+Nested evaluation must retain those nulls through aggregation and publication; no terminal snapshot
+is unknown, not passed.

@@ -314,3 +314,9 @@ Write an explicit active profile document with exact source revisions, engine bi
 - [ ] **Step 4: Update the existing Knowledge Base row and read it back**
 
 - [ ] **Step 5: Leave the branch unpushed and request separate root review**
+
+Current local handoff: source `a59b231`, tree `8f3f6b5`, preserves incomplete process-table and
+terminal-observation coverage as authenticated cleanup uncertainty with nullable counts. Local
+focused, related, auth/privacy, type, plugin, static, catalog, eval-manifest, privacy, and diff gates
+pass. It remains uninstalled and unsealed pending independent static review; the latest sealed
+result remains `e5dc932` at 10/11 hard cases and 0/54 active profiles.

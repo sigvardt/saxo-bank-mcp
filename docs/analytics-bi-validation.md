@@ -547,3 +547,34 @@ browser, sealed proof, or broker/data network activity ran. This source is not i
 The exact `e5dc932` result remains the latest sealed evidence, no retry occurred, all downstream
 numerical, matrix, reconciliation, account-equality, and activation gates remain unrun, and all 54
 profiles remain quarantined with 0/54 active.
+
+## Local cleanup-coverage correction after `0e8b625`
+
+Local source `a59b231ed31bf5254dd5e83bc8a1ba20408f6c90`, tree
+`8f3f6b5989ed944c6ce54a566ad4aa434156f652`, carries process-table coverage as an explicit strict
+field from both root-bound admission snapshots through watcher publication and terminal cleanup.
+Any incomplete or failed first, second, watcher, or terminal observation is sticky, produces typed
+`coverage_unknown` or `target_observation_unknown` evidence, and leaves remaining process and group
+counts null. A later successful snapshot cannot turn that uncertainty into authenticated zero.
+
+Nested native evaluation preserves nullable remaining counts through its manager, report, verified
+child failure, candidate-runner receipt, and outer publication. It never converts `None` to zero or
+labels an empty terminal-evidence set as passed. The model-case boundary refuses typed
+`process_cleanup_unknown` before reading model output. Terminal observation exceptions are caught
+inside the command runner's real cleanup boundary so the owner-only digest-bound refusal receipt is
+written instead of losing the cleanup result to an escaping exception.
+
+Deterministic RED tests reproduced incomplete first and second snapshots, a watcher observation
+failure followed by recovery, terminal observation exceptions, nullable nested aggregation, empty
+terminal evidence, and strict receipt/publication tampering. Final verification passed 204 focused
+tests twice, a 191-test non-overlapping related partition, and a 480-test non-overlapping safe
+auth/privacy partition. Earlier comprehensive runs in the same corrective batch also passed 393
+related and 564 auth/privacy tests. Ruff and changed-file format passed; BasedPyright reported 0
+errors, 0 warnings, and 0 notes; plugin, nine-skill static, 60-tool/294-operation catalog, 34-case
+evaluation-manifest, ten-path privacy, and `git diff --check` gates passed.
+
+Only isolated local fixture-install tests ran. No exact candidate or product install, model,
+production MCP server, Saxo request, broker operation, browser, sealed proof, or broker/data network
+activity ran. The exact `e5dc932` result remains the latest sealed evidence with 10/11 hard cases,
+unknown broker/account/overall-cleanup facts, no retry, no downstream numerical proof or fresh SIM
+matrix, and 0/54 active profiles. Independent static review of `a59b231` is the next gate.

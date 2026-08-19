@@ -135,6 +135,14 @@ candidate-runner, and outer-publication schemas bind and verify the status, dige
 relationship. Missing, inconsistent, unavailable, or tampered cleanup evidence cannot prove
 absence or successful cleanup and cannot promote event or broker-safety negatives.
 
+Process-table coverage is explicit and strict at the cleanup-scope boundary. Both root-bound
+admission snapshots and every watcher observation use checked snapshots, and any incomplete or
+failed observation is accumulated under the watcher lock as sticky unknown coverage. Terminal
+cleanup still operates only on previously admitted birth-bound identities, then emits null
+remaining process and group counts with a typed unknown receipt. Nested evaluation preserves those
+nulls through report aggregation; it never defaults `None` or an empty set of terminal snapshots to
+zero or passed cleanup.
+
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
 record, a skipped model call, an absent or unknown MCP event identity, incomplete tool coverage,

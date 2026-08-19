@@ -2365,6 +2365,14 @@ privacy-safe evidence and is not guessed. The next action is independent static 
 `0e8b625`. Do not install or seal it until that review approves the source and a separately
 authorized exact-candidate validation begins.
 
+Local source `a59b231`, tree `8f3f6b5`, supersedes `0e8b625` as the next review candidate. It makes
+process-table coverage explicit and sticky across both admission snapshots, watcher publication,
+terminal cleanup, nested evaluation, and authenticated failure publication. Incomplete observation
+or missing terminal evidence retains null remaining counts and a typed unknown reason; it cannot
+become passed cleanup or zero through recovery, defaulting, or empty aggregation. Independent
+static review of `a59b231` is now the next gate. No exact install or sealed proof is authorized by
+this local correction alone.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
