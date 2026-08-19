@@ -15,7 +15,10 @@ both observable raw decoded assistant events and observable final parsed text. N
 cleanup and one-shot runtime removal completed locally, but aggregate cleanup, broker safety, and
 account facts remain unknown. Numerical proof, the fresh SIM matrix, Saxo reconciliation, account
 equality, and activation did not run. No retry or activation occurred; all 54 proof profiles remain
-quarantined. Exact evidence boundaries are recorded in `docs/analytics-bi-validation.md`.
+quarantined. Later local source `0e8b625`, tree `59235a9`, makes the artifact receipt contract
+explicit and preserves unknown cleanup as typed, digest-bound diagnostic evidence. That source has
+passed local validation but is not installed or sealed and awaits independent static review. Exact
+evidence boundaries are recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2348,12 +2351,19 @@ root. Those later facts cannot be promoted into the missing authenticated cleanu
 Execution aggregates, broker write, mutation, purchase, disclaimer response, cleanup, and account
 state therefore remain unknown. No retry ran.
 
-The next source batch should remain local and TDD-first. Reproduce why the runner and proof-child
-cleanup observers reported unknown despite the nested evaluator's complete receipt, and separately
-make the `artifact-delivery` native fixture contract require the existing `analysis_id` assertion
-without fabricating output or weakening grading. Freeze a new candidate only after focused and
-related regressions, static/type/privacy gates, and independent review. Do not install or seal a
-new candidate under this attempt's authorization.
+Local corrective source `0e8b625`, tree `59235a9`, now makes the existing artifact assertion
+contract explicit in the native prompt: `analysis_id: <returned or fixture id>; state:
+<verified|degraded|refused>; owner-only; quality warnings`. It does not fabricate output, weaken
+grading, change grants, or change required tool checks. It also records unknown command cleanup in
+an owner-only digest-bound receipt with fixed reason, watcher-drain, coverage, target-count, and
+null remaining-count fields, then carries the typed digest through child, candidate-runner, and
+outer failure publications. Unknown cleanup remains fail closed and cannot create broker or event
+negatives.
+
+The exact subcause of the sealed `e5dc932` cleanup observation remains unavailable from the retained
+privacy-safe evidence and is not guessed. The next action is independent static review of
+`0e8b625`. Do not install or seal it until that review approves the source and a separately
+authorized exact-candidate validation begins.
 
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is

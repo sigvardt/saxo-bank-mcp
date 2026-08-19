@@ -230,8 +230,11 @@ under the publication lock before collecting its root-bound scope. Cleanup close
 drains already-registered captures for a bounded interval, and then freezes the immutable target
 tuple. A completed capture may publish before freeze. A capture that is still alive, discarded,
 failed, or affected by a join error makes semantic cleanup unknown and cannot produce a signed
-zero-process result; only a drained or not-applicable watcher state may enter an authenticated
-owner-only cleanup receipt.
+zero-process result. It instead writes a separate owner-only diagnostic receipt that binds a fixed
+unknown reason, watcher-drain state, coverage state, target count, null remaining counts, and a
+digest. Only a drained or not-applicable watcher state may enter an authenticated completion
+receipt. Child failure, candidate-runner, and outer publication carry the unknown receipt digest
+and reason without promoting model, MCP, Saxo, broker, mutation, purchase, or disclaimer negatives.
 
 - [ ] **Step 4: Run focused producer and evaluation tests twice**
 

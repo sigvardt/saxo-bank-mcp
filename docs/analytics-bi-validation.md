@@ -506,3 +506,44 @@ that name `c716047` as the latest run. Candidate `e5dc932` passed every pre-proo
 failed closed at authenticated runner/child cleanup boundaries with 10/11 hard cases. No retry or
 downstream activation gate ran. Cleanup and broker/account facts remain unknown, and all 54
 profiles remain quarantined with 0/54 active.
+
+## Local artifact receipt and unknown-cleanup evidence correction after `e5dc932`
+
+Local source `0e8b625911e92ffbe2125eca4a80539653317d1e`, tree
+`59235a9fc52f5bc870f3c09d8ea2244eae886f22`, addresses both bounded review findings without
+changing or relabeling the sealed `e5dc932` evidence. The exact subcause of that run's unknown
+outer cleanup observation is not reconstructable from its retained privacy-safe receipt and is not
+guessed here.
+
+The native `artifact-delivery` fixture prompt now requires this exact final receipt contract:
+`analysis_id: <returned or fixture id>; state: <verified|degraded|refused>; owner-only; quality
+warnings`. Its assertions, server-side grants, and required logical tool checks are unchanged. The
+prompt only makes the already-required receipt fields explicit to the model.
+
+Command cleanup now preserves uncertainty in a separate owner-only, path-free diagnostic receipt.
+The receipt binds a fixed allowlisted reason code, watcher-drain state, coverage state, target
+count, null remaining process and group counts, and one digest. Observation failure, discarded or
+still-running watcher publication, join failure, incomplete coverage, and unknown terminal state
+remain refusal outcomes. Receipt-path absence, write failure, inconsistent evidence, and unavailable
+candidate-runner evidence use distinct fixed failure reasons and cannot authenticate cleanup.
+
+The typed unknown receipt digest and reason propagate through command failure, verified child
+failure, candidate-runner receipt, and final outer boundary publication. Unknown or write-failed
+cleanup makes remaining counts unknown and cannot promote zero model, MCP, or Saxo events, no
+broker write, no mutation, no purchase, or no disclaimer response. Historical receipt shapes are
+accepted only when every later cleanup field has its exact default; a historical digest cannot
+authenticate newly supplied cleanup claims.
+
+TDD first reproduced six missing-contract and missing-evidence failures, plus observation-error,
+unknown-count, and strict outer propagation gaps. Final focused verification passed 197 tests twice.
+The expanded cleanup, install-fixture, evaluation, proof, and publication suite passed 386 tests;
+416 auth, session, evidence, redaction, token-cache, and privacy tests passed. Ruff and changed-file
+format checks passed, BasedPyright reported 0 errors, 0 warnings, and 0 notes, and plugin, nine-skill
+static, 60-tool/294-operation catalog, 34-case evaluation-manifest, and 11-path privacy gates passed
+with zero privacy findings or scan errors.
+
+No exact candidate or product install, model, production MCP server, Saxo request, broker operation,
+browser, sealed proof, or broker/data network activity ran. This source is not installed or sealed.
+The exact `e5dc932` result remains the latest sealed evidence, no retry occurred, all downstream
+numerical, matrix, reconciliation, account-equality, and activation gates remain unrun, and all 54
+profiles remain quarantined with 0/54 active.

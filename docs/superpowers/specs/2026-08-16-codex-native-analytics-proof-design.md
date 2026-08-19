@@ -127,9 +127,13 @@ closed. Verifiers use those authenticated semantic outcomes rather than a second
 query. Cleanup runs exactly once and persists its evidence before a terminal failure is raised. The
 authenticated cleanup-evidence status is one of
 `authenticated`, `no-target-observed`, `observation-unknown`, or `write-failed`. A receipt digest is
-present only for `authenticated`, and strict child-failure and outer-publication schemas bind and
-verify that relationship. Missing, inconsistent, or tampered cleanup evidence cannot prove absence
-or successful cleanup.
+present for `authenticated` completion evidence and for the separate owner-only
+`observation-unknown` diagnostic receipt. The unknown receipt binds a fixed reason code,
+watcher-drain state, coverage state, target count, and null remaining process and group counts.
+`no-target-observed` and `write-failed` carry no receipt digest. Strict child-failure,
+candidate-runner, and outer-publication schemas bind and verify the status, digest, and reason
+relationship. Missing, inconsistent, unavailable, or tampered cleanup evidence cannot prove
+absence or successful cleanup and cannot promote event or broker-safety negatives.
 
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
