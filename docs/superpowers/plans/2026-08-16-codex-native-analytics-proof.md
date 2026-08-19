@@ -374,3 +374,15 @@ historical summary omitted the descriptor field from `model_fields_set`; parsed 
 twice plus failure/publication, related, auth/privacy, Ruff/format, type, plugin, static, catalog,
 eval-manifest, privacy, and diff gates. No install or proof ran; independent static review is next,
 the prior sealed result remains unchanged, and 0/54 profiles are active.
+
+Superseding nested-cleanup handoff: source `2dba1a1`, tree `d1e51ec`, adds correlated expected-group
+and expected-birth hashes plus occurrence counts to current private offending observations and
+requires current group-member diagnostics to contain matching evidence. Nested evaluation writes a
+separate owner-only mode-0600 digest-bound receipt over unknown snapshots and deduplicated
+observations. Only its status, digest, typed reason, and stage/subreason propagate through the
+authenticated evaluation cleanup, child, candidate, and outer publication; private identities do
+not. Missing or inconsistent evidence stays unknown and cannot promote broker or event negatives.
+Focused tests passed 191 twice; the prior related and auth/privacy slices passed 163 and 253; Ruff,
+changed-file format, BasedPyright 0/0/0, plugin/static/catalog/eval, eight-path privacy 0/0, and diff
+checks passed. No install, model, production MCP, Saxo, browser, network, or proof ran. Independent
+static review is next, the sealed result remains unchanged, and 0/54 profiles are active.

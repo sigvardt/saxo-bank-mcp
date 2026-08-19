@@ -2520,3 +2520,19 @@ and typed cleanup reason/stage; identity detail remains private. Legacy digest-b
 readable under their historical shape. Local gates passed without install, suite, SIM, model, MCP,
 Saxo, browser, network, or proof activity. The sealed `1d213ff` cleanup result is unchanged,
 activation remains 0/54, and independent static review is the next gate.
+
+## Nested cleanup-diagnostic boundary
+
+Local source `2dba1a1`, tree `d1e51ec`, extends the private cleanup boundary into the nested native
+evaluation lifecycle. Current observations correlate expected and observed process group and birth
+identity, merge repeated sightings with an authenticated occurrence count, and require the retained
+states to agree with the typed group-member cleanup reason. One separate mode-0600 nested receipt
+binds the unknown snapshots and deduplicated observations; only its digest and typed cleanup
+provenance may cross into child, candidate, or outer proof evidence.
+
+This remains a diagnostic refusal, not a signal allowlist or proof recovery. The receipt cannot add
+or exempt a process, make unknown coverage complete, turn null counts into zero, or promote unknown
+model, MCP, Saxo, broker-write, mutation, purchase, or disclaimer-response facts. Local validation
+and static/privacy gates passed without install, model, MCP, Saxo, browser, network, or proof
+activity. The sealed `1d213ff` result remains unchanged, activation remains 0/54, and independent
+static review of `2dba1a1` is next.
