@@ -77,11 +77,15 @@ class EvalProcessManager:
             start_new_session=True,
         )
         root_pid = process.pid
+        # Popen succeeded. Record the root before any fallible PGID or process-table
+        # observation so a later exception cannot collapse cleanup to not_required/zero.
+        self.created_processes += 1
+        self.remaining_processes = None
+        self.process_cleanup = "pending"
         pgid = os.getpgid(root_pid)
         scope = capture_process_cleanup_scope(process, pgid)
         created = max(1, len(scope.identities))
-        self.created_processes += created
-        self.process_cleanup = "pending"
+        self.created_processes += created - 1
         timed_out = False
         stdout = ""
         stderr = ""

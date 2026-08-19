@@ -1320,6 +1320,144 @@ def test_mixed_malformed_eval_evidence_stays_unknown_through_publication() -> No
     assert "tool-before-malformed" not in rendered
 
 
+def test_cleanup_unknown_eval_evidence_stays_unknown_through_publication() -> None:  # noqa: PLR0915
+    """An unparsed post-launch cleanup refusal stays unknown in every signed layer."""
+    case = next(
+        item for item in load_eval_cases(Path("evals/saxo-analytics")) if item.id == "scenario"
+    )
+    grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
+    private_sentinel = "private-cleanup-unknown-output"
+    result = ManagedProcessResult(
+        stdout=private_sentinel,
+        stderr="",
+        returncode=0,
+        timed_out=False,
+        created_processes=1,
+        terminated_processes=0,
+        remaining_processes=None,
+        process_cleanup="unknown",
+    )
+    execution = import_module("saxo_bank_mcp.agent_skill_eval_execution")
+    record = execution._record_from_process(  # noqa: SLF001
+        case,
+        "codex",
+        grants,
+        result,
+    )
+    assert isinstance(record, EvalRunRecord)
+    assert record.transcript_assertions_passed is None
+    assert record.model_output_observability == "unknown"
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
+
+    report = EvalRunReport(
+        status="failed",
+        harness="codex",
+        environment="LOCAL",
+        execution_mode="model_execution",
+        selected_case_count=1,
+        case_count=1,
+        records=(record,),
+        cleanup={
+            "complete": False,
+            "process_cleanup": "unknown",
+            "runtime_cleanup": "passed",
+            "token_promote": "not_required",
+            "created_processes": 1,
+            "terminated_processes": 0,
+            "remaining_processes": None,
+            "process_timed_out": False,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={},
+        after_global_state={},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=CANDIDATE,
+    )
+    report_bytes = json.dumps(
+        report.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    summary = producer._agent_evaluation_failure_summary(  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+    assert summary is not None
+    case_summary = summary.cases[0]
+    assert case_summary.model_output_observability == "unknown"
+    assert case_summary.no_mcp_call is None
+    assert case_summary.no_saxo_call is None
+    assert case_summary.invoked_logical_tool_ids is None
+    assert case_summary.invoked_logical_tool_count is None
+    assert case_summary.model_tool_event_count is None
+    assert case_summary.model_command_event_count is None
+    assert case_summary.model_mcp_event_count is None
+    assert case_summary.model_saxo_event_count is None
+    assert case_summary.grant_status == "unknown"
+    assert case_summary.assertion_status == "unknown"
+    assert summary.cleanup.status == "unknown"
+    assert summary.cleanup.remaining_process_count is None
+
+    inconsistent = case_summary.model_dump(mode="json")
+    inconsistent["model_mcp_event_count"] = 0
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationCaseSummary.model_validate(inconsistent, strict=True)
+    inconsistent = case_summary.model_dump(mode="json")
+    inconsistent["assistant_message_present"] = False
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationCaseSummary.model_validate(inconsistent, strict=True)
+
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    producer._record_agent_report_progress(progress, report)  # noqa: SLF001
+    progress.record_agent_evaluation_failure(summary)
+    verified = _verify(
+        _failure(
+            progress,
+            reason="installed_agent_evaluation_command_failed",
+        ).model_dump_json(),
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    published = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert published.result.agent_evaluation_failure_summary == summary
+    # The process launch itself is known. Only parse-derived event/call facts are unknown.
+    assert published.result.model_event_count == 1
+    assert published.result.mcp_event_count is None
+    assert published.result.saxo_event_count is None
+    assert published.result.broker_write_made is None
+    assert published.result.live_mutation_calls is None
+    assert published.result.purchase_occurred is None
+    assert published.result.disclaimer_response_made is None
+    assert private_sentinel not in publication.model_dump_json()
+
+
 def test_failed_eval_summary_rejects_diagnostic_tamper_extra_and_cleanup_tamper(
     tmp_path: Path,
 ) -> None:

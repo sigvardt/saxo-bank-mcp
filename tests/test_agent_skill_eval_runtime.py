@@ -8,6 +8,7 @@ import stat
 import tomllib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, cast
@@ -15,6 +16,7 @@ from typing import Any, Final, cast
 import pytest
 
 import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
+import saxo_bank_mcp.agent_skill_eval_process as eval_process
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
 import saxo_bank_mcp.agent_skill_matrix_env as matrix_env
 import saxo_bank_mcp.agent_skill_router_eval_execution as router_execution
@@ -28,6 +30,7 @@ from saxo_bank_mcp.agent_skill_command_runner import (
 from saxo_bank_mcp.agent_skill_eval_execution import HarnessRoots, execute_model_case
 from saxo_bank_mcp.agent_skill_eval_models import (
     EvalRunRecord,
+    EvalRunReport,
     RouterDecision,
     SkillEvalCase,
     load_eval_cases,
@@ -576,7 +579,7 @@ def test_malformed_model_output_keeps_runner_event_aggregates_unknown(
         required_logical_tools=case.required_logical_tools,
         forbidden_logical_tools=case.forbidden_logical_tools,
         resolved_tool_grants=(),
-        transcript_assertions_passed=False,
+        transcript_assertions_passed=None,
         no_model_call=False,
         no_mcp_call=None,
         no_saxo_call=None,
@@ -629,25 +632,198 @@ def test_malformed_model_output_keeps_runner_event_aggregates_unknown(
     assert payload["cleanup"]["invoked_logical_tool_count"] is None
 
 
-def test_process_record_refuses_nullable_unknown_cleanup() -> None:
-    """An unknown nested cleanup is a typed refusal, never a numeric comparison."""
+@pytest.mark.parametrize(
+    ("expected_error", "result"),
+    [
+        (
+            "timeout_expired",
+            ManagedProcessResult(
+                stdout="private-output-must-not-be-parsed",
+                stderr="",
+                returncode=124,
+                timed_out=True,
+                created_processes=1,
+                terminated_processes=1,
+                remaining_processes=0,
+                process_cleanup="passed",
+            ),
+        ),
+        (
+            "process_cleanup_unknown",
+            ManagedProcessResult(
+                stdout="private-output-must-not-be-parsed",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=0,
+                remaining_processes=None,
+                process_cleanup="unknown",
+            ),
+        ),
+        (
+            "process_cleanup_residue",
+            ManagedProcessResult(
+                stdout="private-output-must-not-be-parsed",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=0,
+                remaining_processes=1,
+                process_cleanup="residue",
+            ),
+        ),
+    ],
+)
+def test_process_record_refuses_unobservable_post_launch_result(
+    expected_error: str,
+    result: ManagedProcessResult,
+) -> None:
+    """An unparsed post-launch result never becomes an observable empty trace."""
     case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
-    result = ManagedProcessResult(
-        stdout="",
-        stderr="",
-        returncode=0,
-        timed_out=False,
-        created_processes=1,
-        terminated_processes=0,
-        remaining_processes=None,
-        process_cleanup="unknown",
-    )
     record_from_process = eval_execution._record_from_process  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
 
     record = record_from_process(case, "codex", (), result)
 
     assert record.status == "failed"
-    assert record.error == "process_cleanup_unknown"
+    assert record.error == expected_error
+    assert record.transcript_assertions_passed is None
+    assert record.model_output_observability == "unknown"
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
+    assert record.assistant_message_present is None
+    assert "private-output-must-not-be-parsed" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected_error"),
+    [(0, "malformed_output"), (1, "process_nonzero_exit")],
+)
+def test_parser_exception_after_launch_is_unobservable(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    expected_error: str,
+) -> None:
+    """A parser exception cannot turn an executed child into a known empty trace."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
+    result = ManagedProcessResult(
+        stdout="private-unparsed-output",
+        stderr="",
+        returncode=returncode,
+        timed_out=False,
+        created_processes=1,
+        terminated_processes=1,
+        remaining_processes=0,
+        process_cleanup="passed",
+    )
+
+    def fail_parse(_harness: str, _stdout: str) -> eval_execution.ModelToolTrace:
+        raise ValueError("injected parser failure")
+
+    monkeypatch.setattr(eval_execution, "_parse_trace", fail_parse)
+    record = eval_execution._record_from_stdout(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case, "codex", (), result
+    )
+
+    assert record.error == expected_error
+    assert record.transcript_assertions_passed is None
+    assert record.model_output_observability == "unknown"
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_command_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.assertion_status == "unknown"
+    assert "private-unparsed-output" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize("failure", [ProcessLookupError(), OSError("post-spawn failure")])
+def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: OSError,
+) -> None:
+    """A production runner cannot publish complete cleanup or zero calls after Popen."""
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, claude_src = _seed_cli_sources(tmp_path)
+    _install_binding(monkeypatch)
+    monkeypatch.setattr(eval_runner, "client_versions", _stub_versions)
+
+    class FakeProcess:
+        pid = 73_200
+        returncode: int | None = None
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
+
+    def fail_getpgid(_pid: int) -> int:
+        raise failure
+
+    monkeypatch.setattr(eval_process.os, "getpgid", fail_getpgid)
+    options = _options(
+        tmp_path,
+        dry_run=False,
+        credential_mode="ephemeral-owner-only-copy",
+        case_id="qa-evidence-readiness",
+        harness="codex",
+        source_codex_home=codex_src,
+        source_claude_home=claude_src,
+        expected_source_commit="abc123",
+    )
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["cleanup"]["complete"] is False
+    assert payload["cleanup"]["created_processes"] == 1
+    assert payload["cleanup"]["terminated_processes"] == 0
+    assert payload["cleanup"]["remaining_processes"] is None
+    assert payload["cleanup"]["process_cleanup"] == "unknown"
+    assert payload["cleanup"]["model_tool_events"] is None
+    assert payload["cleanup"]["model_command_events"] is None
+    assert payload["cleanup"]["created_mcp_calls"] is None
+    assert payload["cleanup"]["model_saxo_events"] is None
+    assert payload["cleanup"]["invoked_logical_tool_count"] is None
+    record = payload["records"][0]
+    assert record["error"] == (
+        "process_lookup_error" if isinstance(failure, ProcessLookupError) else "os_error"
+    )
+    assert record["transcript_assertions_passed"] is None
+    assert record["model_output_observability"] == "unknown"
+    assert record["no_mcp_call"] is None
+    assert record["no_saxo_call"] is None
+    assert record["invoked_logical_tools"] is None
+    assert record["invoked_logical_tool_count"] is None
+    assert record["grant_status"] == "unknown"
+    assert record["assertion_status"] == "unknown"
+
+    report_payload = dict(payload)
+    report_payload.pop("installation_fixture_preserved")
+    report_payload.pop("run_cleanup")
+    report = EvalRunReport.model_validate(report_payload)
+    report_bytes = options.out.read_bytes()
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    summary = producer._agent_evaluation_failure_summary(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+    assert summary is not None
+    assert summary.cleanup.status == "unknown"
+    assert summary.cleanup.remaining_process_count is None
+    assert summary.cases[0].model_output_observability == "unknown"
+    assert summary.cases[0].no_mcp_call is None
+    assert summary.cases[0].no_saxo_call is None
 
 
 def test_codex_native_policy_rejects_non_codex_harness(tmp_path: Path) -> None:

@@ -208,3 +208,41 @@ def test_nested_eval_cleanup_with_no_terminal_snapshot_is_unknown() -> None:
     assert manager.process_cleanup == "unknown"
     assert snapshot["remaining_processes"] is None
     assert snapshot["process_cleanup"] == "unknown"
+
+
+@pytest.mark.parametrize("failure", [ProcessLookupError(), OSError("post-spawn failure")])
+def test_nested_eval_records_pending_cleanup_before_post_spawn_scope_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: OSError,
+) -> None:
+    """A successful Popen is counted before PGID or scope capture can fail."""
+
+    class FakeProcess:
+        pid = ROOT_PID
+        returncode: int | None = None
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
+
+    def fail_getpgid(_pid: int) -> int:
+        raise failure
+
+    monkeypatch.setattr(eval_process.os, "getpgid", fail_getpgid)
+    manager = eval_process.EvalProcessManager()
+
+    with pytest.raises(type(failure)):
+        manager.run(
+            ("/bin/true",),
+            cwd=tmp_path,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path)},
+            timeout_seconds=1,
+        )
+
+    snapshot = manager.finalize()
+    assert snapshot["created_processes"] == 1
+    assert snapshot["terminated_processes"] == 0
+    assert snapshot["remaining_processes"] is None
+    assert snapshot["process_cleanup"] == "unknown"

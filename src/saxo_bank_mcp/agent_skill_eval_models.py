@@ -137,7 +137,7 @@ class EvalRunRecord(BaseModel):
     required_logical_tools: tuple[str, ...]
     forbidden_logical_tools: tuple[str, ...]
     resolved_tool_grants: tuple[str, ...]
-    transcript_assertions_passed: bool
+    transcript_assertions_passed: bool | None
     no_model_call: bool
     no_mcp_call: bool | None
     no_saxo_call: bool | None
@@ -283,6 +283,7 @@ class EvalRunRecord(BaseModel):
 
     def _validate_model_output_observability(self) -> None:
         parse_derived_fields = (
+            self.transcript_assertions_passed,
             self.no_mcp_call,
             self.no_saxo_call,
             self.model_tool_event_count,
@@ -297,11 +298,36 @@ class EvalRunRecord(BaseModel):
                 raise ValueError("unknown model output cannot carry parse-derived evidence")
             if self.grant_status != "unknown" or self.assertion_status != "unknown":
                 raise ValueError("unknown model output requires unknown grading evidence")
-            if self.harness != "codex" or self.error != "malformed_output":
-                raise ValueError("unknown model output requires malformed Codex output")
+            if (
+                self.status != "failed"
+                or self.execution_mode != "model_execution"
+                or self.no_model_call
+                or not self.error
+            ):
+                raise ValueError("unknown model output requires a post-launch failure")
+            assistant_derived_fields = (
+                self.assistant_message_present,
+                self.raw_assistant_event_count,
+                self.raw_assistant_events_sha256,
+                self.final_assistant_text_sha256,
+                self.raw_assistant_message_present,
+            )
+            assertion_vectors = (
+                self.required_all_assertion_results,
+                self.required_any_assertion_results,
+                self.forbidden_assertion_absent_results,
+                self.raw_assistant_required_all_assertion_results,
+                self.raw_assistant_required_any_assertion_results,
+                self.raw_assistant_forbidden_assertion_absent_results,
+            )
+            if any(value is not None for value in assistant_derived_fields) or any(
+                assertion_vectors
+            ):
+                raise ValueError("unknown model output cannot carry assertion evidence")
         else:
             if (
-                self.no_mcp_call is None
+                self.transcript_assertions_passed is None
+                or self.no_mcp_call is None
                 or self.no_saxo_call is None
                 or self.invoked_logical_tools is None
                 or self.invoked_logical_tool_count is None
@@ -311,12 +337,8 @@ class EvalRunRecord(BaseModel):
                 raise ValueError("invoked logical tool count differs")
             if self.grant_status == "unknown" or self.assertion_status == "unknown":
                 raise ValueError("observable model output cannot carry unknown grading evidence")
-        if (
-            self.harness == "codex"
-            and self.error == "malformed_output"
-            and self.model_output_observability != "unknown"
-        ):
-            raise ValueError("malformed Codex output requires unknown parse evidence")
+        if self.error == "malformed_output" and self.model_output_observability != "unknown":
+            raise ValueError("malformed output requires unknown parse evidence")
 
 
 class EvalRunReport(BaseModel):

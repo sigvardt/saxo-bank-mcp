@@ -370,6 +370,7 @@ def test_codex_malformed_output_keeps_all_parse_derived_evidence_unknown(
 
     assert record.status == "failed"
     assert record.error == "malformed_output"
+    assert record.transcript_assertions_passed is None
     assert record.model_output_observability == "unknown"
     assert record.no_mcp_call is None
     assert record.no_saxo_call is None
@@ -393,6 +394,50 @@ def test_codex_malformed_output_keeps_all_parse_derived_evidence_unknown(
     assert record.raw_assistant_required_any_assertion_results == ()
     assert record.raw_assistant_forbidden_assertion_absent_results == ()
     assert "private-transcript-sentinel" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_claude_unparsed_post_launch_output_is_also_unobservable(
+    returncode: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy dual output cannot infer zero calls from an undecodable launched child."""
+    case = _case()
+    grants = resolve_tool_grants("claude", case.exact_tool_grants["claude"])
+
+    def fake_run(
+        self: EvalProcessManager,
+        command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: float,
+    ) -> ManagedProcessResult:
+        _ = (self, command, cwd, env, timeout_seconds)
+        return _managed("private-claude-output", returncode=returncode)
+
+    monkeypatch.setattr(EvalProcessManager, "run", fake_run)
+    record = execute_model_case(
+        case,
+        "claude",
+        grants,
+        roots=_roots(tmp_path),
+        env=_env(tmp_path),
+        process_manager=EvalProcessManager(),
+    )
+
+    assert record.status == "failed"
+    assert record.error == "malformed_output"
+    assert record.transcript_assertions_passed is None
+    assert record.model_output_observability == "unknown"
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
+    assert "private-claude-output" not in record.model_dump_json()
 
 
 def test_out_of_grant_tool_fails(

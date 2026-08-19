@@ -1016,7 +1016,9 @@ def _rewrite_digest_mismatches(
             required_logical_tools=record.required_logical_tools,
             forbidden_logical_tools=record.forbidden_logical_tools,
             resolved_tool_grants=record.resolved_tool_grants,
-            transcript_assertions_passed=False,
+            transcript_assertions_passed=(
+                None if record.model_output_observability == "unknown" else False
+            ),
             no_model_call=record.no_model_call,
             no_mcp_call=record.no_mcp_call,
             no_saxo_call=record.no_saxo_call,
@@ -1033,7 +1035,9 @@ def _rewrite_digest_mismatches(
             invoked_logical_tools=record.invoked_logical_tools,
             invoked_logical_tool_count=record.invoked_logical_tool_count,
             grant_status=record.grant_status,
-            assertion_status="failed",
+            assertion_status=(
+                "unknown" if record.model_output_observability == "unknown" else "failed"
+            ),
         )
         for record in records
     )

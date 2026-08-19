@@ -122,10 +122,23 @@ def _execute_non_router_case(  # noqa: PLR0913, PLR0911
                 "executable_not_found",
             )
         except OSError as exc:
-            return _failed_record(case, harness, grants, type(exc).__name__)
+            return _process_error_record(case, harness, grants, manager, type(exc).__name__)
     except OSError as exc:
-        return _failed_record(case, harness, grants, type(exc).__name__)
+        return _process_error_record(case, harness, grants, manager, type(exc).__name__)
     return _record_from_process(case, harness, grants, result)
+
+
+def _process_error_record(
+    case: SkillEvalCase,
+    harness: Harness,
+    grants: tuple[str, ...],
+    manager: EvalProcessManager,
+    error: str,
+) -> EvalRunRecord:
+    """Distinguish a pre-launch OSError from an unobservable post-launch failure."""
+    if manager.process_cleanup == "pending" or manager.remaining_processes is None:
+        return _unobservable_failed_record(case, harness, grants, error)
+    return _failed_record(case, harness, grants, error)
 
 
 def _fnfe_is_cwd(exc: FileNotFoundError, cwd: Path) -> bool:
@@ -173,11 +186,11 @@ def _record_from_process(
     result: ManagedProcessResult,
 ) -> EvalRunRecord:
     if result.timed_out:
-        return _failed_record(case, harness, grants, "TimeoutExpired")
+        return _unobservable_failed_record(case, harness, grants, "TimeoutExpired")
     if result.remaining_processes is None or result.process_cleanup == "unknown":
-        return _failed_record(case, harness, grants, "process_cleanup_unknown")
+        return _unobservable_failed_record(case, harness, grants, "process_cleanup_unknown")
     if result.remaining_processes > 0 or result.process_cleanup == "residue":
-        return _failed_record(case, harness, grants, "process_cleanup_residue")
+        return _unobservable_failed_record(case, harness, grants, "process_cleanup_residue")
     return _record_from_stdout(case, harness, grants, result)
 
 
@@ -191,9 +204,9 @@ def _record_from_stdout(
         trace = _parse_trace(harness, result.stdout)
     except (ValueError, TypeError):
         error = "process_nonzero_exit" if result.returncode != 0 else "malformed_output"
-        return _failed_record(case, harness, grants, error)
-    if harness == "codex" and trace.parse_error == "malformed_output":
-        return _failed_record(case, harness, grants, trace.parse_error, trace=trace)
+        return _unobservable_failed_record(case, harness, grants, error)
+    if trace.parse_error == "malformed_output":
+        return _unobservable_failed_record(case, harness, grants, trace.parse_error)
     if result.returncode != 0 and not _claude_nonzero_output_usable(harness, trace):
         return _failed_record(case, harness, grants, "process_nonzero_exit", trace=trace)
     if trace.parse_error:
@@ -350,8 +363,8 @@ def _failed_record(  # noqa: PLR0913
     *,
     trace: ModelToolTrace | None = None,
     assertions_passed: bool = False,
+    model_output_observable: bool = True,
 ) -> EvalRunRecord:
-    model_output_observable = not (harness == "codex" and error == "malformed_output")
     assistant_output_observable = (
         model_output_observable and trace is not None and trace.parse_error != "malformed_output"
     )
@@ -386,7 +399,7 @@ def _failed_record(  # noqa: PLR0913
         required_logical_tools=case.required_logical_tools,
         forbidden_logical_tools=case.forbidden_logical_tools,
         resolved_tool_grants=grants,
-        transcript_assertions_passed=assertions_passed,
+        transcript_assertions_passed=(assertions_passed if model_output_observable else None),
         no_model_call=False,
         no_mcp_call=(
             None if not model_output_observable else trace is None or trace.mcp_event_count == 0
@@ -443,6 +456,27 @@ def _failed_record(  # noqa: PLR0913
             () if assertion_evidence is None else assertion_evidence.forbidden_absent
         ),
         **diagnostic_fields,
+    )
+
+
+def _unobservable_failed_record(
+    case: SkillEvalCase,
+    harness: Harness,
+    grants: tuple[str, ...],
+    error: str,
+) -> EvalRunRecord:
+    """Return a strict failure without inferring an empty model/tool trace."""
+    safe_error = {
+        "OSError": "os_error",
+        "ProcessLookupError": "process_lookup_error",
+        "TimeoutExpired": "timeout_expired",
+    }.get(error, error)
+    return _failed_record(
+        case,
+        harness,
+        grants,
+        safe_error,
+        model_output_observable=False,
     )
 
 

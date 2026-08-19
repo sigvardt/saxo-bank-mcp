@@ -276,8 +276,27 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
                 raise ValueError("unknown model output cannot carry parse-derived summary evidence")
             if self.grant_status != "unknown" or self.assertion_status != "unknown":
                 raise ValueError("unknown model output requires unknown summary grading evidence")
-            if self.error != "malformed_output":
-                raise ValueError("unknown model output summary requires malformed output")
+            if self.status != "failed" or not self.error:
+                raise ValueError("unknown model output summary requires a failed case")
+            assistant_derived_fields = (
+                self.assistant_message_present,
+                self.raw_assistant_event_count,
+                self.raw_assistant_events_sha256,
+                self.final_assistant_text_sha256,
+                self.raw_assistant_message_present,
+            )
+            assertion_vectors = (
+                self.required_all_assertion_results,
+                self.required_any_assertion_results,
+                self.forbidden_assertion_absent_results,
+                self.raw_assistant_required_all_assertion_results,
+                self.raw_assistant_required_any_assertion_results,
+                self.raw_assistant_forbidden_assertion_absent_results,
+            )
+            if any(value is not None for value in assistant_derived_fields) or any(
+                assertion_vectors
+            ):
+                raise ValueError("unknown model output cannot carry summary assertion evidence")
         else:
             has_modern_observability = bool(
                 {
