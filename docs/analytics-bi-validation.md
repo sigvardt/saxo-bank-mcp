@@ -743,7 +743,7 @@ manifest, and the 16-path privacy scan passed. Whole-repository Ruff formatting 
 known 95-file baseline drift; those files were not changed and formatting is not claimed as passed.
 
 The terminal install-structure readback then failed closed because the caller plugin-cache
-fingerprint had changed to `b44a6cf6...c610` after the full suite. All 20 other structural checks
+fingerprint had changed to `b44a6cf6...c610` after the full suite. All 19 other structural checks
 passed, including binding, cache/source/interpreter/lock/producer/probe digests, exact inventory,
 clean clone, candidate/tree binding, owner-only modes, authenticated install cleanup, and the
 present unconsumed proof runtime. The exact concurrent writer is not established. Per the
