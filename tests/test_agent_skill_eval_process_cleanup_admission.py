@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
+import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,45 @@ MINIMUM_ROOT_CHECKS = 3
 REQUIRED_SCOPE_SNAPSHOTS = 2
 EXPECTED_OBSERVATION_COUNT = 2
 OWNER_FILE_MODE = 0o600
+
+
+def test_retained_cleanup_publication_is_atomic_no_clobber_and_directory_synced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = (tmp_path / "retained-cleanup.json").resolve()
+    payloads = {"a": "first\n", "b": "second\n"}
+    barrier = threading.Barrier(3)
+    results: dict[str, bool] = {}
+    directory_syncs: list[int] = []
+    original_fsync = os.fsync
+    creator = command_runner._atomic_owner_only_create  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    def record_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            directory_syncs.append(descriptor)
+        original_fsync(descriptor)
+
+    def publish(label: str) -> None:
+        barrier.wait()
+        results[label] = creator(destination, payloads[label])
+
+    monkeypatch.setattr(command_runner.os, "fsync", record_fsync)
+    threads = tuple(
+        threading.Thread(target=publish, args=(label,), daemon=True) for label in payloads
+    )
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert sum(results.values()) == 1
+    assert destination.read_text(encoding="utf-8") in payloads.values()
+    assert destination.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    assert destination.stat().st_nlink == 1
+    assert directory_syncs
 
 
 @pytest.mark.parametrize(

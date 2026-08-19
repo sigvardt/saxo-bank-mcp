@@ -6,6 +6,7 @@ import os
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -2174,14 +2175,65 @@ def retain_eval_process_cleanup_receipt(
         source,
         expected_receipt_sha256=expected_receipt_sha256,
     )
-    if receipt is None or os.path.lexists(destination):
+    if receipt is None:
         return None
-    if not _atomic_owner_only_write(destination, receipt.model_dump_json() + "\n"):
+    if not _atomic_owner_only_create(destination, receipt.model_dump_json() + "\n"):
         return None
     return verify_eval_process_cleanup_receipt(
         destination,
         expected_receipt_sha256=expected_receipt_sha256,
     )
+
+
+def _atomic_owner_only_create(path: Path, text: str) -> bool:
+    """Atomically publish one immutable owner-only file without replacing a target."""
+    if not path.is_absolute():
+        return False
+    parent = path.parent
+    descriptor: int | None = None
+    temporary: Path | None = None
+    directory_descriptor: int | None = None
+    try:
+        parent_metadata = os.lstat(parent)
+        if not (
+            stat.S_ISDIR(parent_metadata.st_mode)
+            and not stat.S_ISLNK(parent_metadata.st_mode)
+            and parent_metadata.st_uid == os.getuid()
+            and stat.S_IMODE(parent_metadata.st_mode) == _OWNER_DIRECTORY_MODE
+        ):
+            return False
+        descriptor, raw_temporary = tempfile.mkstemp(
+            dir=parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(raw_temporary)
+        os.fchmod(descriptor, _OWNER_FILE_MODE)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path, follow_symlinks=False)
+        directory_descriptor = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        os.fsync(directory_descriptor)
+        temporary.unlink()
+        temporary = None
+        os.fsync(directory_descriptor)
+    except OSError:
+        return False
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink()
+    return True
 
 
 def _atomic_owner_only_write(path: Path, text: str) -> bool:
