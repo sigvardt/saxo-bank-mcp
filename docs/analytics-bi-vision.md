@@ -2373,6 +2373,15 @@ through authenticated child, candidate, and outer failure publication. Fully dec
 router records remain observable and unchanged. Independent static review of `9fbd2cb` is now the
 next gate. No exact install or sealed proof is authorized by this local correction alone.
 
+Local source `f96a3b2`, tree `265a11a`, supersedes `9fbd2cb` as the next review candidate. The same
+strict boundary now includes the post-model client-version subprocess: timeout, unknown or
+noncomplete cleanup, residue, and caught operating-system or value errors keep router decisions,
+grading, tools, and event counts unknown for both harnesses. Report completion also refuses a sticky
+timeout, unknown/noncomplete cleanup, or any remaining process even if an earlier summary flag says
+complete. Exception details are reduced to fixed privacy-safe reason codes through signed failure
+publication. Independent static review of `f96a3b2` is the next gate. It is uninstalled and unsealed;
+sealed `e5dc932`, the downstream proof boundary, and 0/54 activation remain unchanged.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.

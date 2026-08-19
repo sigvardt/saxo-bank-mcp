@@ -338,3 +338,13 @@ candidate, and outer evidence; observable successful router records remain uncha
 focused-twice, related, auth/privacy, catalog-status, Ruff/format, type, plugin, static, catalog,
 eval-manifest, privacy, and diff gates pass. The source remains uninstalled and unsealed pending
 independent static review; sealed `e5dc932` and 0/54 activation remain unchanged.
+
+Superseding local handoff: source `f96a3b2`, tree `265a11a`, extends that strict router boundary to
+the post-model client-version child. Timeout, unknown/null or noncomplete cleanup, residue, and
+caught operating-system or value errors produce an unobservable record for both harnesses. Report
+completion rechecks sticky timeout, semantic cleanup, and known-zero remaining processes instead of
+trusting the summary flag. Fixed lowercase reason codes propagate through authenticated report,
+child, candidate, and outer evidence without private exception details or negative broker facts.
+Local focused tests passed twice plus related, auth/privacy, Ruff/format, type, plugin, static,
+catalog, eval-manifest, privacy, and diff gates. The source remains uninstalled and unsealed pending
+independent static review; sealed `e5dc932` and 0/54 activation remain unchanged.

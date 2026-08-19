@@ -645,3 +645,31 @@ proof, or broker/data network activity ran. This source is uninstalled and unsea
 no retry or downstream numerical proof, fresh SIM matrix, reconciliation, account equality, or
 activation ran. All 54 profiles remain quarantined with 0/54 active. Independent static review of
 `9fbd2cb` is the next gate.
+
+## Local router version-lifecycle correction after `9fbd2cb`
+
+Local source `f96a3b2df57ab66c71d6bf04e40b5637b40ef09b`, tree
+`265a11abb3abbd19d6f54cdd122c19d8bb4453f0`, extends the router's fail-closed boundary through the
+post-model client-version child. A version timeout, unknown or null remaining-process count,
+unknown or noncomplete process cleanup, residue, or caught launch/runtime exception now returns the
+same strict unobservable router record for Codex and the historical Claude harness. The decision,
+grading, invoked tools, and all model, command, MCP, and Saxo counts remain null.
+
+Report completion now independently checks the sticky timeout flag, semantic cleanup result, and
+known-zero remaining count instead of trusting an optimistic summary boolean. Caught exceptions are
+reduced to fixed lowercase allowlisted reasons, including distinct `permission_error`,
+`file_not_found_error`, `os_error`, `value_error`, and `key_error` values. Those reasons survive the
+authenticated report, child, candidate, and outer publication layers without exception messages,
+paths, or negative broker facts.
+
+TDD first reproduced 15 lifecycle and reason-propagation failures. Final focused verification
+passed 16 tests twice; the related evaluation, cleanup, and proof suite passed 307 tests; and the
+bounded auth/privacy partition passed 265 tests. Ruff and changed-file format passed, BasedPyright
+reported 0 errors, 0 warnings, and 0 notes, and plugin, nine-skill static, 60-tool/294-operation
+catalog, 34-case evaluation-manifest, bounded privacy, and diff gates passed.
+
+No install, model, production MCP server, Saxo request, browser, sealed proof, or broker/data network
+activity ran. Sealed `e5dc932` remains unchanged at 10/11 with unknown broker/account/overall
+cleanup facts, no retry, and no downstream proof, fresh matrix, reconciliation, account equality,
+or activation. All 54 profiles remain quarantined with 0/54 active. Independent static review of
+`f96a3b2` is the next gate.
