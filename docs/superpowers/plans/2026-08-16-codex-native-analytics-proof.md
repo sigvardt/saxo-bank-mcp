@@ -205,7 +205,12 @@ All exact-workflow subprocess cleanup uses the shared birth-bound cleanup primit
 runner admits new identities only while the original `Popen` root is unreaped, `poll()` reports it
 active, and bracketing observations match the captured root birth identity and group. That
 admission gate closes permanently on completion, reaping, absence, reuse, unknown observation, or
-birth mismatch. The resulting set is frozen as the only possible signal targets before cleanup;
+birth mismatch. Candidate numeric PIDs are discovered first and their birth identities are
+observed; a second root-bound PID and process-group scope snapshot, bracketed by the same root
+checks, must still contain both the observed PID and its observed group before admission. A
+replacement, group change, disappearance, or incomplete re-observation remains detection-only and
+makes coverage unknown if still present. The resulting set is frozen as the only possible signal
+targets before cleanup;
 nested native evaluation and exact install consume the same primitive. Every signal rechecks the
 target birth identity, and terminal tracked-group scans detect late members without admitting
 them. Historical numeric process groups are never signaled. Only a member admitted during the
