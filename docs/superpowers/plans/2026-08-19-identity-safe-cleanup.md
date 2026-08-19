@@ -16,3 +16,10 @@ observation cannot be erased by a later successful observation. Terminal cleanup
 the owner-only digest-bound receipt reports a fixed unknown reason and null remaining counts.
 Nested evaluation must retain those nulls through aggregation and publication; no terminal snapshot
 is unknown, not passed.
+
+Post-launch observability completion rule: once `Popen` succeeds, cleanup is pending, the root is
+counted as created, and remaining processes are unknown before any PGID or process-table read.
+Timeout, uncertain or residual cleanup, parser failure, malformed output, and post-spawn operating-
+system failure use the unobservable record path. Every parse-derived grading, tool identity, and
+model/command/MCP/Saxo event count stays null or unknown through the signed case, child, candidate,
+and outer schemas. Only a completely decoded observable result may publish zero or a no-call fact.

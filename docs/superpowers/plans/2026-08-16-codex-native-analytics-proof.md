@@ -320,3 +320,12 @@ terminal-observation coverage as authenticated cleanup uncertainty with nullable
 focused, related, auth/privacy, type, plugin, static, catalog, eval-manifest, privacy, and diff gates
 pass. It remains uninstalled and unsealed pending independent static review; the latest sealed
 result remains `e5dc932` at 10/11 hard cases and 0/54 active profiles.
+
+Superseding local handoff: source `dd85c9c`, tree `b8ad581`, extends that strict uncertainty to
+every post-launch unobservable result. Timeout, uncertain or residual cleanup, parser failure,
+malformed output, and post-spawn process-observation failure retain null grading, tool identities,
+and model/command/MCP/Saxo event counts through authenticated failure publication. A successful
+spawn records cleanup pending and the root as created before fallible PGID or scope capture. The
+source passed focused tests twice plus related, auth/privacy, type, plugin, static, catalog,
+eval-manifest, privacy, and diff gates. It remains uninstalled and unsealed pending independent
+static review; sealed `e5dc932` and 0/54 activation remain unchanged.

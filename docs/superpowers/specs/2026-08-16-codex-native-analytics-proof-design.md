@@ -143,6 +143,14 @@ remaining process and group counts with a typed unknown receipt. Nested evaluati
 nulls through report aggregation; it never defaults `None` or an empty set of terminal snapshots to
 zero or passed cleanup.
 
+Nested model execution marks cleanup pending and counts the root process immediately after a
+successful spawn, before fallible process-group or scope observation. Any later timeout, uncertain
+or residual cleanup, output parse failure, malformed output, or post-spawn operating-system error
+has unknown transcript grading, assistant evidence, invoked tools, and model/command/MCP/Saxo event
+counts. The authenticated per-case summary, child failure, candidate runner, and outer publication
+must preserve those nulls; no post-launch unobservable result may be represented as an observable
+empty trace.
+
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
 record, a skipped model call, an absent or unknown MCP event identity, incomplete tool coverage,

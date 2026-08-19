@@ -578,3 +578,38 @@ production MCP server, Saxo request, broker operation, browser, sealed proof, or
 activity ran. The exact `e5dc932` result remains the latest sealed evidence with 10/11 hard cases,
 unknown broker/account/overall-cleanup facts, no retry, no downstream numerical proof or fresh SIM
 matrix, and 0/54 active profiles. Independent static review of `a59b231` is the next gate.
+
+## Local post-launch observability correction after `a59b231`
+
+Local source `dd85c9ca55cb43a677195320b714ee37bb6d5c6b`, tree
+`b8ad581990c36c06e22b7efadf98de59519749bd`, closes two independent false-negative paths without
+changing any sealed evidence. After a model process starts, timeout, unknown or residual cleanup,
+unparsed output, malformed output, and post-spawn operating-system failures now use one strict
+unobservable failure state. Transcript grading, assistant evidence, tool identities, and all
+model, command, MCP, and Saxo event counts remain null or unknown; they can no longer become false,
+zero, or an empty tool set. The same nullable state is authenticated through the per-case summary,
+verified child failure, candidate result, and outer publication.
+
+Immediately after a successful process spawn, nested evaluation records cleanup as pending, counts
+at least the root process as created, and leaves remaining processes unknown before any fallible
+process-group or scope observation. A post-spawn `ProcessLookupError` or `OSError` therefore cannot
+be reported as not-required cleanup with zero created or remaining processes. Legacy pre-launch
+failures retain their prior behavior, and the historical `dual_v1` path remains supported;
+malformed output is fail closed for either harness.
+
+Deterministic RED tests covered timeout, cleanup uncertainty and residue, parser failure, mixed
+malformed streams, both harnesses, post-spawn process-group failure through the production runner,
+authenticated child/candidate/outer propagation, and tampering. Final verification passed 153
+focused tests twice, 356 related evaluation/cleanup/proof tests, and 387 bounded auth/privacy tests.
+Ruff check and changed-file format passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes;
+plugin, nine-skill static, 60-tool/294-operation catalog, 34-case evaluation-manifest, nine-path
+privacy, and diff gates passed. One overbroad local test selection reached a synthetic install
+fixture and was stopped; it is excluded from the counts and left no residual Saxo test or install
+process. No exact or product install, model, production MCP, Saxo request, broker operation,
+browser, sealed proof, or broker/data network activity ran.
+
+This source is not installed or sealed. The exact `e5dc932` result remains the latest sealed
+evidence at 10/11 hard cases with unknown broker/account/overall-cleanup facts. No retry or
+downstream numerical proof, fresh SIM matrix, reconciliation, account equality, or activation ran;
+all 54 profiles remain quarantined with 0/54 active. Independent static review of `dd85c9c` is the
+next gate.
