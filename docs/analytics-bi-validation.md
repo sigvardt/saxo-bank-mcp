@@ -392,3 +392,42 @@ relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 ha
 unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
 account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
 quarantined and 0/54 are active. The branch remains local and unpushed.
+
+## Watcher drain/freeze correction after `9826b26`
+
+Local source `e5dc932f92fc850c9a2d7608074f3af0ae57b1c6`, tree
+`bd754a6288512ed9402dffbe0c4a336eae6130ef`, closes the command-runner watcher publication race
+without changing the sealed `c716047` evidence. The former cleanup path stopped the daemon watcher
+and joined it for one second, but could freeze the tracked identity tuple while an already-started
+capture pass was still between scope capture and publication. That pass could publish after cleanup
+had authenticated a false complete/zero result.
+
+Admission publication is now lock-bracketed in three states. A capture registers while publication
+is open. Cleanup atomically moves admission to draining and closes the root admission gate, so no
+new pass can start. An already-registered pass may publish before the bounded drain completes; after
+that boundary the immutable target tuple is frozen and every late pass is discarded without target
+mutation. A still-running watcher, discarded pass, failed capture, join error, or unknown drain
+observation makes the semantic cleanup result unknown, with unknown remaining counts and no
+authenticated cleanup receipt. A fully drained watcher remains eligible for authenticated cleanup;
+the owner-only receipt digest includes the allowed drain state and strict verification rejects
+tampering or an impossible authenticated late/discarded state.
+
+The deterministic RED paused a watcher after its root-bound scope had been computed but before it
+could publish, released the root, and expired the bounded join. The former source returned success
+without an error; the corrected path refuses with `process_cleanup_unknown`, publishes no signed
+zero, and does not admit the late identity. Companion coverage proves completed publication drains
+and authenticates, join and capture operating-system errors remain unknown, and private command
+arguments and paths do not enter the receipt.
+
+Final local verification passed 199 focused cleanup/evaluation/failure-envelope tests twice, 370
+related cleanup/install/evaluation/proof tests, and 431 safe auth/privacy tests. Ruff check and
+changed-file format passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin,
+nine-skill static, 60-tool/294-operation catalog, 34-case evaluation-manifest, bounded privacy,
+and `git diff --check` gates passed.
+
+No exact install, model, production MCP server, Saxo request, broker operation, browser, sealed
+proof, or broker/data network activity ran. This source is not installed or sealed and does not
+relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 hard cases with
+unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
+account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
+quarantined and 0/54 are active. The branch remains local and unpushed.

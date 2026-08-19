@@ -225,6 +225,14 @@ verification accepts cleanup success only from consistent `authenticated` or
 Missing, malformed, inconsistent, write-failed, unknown, or incomplete cleanup evidence fails
 closed and cannot contribute false zero event or process claims.
 
+Command-runner watcher publication is a separate authenticated boundary. Each capture registers
+under the publication lock before collecting its root-bound scope. Cleanup closes new admission,
+drains already-registered captures for a bounded interval, and then freezes the immutable target
+tuple. A completed capture may publish before freeze. A capture that is still alive, discarded,
+failed, or affected by a join error makes semantic cleanup unknown and cannot produce a signed
+zero-process result; only a drained or not-applicable watcher state may enter an authenticated
+owner-only cleanup receipt.
+
 - [ ] **Step 4: Run focused producer and evaluation tests twice**
 
 - [ ] **Step 5: Run all related proof, install, and evaluation tests**

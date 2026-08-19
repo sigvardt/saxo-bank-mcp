@@ -2340,9 +2340,9 @@ disclaimer-response facts remain unknown. Authenticated runtime-consumption and 
 cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
 process, or proof run root. No retry ran.
 
-Local corrective source `9826b26`, tree `0bc77c9`, keeps the sealed `c716047` evidence unchanged
-while incorporating the scenario contract and all shared cleanup work through `7467f11`. The
-command runner and nested evaluator now use the same root-handle-bound identity-admission gate.
+Local corrective source `e5dc932`, tree `bd754a6`, keeps the sealed `c716047` evidence unchanged
+while incorporating the scenario contract and all shared cleanup work through `9826b26`. The
+command runner and nested evaluator use the same root-handle-bound identity-admission gate.
 It requires the original `Popen` root to remain active, unreaped, and same-birth across two
 PID/process-group snapshots; every candidate is then re-observed and must retain the same PID,
 birth identity, and group before the final root check. Every changed, missing, unknown,
@@ -2352,13 +2352,20 @@ confirmed during the valid root window remains individually cleanable after lead
 own birth identity and group match. Exact-install cleanup retains the same immutable-target,
 per-signal recheck, terminal membership scan, and strict authenticated zero-count rules.
 
-The local corrective source passed 192 focused tests twice, 363 related tests, 431 safe
+Command-runner admission publication now has a separate bounded drain/freeze boundary. Capture
+passes register before taking a scope. Cleanup closes new admission, lets already-registered passes
+publish only during the bounded drain, and then freezes the immutable target tuple. Any pass still
+alive, discarded after freeze, failed during capture, or affected by a join error makes cleanup
+unknown and cannot authenticate zero remaining processes. A drained pass is digest-bound in the
+owner-only cleanup receipt, whose strict verifier rejects drain-state tampering.
+
+The local corrective source passed 199 focused tests twice, 370 related tests, 431 safe
 auth/privacy tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/
 0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No exact
 install, model, production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity
 ran. The source is not installed or sealed and does not relabel `c716047`.
 
-The independent native review should verify `9826b26` before any exact install or sealed attempt.
+The independent native review should verify `e5dc932` before any exact install or sealed attempt.
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
