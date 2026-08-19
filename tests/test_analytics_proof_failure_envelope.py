@@ -2047,6 +2047,7 @@ def test_outer_unknown_cleanup_receipt_reason_is_authenticated_and_fail_closed(
     assert "PRIVATE" not in rendered
     assert "pid" not in rendered.lower()
     assert "birth" not in rendered.lower()
+    assert "offending_observation" not in rendered
 
     tampered = publication.model_dump(mode="json")
     cast("dict[str, Any]", tampered["result"])["outer_process_cleanup_unknown_reason"] = (
@@ -2054,6 +2055,15 @@ def test_outer_unknown_cleanup_receipt_reason_is_authenticated_and_fail_closed(
     )
     with pytest.raises(ValidationError):
         publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
+
+    private_observation_injection = publication.model_dump(mode="json")
+    cast("dict[str, Any]", private_observation_injection["result"])[
+        "outer_process_cleanup_offending_observations"
+    ] = [{"pid": 9999}]
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(
+            json.dumps(private_observation_injection),
+        )
 
 
 @pytest.mark.parametrize(

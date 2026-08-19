@@ -114,8 +114,10 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
         return command_runner.ProcessObservation(
             pid=pid,
             pgid=child_pgid,
+            ppid=ROOT_PID,
             birth_identity=child_birth,
             state="unknown" if child_unknown else "running",
+            process_category="process_observer" if child_unknown else None,
         )
 
     def group_members(pgid: int) -> tuple[int, ...]:
@@ -154,7 +156,8 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
     monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
     monkeypatch.setattr(command_runner.time, "sleep", skip_wait)
 
-    result = eval_process.EvalProcessManager().run(
+    manager = eval_process.EvalProcessManager()
+    result = manager.run(
         ("/bin/true",),
         cwd=tmp_path,
         env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(tmp_path)},
@@ -167,6 +170,20 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
     assert result.process_cleanup == expected_cleanup
     if expected_cleanup == "unknown":
         assert result.remaining_processes is None
+    terminal = manager._cleanup_snapshots[0]  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    if transition in {"moved", "replaced", "unknown"}:
+        assert terminal.offending_observations
+        assert any(
+            item.detection_source == "second_snapshot" and item.admission_phase == "admission_open"
+            for item in terminal.offending_observations
+        )
+        if transition == "unknown":
+            assert any(
+                item.process_category == "process_observer" and item.process_identity_sha256 is None
+                for item in terminal.offending_observations
+            )
+    else:
+        assert terminal.offending_observations == ()
     assert any(pid == CHILD_PID for pid, _sig in signals) is child_signaled
 
 

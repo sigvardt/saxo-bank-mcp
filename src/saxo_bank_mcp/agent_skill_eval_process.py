@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from saxo_bank_mcp.agent_skill_command_runner import (
@@ -102,6 +102,15 @@ class EvalProcessManager:
             coverage_stage=scope.coverage_stage,
             coverage_subreason=scope.coverage_subreason,
         )
+        if scope.offending_observations:
+            observations = {
+                item.model_dump_json(): item
+                for item in (*scope.offending_observations, *snapshot.offending_observations)
+            }
+            snapshot = replace(
+                snapshot,
+                offending_observations=tuple(observations.values()),
+            )
         self._cleanup_snapshots.append(snapshot)
         terminated = snapshot.signaled_process_count
         self.terminated_processes += terminated

@@ -2703,3 +2703,515 @@ def test_current_cleanup_evidence_rejects_missing_or_mismatched_diagnostic() -> 
             cleanup_coverage_stage="group_member",
             cleanup_coverage_subreason="observation_unknown",
         )
+
+
+def test_persistent_late_descendant_is_private_diagnostic_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late member is never signalled and survives as correlated private evidence."""
+    leader_pid = 7101
+    late_pid = 7102
+    leader_running = True
+    signals: list[tuple[int, signal.Signals]] = []
+    leader = command_runner.ProcessCleanupIdentity(
+        pid=leader_pid,
+        pgid=leader_pid,
+        birth_identity="leader-birth",
+        initial_state="running",
+    )
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == leader_pid:
+            if not leader_running:
+                return None
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=leader_pid,
+                ppid=1,
+                birth_identity="leader-birth",
+                state="running",
+                process_category=None,
+                process_identity_sha256="a" * 64,
+            )
+        assert pid == late_pid
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=leader_pid,
+            ppid=leader_pid,
+            birth_identity="late-birth",
+            state="running",
+            process_category="process_observer",
+            process_identity_sha256=None,
+        )
+
+    def group_members(pgid: int) -> tuple[tuple[int, ...], bool]:
+        assert pgid == leader_pid
+        return (leader_pid, late_pid), True
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        nonlocal leader_running
+        signals.append((pid, sig))
+        if pid == leader_pid:
+            leader_running = False
+
+    def skip_wait(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", skip_wait)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (leader,),
+        tracked_pids=(leader_pid,),
+        tracked_pgids=(leader_pid,),
+    )
+
+    assert all(pid != late_pid for pid, _sig in signals)
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+    assert tuple(item.pid for item in snapshot.offending_observations) == (late_pid, late_pid)
+    assert tuple(item.detection_source for item in snapshot.offending_observations) == (
+        "pre_signal_group_scan",
+        "post_signal_group_rescan",
+    )
+    assert all(
+        item.admission_phase == "admission_closed" for item in snapshot.offending_observations
+    )
+    assert all(
+        item.process_category == "process_observer" and item.process_identity_sha256 is None
+        for item in snapshot.offending_observations
+    )
+
+    receipt_path = (tmp_path / "late-private.json").resolve()
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="PRIVATE_COMMAND_DO_NOT_PUBLISH",
+        argv=("/private/interpreter", "PRIVATE_ARGUMENT_DO_NOT_PUBLISH"),
+        cwd=tmp_path,
+        root_pid=leader_pid,
+        root_pgid=leader_pid,
+        terminal_snapshot=snapshot,
+    )
+    assert evidence.receipt_sha256 is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+    assert receipt is not None
+    assert receipt.offending_observations == snapshot.offending_observations
+    assert receipt.remaining_process_count is None
+    assert receipt.remaining_process_group_count is None
+    assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    raw = receipt_path.read_text(encoding="utf-8")
+    assert "PRIVATE" not in raw
+    assert str(tmp_path) not in raw
+
+
+@pytest.mark.parametrize(
+    ("command_name", "expected_category"),
+    [("ps", "process_observer"), ("/private/runtime/python3", None)],
+)
+def test_process_observation_reduces_command_identity_to_category_or_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    command_name: str,
+    expected_category: command_runner.CleanupProcessCategory | None,
+) -> None:
+    """The ps observer is classed safely; every other command is retained only as a hash."""
+    parent_pid = 101
+    process_group_id = 202
+    process_id = 303
+    completed = subprocess.CompletedProcess(
+        args=("ps",),
+        returncode=0,
+        stdout=(
+            f"{parent_pid} {process_group_id} Rs   Wed Aug 19 14:46:16 2026     {command_name}\n"
+        ),
+        stderr="",
+    )
+
+    def fake_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return completed
+
+    monkeypatch.setattr(command_runner.subprocess, "run", fake_run)
+
+    observation = command_runner.read_process_observation(process_id)
+
+    assert observation is not None
+    assert observation.pid == process_id
+    assert observation.ppid == parent_pid
+    assert observation.pgid == process_group_id
+    assert observation.birth_identity == "Wed Aug 19 14:46:16 2026"
+    assert observation.process_category == expected_category
+    if expected_category is None:
+        assert (
+            observation.process_identity_sha256
+            == hashlib.sha256(
+                command_name.encode(),
+            ).hexdigest()
+        )
+    else:
+        assert observation.process_identity_sha256 is None
+    assert command_name not in repr(observation.process_identity_sha256)
+
+
+def test_vanished_uncaptured_member_retains_absent_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader_pid = 7201
+    vanished_pid = 7202
+    leader = command_runner.ProcessCleanupIdentity(
+        pid=leader_pid,
+        pgid=leader_pid,
+        birth_identity="leader-birth",
+        initial_state="running",
+    )
+    group_scans = 0
+    leader_running = True
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == vanished_pid:
+            return None
+        if not leader_running:
+            return None
+        return command_runner.ProcessObservation(
+            pid=leader_pid,
+            pgid=leader_pid,
+            ppid=1,
+            birth_identity="leader-birth",
+            state="running",
+            process_identity_sha256="b" * 64,
+        )
+
+    def group_members(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        nonlocal group_scans
+        group_scans += 1
+        return ((leader_pid, vanished_pid) if group_scans == 1 else ()), True
+
+    def record_signal(pid: int, _sig: signal.Signals) -> None:
+        nonlocal leader_running
+        if pid == leader_pid:
+            leader_running = False
+
+    def skip_wait(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", skip_wait)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (leader,),
+        tracked_pids=(leader_pid,),
+        tracked_pgids=(leader_pid,),
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+    assert len(snapshot.offending_observations) == 1
+    vanished = snapshot.offending_observations[0]
+    assert vanished.pid == vanished_pid
+    assert vanished.pgid == leader_pid
+    assert vanished.ppid is None
+    assert vanished.birth_identity_sha256 is None
+    assert vanished.observation_state == "absent"
+    assert vanished.detection_source == "pre_signal_group_scan"
+
+
+def test_reused_pid_and_pgid_are_hashed_and_never_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pid = 7301
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=pid,
+        pgid=pid,
+        birth_identity="old-birth",
+        initial_state="running",
+    )
+    signals: list[int] = []
+
+    def observation(_pid: int) -> command_runner.ProcessObservation:
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=pid,
+            ppid=1,
+            birth_identity="replacement-birth",
+            state="running",
+            process_identity_sha256="c" * 64,
+        )
+
+    def group_members(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        return (pid,), True
+
+    def record_signal(target: int, _sig: signal.Signals) -> None:
+        signals.append(target)
+
+    def skip_wait(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        group_members,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+    monkeypatch.setattr(command_runner.time, "sleep", skip_wait)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (identity,),
+        tracked_pids=(pid,),
+        tracked_pgids=(pid,),
+    )
+
+    assert signals == []
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+    assert tuple(item.observation_state for item in snapshot.offending_observations) == (
+        "identity_changed",
+        "identity_changed",
+    )
+    assert all(item.pid == pid and item.pgid == pid for item in snapshot.offending_observations)
+    assert all(
+        item.birth_identity_sha256 == hashlib.sha256(b"replacement-birth").hexdigest()
+        for item in snapshot.offending_observations
+    )
+
+
+def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legacy(
+    tmp_path: Path,
+) -> None:
+    receipt_path = (tmp_path / "private-observations.json").resolve()
+    observation = command_runner.ProcessCleanupOffendingObservation(
+        pid=7401,
+        pgid=7400,
+        ppid=7400,
+        birth_identity_sha256="d" * 64,
+        detection_source="historical_pid_check",
+        observation_state="running",
+        admission_phase="admission_closed",
+        process_category=None,
+        process_identity_sha256="e" * 64,
+    )
+    snapshot = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="unknown",
+        coverage_stage="group_member",
+        coverage_subreason="uncaptured_member",
+        offending_observations=(observation,),
+    )
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="PRIVATE_COMMAND",
+        argv=("/private/runtime", "PRIVATE_ARGUMENT"),
+        cwd=tmp_path,
+        root_pid=7400,
+        root_pgid=7400,
+        terminal_snapshot=snapshot,
+    )
+    digest = evidence.receipt_sha256
+    assert digest is not None
+    original = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    tampered = json.loads(json.dumps(original))
+    tampered["offending_observations"][0]["pid"] = 9999
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=digest,
+        )
+        is None
+    )
+
+    extra = json.loads(json.dumps(original))
+    extra["offending_observations"][0]["raw_command"] = "/private/do-not-publish"
+    material = {key: value for key, value in extra.items() if key != "receipt_sha256"}
+    extra["receipt_sha256"] = hashlib.sha256(
+        json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(extra), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=extra["receipt_sha256"],
+        )
+        is None
+    )
+
+    legacy = json.loads(json.dumps(original))
+    legacy.pop("offending_observations")
+    material = {key: value for key, value in legacy.items() if key != "receipt_sha256"}
+    legacy["receipt_sha256"] = hashlib.sha256(
+        json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(legacy), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    verified = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=legacy["receipt_sha256"],
+    )
+    assert verified is not None
+    assert verified.offending_observations is None
+    raw = receipt_path.read_text(encoding="utf-8")
+    assert "PRIVATE" not in raw
+    assert str(tmp_path) not in raw
+
+
+def test_run_command_binds_scope_observations_only_into_private_unknown_receipt(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_pid = 7500
+    offender = command_runner.ProcessCleanupOffendingObservation(
+        pid=7501,
+        pgid=root_pid,
+        ppid=root_pid,
+        birth_identity_sha256="f" * 64,
+        detection_source="second_snapshot",
+        observation_state="group_changed",
+        admission_phase="admission_open",
+        process_category=None,
+        process_identity_sha256="a" * 64,
+    )
+    receipt_path = (tmp_path / "scope-observation.json").resolve()
+
+    class ExitingProcess:
+        pid = root_pid
+        returncode: int | None = None
+        poll_calls = 0
+
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            if self.poll_calls <= ROOT_BINDING_POLL_COUNT:
+                return None
+            self.returncode = 0
+            return 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    def capture_scope(
+        _admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        return command_runner.ProcessCleanupScope(
+            identities=(),
+            tracked_pids=(root_pid, offender.pid),
+            tracked_pgids=(root_pid,),
+            coverage_status="unknown",
+            coverage_stage="group_member",
+            coverage_subreason="changed_identity_or_group_member",
+            offending_observations=(offender,),
+        )
+
+    def unknown_cleanup(
+        _identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
+        tracked_pids: tuple[int, ...],
+        tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        del tracked_pids, tracked_pgids
+        assert coverage_status == "unknown"
+        return command_runner.ProcessCleanupTerminalSnapshot(
+            targets=(),
+            coverage_status=coverage_status,
+            coverage_stage=coverage_stage,
+            coverage_subreason=coverage_subreason,
+        )
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ExitingProcess:
+        return ExitingProcess()
+
+    def fake_getpgid(_pid: int) -> int:
+        return root_pid
+
+    def root_observation(pid: int) -> command_runner.ProcessObservation:
+        return command_runner.ProcessObservation(
+            pid=pid,
+            pgid=root_pid,
+            birth_identity="root-birth",
+            state="running",
+        )
+
+    def empty_snapshot(
+        _pid: int | None,
+        _pgid: int | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], command_runner.CleanupCoverage]:
+        return (), (), "complete"
+
+    monkeypatch.setattr(
+        command_runner.subprocess,
+        "Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(command_runner.os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(
+        command_runner,
+        "read_process_observation",
+        root_observation,
+    )
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        capture_scope,
+    )
+    monkeypatch.setattr(
+        command_runner,
+        "_snapshot_tree_checked",
+        empty_snapshot,
+    )
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", unknown_cleanup)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "private_scope_probe",
+            ("ignored",),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    digest = caught.value.cleanup_identity_receipt_sha256
+    assert digest is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=digest,
+    )
+    assert receipt is not None
+    assert receipt.offending_observations == (offender,)
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
