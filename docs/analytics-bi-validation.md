@@ -719,3 +719,36 @@ gates, SIM auth, session capability, model evaluation, sealed proof, numerical p
 60-tool SIM matrix, reconciliation, account comparison, or activation. No later broker-bound stage
 was invoked, no retry ran, and no result is promoted from this failed install. Sealed `e5dc932`
 remains the latest sealed evidence; all 54 profiles remain quarantined with 0/54 active.
+
+## Terminal exact `f96a3b2` third attempt
+
+The first two attempts and their receipts remained untouched. After the reviewer's metadata
+refresh, 12 read-only caller-cache fingerprints stayed identical for 575 seconds: digest
+`92531540...93d4`, 22,434 cache nodes, and an unchanged latest cache mtime. The new owner-only
+evidence parent was created only after that quiet window; its unique installer child remained
+absent for transactional creation. The detached source
+`f96a3b2df57ab66c71d6bf04e40b5637b40ef09b`, tree
+`265a11abb3abbd19d6f54cdd122c19d8bb4453f0`, was clean and the system disk had 75 GiB free.
+
+The single retained-runtime install passed with 621 byte-exact files, 9 skills, 1 MCP server,
+60 tools, unchanged caller fingerprint, owner-only state, privacy pass, and complete process
+cleanup with zero remaining PIDs or groups. The single verify-only readback also passed with
+60 tools and unchanged caller state. The signed exact-candidate full suite then passed 2,943 tests
+with zero failures, errors, or skips; candidate source was clean before and after, raw output was
+not retained, and the candidate-owned external temp root was absent at completion.
+
+Post-suite Ruff lint, BasedPyright (0 errors, 0 warnings, 0 notes), Codex plugin validation, all
+nine skill validators, static gates, the 60-tool/294-operation catalog, the 34-case evaluation
+manifest, and the 16-path privacy scan passed. Whole-repository Ruff formatting still reports the
+known 95-file baseline drift; those files were not changed and formatting is not claimed as passed.
+
+The terminal install-structure readback then failed closed because the caller plugin-cache
+fingerprint had changed to `b44a6cf6...c610` after the full suite. All 20 other structural checks
+passed, including binding, cache/source/interpreter/lock/producer/probe digests, exact inventory,
+clean clone, candidate/tree binding, owner-only modes, authenticated install cleanup, and the
+present unconsumed proof runtime. The exact concurrent writer is not established. Per the
+stop-on-first-mismatch rule, local auth, session capability, model evaluation, sealed proof,
+all-54 numerical proof, fresh 60-tool SIM matrix, reconciliation, controlled lifecycle, account
+comparison, and activation did not run. No retry occurred; the owner-only runtime remains preserved
+and unconsumed, no task-owned process remains, sealed `e5dc932` remains the latest sealed evidence,
+and all 54 profiles remain quarantined with 0/54 active.

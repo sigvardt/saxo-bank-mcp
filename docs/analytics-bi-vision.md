@@ -2401,6 +2401,23 @@ root is preserved, no retry is permitted, sealed `e5dc932` remains the latest se
 activation remains 0/54. The next action is an independent diagnosis or new authorization; this
 attempt must not be retried or described as an exact install pass.
 
+A newly authorized third attempt first established a 575-second caller-cache quiet window with 12
+identical fingerprints, then used a fresh absent installer-owned run root. Exact `f96a3b2` install
+and verify-only passed at 621 files, 9 skills, 1 MCP server, and 60 tools. The signed full suite
+passed 2,943 tests with no failures, errors, or skips, and required lint, type, plugin, skill,
+static, catalog, evaluation-manifest, and privacy checks passed. The known 95-file whole-repository
+Ruff format drift remains an observation, not a pass, and was not modified.
+
+The final install-structure readback stopped the sequence because the caller plugin-cache
+fingerprint changed after the suite. Every other structural check passed, including exact source,
+installed bytes, proof-runtime binding, interpreter and dependency digests, owner-only modes,
+authenticated install cleanup, and unconsumed runtime state. The concurrent writer is unknown, so
+the mismatch is not assigned to candidate source and is not retried. No SIM capability call,
+sealed proof, numerical proof, fresh matrix, reconciliation, account comparison, or activation ran.
+The bound runtime remains owner-only and unconsumed, sealed `e5dc932` remains the latest sealed
+evidence, and activation remains 0/54. A future attempt requires a new authorization and a caller
+state boundary that remains stable through the terminal structural readback.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
