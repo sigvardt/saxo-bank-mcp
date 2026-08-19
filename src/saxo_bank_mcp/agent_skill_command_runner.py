@@ -183,6 +183,135 @@ class ProcessCleanupScope:
     tracked_pgids: tuple[int, ...]
 
 
+@dataclass(slots=True)
+class RootBoundProcessCleanupAdmission:
+    """Admit cleanup identities only inside one live, same-birth root window."""
+
+    process: subprocess.Popen[str]
+    root_pgid: int
+    root_identity: ProcessCleanupIdentity | None
+    _closed: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def close(self) -> None:
+        self._closed.set()
+
+    def capture_scope(self) -> ProcessCleanupScope:
+        """Take two root-bracketed snapshots and admit only exact stable identities."""
+        root_pid = self.process.pid
+        root_identities = (self.root_identity,) if self.root_identity is not None else ()
+        tracked_pids: set[int] = {root_pid}
+        tracked_pgids: set[int] = {self.root_pgid}
+        if not self._root_allows_admission():
+            return self._detection_scope(root_identities, tracked_pids, tracked_pgids)
+
+        try:
+            first_pids, first_pgids = _snapshot_tree(root_pid, self.root_pgid)
+        except OSError:
+            self.close()
+            return ProcessCleanupScope(
+                identities=root_identities,
+                tracked_pids=tuple(sorted(tracked_pids)),
+                tracked_pgids=tuple(sorted(tracked_pgids)),
+            )
+        tracked_pids.update(first_pids)
+        tracked_pgids.update(first_pgids)
+        observations = tuple(
+            observation
+            for pid in first_pids
+            if (observation := read_process_observation(pid)) is not None
+            and observation.state != "unknown"
+        )
+        if not self._root_allows_admission():
+            return ProcessCleanupScope(
+                identities=root_identities,
+                tracked_pids=tuple(sorted(tracked_pids)),
+                tracked_pgids=tuple(sorted(tracked_pgids)),
+            )
+
+        try:
+            second_pids, second_pgids = _snapshot_tree(root_pid, self.root_pgid)
+        except OSError:
+            self.close()
+            return ProcessCleanupScope(
+                identities=root_identities,
+                tracked_pids=tuple(sorted(tracked_pids)),
+                tracked_pgids=tuple(sorted(tracked_pgids)),
+            )
+        tracked_pids.update(second_pids)
+        tracked_pgids.update(second_pgids)
+        second_pid_scope = frozenset(second_pids)
+        second_pgid_scope = frozenset(second_pgids)
+        confirmed: dict[int, ProcessCleanupIdentity] = {
+            identity.pid: identity for identity in root_identities
+        }
+        for observation in observations:
+            reobserved = read_process_observation(observation.pid)
+            if not (
+                reobserved is not None
+                and reobserved.state != "unknown"
+                and reobserved.pid == observation.pid
+                and reobserved.birth_identity == observation.birth_identity
+                and reobserved.pgid == observation.pgid
+                and observation.pid in second_pid_scope
+                and observation.pgid in second_pgid_scope
+            ):
+                continue
+            confirmed[observation.pid] = ProcessCleanupIdentity(
+                pid=observation.pid,
+                pgid=observation.pgid,
+                birth_identity=observation.birth_identity,
+                initial_state=observation.state,
+            )
+        if not self._root_allows_admission():
+            confirmed = {identity.pid: identity for identity in root_identities}
+        return ProcessCleanupScope(
+            identities=tuple(confirmed[pid] for pid in sorted(confirmed)),
+            tracked_pids=tuple(sorted(tracked_pids)),
+            tracked_pgids=tuple(sorted(tracked_pgids)),
+        )
+
+    def _root_allows_admission(self) -> bool:
+        if self._closed.is_set() or self.root_identity is None:
+            return False
+        try:
+            return_code = self.process.poll()
+        except OSError:
+            self.close()
+            return False
+        if return_code is not None:
+            self.close()
+            return False
+        observation = read_process_observation(self.process.pid)
+        if not (
+            observation is not None
+            and observation.state == "running"
+            and observation.pid == self.root_identity.pid
+            and observation.pgid == self.root_identity.pgid
+            and observation.birth_identity == self.root_identity.birth_identity
+        ):
+            self.close()
+            return False
+        return not self._closed.is_set()
+
+    def _detection_scope(
+        self,
+        identities: tuple[ProcessCleanupIdentity, ...],
+        tracked_pids: set[int],
+        tracked_pgids: set[int],
+    ) -> ProcessCleanupScope:
+        try:
+            pids, pgids = _snapshot_tree(self.process.pid, self.root_pgid)
+        except OSError:
+            pids, pgids = (), ()
+        tracked_pids.update(pids)
+        tracked_pgids.update(pgids)
+        return ProcessCleanupScope(
+            identities=identities,
+            tracked_pids=tuple(sorted(tracked_pids)),
+            tracked_pgids=tuple(sorted(tracked_pgids)),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class CommandCleanupIdentityEvidence:
     evidence_status: CleanupIdentityEvidenceKind
@@ -258,12 +387,11 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     process: subprocess.Popen[str] | None = None
     pgid: int | None = None
     root_pid: int | None = None
-    root_identity: ProcessCleanupIdentity | None = None
+    admission: RootBoundProcessCleanupAdmission | None = None
     tracked_pids: list[int] = []
     tracked_pgids: list[int] = []
     tracked_identities: dict[int, ProcessCleanupIdentity] = {}
     stop_watch = threading.Event()
-    identity_admission_closed = threading.Event()
     watch_lock = threading.Lock()
     timed_out = False
     stdout = ""
@@ -276,102 +404,37 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
     def _poll_root_process() -> int | None:
         if process is None:
-            identity_admission_closed.set()
+            if admission is not None:
+                admission.close()
             return None
         try:
             return_code = process.poll()
         except OSError:
-            identity_admission_closed.set()
+            if admission is not None:
+                admission.close()
             raise
-        if return_code is not None:
-            identity_admission_closed.set()
+        if return_code is not None and admission is not None:
+            admission.close()
         return return_code
 
-    def _root_allows_new_identity() -> bool:
-        if identity_admission_closed.is_set() or root_identity is None or root_pid is None:
-            return False
-        if _poll_root_process() is not None:
-            return False
-        observation = read_process_observation(root_pid)
-        if not (
-            observation is not None
-            and observation.state == "running"
-            and observation.birth_identity == root_identity.birth_identity
-            and observation.pgid == root_identity.pgid
-        ):
-            identity_admission_closed.set()
-            return False
-        return not identity_admission_closed.is_set()
-
-    def _capture_identities(pids: tuple[int, ...]) -> None:
-        allow_new = _root_allows_new_identity()
-        observations = tuple(
-            observation
-            for pid in pids
-            if (observation := read_process_observation(pid)) is not None
-            and observation.state != "unknown"
-        )
-        second_scope_pids: tuple[int, ...] = ()
-        second_scope_pgids: tuple[int, ...] = ()
-        confirmed_identity_scope: set[tuple[int, str, int]] = set()
-        if allow_new and _root_allows_new_identity():
-            try:
-                second_scope_pids, second_scope_pgids = _snapshot_tree(root_pid, pgid)
-            except OSError:
-                identity_admission_closed.set()
-                allow_new = False
-            else:
-                for observation in observations:
-                    reobserved = read_process_observation(observation.pid)
-                    if (
-                        reobserved is not None
-                        and reobserved.state != "unknown"
-                        and reobserved.pid == observation.pid
-                        and reobserved.birth_identity == observation.birth_identity
-                        and reobserved.pgid == observation.pgid
-                    ):
-                        confirmed_identity_scope.add(
-                            (
-                                observation.pid,
-                                observation.birth_identity,
-                                observation.pgid,
-                            )
-                        )
-                allow_new = _root_allows_new_identity()
-        else:
-            allow_new = False
-        admitted_pid_scope = frozenset(second_scope_pids)
-        admitted_pgid_scope = frozenset(second_scope_pgids)
+    def _capture_identities() -> None:
+        if admission is None:
+            return
+        scope = admission.capture_scope()
         with watch_lock:
-            for observation in observations:
-                identity = tracked_identities.get(observation.pid)
+            tracked_pids[:] = sorted(set(tracked_pids) | set(scope.tracked_pids))
+            tracked_pgids[:] = sorted(set(tracked_pgids) | set(scope.tracked_pgids))
+            for candidate in scope.identities:
+                identity = tracked_identities.get(candidate.pid)
                 if identity is None:
-                    if not (
-                        allow_new
-                        and not identity_admission_closed.is_set()
-                        and observation.pid in admitted_pid_scope
-                        and observation.pgid in admitted_pgid_scope
-                        and (
-                            observation.pid,
-                            observation.birth_identity,
-                            observation.pgid,
-                        )
-                        in confirmed_identity_scope
-                    ):
-                        continue
-                    tracked_identities[observation.pid] = ProcessCleanupIdentity(
-                        pid=observation.pid,
-                        pgid=observation.pgid,
-                        birth_identity=observation.birth_identity,
-                        initial_state=observation.state,
-                    )
+                    tracked_identities[candidate.pid] = candidate
                 elif (
-                    identity.birth_identity == observation.birth_identity
-                    and identity.pgid != observation.pgid
+                    identity.birth_identity == candidate.birth_identity
+                    and identity.pgid != candidate.pgid
                 ):
-                    tracked_identities[observation.pid] = ProcessCleanupIdentity(
+                    tracked_identities[candidate.pid] = ProcessCleanupIdentity(
                         pid=identity.pid,
-                        pgid=observation.pgid,
+                        pgid=candidate.pgid,
                         birth_identity=identity.birth_identity,
                         initial_state=identity.initial_state,
                     )
@@ -391,14 +454,10 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
     def _watch() -> None:
         while not stop_watch.is_set():
-            if root_pid is None:
+            if admission is None:
                 time.sleep(0.001)
                 continue
-            pids, pgids = _snapshot_tree(root_pid, pgid)
-            _capture_identities(pids)
-            with watch_lock:
-                tracked_pids[:] = sorted(set(tracked_pids) | set(pids))
-                tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids))
+            _capture_identities()
             time.sleep(0.001)
 
     watcher: threading.Thread | None = None
@@ -414,26 +473,15 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         )
         root_pid = process.pid
         pgid = os.getpgid(process.pid)
-        root_identity = capture_process_cleanup_identity(root_pid)
-        if root_identity is not None:
-            with watch_lock:
-                tracked_identities[root_identity.pid] = root_identity
+        admission = open_root_bound_process_cleanup_admission(process, pgid)
         # Immediate snapshot so fast-exit parents still leave tracked members.
-        first_pids, first_pgids = _snapshot_tree(root_pid, pgid)
-        _capture_identities(first_pids)
-        with watch_lock:
-            tracked_pids[:] = list(first_pids)
-            tracked_pgids[:] = list(first_pgids)
+        _capture_identities()
         watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
         watcher.start()
         deadline = time.monotonic() + timeout_seconds
         while _poll_root_process() is None:
             # Continuous capture while parent is alive (escaped groups / new sessions).
-            pids_now, pgids_now = _snapshot_tree(root_pid, pgid)
-            _capture_identities(pids_now)
-            with watch_lock:
-                tracked_pids[:] = sorted(set(tracked_pids) | set(pids_now))
-                tracked_pgids[:] = sorted(set(tracked_pgids) | set(pgids_now))
+            _capture_identities()
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
@@ -448,7 +496,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         tracked_pgid = pgid
         pgids = tuple(sorted(set(pgids) | {tracked_pgid}))
         pids = tuple(sorted(set(pids) | set(process_group_members(tracked_pgid))))
-        _capture_identities(pids)
+        _capture_identities()
     except OSError as exc:
         process_error = exc
     finally:
@@ -472,8 +520,14 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         if pgid is not None:
             pgids = tuple(sorted(set(pgids) | {pgid}))
             pids = tuple(sorted(set(pids) | set(process_group_members(pgid))))
-        _capture_identities(pids)
+        _capture_identities()
         with watch_lock:
+            pids, pgids = _merge_snapshots(
+                pids,
+                pgids,
+                tuple(tracked_pids),
+                tuple(tracked_pgids),
+            )
             identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
         # Signal only still-running processes whose birth identity still matches. The returned
         # terminal snapshot is the sole source for the receipt and remaining candidate counts.
@@ -645,19 +699,42 @@ def capture_process_cleanup_identity(pid: int) -> ProcessCleanupIdentity | None:
     )
 
 
-def capture_process_cleanup_scope(root_pid: int, root_pgid: int) -> ProcessCleanupScope:
-    """Capture a child tree immediately; numeric IDs are discovery hints, never signal targets."""
-    pids, pgids = _snapshot_tree(root_pid, root_pgid)
-    pids = tuple(sorted(set(pids) | {root_pid} | set(process_group_members(root_pgid))))
-    pgids = tuple(sorted(set(pgids) | {root_pgid}))
-    identities = tuple(
-        identity for pid in pids if (identity := capture_process_cleanup_identity(pid)) is not None
+def open_root_bound_process_cleanup_admission(
+    process: subprocess.Popen[str],
+    root_pgid: int,
+) -> RootBoundProcessCleanupAdmission:
+    """Bind all later identity admission to one exact root process handle and birth."""
+    root_identity: ProcessCleanupIdentity | None = None
+    try:
+        root_active = process.poll() is None
+    except OSError:
+        root_active = False
+    if root_active:
+        candidate = capture_process_cleanup_identity(process.pid)
+        if (
+            candidate is not None
+            and candidate.pid == process.pid
+            and candidate.pgid == root_pgid
+            and candidate.initial_state == "running"
+        ):
+            try:
+                process.poll()
+            except OSError:
+                candidate = None
+            root_identity = candidate
+    return RootBoundProcessCleanupAdmission(
+        process=process,
+        root_pgid=root_pgid,
+        root_identity=root_identity,
     )
-    return ProcessCleanupScope(
-        identities=identities,
-        tracked_pids=pids,
-        tracked_pgids=pgids,
-    )
+
+
+def capture_process_cleanup_scope(
+    process: subprocess.Popen[str],
+    root_pgid: int,
+) -> ProcessCleanupScope:
+    """Capture one nested child scope through the shared root-bound admission gate."""
+    return open_root_bound_process_cleanup_admission(process, root_pgid).capture_scope()
 
 
 def observe_process_cleanup_target(

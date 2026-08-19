@@ -78,7 +78,7 @@ class EvalProcessManager:
         )
         root_pid = process.pid
         pgid = os.getpgid(root_pid)
-        scope = capture_process_cleanup_scope(root_pid, pgid)
+        scope = capture_process_cleanup_scope(process, pgid)
         created = max(1, len(scope.identities))
         self.created_processes += created
         self.process_cleanup = "pending"
