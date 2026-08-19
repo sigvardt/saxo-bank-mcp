@@ -53,3 +53,14 @@ field from `model_fields_set`. It must preserve `None` after parsing and reject 
 extra, malformed, or tampered material. Source `1d213ff` passes focused-twice, related,
 auth/privacy, Ruff/format, type, plugin, static, catalog, eval-manifest, privacy, and diff gates and
 remains uninstalled/unsealed pending independent review.
+
+Private offending-observation completion rule: every current owner-only unknown-cleanup receipt
+contains a strict digest-bound observation array. An entry may retain only PID, PGID, optional
+PPID, hashed birth identity, fixed detection source, fixed observation state, admission phase, and
+either an allowlisted diagnostic process category or an opaque identity hash. The category is not
+a cleanup exemption. Observations never enter the immutable signal-target set, never repair
+coverage, and never replace null counts with zero. Raw commands, paths, arguments, payloads, and
+process content are forbidden. Public child/candidate/outer receipts retain only the private
+receipt digest plus typed cleanup reason/stage. Source `139704b`, tree `a95547d`, passes focused
+twice, related/auth/privacy, Ruff/format, BasedPyright, plugin/static/catalog/eval, privacy, and diff
+gates and remains uninstalled/unsealed pending independent review.

@@ -2503,3 +2503,20 @@ The following was passed verbatim to the headless `claude-fable-5` max-effort ru
 > After you've completed this round i want you to spawn a a deep exploration cycle on the analytics and BI tools of this MCP. Does this MCP provide ALL that users could dream off, when it comes to market and portfolio reserach? Or could we extend the mcp to do modelling/visualsiations and hand them over directly to the agent, making it way more capable? I want you to dream BIG here. As a part of this deepe xploration i require that you use claude cli and run a fable 5 run on max, where you ask it for ideas where - what could a trader want from an MCP like this? What woul dmake it the ultimate tool for them? Instead of having to browse different webpages and look for and build graphs - the goal is to have the agent be able to show all, analytics call and model all they could dream off. It is a requiremnt that fable is also handed my original prompt, so it knows exactly what the goal of this brainstorm is.
 >
 > Any questions about this plan before you get going with the research/brainstorm?
+
+## Private cleanup-observation boundary
+
+Local source `139704b`, tree `a95547d`, adds the missing diagnostic detail to owner-only unknown
+cleanup receipts. Each retained offending observation is strict and digest-bound: numeric
+PID/PGID/optional PPID, a hashed birth identity, a fixed detection source and admission phase,
+observation state, and either the fixed diagnostic category `process_observer` or an opaque process
+identity hash. It retains no raw command, argument, path, payload, transcript, account value, or
+broker data.
+
+The observation array is never a signal allowlist. It cannot add a target, exempt `ps`, `uv`, a
+resource tracker, a server, or any other uncaptured member, repair unknown coverage, or create a
+zero remaining count. The public proof boundary still receives only the owner-only receipt digest
+and typed cleanup reason/stage; identity detail remains private. Legacy digest-bound receipts remain
+readable under their historical shape. Local gates passed without install, suite, SIM, model, MCP,
+Saxo, browser, network, or proof activity. The sealed `1d213ff` cleanup result is unchanged,
+activation remains 0/54, and independent static review is the next gate.

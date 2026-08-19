@@ -876,3 +876,33 @@ still matches all 621 files. Those later facts do not repair the authenticated c
 The terminal ten-file publication privacy scan passed with zero findings and zero scan errors. No
 54-kind numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, controlled lifecycle,
 account-equality comparison, or activation ran. All profiles remain quarantined at 0/54.
+
+## Local private cleanup-observation diagnostics
+
+Source `139704b70b4599839d1be094d1967c16a30d3cba`, tree
+`a95547da66a5d67feb3f6a8e4da4f3aec94ca441`, extends unknown cleanup evidence without changing the
+sealed `1d213ff` result. The mode-0600 owner-only unknown-cleanup receipt now digest-binds strict
+offending observations: PID, process group, optional parent PID, hashed birth identity, fixed
+detection source, observation state, admission phase, and either the fixed diagnostic category
+`process_observer` or an opaque identity digest. Raw commands, arguments, paths, payloads, and
+process content are not retained.
+
+These observations are diagnostic only. They never expand the immutable birth-bound signal target
+set, never make coverage complete, and never turn null remaining counts into zero. In particular,
+classifying an observed `ps` process does not whitelist or exempt it. Persistent late descendants,
+vanished members, reused identities or groups, admission-window changes, and historical PID checks
+all remain fail-closed. The nested eval manager preserves the same private observations. Child,
+candidate-runner, and public proof publications continue to carry only the authenticated private
+receipt digest and typed cleanup reason/stage; their strict schemas reject injected identities.
+Historical digest-bound unknown receipts that predate the observation array remain readable and
+are never rewritten as current evidence.
+
+TDD first reproduced the missing observation schema and then isolated two parser failures and
+three nested-admission propagation failures. Final local validation passed the 13 focused tests
+twice, 97 cleanup/publication tests, 175 runtime/failure-envelope tests, 238 auth/privacy tests, and
+55 plugin/static/catalog/eval tests. Ruff lint and changed-file format checks passed; BasedPyright
+reported 0 errors, 0 warnings, and 0 notes. Plugin validation, nine-skill static gates, the
+60-tool/294-operation catalog, the 34-case eval manifest, five-path privacy scan, and diff checks
+passed. No install, full suite, SIM/auth call, model, MCP, Saxo request, browser, network, or proof
+ran. The prior sealed cleanup uncertainty remains unchanged, downstream proof and activation did
+not run, and 0/54 profiles remain active pending independent static review.
