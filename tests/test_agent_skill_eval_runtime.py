@@ -629,6 +629,27 @@ def test_malformed_model_output_keeps_runner_event_aggregates_unknown(
     assert payload["cleanup"]["invoked_logical_tool_count"] is None
 
 
+def test_process_record_refuses_nullable_unknown_cleanup() -> None:
+    """An unknown nested cleanup is a typed refusal, never a numeric comparison."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
+    result = ManagedProcessResult(
+        stdout="",
+        stderr="",
+        returncode=0,
+        timed_out=False,
+        created_processes=1,
+        terminated_processes=0,
+        remaining_processes=None,
+        process_cleanup="unknown",
+    )
+    record_from_process = eval_execution._record_from_process  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    record = record_from_process(case, "codex", (), result)
+
+    assert record.status == "failed"
+    assert record.error == "process_cleanup_unknown"
+
+
 def test_codex_native_policy_rejects_non_codex_harness(tmp_path: Path) -> None:
     options = replace(
         _options(tmp_path, dry_run=True, credential_mode="none"),

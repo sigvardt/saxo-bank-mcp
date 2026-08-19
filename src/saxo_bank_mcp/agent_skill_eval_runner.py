@@ -221,7 +221,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
             "complete": bool(outcome.cleanup.get("complete", True)),
             "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
             "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
-            "remaining_processes": _cleanup_int(outcome.cleanup, "remaining_processes"),
+            "remaining_processes": _cleanup_remaining_count(outcome.cleanup),
             "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
             "process_timed_out": bool(outcome.cleanup.get("process_timed_out", False)),
             "raw_transcripts_persisted": 0,
@@ -303,7 +303,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         "token_promote": outcome.cleanup.get("token_promote", "not_required"),
         "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
         "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
-        "remaining_processes": _cleanup_int(outcome.cleanup, "remaining_processes"),
+        "remaining_processes": _cleanup_remaining_count(outcome.cleanup),
     }
     payload["installation_fixture_preserved"] = installation_fixture_preserved
     write_json(options.out, payload)
@@ -443,7 +443,12 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
     finally:
         # Process cleanup must finish before token promotion and runtime deletion.
         process_manager.finalize()
-        if process_manager.remaining_processes > 0 or process_manager.process_cleanup not in {
+        if (
+            process_manager.remaining_processes is None
+            or process_manager.process_cleanup == "unknown"
+        ):
+            process_error = "process_cleanup_unknown"
+        elif process_manager.remaining_processes > 0 or process_manager.process_cleanup not in {
             "passed",
             "not_required",
         }:
@@ -843,7 +848,13 @@ def _cleanup_fields(
     cleanup_error: MatrixEnvError | None,
 ) -> dict[str, JsonValue]:
     complete = process_error is None and promote_error is None and cleanup_error is None
-    process_cleanup = "residue" if process_error is not None else process_manager.process_cleanup
+    process_cleanup = (
+        "unknown"
+        if process_error == "process_cleanup_unknown"
+        else "residue"
+        if process_error is not None
+        else process_manager.process_cleanup
+    )
     return {
         "complete": complete,
         "runtime_cleanup": "residue" if cleanup_error is not None else "passed",
@@ -915,6 +926,13 @@ def _idle_cleanup() -> dict[str, JsonValue]:
 
 def _cleanup_int(cleanup: dict[str, JsonValue], key: str) -> int:
     value = cleanup.get(key, 0)
+    return value if isinstance(value, int) else 0
+
+
+def _cleanup_remaining_count(cleanup: dict[str, JsonValue]) -> int | None:
+    value = cleanup.get("remaining_processes", 0)
+    if value is None:
+        return None
     return value if isinstance(value, int) else 0
 
 

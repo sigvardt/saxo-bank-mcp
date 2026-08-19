@@ -41,6 +41,7 @@ type WatcherDrainState = Literal[
     "still-running",
     "unknown",
 ]
+type CleanupCoverage = Literal["complete", "unknown"]
 type CleanupUnknownReason = Literal[
     "watcher_publication_discarded",
     "watcher_still_running",
@@ -102,16 +103,19 @@ class ProcessCleanupTerminalSnapshot:
     """One birth-bound terminal view used for cleanup status, receipt, and counts."""
 
     targets: tuple[ProcessCleanupTargetReceipt, ...]
-    coverage_status: Literal["complete", "unknown"]
+    coverage_status: CleanupCoverage
     signaled_process_count: int = 0
     watcher_drain_status: WatcherDrainState = "not-applicable"
+    target_observation_unknown: bool = False
 
     @property
     def cleanup_status(self) -> Literal["complete", "failed", "unknown"]:
         if self.watcher_drain_status in {"discarded", "still-running", "unknown"}:
             return "unknown"
-        if self.coverage_status == "unknown" or any(
-            target.termination_outcome == "unknown" for target in self.targets
+        if (
+            self.target_observation_unknown
+            or self.coverage_status == "unknown"
+            or any(target.termination_outcome == "unknown" for target in self.targets)
         ):
             return "unknown"
         if any(target.termination_outcome == "still_running" for target in self.targets):
@@ -143,8 +147,9 @@ class ProcessCleanupTerminalSnapshot:
         return _cleanup_unknown_reason(
             watcher_drain_status=self.watcher_drain_status,
             coverage_status=self.coverage_status,
-            target_observation_unknown=any(
-                target.termination_outcome == "unknown" for target in self.targets
+            target_observation_unknown=(
+                self.target_observation_unknown
+                or any(target.termination_outcome == "unknown" for target in self.targets)
             ),
         )
 
@@ -253,6 +258,12 @@ class ProcessCleanupScope:
     identities: tuple[ProcessCleanupIdentity, ...]
     tracked_pids: tuple[int, ...]
     tracked_pgids: tuple[int, ...]
+    coverage_status: CleanupCoverage
+
+    def __post_init__(self) -> None:
+        """Reject coverage values outside the authenticated receipt vocabulary."""
+        if self.coverage_status not in {"complete", "unknown"}:
+            raise ValueError("cleanup scope coverage status is invalid")
 
 
 @dataclass(slots=True)
@@ -267,26 +278,43 @@ class RootBoundProcessCleanupAdmission:
     def close(self) -> None:
         self._closed.set()
 
-    def capture_scope(self) -> ProcessCleanupScope:
+    def capture_scope(self) -> ProcessCleanupScope:  # noqa: PLR0911
         """Take two root-bracketed snapshots and admit only exact stable identities."""
         root_pid = self.process.pid
         root_identities = (self.root_identity,) if self.root_identity is not None else ()
         tracked_pids: set[int] = {root_pid}
         tracked_pgids: set[int] = {self.root_pgid}
         if not self._root_allows_admission():
-            return self._detection_scope(root_identities, tracked_pids, tracked_pgids)
+            return self._detection_scope(
+                root_identities,
+                tracked_pids,
+                tracked_pgids,
+                coverage_status="complete",
+            )
 
         try:
-            first_pids, first_pgids = _snapshot_tree(root_pid, self.root_pgid)
-        except OSError:
+            first_pids, first_pgids, first_coverage = _snapshot_tree_checked(
+                root_pid,
+                self.root_pgid,
+            )
+        except (OSError, RuntimeError, ValueError):
             self.close()
             return ProcessCleanupScope(
                 identities=root_identities,
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
+                coverage_status="unknown",
             )
         tracked_pids.update(first_pids)
         tracked_pgids.update(first_pgids)
+        if first_coverage == "unknown":
+            self.close()
+            return ProcessCleanupScope(
+                identities=root_identities,
+                tracked_pids=tuple(sorted(tracked_pids)),
+                tracked_pgids=tuple(sorted(tracked_pgids)),
+                coverage_status="unknown",
+            )
         observations = tuple(
             observation
             for pid in first_pids
@@ -298,19 +326,32 @@ class RootBoundProcessCleanupAdmission:
                 identities=root_identities,
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
+                coverage_status="complete",
             )
 
         try:
-            second_pids, second_pgids = _snapshot_tree(root_pid, self.root_pgid)
-        except OSError:
+            second_pids, second_pgids, second_coverage = _snapshot_tree_checked(
+                root_pid,
+                self.root_pgid,
+            )
+        except (OSError, RuntimeError, ValueError):
             self.close()
             return ProcessCleanupScope(
                 identities=root_identities,
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
+                coverage_status="unknown",
             )
         tracked_pids.update(second_pids)
         tracked_pgids.update(second_pgids)
+        if second_coverage == "unknown":
+            self.close()
+            return ProcessCleanupScope(
+                identities=root_identities,
+                tracked_pids=tuple(sorted(tracked_pids)),
+                tracked_pgids=tuple(sorted(tracked_pgids)),
+                coverage_status="unknown",
+            )
         second_pid_scope = frozenset(second_pids)
         second_pgid_scope = frozenset(second_pgids)
         confirmed: dict[int, ProcessCleanupIdentity] = {
@@ -340,6 +381,7 @@ class RootBoundProcessCleanupAdmission:
             identities=tuple(confirmed[pid] for pid in sorted(confirmed)),
             tracked_pids=tuple(sorted(tracked_pids)),
             tracked_pgids=tuple(sorted(tracked_pgids)),
+            coverage_status="complete",
         )
 
     def _root_allows_admission(self) -> bool:
@@ -370,17 +412,27 @@ class RootBoundProcessCleanupAdmission:
         identities: tuple[ProcessCleanupIdentity, ...],
         tracked_pids: set[int],
         tracked_pgids: set[int],
+        *,
+        coverage_status: CleanupCoverage,
     ) -> ProcessCleanupScope:
         try:
-            pids, pgids = _snapshot_tree(self.process.pid, self.root_pgid)
-        except OSError:
-            pids, pgids = (), ()
+            pids, pgids, detected_coverage = _snapshot_tree_checked(
+                self.process.pid,
+                self.root_pgid,
+            )
+        except (OSError, RuntimeError, ValueError):
+            pids, pgids, detected_coverage = (), (), "unknown"
         tracked_pids.update(pids)
         tracked_pgids.update(pgids)
         return ProcessCleanupScope(
             identities=identities,
             tracked_pids=tuple(sorted(tracked_pids)),
             tracked_pgids=tuple(sorted(tracked_pgids)),
+            coverage_status=(
+                "unknown"
+                if coverage_status == "unknown" or detected_coverage == "unknown"
+                else "complete"
+            ),
         )
 
 
@@ -478,6 +530,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     watcher_capture_failed = False
     watcher_publication_discarded = False
     watcher_drain_status: WatcherDrainState = "not-applicable"
+    tracked_coverage_status: CleanupCoverage = "complete"
     timed_out = False
     stdout = ""
     stderr = ""
@@ -503,6 +556,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         return return_code
 
     def _capture_identities() -> None:
+        nonlocal tracked_coverage_status
         nonlocal watcher_capture_failed, watcher_capture_inflight, watcher_publication_discarded
         if admission is None:
             return
@@ -516,9 +570,12 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             with watch_lock:
                 watcher_capture_inflight -= 1
                 watcher_capture_failed = True
+                tracked_coverage_status = "unknown"
             raise
         with watch_lock:
             watcher_capture_inflight -= 1
+            if scope.coverage_status == "unknown":
+                tracked_coverage_status = "unknown"
             # Another thread can advance the state while capture_scope runs.
             if str(admission_publication_state) == "frozen":
                 watcher_publication_discarded = True
@@ -600,13 +657,22 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         with watch_lock:
             pids = tuple(tracked_pids)
             pgids = tuple(tracked_pgids)
-        pids, pgids = _merge_snapshots(pids, pgids, *_snapshot_tree(root_pid, pgid))
+        try:
+            observed_pids, observed_pgids, observed_coverage = _snapshot_tree_checked(
+                root_pid,
+                pgid,
+            )
+        except (OSError, RuntimeError, ValueError):
+            observed_pids, observed_pgids, observed_coverage = (), (), "unknown"
+        with watch_lock:
+            if observed_coverage == "unknown":
+                tracked_coverage_status = "unknown"
+        pids, pgids = _merge_snapshots(pids, pgids, observed_pids, observed_pgids)
         # Always include original process group: redirected sleepers share it after parent exit.
         # pgid is assigned from os.getpgid after Popen; keep it in the tracked set even if
         # the parent has already exited and descendants remain only under that group.
         tracked_pgid = pgid
         pgids = tuple(sorted(set(pgids) | {tracked_pgid}))
-        pids = tuple(sorted(set(pids) | set(process_group_members(tracked_pgid))))
         _capture_identities()
     except OSError as exc:
         process_error = exc
@@ -640,26 +706,37 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 tuple(tracked_pgids),
             )
             identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
+            cleanup_coverage_status = tracked_coverage_status
         try:
-            final_pids, final_pgids = _snapshot_tree(root_pid, pgid)
-        except OSError:
-            final_pids, final_pgids = (), ()
+            final_pids, final_pgids, final_coverage = _snapshot_tree_checked(root_pid, pgid)
+        except (OSError, RuntimeError, ValueError):
+            final_pids, final_pgids, final_coverage = (), (), "unknown"
+        if final_coverage == "unknown":
+            cleanup_coverage_status = "unknown"
         pids, pgids = _merge_snapshots(pids, pgids, final_pids, final_pgids)
         if root_pid is not None:
             pids = tuple(sorted(set(pids) | {root_pid}))
         if pgid is not None:
             pgids = tuple(sorted(set(pgids) | {pgid}))
-            pids = tuple(sorted(set(pids) | set(process_group_members(pgid))))
         # Signal only still-running processes whose birth identity still matches. The returned
         # terminal snapshot is the sole source for the receipt and remaining candidate counts.
-        terminal_snapshot = replace(
-            cleanup_birth_bound_processes(
-                identities,
-                tracked_pids=pids,
-                tracked_pgids=pgids,
-            ),
-            watcher_drain_status=watcher_drain_status,
-        )
+        try:
+            terminal_snapshot = replace(
+                cleanup_birth_bound_processes(
+                    identities,
+                    tracked_pids=pids,
+                    tracked_pgids=pgids,
+                    coverage_status=cleanup_coverage_status,
+                ),
+                watcher_drain_status=watcher_drain_status,
+            )
+        except (OSError, ValidationError, ValueError):
+            terminal_snapshot = ProcessCleanupTerminalSnapshot(
+                targets=(),
+                coverage_status="unknown",
+                watcher_drain_status=watcher_drain_status,
+                target_observation_unknown=True,
+            )
         if process is not None:
             try:
                 stdout, stderr = process.communicate(
@@ -908,12 +985,13 @@ def cleanup_birth_bound_processes(
     *,
     tracked_pids: tuple[int, ...],
     tracked_pgids: tuple[int, ...],
+    coverage_status: CleanupCoverage = "complete",
 ) -> ProcessCleanupTerminalSnapshot:
     """Clean one captured scope without ever signalling an unverified numeric identity."""
     identity_by_pid: Mapping[int, ProcessCleanupIdentity] = MappingProxyType(
         {identity.pid: identity for identity in identities},
     )
-    coverage_unknown = len(identity_by_pid) != len(identities)
+    coverage_unknown = coverage_status == "unknown" or len(identity_by_pid) != len(identities)
     tracked_groups, group_coverage_unknown = _detect_tracked_group_members(
         tracked_pgids,
         identity_by_pid,
@@ -1506,26 +1584,40 @@ def shutil_which(command: str, *, path: str | None) -> str | None:
     return shutil.which(command, path=path)
 
 
-def _snapshot_tree(
+def _snapshot_tree_checked(
     root_pid: int | None,
     pgid: int | None,
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
+) -> tuple[tuple[int, ...], tuple[int, ...], CleanupCoverage]:
+    """Capture one tree/group view and retain process-table completeness."""
     pids: set[int] = set()
     pgids: set[int] = set()
+    table, observed = _process_table_checked()
+    children: dict[int, list[int]] = {}
+    group_by_pid: dict[int, int] = {}
+    for pid, ppid, group in table:
+        children.setdefault(ppid, []).append(pid)
+        group_by_pid[pid] = group
     if root_pid is not None:
-        pids.update(descendant_pids(root_pid))
-        pids.add(root_pid)
+        stack = [root_pid]
+        while stack:
+            current = stack.pop()
+            if current in pids:
+                continue
+            pids.add(current)
+            stack.extend(children.get(current, ()))
     if pgid is not None:
         pgids.add(pgid)
-        members = process_group_members(pgid)
-        pids.update(members)
-    table = {pid: group for pid, _ppid, group in _process_table()}
-    for pid in list(pids):
-        group = table.get(pid)
+        pids.update(pid for pid, group in group_by_pid.items() if group == pgid)
+    for pid in tuple(pids):
+        group = group_by_pid.get(pid)
         if group is not None:
             pgids.add(group)
-            pids.update(process_group_members(group))
-    return tuple(sorted(pids)), tuple(sorted(pgids))
+    pids.update(pid for pid, group in group_by_pid.items() if group in pgids)
+    return (
+        tuple(sorted(pids)),
+        tuple(sorted(pgids)),
+        "complete" if observed else "unknown",
+    )
 
 
 def _merge_snapshots(

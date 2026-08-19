@@ -25,7 +25,7 @@ class ManagedProcessResult:
     timed_out: bool
     created_processes: int
     terminated_processes: int
-    remaining_processes: int
+    remaining_processes: int | None
     process_cleanup: str
 
 
@@ -35,7 +35,7 @@ class EvalProcessManager:
 
     created_processes: int = 0
     terminated_processes: int = 0
-    remaining_processes: int = 0
+    remaining_processes: int | None = 0
     timed_out: bool = False
     process_cleanup: str = "not_required"
     _cleanup_snapshots: list[ProcessCleanupTerminalSnapshot] = field(
@@ -94,6 +94,7 @@ class EvalProcessManager:
             scope.identities,
             tracked_pids=scope.tracked_pids,
             tracked_pgids=scope.tracked_pgids,
+            coverage_status=scope.coverage_status,
         )
         self._cleanup_snapshots.append(snapshot)
         terminated = snapshot.signaled_process_count
@@ -104,9 +105,15 @@ class EvalProcessManager:
             except (subprocess.TimeoutExpired, OSError):
                 stdout = stdout or ""
                 stderr = stderr or "communicate_timeout"
-        remaining = snapshot.remaining_process_count or 0
+        remaining = snapshot.remaining_process_count
         self.remaining_processes = remaining
-        cleanup = "passed" if snapshot.cleanup_status == "complete" else "residue"
+        cleanup = (
+            "passed"
+            if snapshot.cleanup_status == "complete"
+            else "unknown"
+            if snapshot.cleanup_status == "unknown"
+            else "residue"
+        )
         self.process_cleanup = cleanup
         # Preserve exact zero. `or 124` would turn successful exit 0 into 124.
         returncode = 124 if timed_out or process.returncode is None else int(process.returncode)
@@ -125,16 +132,21 @@ class EvalProcessManager:
         """Publish the shared primitive's terminal semantics without re-signalling IDs."""
         if not self._cleanup_snapshots and self.process_cleanup == "not_required":
             return self.snapshot()
-        known_remaining = tuple(
-            snapshot.remaining_process_count
-            for snapshot in self._cleanup_snapshots
-            if snapshot.remaining_process_count is not None
+        remaining_counts = tuple(
+            snapshot.remaining_process_count for snapshot in self._cleanup_snapshots
         )
-        self.remaining_processes = sum(known_remaining)
+        self.remaining_processes = (
+            sum(value for value in remaining_counts if value is not None)
+            if remaining_counts and all(value is not None for value in remaining_counts)
+            else None
+        )
+        cleanup_statuses = tuple(snapshot.cleanup_status for snapshot in self._cleanup_snapshots)
         self.process_cleanup = (
-            "passed"
-            if all(snapshot.cleanup_status == "complete" for snapshot in self._cleanup_snapshots)
+            "unknown"
+            if not cleanup_statuses or any(status == "unknown" for status in cleanup_statuses)
             else "residue"
+            if any(status == "failed" for status in cleanup_statuses)
+            else "passed"
         )
         return self.snapshot()
 

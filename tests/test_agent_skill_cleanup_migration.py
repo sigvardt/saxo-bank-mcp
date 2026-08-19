@@ -37,6 +37,7 @@ def test_nested_eval_does_not_signal_pid_reused_after_scope_capture(
         identities=(identity,),
         tracked_pids=(pid,),
         tracked_pgids=(),
+        coverage_status="complete",
     )
     replacement = command_runner.ProcessObservation(
         pid=pid,

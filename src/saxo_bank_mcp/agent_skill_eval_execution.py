@@ -174,6 +174,8 @@ def _record_from_process(
 ) -> EvalRunRecord:
     if result.timed_out:
         return _failed_record(case, harness, grants, "TimeoutExpired")
+    if result.remaining_processes is None or result.process_cleanup == "unknown":
+        return _failed_record(case, harness, grants, "process_cleanup_unknown")
     if result.remaining_processes > 0 or result.process_cleanup == "residue":
         return _failed_record(case, harness, grants, "process_cleanup_residue")
     return _record_from_stdout(case, harness, grants, result)

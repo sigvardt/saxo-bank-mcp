@@ -1257,13 +1257,17 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
     def snapshot(
         observed_root_pid: int | None,
         observed_pgid: int | None,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
         assert observed_root_pid == root_pid
         assert observed_pgid == root_pid
         if root_state == "original":
-            return (root_pid,), (root_pid,)
+            return (root_pid,), (root_pid,), "complete"
         current = (replacement_pid,) if root_state == "absent" else (root_pid, replacement_pid)
-        return current, (root_pid,)
+        return current, (root_pid,), "complete"
 
     def group_members(pgid: int) -> tuple[int, ...]:
         assert pgid == root_pid
@@ -1288,12 +1292,14 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         admitted_for_cleanup.extend(identity.pid for identity in identities)
         return original_cleanup(
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            coverage_status=coverage_status,
         )
 
     def fake_popen(*_args: object, **_kwargs: object) -> ExitedProcess:
@@ -1309,7 +1315,7 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
     monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
     monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
     monkeypatch.setattr(command_runner, "read_process_observation", observation)
-    monkeypatch.setattr(command_runner, "_snapshot_tree", snapshot)
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", snapshot)
     monkeypatch.setattr(command_runner, "process_group_members", group_members)
     monkeypatch.setattr(
         command_runner,
@@ -1443,7 +1449,11 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
     def snapshot(
         observed_root_pid: int | None,
         observed_pgid: int | None,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
         nonlocal child_group_moved, second_scope_taken
         assert observed_root_pid == root_pid
         assert observed_pgid == root_pid
@@ -1460,8 +1470,8 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
             )
         )
         if child_transition == "moved-group-after-observation" and child_group_moved:
-            return visible, (root_pid, child_pid)
-        return visible, (root_pid,)
+            return visible, (root_pid, child_pid), "complete"
+        return visible, (root_pid,), "complete"
 
     def group_members(pgid: int) -> tuple[int, ...]:
         assert pgid in {root_pid, child_pid}
@@ -1492,12 +1502,14 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         admitted_for_cleanup.extend(identity.pid for identity in identities)
         return original_cleanup(
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            coverage_status=coverage_status,
         )
 
     def fake_popen(*_args: object, **_kwargs: object) -> ActiveProcess:
@@ -1513,7 +1525,7 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
     monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
     monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
     monkeypatch.setattr(command_runner, "read_process_observation", observation)
-    monkeypatch.setattr(command_runner, "_snapshot_tree", snapshot)
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", snapshot)
     monkeypatch.setattr(command_runner, "process_group_members", group_members)
     monkeypatch.setattr(
         command_runner,
@@ -1572,6 +1584,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls, cleanup_complete, inside_cleanup
         cleanup_calls += 1
@@ -1582,6 +1595,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
                 identities,
                 tracked_pids=tracked_pids,
                 tracked_pgids=tracked_pgids,
+                coverage_status=coverage_status,
             )
         finally:
             inside_cleanup = False
@@ -1656,7 +1670,11 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
     def broken_snapshot(
         root_pid: int | None,
         pgid: int | None,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
         _ = (root_pid, pgid)
         raise OSError("injected_post_spawn_observation_failure")
 
@@ -1665,6 +1683,7 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls
         cleanup_calls += 1
@@ -1673,9 +1692,10 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            coverage_status=coverage_status,
         )
 
-    monkeypatch.setattr(command_runner, "_snapshot_tree", broken_snapshot)
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", broken_snapshot)
     monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", counted_cleanup)
 
     with pytest.raises(command_runner.CommandFailureError) as caught:
@@ -1691,9 +1711,10 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
     assert len(cleanup_roots) == 1
     assert cleanup_calls == 1
     assert command_runner.process_still_running(cleanup_roots[0]) is False
-    assert caught.value.remaining_process_count == 0
-    assert caught.value.remaining_process_group_count == 0
-    assert caught.value.cleanup_identity_evidence_status == "authenticated"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+    assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
+    assert caught.value.cleanup_unknown_reason == "coverage_unknown"
     assert caught.value.cleanup_identity_receipt_sha256 is not None
 
 
@@ -1864,6 +1885,7 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
                 identities=(*scope.identities, escaped),
                 tracked_pids=(*scope.tracked_pids, escaped_pid),
                 tracked_pgids=(*scope.tracked_pgids, escaped_pid),
+                coverage_status=scope.coverage_status,
             )
             watcher_scope_ready.set()
             if not release_watcher.wait(timeout=5):
@@ -1876,12 +1898,14 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        coverage_status: command_runner.CleanupCoverage = "complete",
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         cleanup_identity_pids.extend(identity.pid for identity in identities)
         return original_cleanup(
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            coverage_status=coverage_status,
         )
 
     code = (
@@ -2083,9 +2107,201 @@ def test_run_command_watcher_capture_oserror_is_unknown(
     assert unknown_receipt is not None
     assert unknown_receipt.unknown_reason == "watcher_drain_unknown"
     assert unknown_receipt.watcher_drain_status == "unknown"
-    assert unknown_receipt.coverage_status == "complete"
+    assert unknown_receipt.coverage_status == "unknown"
     assert unknown_receipt.remaining_process_count is None
     assert unknown_receipt.remaining_process_group_count is None
+
+
+@pytest.mark.parametrize("failed_snapshot", [1, 2])
+def test_root_bound_scope_keeps_transient_checked_snapshot_failure_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_snapshot: int,
+) -> None:
+    """A recovered first or second process-table failure cannot regain complete coverage."""
+    root_pid = REUSED_PID + 1_200
+    calls = 0
+
+    class FakeProcess:
+        pid = root_pid
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    root_identity = command_runner.ProcessCleanupIdentity(
+        pid=root_pid,
+        pgid=root_pid,
+        birth_identity="stable-root-birth",
+        initial_state="running",
+    )
+
+    def checked_snapshot(
+        observed_root_pid: int | None,
+        observed_root_pgid: int | None,
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
+        nonlocal calls
+        assert observed_root_pid == root_pid
+        assert observed_root_pgid == root_pid
+        calls += 1
+        return (
+            (root_pid,),
+            (root_pid,),
+            "unknown" if calls == failed_snapshot else "complete",
+        )
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        assert pid == root_pid
+        return command_runner.ProcessObservation(
+            pid=root_pid,
+            pgid=root_pid,
+            birth_identity="stable-root-birth",
+            state="running",
+        )
+
+    monkeypatch.setattr(
+        command_runner,
+        "_snapshot_tree_checked",
+        checked_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+
+    scope = command_runner.RootBoundProcessCleanupAdmission(
+        process=FakeProcess(),  # type: ignore[arg-type]
+        root_pgid=root_pid,
+        root_identity=root_identity,
+    ).capture_scope()
+
+    assert calls == failed_snapshot
+    assert scope.coverage_status == "unknown"
+    assert scope.identities == (root_identity,)
+
+
+def test_process_cleanup_scope_rejects_unknown_coverage_value() -> None:
+    """A caller cannot publish an unrecognised cleanup-coverage state."""
+    with pytest.raises(ValueError, match="cleanup scope coverage status"):
+        command_runner.ProcessCleanupScope(
+            identities=(),
+            tracked_pids=(),
+            tracked_pgids=(),
+            coverage_status="invalid",  # type: ignore[arg-type]
+        )
+
+
+def test_run_command_keeps_recovered_watcher_process_table_failure_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later good watcher snapshot cannot erase one incomplete process-table view."""
+    receipt_path = (tmp_path / "watcher-table-unknown.json").resolve()
+    original_checked = command_runner._snapshot_tree_checked  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    injected = False
+    injection_lock = threading.Lock()
+
+    def checked_snapshot(
+        root_pid: int | None,
+        root_pgid: int | None,
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
+        nonlocal injected
+        pids, pgids, coverage = original_checked(root_pid, root_pgid)
+        if threading.current_thread().name.startswith("cmd-watch-"):
+            with injection_lock:
+                if not injected:
+                    injected = True
+                    return pids, pgids, "unknown"
+        return pids, pgids, coverage
+
+    monkeypatch.setattr(
+        command_runner,
+        "_snapshot_tree_checked",
+        checked_snapshot,
+        raising=False,
+    )
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "watcher_process_table_unknown",
+            (sys.executable, "-c", "import time; time.sleep(0.08)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    assert injected is True
+    assert caught.value.stderr == "process_cleanup_unknown"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+    assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
+    assert caught.value.cleanup_unknown_reason == "coverage_unknown"
+    digest = caught.value.cleanup_identity_receipt_sha256
+    assert digest is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=digest,
+    )
+    assert receipt is not None
+    assert receipt.unknown_reason == "coverage_unknown"
+    assert receipt.coverage_status == "unknown"
+    assert receipt.remaining_process_count is None
+    assert receipt.remaining_process_group_count is None
+
+
+@pytest.mark.parametrize("failure_type", [OSError, ValueError])
+def test_run_command_terminal_target_observation_error_writes_unknown_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[Exception],
+) -> None:
+    """A terminal target read failure is contained and published as typed unknown evidence."""
+    receipt_path = (tmp_path / "terminal-observation-unknown.json").resolve()
+
+    def fail_terminal_observation(
+        _identity: command_runner.ProcessCleanupIdentity,
+    ) -> command_runner.ProcessCleanupTargetReceipt:
+        raise failure_type("PRIVATE_TERMINAL_OBSERVATION_DETAIL")
+
+    monkeypatch.setattr(
+        command_runner,
+        "observe_process_cleanup_target",
+        fail_terminal_observation,
+    )
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "terminal_target_observation_unknown",
+            (sys.executable, "-c", "import time; time.sleep(0.05)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    assert caught.value.stderr == "process_cleanup_unknown"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+    assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
+    assert caught.value.cleanup_unknown_reason == "target_observation_unknown"
+    digest = caught.value.cleanup_identity_receipt_sha256
+    assert digest is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=digest,
+    )
+    assert receipt is not None
+    assert receipt.unknown_reason == "target_observation_unknown"
+    assert receipt.coverage_status == "unknown"
+    assert receipt.remaining_process_count is None
+    assert receipt.remaining_process_group_count is None
+    assert "PRIVATE_TERMINAL" not in receipt_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("drain_status", ["discarded", "still-running", "unknown"])

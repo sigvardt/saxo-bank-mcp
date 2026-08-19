@@ -1925,19 +1925,20 @@ def _agent_evaluation_cleanup_summary(
     remaining = raw.get("remaining_processes")
     timed_out = raw.get("process_timed_out")
     persisted = raw.get("raw_transcripts_persisted")
+    remaining_is_known = type(remaining) is int and remaining >= 0
+    remaining_is_unknown = remaining is None and process_cleanup == "unknown"
     valid = (
         type(complete) is bool
-        and process_cleanup in {"passed", "residue", "not_required"}
+        and process_cleanup in {"passed", "residue", "not_required", "unknown"}
         and runtime_cleanup in {"passed", "residue", "not_required"}
         and token_promote in {"passed", "failed", "not_required"}
         and type(created) is int
         and type(terminated) is int
-        and type(remaining) is int
+        and (remaining_is_known or remaining_is_unknown)
         and type(timed_out) is bool
         and type(persisted) is int
         and created >= 0
         and terminated >= 0
-        and remaining >= 0
         and persisted >= 0
     )
     if valid:
@@ -1953,7 +1954,13 @@ def _agent_evaluation_cleanup_summary(
             "schema_version": "1",
             "receipt_kind": "codex_native_agent_evaluation_cleanup",
             "status": (
-                "complete" if cleanup_is_complete else "failed" if complete is False else "unknown"
+                "complete"
+                if cleanup_is_complete
+                else "unknown"
+                if process_cleanup == "unknown" or remaining is None
+                else "failed"
+                if complete is False
+                else "unknown"
             ),
             "process_cleanup": process_cleanup,
             "runtime_cleanup": runtime_cleanup,

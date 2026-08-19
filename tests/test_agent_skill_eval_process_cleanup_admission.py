@@ -19,10 +19,10 @@ REQUIRED_SCOPE_SNAPSHOTS = 2
     ("transition", "expected_created", "expected_cleanup", "child_signaled"),
     [
         ("stable", 2, "passed", True),
-        ("moved", 1, "residue", False),
-        ("replaced", 1, "residue", False),
+        ("moved", 1, "unknown", False),
+        ("replaced", 1, "unknown", False),
         ("missing", 1, "passed", False),
-        ("unknown", 1, "residue", False),
+        ("unknown", 1, "unknown", False),
     ],
 )
 def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(  # noqa: C901, PLR0913, PLR0915
@@ -76,7 +76,11 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
     def fake_snapshot(
         root_pid: int | None,
         root_pgid: int | None,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+    ]:
         nonlocal snapshot_calls, child_running, child_birth, child_pgid, child_unknown
         assert root_pid == ROOT_PID
         assert root_pgid == ROOT_PID
@@ -93,7 +97,7 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
                 child_unknown = True
         visible = (ROOT_PID,) + ((CHILD_PID,) if child_running else ())
         # Keeping both groups visible catches independent PID/PGID membership checks.
-        return visible, (ROOT_PID, MOVED_PGID)
+        return visible, (ROOT_PID, MOVED_PGID), "complete"
 
     def fake_observation(pid: int) -> command_runner.ProcessObservation | None:
         if pid == ROOT_PID:
@@ -139,7 +143,7 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
 
     monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(eval_process.os, "getpgid", fake_getpgid)
-    monkeypatch.setattr(command_runner, "_snapshot_tree", fake_snapshot)
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", fake_snapshot)
     monkeypatch.setattr(command_runner, "read_process_observation", fake_observation)
     monkeypatch.setattr(command_runner, "process_group_members", group_members)
     monkeypatch.setattr(
@@ -161,4 +165,46 @@ def test_nested_eval_admission_is_bracketed_by_live_root_and_exact_second_scope(
     assert snapshot_calls >= REQUIRED_SCOPE_SNAPSHOTS
     assert result.created_processes == expected_created
     assert result.process_cleanup == expected_cleanup
+    if expected_cleanup == "unknown":
+        assert result.remaining_processes is None
     assert any(pid == CHILD_PID for pid, _sig in signals) is child_signaled
+
+
+@pytest.mark.parametrize("with_known_zero", [False, True])
+def test_nested_eval_cleanup_keeps_unknown_remaining_count_nullable(
+    with_known_zero: bool,  # noqa: FBT001
+) -> None:
+    """Unknown nested cleanup never becomes zero through filtering or empty summation."""
+    manager = eval_process.EvalProcessManager()
+    cleanup_snapshots = manager._cleanup_snapshots  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+    unknown = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="unknown",
+    )
+    if with_known_zero:
+        cleanup_snapshots.append(
+            command_runner.ProcessCleanupTerminalSnapshot(
+                targets=(),
+                coverage_status="complete",
+            ),
+        )
+    cleanup_snapshots.append(unknown)
+
+    snapshot = manager.finalize()
+
+    assert manager.remaining_processes is None
+    assert manager.process_cleanup == "unknown"
+    assert snapshot["remaining_processes"] is None
+    assert snapshot["process_cleanup"] == "unknown"
+
+
+def test_nested_eval_cleanup_with_no_terminal_snapshot_is_unknown() -> None:
+    """A started nested process without terminal evidence cannot publish passed cleanup."""
+    manager = eval_process.EvalProcessManager(process_cleanup="pending")
+
+    snapshot = manager.finalize()
+
+    assert manager.remaining_processes is None
+    assert manager.process_cleanup == "unknown"
+    assert snapshot["remaining_processes"] is None
+    assert snapshot["process_cleanup"] == "unknown"

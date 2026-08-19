@@ -23,6 +23,7 @@ from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.qa_analytics_proof_failure import (
     CodexNativeAgentEvaluationCaseSummary,
+    CodexNativeAgentEvaluationFailureSummary,
     CodexNativeBootstrapEnvelope,
     CodexNativeBootstrapVerification,
     CodexNativeChildFailureEnvelope,
@@ -1344,6 +1345,85 @@ def test_failed_eval_summary_rejects_diagnostic_tamper_extra_and_cleanup_tamper(
     cast("dict[str, Any]", cleanup_tamper["cleanup"])["remaining_process_count"] = 1
     with pytest.raises(ValidationError):
         type(summary).model_validate(cleanup_tamper, strict=True)
+
+
+def test_unknown_nested_eval_cleanup_keeps_nullable_count_through_publication() -> None:
+    """Authenticated nested cleanup uncertainty stays nullable and fail closed end to end."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    report = _failed_agent_evaluation_report().model_copy(
+        update={
+            "cleanup": {
+                "complete": False,
+                "process_cleanup": "unknown",
+                "runtime_cleanup": "passed",
+                "token_promote": "passed",
+                "created_processes": EVAL_CREATED_PROCESS_COUNT,
+                "terminated_processes": EVAL_TERMINATED_PROCESS_COUNT,
+                "remaining_processes": None,
+                "process_timed_out": False,
+                "raw_transcripts_persisted": 0,
+            },
+        },
+    )
+    report_bytes = json.dumps(
+        report.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    summary = producer._agent_evaluation_failure_summary(  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+
+    assert summary is not None
+    assert summary.cleanup is not None
+    assert summary.cleanup.status == "unknown"
+    assert summary.cleanup.process_cleanup == "unknown"
+    assert summary.cleanup.created_process_count == EVAL_CREATED_PROCESS_COUNT
+    assert summary.cleanup.terminated_process_count == EVAL_TERMINATED_PROCESS_COUNT
+    assert summary.cleanup.remaining_process_count is None
+
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    producer._record_agent_report_progress(progress, report)  # noqa: SLF001
+    progress.record_agent_evaluation_failure(summary)
+    verified = _verify(
+        _failure(
+            progress,
+            reason="installed_agent_evaluation_command_failed",
+        ).model_dump_json(),
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert parsed.result.agent_evaluation_failure_summary == summary
+    assert parsed.result.model_event_count == AGENT_MODEL_EVENT_COUNT
+    assert parsed.result.mcp_event_count == CLI_TOTAL_MCP_EVENT_COUNT
+    assert parsed.result.saxo_event_count is None
+    assert parsed.result.broker_write_made is None
+    assert parsed.result.live_mutation_calls is None
+    assert parsed.result.purchase_occurred is None
+    assert parsed.result.disclaimer_response_made is None
+    assert "PRIVATE_CLIENT_SENTINEL" not in publication.model_dump_json()
+
+    tampered = summary.model_dump(mode="json")
+    cast("dict[str, Any]", tampered["cleanup"])["remaining_process_count"] = 0
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationFailureSummary.model_validate(tampered, strict=True)
 
 
 def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_as_digest(
