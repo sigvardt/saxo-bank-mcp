@@ -360,3 +360,35 @@ account equality, controlled lifecycle, and activation did not run. All 54 profi
 quarantined and 0/54 are active. The branch remains local and unpushed.
 
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
+
+## Nested-evaluation capture-window correction after `7467f11`
+
+Local source `9826b26cf19a45ed9aa0142ebf64585eb40ad0aa`, tree
+`0bc77c9b72a31cb564c7a092407213c8e04aa725`, closes the nested
+`EvalProcessManager` capture-time PID-reuse window without changing the sealed `c716047`
+evidence. The command runner and nested evaluator now use the same root-handle-bound admission
+gate. It requires the original `Popen` root to remain active, unreaped, and same-birth across two
+PID/process-group snapshots, then re-observes every candidate and requires the same PID, birth
+identity, and group before the final root check. Only confirmed identities enter the immutable
+signal target set. Moved, replaced, missing, or unknown observations remain detection-only; a
+still-visible unconfirmed process makes cleanup coverage unknown.
+
+The deterministic RED failed all five stable, moved, replaced, missing, and unknown nested-eval
+variants because the former path performed no `Popen.poll()` bracket or second snapshot. The
+stable child is now admitted and cleaned. A same-birth child that moves while both old and new
+groups remain visible, a replaced PID/new leader, and an unknown observation are excluded without
+signals and retain unknown cleanup evidence while visible. A child that disappears before exact
+confirmation is excluded and is not signaled.
+
+Final local verification passed 192 focused cleanup/evaluation/failure-envelope tests twice, 363
+related cleanup/install/evaluation/proof tests, and 431 safe auth/privacy tests. Ruff check and
+changed-file format passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin,
+nine-skill static, 60-tool/294-operation catalog, 34-case evaluation-manifest, bounded privacy,
+and `git diff --check` gates passed.
+
+No exact install, model, production MCP server, Saxo request, broker operation, browser, sealed
+proof, or broker/data network activity ran. This source is not installed or sealed and does not
+relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 hard cases with
+unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
+account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
+quarantined and 0/54 are active. The branch remains local and unpushed.

@@ -211,8 +211,10 @@ checks, must still contain both the observed PID and its observed group before a
 post-scope re-observation must also match the candidate's original PID, birth identity, and group
 before the final root check. A replacement, group change, disappearance, unknown observation, or
 incomplete re-observation remains detection-only and makes coverage unknown if still present. The
-resulting set is frozen as the only possible signal targets before cleanup;
-nested native evaluation and exact install consume the same primitive. Every signal rechecks the
+resulting set is frozen as the only possible signal targets before cleanup. The command runner and
+nested native evaluation call the same root-handle-bound, two-snapshot admission gate; neither may
+capture signal targets from a numeric PID/PGID scope alone. Exact install consumes the same cleanup
+primitive. Every signal rechecks the
 target birth identity, and terminal tracked-group scans detect late members without admitting
 them. Historical numeric process groups are never signaled. Only a member admitted during the
 valid root window with the same current birth identity and group remains eligible for an
