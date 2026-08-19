@@ -752,3 +752,36 @@ all-54 numerical proof, fresh 60-tool SIM matrix, reconciliation, controlled lif
 comparison, and activation did not run. No retry occurred; the owner-only runtime remains preserved
 and unconsumed, no task-owned process remains, sealed `e5dc932` remains the latest sealed evidence,
 and all 54 profiles remain quarantined with 0/54 active.
+
+## Recovered third-attempt verification and sealed proof
+
+Independent review attributed the earlier caller-cache change to concurrent Codex app-server
+plugin refresh, not to the candidate or its 2,943-test suite. The preserved third-attempt install
+was not reinstalled and the suite was not rerun. A fresh verify-only window against that same
+owner-only unconsumed runtime passed. Its digest-bound structural receipt records all 20 checks
+passing, caller fingerprint `b44a6cf6...c610` unchanged from start to end, 22,434 cache nodes,
+exact source/tree and prior install/verify/suite/JUnit digests, zero task processes, and an
+unconsumed runtime. The earlier failed structural receipt remains byte-for-byte unchanged.
+
+Local no-network auth status then proved requested/effective `SIM`, LIVE reads false, LIVE writes
+false, a readable unexpired SIM cache, and no blockers. The one separate read-only capability call
+passed with `network_call_made=true`, `token_refreshed=false`, one call, and no retry. It did not
+publish mutation, purchase, or disclaimer negatives, so those fields remain unknown.
+
+The one sealed `codex_native_v1` proof ran through the exact candidate-source-root and failed with
+no retry. Its authenticated candidate result records a passed SIM preflight and an 11-case native
+evaluation with 10 passes. `backtest-limitations` alone failed with `non_saxo_mcp_event`: its one
+required Saxo tool was invoked, but grant/assertion status failed because additional MCP events were
+not classified as Saxo. All other cases, including artifact delivery and scenario, passed their
+exact grants, required tool counts, and assertions. Nested evaluation cleanup is authenticated
+complete with 12 created processes, zero remaining processes, and zero persisted raw outputs.
+
+The proof still fails closed. The proof-child cleanup receipt and candidate-runner cleanup receipt
+both report `observation-unknown` / `coverage_unknown` with nullable remaining counts. The inner
+reason is `proof_child_cleanup_failed`; the authenticated outer publication is a
+`proof_candidate_runner_cleanup_failed` boundary. Model/MCP/Saxo aggregate counts and broker write,
+mutation, purchase, and disclaimer-response facts remain unknown rather than false. The one-shot
+runtime consumption and cleanup receipts authenticate complete removal, the proof temp is absent,
+and later observation finds zero task processes, but those later facts do not repair unknown
+cleanup coverage. No numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, controlled
+lifecycle, account equality, or activation ran. All 54 profiles remain quarantined with 0/54 active.

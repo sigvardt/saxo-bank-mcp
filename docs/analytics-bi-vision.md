@@ -2418,6 +2418,24 @@ The bound runtime remains owner-only and unconsumed, sealed `e5dc932` remains th
 evidence, and activation remains 0/54. A future attempt requires a new authorization and a caller
 state boundary that remains stable through the terminal structural readback.
 
+Independent review later established that the failed caller-state comparison came from concurrent
+Codex app-server plugin refresh rather than candidate or suite mutation. A newly authorized
+verify-only window reused the same third-attempt install without reinstalling or rerunning tests.
+All 20 structural checks passed with the current caller fingerprint stable across the window and
+the proof runtime still owner-only and unconsumed. Local status and one capability read then proved
+SIM/SIM with both LIVE gates false and current session capabilities.
+
+The single sealed native proof reached all 11 hard cases. Ten passed; `backtest-limitations` failed
+strictly on `non_saxo_mcp_event` even though its one required Saxo tool was invoked. Nested eval
+cleanup is complete at 12 created/0 remaining with no retained raw output. Proof-child and
+candidate-runner cleanup coverage are nevertheless authenticated unknown, so the inner and outer
+receipts refuse rather than promote the evaluation. Runtime consumption is complete and the
+one-shot runtime is absent, but aggregate model/MCP/Saxo counts and broker mutation, purchase, and
+disclaimer-response facts remain unknown. No 54-kind numerical proof, fresh matrix, reconciliation,
+account equality, or activation followed; activation remains 0/54. The next work is local diagnosis
+of non-Saxo event classification and both unknown cleanup-coverage boundaries before any new exact
+candidate or sealed attempt.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
