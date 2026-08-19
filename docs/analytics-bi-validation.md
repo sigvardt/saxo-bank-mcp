@@ -673,3 +673,24 @@ activity ran. Sealed `e5dc932` remains unchanged at 10/11 with unknown broker/ac
 cleanup facts, no retry, and no downstream proof, fresh matrix, reconciliation, account equality,
 or activation. All 54 profiles remain quarantined with 0/54 active. Independent static review of
 `f96a3b2` is the next gate.
+
+## Terminal exact `f96a3b2` install preflight refusal
+
+Independent static review approved source `f96a3b2df57ab66c71d6bf04e40b5637b40ef09b`, tree
+`265a11abb3abbd19d6f54cdd122c19d8bb4453f0`. The exact clean detached source, disk, process, and
+owner-only evidence-root prechecks passed. The one authorized retained-runtime install then exited
+1 before install work with typed reason `codex_install_run_root_exists`: the task had pre-created
+the empty owner-only install-runtime directory, while the candidate contract requires that path to
+be absent so the installer can create it transactionally.
+
+The mode-0600 refusal report contains no secondary errors. Source readback confirms this check runs
+before clone, plugin install, retained-runtime creation, client launch, or global-state mutation.
+No verify-only, full suite, static/readback rerun, SIM auth, session capability call, model, MCP,
+Saxo request, proof, numerical matrix, account comparison, or activation ran. No task-owned process
+remained, the detached source stayed clean, and the system disk retained 77 GiB free.
+
+The authorization allowed one install attempt and no retry, so the sequence stopped. This local
+invocation error does not invalidate the already reviewed source, but it provides no install proof
+for `f96a3b2`. Sealed `e5dc932` remains the latest sealed evidence, its downstream facts remain
+unknown, and all 54 profiles remain quarantined with 0/54 active. A new exact install attempt needs
+fresh authorization and an absent installer-owned run root.

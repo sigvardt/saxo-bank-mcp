@@ -2382,6 +2382,14 @@ complete. Exception details are reduced to fixed privacy-safe reason codes throu
 publication. Independent static review of `f96a3b2` is the next gate. It is uninstalled and unsealed;
 sealed `e5dc932`, the downstream proof boundary, and 0/54 activation remain unchanged.
 
+Independent review approved `f96a3b2`, but its first exact validation stopped before installation.
+The sole retained-runtime install invocation received `codex_install_run_root_exists` because the
+empty owner-only installer run root had been created in advance. The contract correctly refused
+before clone, install, client, model, MCP, Saxo, or global-state work. The no-retry rule prevented a
+corrected invocation in the same sequence. `f96a3b2` therefore remains locally validated but has no
+exact install evidence. A fresh authorization must begin with an absent installer-owned run root;
+until then sealed `e5dc932` remains historical and activation stays 0/54.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.

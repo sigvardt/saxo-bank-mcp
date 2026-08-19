@@ -348,3 +348,11 @@ child, candidate, and outer evidence without private exception details or negati
 Local focused tests passed twice plus related, auth/privacy, Ruff/format, type, plugin, static,
 catalog, eval-manifest, privacy, and diff gates. The source remains uninstalled and unsealed pending
 independent static review; sealed `e5dc932` and 0/54 activation remain unchanged.
+
+Terminal validation handoff: independent review approved `f96a3b2`, but the one authorized exact
+install invocation refused before execution with `codex_install_run_root_exists`. The empty
+owner-only installer run root had been pre-created even though the transactional installer requires
+that path to be absent. No clone, plugin install, client, retained runtime, model, MCP, Saxo, or
+global-state work ran, and no retry was permitted. A separately authorized attempt must pass an
+absent installer-owned run root. No exact `f96a3b2` install, suite, proof, or activation evidence
+exists; sealed `e5dc932` and 0/54 activation remain unchanged.
