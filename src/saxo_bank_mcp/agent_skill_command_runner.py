@@ -311,13 +311,30 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             if (observation := read_process_observation(pid)) is not None
             and observation.state != "unknown"
         )
-        if allow_new:
-            allow_new = _root_allows_new_identity()
+        second_scope_pids: tuple[int, ...] = ()
+        second_scope_pgids: tuple[int, ...] = ()
+        if allow_new and _root_allows_new_identity():
+            try:
+                second_scope_pids, second_scope_pgids = _snapshot_tree(root_pid, pgid)
+            except OSError:
+                identity_admission_closed.set()
+                allow_new = False
+            else:
+                allow_new = _root_allows_new_identity()
+        else:
+            allow_new = False
+        admitted_pid_scope = frozenset(second_scope_pids)
+        admitted_pgid_scope = frozenset(second_scope_pgids)
         with watch_lock:
             for observation in observations:
                 identity = tracked_identities.get(observation.pid)
                 if identity is None:
-                    if not allow_new or identity_admission_closed.is_set():
+                    if not (
+                        allow_new
+                        and not identity_admission_closed.is_set()
+                        and observation.pid in admitted_pid_scope
+                        and observation.pgid in admitted_pgid_scope
+                    ):
                         continue
                     tracked_identities[observation.pid] = ProcessCleanupIdentity(
                         pid=observation.pid,

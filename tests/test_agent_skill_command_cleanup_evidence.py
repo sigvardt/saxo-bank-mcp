@@ -30,21 +30,65 @@ def _env(tmp_path: Path) -> dict[str, str]:
     }
 
 
-def test_escaped_session_cleanup_writes_owner_only_identity_receipt(tmp_path: Path) -> None:
+def test_escaped_session_cleanup_writes_owner_only_identity_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     receipt_path = (tmp_path / "escaped-cleanup.json").resolve()
+    admission_marker = (tmp_path / "escaped-child-admitted").resolve()
+    root_pid: int | None = None
+    child_seen = False
+    root_checks_after_child = 0
+    original_observation = command_runner.read_process_observation
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        nonlocal child_seen, root_checks_after_child, root_pid
+        result = original_observation(pid)
+        if root_pid is None:
+            root_pid = pid
+        elif pid != root_pid and result is not None and result.state == "running":
+            child_seen = True
+        elif pid == root_pid and child_seen and result is not None and result.state == "running":
+            root_checks_after_child += 1
+            if root_checks_after_child >= 2:  # noqa: PLR2004
+                admission_marker.touch(mode=OWNER_FILE_MODE)
+        return result
+
     child_code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
     parent_code = (
-        "import subprocess,sys,time; "
-        f"subprocess.Popen([sys.executable, '-c', {child_code!r}], start_new_session=True); "
-        "time.sleep(0.35); sys.exit(3)"
+        "import os,subprocess,sys,time\n"
+        "child = subprocess.Popen("
+        f"[sys.executable, '-c', {child_code!r}], start_new_session=True)\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not os.path.exists(os.environ['ADMISSION_MARKER']):\n"
+        "    if time.monotonic() >= deadline:\n"
+        "        child.kill()\n"
+        "        child.wait(timeout=2)\n"
+        "        raise SystemExit(99)\n"
+        "    time.sleep(0.001)\n"
+        "raise SystemExit(3)\n"
     )
+    env = _env(tmp_path)
+    env["ADMISSION_MARKER"] = str(admission_marker)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
 
     with pytest.raises(command_runner.CommandFailureError) as caught:
         command_runner.run_command(
             "escaped_identity_probe",
             (sys.executable, "-c", parent_code),
             cwd=tmp_path,
-            env=_env(tmp_path),
+            env=env,
             timeout_seconds=5,
             cleanup_identity_receipt_path=receipt_path,
         )
@@ -1262,14 +1306,17 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
     assert caught.value.remaining_process_group_count is None
 
 
-def test_run_command_active_same_birth_root_may_admit_child(  # noqa: C901
+@pytest.mark.parametrize("child_transition", ["legitimate", "replaced-self-group"])
+def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    child_transition: str,
 ) -> None:
-    """A legitimate child observed while the original root is active remains cleanable."""
+    """A child must retain its discovered root scope through identity admission."""
     root_pid = REUSED_PGID
     child_pid = root_pid + 1
     running = {root_pid: True, child_pid: True}
+    child_observed = False
     admitted_for_cleanup: list[int] = []
     signals: list[tuple[int, signal.Signals]] = []
     original_cleanup = command_runner.cleanup_birth_bound_processes
@@ -1296,12 +1343,25 @@ def test_run_command_active_same_birth_root_may_admit_child(  # noqa: C901
             _ = timeout
 
     def observation(pid: int) -> command_runner.ProcessObservation | None:
+        nonlocal child_observed
         if not running[pid]:
             return None
+        if pid == child_pid:
+            child_observed = True
         return command_runner.ProcessObservation(
             pid=pid,
-            pgid=root_pid,
-            birth_identity="root-original" if pid == root_pid else "child-original",
+            pgid=(
+                child_pid
+                if pid == child_pid and child_transition == "replaced-self-group"
+                else root_pid
+            ),
+            birth_identity=(
+                "root-original"
+                if pid == root_pid
+                else "unrelated-replacement"
+                if child_transition == "replaced-self-group"
+                else "child-original"
+            ),
             state="running",
         )
 
@@ -1311,11 +1371,24 @@ def test_run_command_active_same_birth_root_may_admit_child(  # noqa: C901
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         assert observed_root_pid == root_pid
         assert observed_pgid == root_pid
-        return tuple(pid for pid, is_running in running.items() if is_running), (root_pid,)
+        visible = tuple(
+            pid
+            for pid, is_running in running.items()
+            if is_running
+            and not (
+                pid == child_pid and child_transition == "replaced-self-group" and child_observed
+            )
+        )
+        return visible, (root_pid,)
 
     def group_members(pgid: int) -> tuple[int, ...]:
-        assert pgid == root_pid
-        return tuple(pid for pid, is_running in running.items() if is_running)
+        assert pgid in {root_pid, child_pid}
+        return tuple(
+            pid
+            for pid, is_running in running.items()
+            if is_running
+            and (pid == pgid if child_transition == "replaced-self-group" else pgid == root_pid)
+        )
 
     def group_members_with_coverage(pgid: int) -> tuple[tuple[int, ...], bool]:
         return group_members(pgid), True
@@ -1371,10 +1444,16 @@ def test_run_command_active_same_birth_root_may_admit_child(  # noqa: C901
         )
 
     assert caught.value.receipt.timed_out is True
-    assert child_pid in admitted_for_cleanup
-    assert (child_pid, signal.SIGTERM) in signals
-    assert caught.value.remaining_process_count == 0
-    assert caught.value.remaining_process_group_count == 0
+    if child_transition == "replaced-self-group":
+        assert child_pid not in admitted_for_cleanup
+        assert all(pid != child_pid for pid, _sig in signals)
+        assert caught.value.remaining_process_count is None
+        assert caught.value.remaining_process_group_count is None
+    else:
+        assert child_pid in admitted_for_cleanup
+        assert (child_pid, signal.SIGTERM) in signals
+        assert caught.value.remaining_process_count == 0
+        assert caught.value.remaining_process_group_count == 0
 
 
 def test_timeout_cleans_once_before_terminal_observation_write_and_count(

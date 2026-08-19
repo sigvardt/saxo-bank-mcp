@@ -374,6 +374,7 @@ def test_failed_command_redirected_sleeper_cleaned(
     }
     root_pid: int | None = None
     child_seen = False
+    root_checks_after_child = 0
     original_observation = command_runner.read_process_observation
 
     class PassiveWatcher:
@@ -387,15 +388,17 @@ def test_failed_command_redirected_sleeper_cleaned(
             _ = timeout
 
     def observation(pid: int) -> command_runner.ProcessObservation | None:
-        nonlocal child_seen, root_pid
+        nonlocal child_seen, root_checks_after_child, root_pid
         result = original_observation(pid)
         if root_pid is None:
             root_pid = pid
         elif pid != root_pid and result is not None and result.state == "running":
             child_seen = True
         elif pid == root_pid and child_seen and result is not None and result.state == "running":
-            # This is the second birth-bound root observation bracketing admission.
-            observed_marker.touch(mode=0o600)
+            root_checks_after_child += 1
+            if root_checks_after_child >= 2:  # noqa: PLR2004
+                # Release the root only after the post-scope birth-bound check.
+                observed_marker.touch(mode=0o600)
         return result
 
     code = (
