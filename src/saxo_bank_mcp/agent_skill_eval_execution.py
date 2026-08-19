@@ -292,6 +292,7 @@ def _evaluate_trace(
         model_command_event_count=trace.command_event_count,
         model_mcp_event_count=trace.mcp_event_count,
         model_saxo_event_count=trace.saxo_event_count,
+        non_saxo_event_descriptors=trace.non_saxo_event_descriptors,
         invoked_logical_tools=invoked,
         invoked_logical_tool_count=len(invoked),
         grant_status="passed" if grant_ok else "failed",
@@ -423,6 +424,11 @@ def _failed_record(  # noqa: PLR0913
         ),
         model_saxo_event_count=(
             None if not model_output_observable or trace is None else trace.saxo_event_count
+        ),
+        non_saxo_event_descriptors=(
+            None
+            if not model_output_observable or trace is None
+            else trace.non_saxo_event_descriptors
         ),
         invoked_logical_tools=(
             None

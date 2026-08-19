@@ -389,6 +389,8 @@ def test_candidate_launcher_publishes_truthful_exit_when_result_is_missing(
         "cleanup_identity_receipt_sha256": receipt["cleanup_identity_receipt_sha256"],
         "cleanup_status": "complete",
         "cleanup_unknown_reason": None,
+        "cleanup_coverage_stage": None,
+        "cleanup_coverage_subreason": None,
         "command_schema_sha256": receipt["command_schema_sha256"],
         "command_sha256": receipt["command_sha256"],
         "exit_code": 7,

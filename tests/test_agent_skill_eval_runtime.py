@@ -2119,7 +2119,12 @@ def test_router_version_probe_lifecycle_failure_is_unobservable(  # noqa: C901, 
         if cleanup_call_count != VERSION_PROBE_CLEANUP_CALL_INDEX:
             return snapshot
         if version_failure == "cleanup_unknown":
-            return replace(snapshot, coverage_status="unknown")
+            return replace(
+                snapshot,
+                coverage_status="unknown",
+                coverage_stage="target_observation",
+                coverage_subreason="observation_unknown",
+            )
         if version_failure == "cleanup_residue":
             assert snapshot.targets
             first = snapshot.targets[0]

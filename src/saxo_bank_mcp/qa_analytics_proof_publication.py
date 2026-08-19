@@ -12,6 +12,8 @@ from typing import Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupCoverageStage,
+    CleanupCoverageSubreason,
     CleanupIdentityEvidenceKind,
     CleanupUnknownReason,
 )
@@ -63,6 +65,8 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
         pattern=_SHA256_PATTERN,
     )
     candidate_runner_cleanup_unknown_reason: CleanupUnknownReason | None = None
+    candidate_runner_cleanup_coverage_stage: CleanupCoverageStage | None = None
+    candidate_runner_cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     candidate_runner_result_status: Literal["unknown", "authenticated"] = "unknown"
     candidate_runner_result_sha256: str | None = Field(
         default=None,
@@ -98,6 +102,15 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
             status=self.candidate_runner_cleanup_evidence_status,
             receipt_sha256=self.candidate_runner_cleanup_receipt_sha256,
             unknown_reason=self.candidate_runner_cleanup_unknown_reason,
+            coverage_stage=self.candidate_runner_cleanup_coverage_stage,
+            coverage_subreason=self.candidate_runner_cleanup_coverage_subreason,
+            allow_legacy_missing=not bool(
+                {
+                    "candidate_runner_cleanup_coverage_stage",
+                    "candidate_runner_cleanup_coverage_subreason",
+                }
+                & self.model_fields_set
+            ),
         ):
             raise ValueError("native candidate runner cleanup evidence differs")
         if (
@@ -162,12 +175,17 @@ class CodexNativeCandidateRunnerReceipt(_StrictModel):
         pattern=_SHA256_PATTERN,
     )
     cleanup_unknown_reason: CleanupUnknownReason | None = None
+    cleanup_coverage_stage: CleanupCoverageStage | None = None
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def _validate_receipt(self) -> Self:
         material = self.model_dump(mode="json", exclude={"receipt_sha256"})
-        legacy_material = dict(material)
+        prior_diagnostic_material = dict(material)
+        prior_diagnostic_material.pop("cleanup_coverage_stage")
+        prior_diagnostic_material.pop("cleanup_coverage_subreason")
+        legacy_material = dict(prior_diagnostic_material)
         legacy_material.pop("cleanup_identity_evidence_status")
         legacy_material.pop("cleanup_identity_receipt_sha256")
         legacy_material.pop("cleanup_unknown_reason")
@@ -175,12 +193,19 @@ class CodexNativeCandidateRunnerReceipt(_StrictModel):
             self.cleanup_identity_evidence_status == "no-target-observed"
             and self.cleanup_identity_receipt_sha256 is None
             and self.cleanup_unknown_reason is None
+            and self.cleanup_coverage_stage is None
+            and self.cleanup_coverage_subreason is None
         )
         legacy_cleanup = legacy_defaults and self.receipt_sha256 == _digest(legacy_material)
         if not legacy_cleanup and not _cleanup_evidence_is_consistent(
             status=self.cleanup_identity_evidence_status,
             receipt_sha256=self.cleanup_identity_receipt_sha256,
             unknown_reason=self.cleanup_unknown_reason,
+            coverage_stage=self.cleanup_coverage_stage,
+            coverage_subreason=self.cleanup_coverage_subreason,
+            allow_legacy_missing=not bool(
+                {"cleanup_coverage_stage", "cleanup_coverage_subreason"} & self.model_fields_set
+            ),
         ):
             raise ValueError("candidate runner cleanup evidence differs")
         if self.phase == "entry" and self.spawned:
@@ -204,6 +229,8 @@ class CodexNativeCandidateRunnerReceipt(_StrictModel):
         if self.result_present != (self.result_sha256 is not None):
             raise ValueError("candidate runner result digest mismatch")
         accepted_digests = {_digest(material)}
+        if self.cleanup_coverage_stage is None and self.cleanup_coverage_subreason is None:
+            accepted_digests.add(_digest(prior_diagnostic_material))
         if legacy_defaults:
             accepted_digests.add(_digest(legacy_material))
         if self.receipt_sha256 not in accepted_digests:
@@ -239,7 +266,7 @@ class CodexNativeProofPublication(_StrictModel):
     publication_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_publication(self) -> Self:
+    def _validate_publication(self) -> Self:  # noqa: C901
         expected_type = {
             "verified_result": CodexNativeVerifiedInstalledProofValidation,
             "verified_child_failure": CodexNativeVerifiedChildFailure,
@@ -271,6 +298,20 @@ class CodexNativeProofPublication(_StrictModel):
                         "outer_process_cleanup_unknown_reason",
                     ),
                 )
+            if (
+                self.result.outer_process_cleanup_coverage_stage is None
+                and self.result.outer_process_cleanup_coverage_subreason is None
+            ):
+                for field in (
+                    "outer_process_cleanup_coverage_stage",
+                    "outer_process_cleanup_coverage_subreason",
+                ):
+                    publication_materials.extend(
+                        _publication_variants_without_result_field(
+                            publication_materials,
+                            field,
+                        ),
+                    )
         if isinstance(self.result, CodexNativeBoundaryFailureReceipt):
             publication_materials.extend(
                 {**material, "result": result_material}
@@ -296,6 +337,8 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
     candidate_runner_cleanup_evidence_status: CleanupIdentityEvidenceKind = ("no-target-observed"),
     candidate_runner_cleanup_receipt_sha256: str | None = None,
     candidate_runner_cleanup_unknown_reason: CleanupUnknownReason | None = None,
+    candidate_runner_cleanup_coverage_stage: CleanupCoverageStage | None = None,
+    candidate_runner_cleanup_coverage_subreason: CleanupCoverageSubreason | None = None,
     candidate_runner_result_sha256: str | None = None,
     runtime_consumption_intent_sha256: str | None = None,
     runtime_cleanup_receipt_sha256: str | None = None,
@@ -316,6 +359,10 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
         "candidate_runner_cleanup_evidence_status": candidate_runner_cleanup_evidence_status,
         "candidate_runner_cleanup_receipt_sha256": candidate_runner_cleanup_receipt_sha256,
         "candidate_runner_cleanup_unknown_reason": candidate_runner_cleanup_unknown_reason,
+        "candidate_runner_cleanup_coverage_stage": candidate_runner_cleanup_coverage_stage,
+        "candidate_runner_cleanup_coverage_subreason": (
+            candidate_runner_cleanup_coverage_subreason
+        ),
         "candidate_runner_result_status": (
             "authenticated" if candidate_runner_result_sha256 is not None else "unknown"
         ),
@@ -360,6 +407,8 @@ def build_codex_native_candidate_runner_receipt(  # noqa: PLR0913
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed",
     cleanup_identity_receipt_sha256: str | None = None,
     cleanup_unknown_reason: CleanupUnknownReason | None = None,
+    cleanup_coverage_stage: CleanupCoverageStage | None = None,
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None,
 ) -> CodexNativeCandidateRunnerReceipt:
     """Build one self-authenticating path-free runner receipt."""
     material = {
@@ -379,6 +428,8 @@ def build_codex_native_candidate_runner_receipt(  # noqa: PLR0913
         "cleanup_identity_evidence_status": cleanup_identity_evidence_status,
         "cleanup_identity_receipt_sha256": cleanup_identity_receipt_sha256,
         "cleanup_unknown_reason": cleanup_unknown_reason,
+        "cleanup_coverage_stage": cleanup_coverage_stage,
+        "cleanup_coverage_subreason": cleanup_coverage_subreason,
     }
     return CodexNativeCandidateRunnerReceipt.model_validate(
         {**material, "receipt_sha256": _digest(material)},
@@ -493,43 +544,100 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-def _cleanup_evidence_is_consistent(
+def _cleanup_evidence_is_consistent(  # noqa: PLR0911, PLR0913
     *,
     status: CleanupIdentityEvidenceKind,
     receipt_sha256: str | None,
     unknown_reason: CleanupUnknownReason | None,
+    coverage_stage: CleanupCoverageStage | None,
+    coverage_subreason: CleanupCoverageSubreason | None,
+    allow_legacy_missing: bool = False,
 ) -> bool:
+    if (coverage_stage is None) != (coverage_subreason is None):
+        return False
+    has_diagnostic = coverage_stage is not None
+    if has_diagnostic:
+        allowed: dict[CleanupCoverageStage, frozenset[CleanupCoverageSubreason]] = {
+            "first_snapshot": frozenset({"snapshot_failure"}),
+            "second_snapshot": frozenset({"snapshot_failure"}),
+            "watcher_capture": frozenset({"capture_failure"}),
+            "post_exit_snapshot": frozenset({"snapshot_failure"}),
+            "final_snapshot": frozenset({"snapshot_failure"}),
+            "group_table": frozenset({"table_incomplete"}),
+            "group_member": frozenset(
+                {
+                    "uncaptured_member",
+                    "changed_identity_or_group_member",
+                    "observation_unknown",
+                },
+            ),
+            "target_observation": frozenset({"observation_unknown"}),
+        }
+        if coverage_subreason not in allowed[coverage_stage]:
+            return False
     if status == "authenticated":
-        return receipt_sha256 is not None and unknown_reason is None
+        return receipt_sha256 is not None and unknown_reason is None and not has_diagnostic
     if status == "no-target-observed":
-        return receipt_sha256 is None and unknown_reason is None
+        return receipt_sha256 is None and unknown_reason is None and not has_diagnostic
     if status == "observation-unknown":
-        return receipt_sha256 is not None and unknown_reason in {
+        if receipt_sha256 is None or unknown_reason not in {
             "watcher_publication_discarded",
             "watcher_still_running",
             "watcher_drain_unknown",
             "coverage_unknown",
             "target_observation_unknown",
             "cleanup_state_unknown",
+        }:
+            return False
+        if unknown_reason == "coverage_unknown":
+            return (
+                allow_legacy_missing
+                if not has_diagnostic
+                else coverage_stage != ("target_observation")
+            )
+        if unknown_reason == "target_observation_unknown":
+            return (
+                allow_legacy_missing
+                if not has_diagnostic
+                else (
+                    coverage_stage == "target_observation"
+                    and coverage_subreason == "observation_unknown"
+                )
+            )
+        return True
+    return (
+        receipt_sha256 is None
+        and not has_diagnostic
+        and unknown_reason
+        in {
+            "cleanup_receipt_path_missing",
+            "cleanup_receipt_write_failed",
+            "cleanup_evidence_inconsistent",
+            "cleanup_evidence_unavailable",
         }
-    return receipt_sha256 is None and unknown_reason in {
-        "cleanup_receipt_path_missing",
-        "cleanup_receipt_write_failed",
-        "cleanup_evidence_inconsistent",
-        "cleanup_evidence_unavailable",
-    }
+    )
 
 
 def _boundary_material_variants(material: dict[str, object]) -> tuple[dict[str, object], ...]:
     """Return the current boundary material and exact historical default-only shapes."""
     variants = [dict(material)]
+    if (
+        material.get("candidate_runner_cleanup_coverage_stage") is None
+        and material.get("candidate_runner_cleanup_coverage_subreason") is None
+    ):
+        prior_diagnostic = dict(material)
+        prior_diagnostic.pop("candidate_runner_cleanup_coverage_stage")
+        prior_diagnostic.pop("candidate_runner_cleanup_coverage_subreason")
+        variants.append(prior_diagnostic)
     if not (
         material.get("candidate_runner_cleanup_evidence_status") == "no-target-observed"
         and material.get("candidate_runner_cleanup_receipt_sha256") is None
         and material.get("candidate_runner_cleanup_unknown_reason") is None
+        and material.get("candidate_runner_cleanup_coverage_stage") is None
+        and material.get("candidate_runner_cleanup_coverage_subreason") is None
     ):
         return tuple(variants)
-    without_cleanup = dict(material)
+    without_cleanup = dict(variants[-1])
     without_cleanup.pop("candidate_runner_cleanup_evidence_status")
     without_cleanup.pop("candidate_runner_cleanup_receipt_sha256")
     without_cleanup.pop("candidate_runner_cleanup_unknown_reason")

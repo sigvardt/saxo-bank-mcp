@@ -1868,6 +1868,7 @@ def _agent_evaluation_failure_summary(
             model_command_event_count=record.model_command_event_count,
             model_mcp_event_count=record.model_mcp_event_count,
             model_saxo_event_count=record.model_saxo_event_count,
+            non_saxo_event_descriptors=record.non_saxo_event_descriptors,
             plugin_list_exit_code=record.plugin_list_exit_code,
             plugin_list_stdout_schema_sha256=record.plugin_list_stdout_schema_sha256,
             mcp_probe_stage=record.mcp_probe_stage,
@@ -2898,6 +2899,8 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
                 cleanup_identity_evidence_status=(command_error.cleanup_identity_evidence_status),
                 cleanup_identity_receipt_sha256=(command_error.cleanup_identity_receipt_sha256),
                 cleanup_identity_unknown_reason=command_error.cleanup_unknown_reason,
+                cleanup_identity_coverage_stage=command_error.cleanup_coverage_stage,
+                cleanup_identity_coverage_subreason=(command_error.cleanup_coverage_subreason),
                 runtime_cleanup_status=(
                     "complete"
                     if (

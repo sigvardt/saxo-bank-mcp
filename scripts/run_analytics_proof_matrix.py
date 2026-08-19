@@ -20,6 +20,8 @@ from saxo_bank_mcp.agent_skill_codex_install import (
     load_verified_codex_install_report,
 )
 from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupCoverageStage,
+    CleanupCoverageSubreason,
     CleanupIdentityEvidenceKind,
     CleanupUnknownReason,
     CommandFailureError,
@@ -263,6 +265,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                         receipt.cleanup_unknown_reason
                         if receipt is not None
                         else "cleanup_evidence_unavailable"
+                    ),
+                    candidate_runner_cleanup_coverage_stage=(
+                        receipt.cleanup_coverage_stage if receipt is not None else None
+                    ),
+                    candidate_runner_cleanup_coverage_subreason=(
+                        receipt.cleanup_coverage_subreason if receipt is not None else None
                     ),
                     candidate_runner_result_sha256=(error.authenticated_result_sha256),
                 ),
@@ -608,6 +616,8 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
     cleanup_identity_receipt_sha256: str | None = None
     cleanup_unknown_reason: CleanupUnknownReason | None = None
+    cleanup_coverage_stage: CleanupCoverageStage | None = None
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     spawned = True
     try:
         completed = run_command(
@@ -622,12 +632,16 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_evidence_status = completed.cleanup_identity_evidence_status
         cleanup_identity_receipt_sha256 = completed.cleanup_identity_receipt_sha256
         cleanup_unknown_reason = completed.cleanup_unknown_reason
+        cleanup_coverage_stage = completed.cleanup_coverage_stage
+        cleanup_coverage_subreason = completed.cleanup_coverage_subreason
     except CommandFailureError as exc:
         spawned = exc.receipt.pid is not None
         exit_code = exc.receipt.exit_code if spawned else None
         cleanup_identity_evidence_status = exc.cleanup_identity_evidence_status
         cleanup_identity_receipt_sha256 = exc.cleanup_identity_receipt_sha256
         cleanup_unknown_reason = exc.cleanup_unknown_reason
+        cleanup_coverage_stage = exc.cleanup_coverage_stage
+        cleanup_coverage_subreason = exc.cleanup_coverage_subreason
         if not spawned:
             command_state = "start_failed"
             cleanup_status = "not_started"
@@ -668,6 +682,8 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         cleanup_unknown_reason=cleanup_unknown_reason,
+        cleanup_coverage_stage=cleanup_coverage_stage,
+        cleanup_coverage_subreason=cleanup_coverage_subreason,
     )
     if not write_codex_native_candidate_runner_receipt(receipt_path, exit_receipt):
         raise _CandidateRunnerError(

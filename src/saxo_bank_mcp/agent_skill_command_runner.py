@@ -42,6 +42,24 @@ type WatcherDrainState = Literal[
     "unknown",
 ]
 type CleanupCoverage = Literal["complete", "unknown"]
+type CleanupCoverageStage = Literal[
+    "first_snapshot",
+    "second_snapshot",
+    "watcher_capture",
+    "post_exit_snapshot",
+    "final_snapshot",
+    "group_table",
+    "group_member",
+    "target_observation",
+]
+type CleanupCoverageSubreason = Literal[
+    "snapshot_failure",
+    "capture_failure",
+    "table_incomplete",
+    "uncaptured_member",
+    "changed_identity_or_group_member",
+    "observation_unknown",
+]
 type CleanupUnknownReason = Literal[
     "watcher_publication_discarded",
     "watcher_still_running",
@@ -104,9 +122,19 @@ class ProcessCleanupTerminalSnapshot:
 
     targets: tuple[ProcessCleanupTargetReceipt, ...]
     coverage_status: CleanupCoverage
+    coverage_stage: CleanupCoverageStage | None = None
+    coverage_subreason: CleanupCoverageSubreason | None = None
     signaled_process_count: int = 0
     watcher_drain_status: WatcherDrainState = "not-applicable"
     target_observation_unknown: bool = False
+
+    def __post_init__(self) -> None:
+        """Require unknown coverage to carry one fixed diagnostic pair."""
+        _require_cleanup_coverage_diagnostic(
+            coverage_status=self.coverage_status,
+            stage=self.coverage_stage,
+            subreason=self.coverage_subreason,
+        )
 
     @property
     def cleanup_status(self) -> Literal["complete", "failed", "unknown"]:
@@ -210,6 +238,8 @@ class CommandCleanupUnknownReceipt(_StrictModel):
     unknown_reason: CleanupUnknownReason
     watcher_drain_status: WatcherDrainState
     coverage_status: Literal["complete", "unknown"]
+    coverage_stage: CleanupCoverageStage | None = None
+    coverage_subreason: CleanupCoverageSubreason | None = None
     target_count: int = Field(ge=0)
     remaining_process_count: int | None = Field(default=None, ge=0)
     remaining_process_group_count: int | None = Field(default=None, ge=0)
@@ -224,13 +254,27 @@ class CommandCleanupUnknownReceipt(_StrictModel):
         )
         if self.unknown_reason != expected:
             raise ValueError("cleanup unknown reason differs from semantic state")
+        _require_cleanup_coverage_diagnostic(
+            coverage_status=self.coverage_status,
+            stage=self.coverage_stage,
+            subreason=self.coverage_subreason,
+            allow_legacy_missing=not bool(
+                {"coverage_stage", "coverage_subreason"} & self.model_fields_set
+            ),
+        )
         if (
             self.remaining_process_count is not None
             or self.remaining_process_group_count is not None
         ):
             raise ValueError("unknown cleanup receipt cannot prove remaining counts")
         material = self.model_dump(mode="json", exclude={"receipt_sha256"})
-        if self.receipt_sha256 != _digest(material):
+        accepted = {_digest(material)}
+        if self.coverage_stage is None and self.coverage_subreason is None:
+            legacy_material = dict(material)
+            legacy_material.pop("coverage_stage")
+            legacy_material.pop("coverage_subreason")
+            accepted.add(_digest(legacy_material))
+        if self.receipt_sha256 not in accepted:
             raise ValueError("cleanup unknown receipt digest mismatch")
         return self
 
@@ -259,11 +303,18 @@ class ProcessCleanupScope:
     tracked_pids: tuple[int, ...]
     tracked_pgids: tuple[int, ...]
     coverage_status: CleanupCoverage
+    coverage_stage: CleanupCoverageStage | None = None
+    coverage_subreason: CleanupCoverageSubreason | None = None
 
     def __post_init__(self) -> None:
         """Reject coverage values outside the authenticated receipt vocabulary."""
         if self.coverage_status not in {"complete", "unknown"}:
             raise ValueError("cleanup scope coverage status is invalid")
+        _require_cleanup_coverage_diagnostic(
+            coverage_status=self.coverage_status,
+            stage=self.coverage_stage,
+            subreason=self.coverage_subreason,
+        )
 
 
 @dataclass(slots=True)
@@ -278,7 +329,7 @@ class RootBoundProcessCleanupAdmission:
     def close(self) -> None:
         self._closed.set()
 
-    def capture_scope(self) -> ProcessCleanupScope:  # noqa: PLR0911
+    def capture_scope(self) -> ProcessCleanupScope:  # noqa: C901, PLR0911, PLR0912
         """Take two root-bracketed snapshots and admit only exact stable identities."""
         root_pid = self.process.pid
         root_identities = (self.root_identity,) if self.root_identity is not None else ()
@@ -304,6 +355,8 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                coverage_stage="first_snapshot",
+                coverage_subreason="snapshot_failure",
             )
         tracked_pids.update(first_pids)
         tracked_pgids.update(first_pgids)
@@ -314,19 +367,37 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                coverage_stage="first_snapshot",
+                coverage_subreason="snapshot_failure",
             )
-        observations = tuple(
-            observation
-            for pid in first_pids
-            if (observation := read_process_observation(pid)) is not None
-            and observation.state != "unknown"
-        )
+        observations: list[ProcessObservation] = []
+        observation_diagnostic: (
+            tuple[
+                CleanupCoverageStage,
+                CleanupCoverageSubreason,
+            ]
+            | None
+        ) = None
+        for pid in first_pids:
+            observation = read_process_observation(pid)
+            if observation is None:
+                continue
+            if observation.state == "unknown":
+                observation_diagnostic = ("group_member", "observation_unknown")
+                continue
+            observations.append(observation)
         if not self._root_allows_admission():
             return ProcessCleanupScope(
                 identities=root_identities,
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
-                coverage_status="complete",
+                coverage_status=("unknown" if observation_diagnostic is not None else "complete"),
+                coverage_stage=(
+                    observation_diagnostic[0] if observation_diagnostic is not None else None
+                ),
+                coverage_subreason=(
+                    observation_diagnostic[1] if observation_diagnostic is not None else None
+                ),
             )
 
         try:
@@ -341,6 +412,8 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                coverage_stage="second_snapshot",
+                coverage_subreason="snapshot_failure",
             )
         tracked_pids.update(second_pids)
         tracked_pgids.update(second_pgids)
@@ -351,6 +424,8 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                coverage_stage="second_snapshot",
+                coverage_subreason="snapshot_failure",
             )
         second_pid_scope = frozenset(second_pids)
         second_pgid_scope = frozenset(second_pgids)
@@ -359,15 +434,26 @@ class RootBoundProcessCleanupAdmission:
         }
         for observation in observations:
             reobserved = read_process_observation(observation.pid)
+            if observation.pid not in second_pid_scope:
+                continue
+            if reobserved is None:
+                continue
+            if reobserved.state == "unknown":
+                observation_diagnostic = observation_diagnostic or (
+                    "group_member",
+                    "observation_unknown",
+                )
+                continue
             if not (
-                reobserved is not None
-                and reobserved.state != "unknown"
-                and reobserved.pid == observation.pid
+                reobserved.pid == observation.pid
                 and reobserved.birth_identity == observation.birth_identity
                 and reobserved.pgid == observation.pgid
-                and observation.pid in second_pid_scope
                 and observation.pgid in second_pgid_scope
             ):
+                observation_diagnostic = observation_diagnostic or (
+                    "group_member",
+                    "changed_identity_or_group_member",
+                )
                 continue
             confirmed[observation.pid] = ProcessCleanupIdentity(
                 pid=observation.pid,
@@ -381,7 +467,13 @@ class RootBoundProcessCleanupAdmission:
             identities=tuple(confirmed[pid] for pid in sorted(confirmed)),
             tracked_pids=tuple(sorted(tracked_pids)),
             tracked_pgids=tuple(sorted(tracked_pgids)),
-            coverage_status="complete",
+            coverage_status="unknown" if observation_diagnostic is not None else "complete",
+            coverage_stage=(
+                observation_diagnostic[0] if observation_diagnostic is not None else None
+            ),
+            coverage_subreason=(
+                observation_diagnostic[1] if observation_diagnostic is not None else None
+            ),
         )
 
     def _root_allows_admission(self) -> bool:
@@ -433,6 +525,16 @@ class RootBoundProcessCleanupAdmission:
                 if coverage_status == "unknown" or detected_coverage == "unknown"
                 else "complete"
             ),
+            coverage_stage=(
+                "first_snapshot"
+                if coverage_status == "unknown" or detected_coverage == "unknown"
+                else None
+            ),
+            coverage_subreason=(
+                "snapshot_failure"
+                if coverage_status == "unknown" or detected_coverage == "unknown"
+                else None
+            ),
         )
 
 
@@ -441,6 +543,8 @@ class CommandCleanupIdentityEvidence:
     evidence_status: CleanupIdentityEvidenceKind
     receipt_sha256: str | None = None
     unknown_reason: CleanupUnknownReason | None = None
+    cleanup_coverage_stage: CleanupCoverageStage | None = None
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
 
     def __post_init__(self) -> None:
         """Require evidence kind, digest, and safe reason to agree."""
@@ -448,6 +552,8 @@ class CommandCleanupIdentityEvidence:
             self.evidence_status,
             self.receipt_sha256,
             self.unknown_reason,
+            self.cleanup_coverage_stage,
+            self.cleanup_coverage_subreason,
         )
 
 
@@ -459,6 +565,8 @@ class CommandResult:
     cleanup_identity_receipt_sha256: str | None = None
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
     cleanup_unknown_reason: CleanupUnknownReason | None = None
+    cleanup_coverage_stage: CleanupCoverageStage | None = None
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
 
     def __post_init__(self) -> None:
         """Require command cleanup status and digest consistency."""
@@ -466,6 +574,8 @@ class CommandResult:
             self.cleanup_identity_evidence_status,
             self.cleanup_identity_receipt_sha256,
             self.cleanup_unknown_reason,
+            self.cleanup_coverage_stage,
+            self.cleanup_coverage_subreason,
         )
 
     def json_stdout(self) -> dict[str, JsonValue]:
@@ -491,6 +601,8 @@ class CommandFailureError(Exception):
     cleanup_identity_receipt_sha256: str | None = None
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
     cleanup_unknown_reason: CleanupUnknownReason | None = None
+    cleanup_coverage_stage: CleanupCoverageStage | None = None
+    cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
 
     def __post_init__(self) -> None:
         """Require failed-command cleanup status and digest consistency."""
@@ -498,6 +610,8 @@ class CommandFailureError(Exception):
             self.cleanup_identity_evidence_status,
             self.cleanup_identity_receipt_sha256,
             self.cleanup_unknown_reason,
+            self.cleanup_coverage_stage,
+            self.cleanup_coverage_subreason,
         )
 
 
@@ -531,6 +645,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     watcher_publication_discarded = False
     watcher_drain_status: WatcherDrainState = "not-applicable"
     tracked_coverage_status: CleanupCoverage = "complete"
+    tracked_coverage_stage: CleanupCoverageStage | None = None
+    tracked_coverage_subreason: CleanupCoverageSubreason | None = None
     timed_out = False
     stdout = ""
     stderr = ""
@@ -555,8 +671,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             admission.close()
         return return_code
 
-    def _capture_identities() -> None:
+    def _capture_identities() -> None:  # noqa: C901
         nonlocal tracked_coverage_status
+        nonlocal tracked_coverage_stage, tracked_coverage_subreason
         nonlocal watcher_capture_failed, watcher_capture_inflight, watcher_publication_discarded
         if admission is None:
             return
@@ -571,11 +688,17 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 watcher_capture_inflight -= 1
                 watcher_capture_failed = True
                 tracked_coverage_status = "unknown"
+                if tracked_coverage_stage is None:
+                    tracked_coverage_stage = "watcher_capture"
+                    tracked_coverage_subreason = "capture_failure"
             raise
         with watch_lock:
             watcher_capture_inflight -= 1
             if scope.coverage_status == "unknown":
                 tracked_coverage_status = "unknown"
+                if tracked_coverage_stage is None:
+                    tracked_coverage_stage = scope.coverage_stage
+                    tracked_coverage_subreason = scope.coverage_subreason
             # Another thread can advance the state while capture_scope runs.
             if str(admission_publication_state) == "frozen":
                 watcher_publication_discarded = True
@@ -667,6 +790,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         with watch_lock:
             if observed_coverage == "unknown":
                 tracked_coverage_status = "unknown"
+                if tracked_coverage_stage is None:
+                    tracked_coverage_stage = "post_exit_snapshot"
+                    tracked_coverage_subreason = "snapshot_failure"
         pids, pgids = _merge_snapshots(pids, pgids, observed_pids, observed_pgids)
         # Always include original process group: redirected sleepers share it after parent exit.
         # pgid is assigned from os.getpgid after Popen; keep it in the tracked set even if
@@ -707,12 +833,17 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             )
             identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
             cleanup_coverage_status = tracked_coverage_status
+            cleanup_coverage_stage = tracked_coverage_stage
+            cleanup_coverage_subreason = tracked_coverage_subreason
         try:
             final_pids, final_pgids, final_coverage = _snapshot_tree_checked(root_pid, pgid)
         except (OSError, RuntimeError, ValueError):
             final_pids, final_pgids, final_coverage = (), (), "unknown"
         if final_coverage == "unknown":
             cleanup_coverage_status = "unknown"
+            if cleanup_coverage_stage is None:
+                cleanup_coverage_stage = "final_snapshot"
+                cleanup_coverage_subreason = "snapshot_failure"
         pids, pgids = _merge_snapshots(pids, pgids, final_pids, final_pgids)
         if root_pid is not None:
             pids = tuple(sorted(set(pids) | {root_pid}))
@@ -727,6 +858,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     tracked_pids=pids,
                     tracked_pgids=pgids,
                     coverage_status=cleanup_coverage_status,
+                    coverage_stage=cleanup_coverage_stage,
+                    coverage_subreason=cleanup_coverage_subreason,
                 ),
                 watcher_drain_status=watcher_drain_status,
             )
@@ -734,6 +867,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             terminal_snapshot = ProcessCleanupTerminalSnapshot(
                 targets=(),
                 coverage_status="unknown",
+                coverage_stage="target_observation",
+                coverage_subreason="observation_unknown",
                 watcher_drain_status=watcher_drain_status,
                 target_observation_unknown=True,
             )
@@ -775,6 +910,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
             cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
         ) from process_error
 
     if timed_out:
@@ -800,6 +937,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
             cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
         )
 
     if process is not None:
@@ -824,6 +963,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
         cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
         cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+        cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+        cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
     )
     cleanup_closed = terminal_snapshot.cleanup_status == "complete" and (
         cleanup_identity_receipt_path is None
@@ -844,6 +985,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
             cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
         )
     if exit_code != 0:
         raise CommandFailureError(
@@ -855,6 +998,8 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
             cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
         )
     return result
 
@@ -980,23 +1125,38 @@ def observe_process_cleanup_target(
     )
 
 
-def cleanup_birth_bound_processes(
+def cleanup_birth_bound_processes(  # noqa: C901, PLR0913
     identities: tuple[ProcessCleanupIdentity, ...],
     *,
     tracked_pids: tuple[int, ...],
     tracked_pgids: tuple[int, ...],
     coverage_status: CleanupCoverage = "complete",
+    coverage_stage: CleanupCoverageStage | None = None,
+    coverage_subreason: CleanupCoverageSubreason | None = None,
 ) -> ProcessCleanupTerminalSnapshot:
     """Clean one captured scope without ever signalling an unverified numeric identity."""
+    _require_cleanup_coverage_diagnostic(
+        coverage_status=coverage_status,
+        stage=coverage_stage,
+        subreason=coverage_subreason,
+    )
     identity_by_pid: Mapping[int, ProcessCleanupIdentity] = MappingProxyType(
         {identity.pid: identity for identity in identities},
     )
     coverage_unknown = coverage_status == "unknown" or len(identity_by_pid) != len(identities)
-    tracked_groups, group_coverage_unknown = _detect_tracked_group_members(
+    diagnostic = (
+        (coverage_stage, coverage_subreason)
+        if coverage_stage is not None and coverage_subreason is not None
+        else None
+    )
+    if len(identity_by_pid) != len(identities) and diagnostic is None:
+        diagnostic = ("group_member", "changed_identity_or_group_member")
+    tracked_groups, group_diagnostic = _detect_tracked_group_members(
         tracked_pgids,
         identity_by_pid,
     )
-    coverage_unknown = coverage_unknown or group_coverage_unknown
+    coverage_unknown = coverage_unknown or group_diagnostic is not None
+    diagnostic = diagnostic or group_diagnostic
 
     term_targets = tuple(
         identity
@@ -1031,9 +1191,9 @@ def cleanup_birth_bound_processes(
 
     # A child can join a tracked group after target selection. Detection can only make
     # coverage unknown; it can never expand the immutable pre-cleanup signal target set.
-    coverage_unknown = (
-        _terminal_rescan_tracked_groups(tracked_groups, identity_by_pid) or coverage_unknown
-    )
+    rescan_diagnostic = _terminal_rescan_tracked_groups(tracked_groups, identity_by_pid)
+    coverage_unknown = rescan_diagnostic is not None or coverage_unknown
+    diagnostic = diagnostic or rescan_diagnostic
 
     targets = tuple(
         observe_process_cleanup_target(identity)
@@ -1041,15 +1201,22 @@ def cleanup_birth_bound_processes(
     )
     if any(target.termination_outcome == "unknown" for target in targets):
         coverage_unknown = True
+        diagnostic = diagnostic or ("target_observation", "observation_unknown")
 
     for pid in sorted(set(tracked_pids) - set(identity_by_pid)):
         observation = read_process_observation(pid)
-        if observation is not None and observation.state != "zombie":
+        if observation is not None and observation.state == "unknown":
             coverage_unknown = True
+            diagnostic = diagnostic or ("group_member", "observation_unknown")
+        elif observation is not None and observation.state != "zombie":
+            coverage_unknown = True
+            diagnostic = diagnostic or ("group_member", "uncaptured_member")
 
     return ProcessCleanupTerminalSnapshot(
         targets=targets,
         coverage_status="unknown" if coverage_unknown else "complete",
+        coverage_stage=diagnostic[0] if coverage_unknown and diagnostic is not None else None,
+        coverage_subreason=(diagnostic[1] if coverage_unknown and diagnostic is not None else None),
         signaled_process_count=len(signaled_pids),
     )
 
@@ -1094,46 +1261,43 @@ def _signal_same_birth(
 def _detect_tracked_group_members(
     tracked_pgids: tuple[int, ...],
     identities: Mapping[int, ProcessCleanupIdentity],
-) -> tuple[set[int], bool]:
+) -> tuple[
+    set[int],
+    tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None,
+]:
     """Detect uncaptured members without ever expanding the cleanup target set."""
     tracked_groups = set(tracked_pgids)
-    coverage_unknown = False
+    diagnostic: tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None = None
     for pgid in sorted(tracked_groups):
         members, group_observed = process_group_members_with_coverage(pgid)
         if not group_observed:
-            coverage_unknown = True
+            diagnostic = diagnostic or ("group_table", "table_incomplete")
             continue
-        coverage_unknown = (
-            _compare_group_members(
-                members,
-                pgid=pgid,
-                identities=identities,
-            )
-            or coverage_unknown
+        diagnostic = diagnostic or _compare_group_members(
+            members,
+            pgid=pgid,
+            identities=identities,
         )
-    return tracked_groups, coverage_unknown
+    return tracked_groups, diagnostic
 
 
 def _terminal_rescan_tracked_groups(
     tracked_groups: set[int],
     identities: Mapping[int, ProcessCleanupIdentity],
-) -> bool:
+) -> tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None:
     """Detect late members so incomplete cleanup cannot publish a false zero."""
-    coverage_unknown = False
+    diagnostic: tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None = None
     for pgid in sorted(tracked_groups):
         members, group_observed = process_group_members_with_coverage(pgid)
         if not group_observed:
-            coverage_unknown = True
+            diagnostic = diagnostic or ("group_table", "table_incomplete")
             continue
-        coverage_unknown = (
-            _compare_group_members(
-                members,
-                pgid=pgid,
-                identities=identities,
-            )
-            or coverage_unknown
+        diagnostic = diagnostic or _compare_group_members(
+            members,
+            pgid=pgid,
+            identities=identities,
         )
-    return coverage_unknown
+    return diagnostic
 
 
 def _compare_group_members(
@@ -1141,28 +1305,34 @@ def _compare_group_members(
     *,
     pgid: int,
     identities: Mapping[int, ProcessCleanupIdentity],
-) -> bool:
+) -> tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None:
     """Return unknown for any member not matching the pre-cleanup captured identities."""
-    unknown = False
+    diagnostic: tuple[CleanupCoverageStage, CleanupCoverageSubreason] | None = None
     for pid in sorted(set(members)):
         existing = identities.get(pid)
         observation = read_process_observation(pid)
         if observation is None:
             if existing is None:
-                unknown = True
+                diagnostic = diagnostic or ("group_member", "uncaptured_member")
             continue
         if observation.state == "unknown":
-            unknown = True
+            diagnostic = diagnostic or ("group_member", "observation_unknown")
             continue
         if observation.pgid != pgid:
-            unknown = True
+            diagnostic = diagnostic or (
+                "group_member",
+                "changed_identity_or_group_member",
+            )
             continue
         if existing is not None:
             if existing.pgid != pgid or existing.birth_identity != observation.birth_identity:
-                unknown = True
+                diagnostic = diagnostic or (
+                    "group_member",
+                    "changed_identity_or_group_member",
+                )
             continue
-        unknown = True
-    return unknown
+        diagnostic = diagnostic or ("group_member", "uncaptured_member")
+    return diagnostic
 
 
 def write_command_cleanup_identity_receipt(  # noqa: PLR0913
@@ -1193,6 +1363,8 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
                 unknown_reason="target_observation_unknown",
                 watcher_drain_status="not-applicable",
                 coverage_status="unknown",
+                coverage_stage="target_observation",
+                coverage_subreason="observation_unknown",
                 target_count=len(supplied_identities),
             )
         terminal_snapshot = ProcessCleanupTerminalSnapshot(
@@ -1201,6 +1373,16 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
                 "unknown"
                 if any(target.termination_outcome == "unknown" for target in targets)
                 else "complete"
+            ),
+            coverage_stage=(
+                "target_observation"
+                if any(target.termination_outcome == "unknown" for target in targets)
+                else None
+            ),
+            coverage_subreason=(
+                "observation_unknown"
+                if any(target.termination_outcome == "unknown" for target in targets)
+                else None
             ),
         )
     if terminal_snapshot.cleanup_status == "unknown":
@@ -1215,6 +1397,8 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
             unknown_reason=unknown_reason,
             watcher_drain_status=terminal_snapshot.watcher_drain_status,
             coverage_status=terminal_snapshot.coverage_status,
+            coverage_stage=terminal_snapshot.coverage_stage,
+            coverage_subreason=terminal_snapshot.coverage_subreason,
             target_count=len(terminal_snapshot.targets),
         )
     targets = terminal_snapshot.targets
@@ -1258,6 +1442,8 @@ def _write_command_cleanup_unknown_receipt(  # noqa: PLR0913
     unknown_reason: CleanupUnknownReason,
     watcher_drain_status: WatcherDrainState,
     coverage_status: Literal["complete", "unknown"],
+    coverage_stage: CleanupCoverageStage | None,
+    coverage_subreason: CleanupCoverageSubreason | None,
     target_count: int,
 ) -> CommandCleanupIdentityEvidence:
     material = {
@@ -1271,6 +1457,8 @@ def _write_command_cleanup_unknown_receipt(  # noqa: PLR0913
         "unknown_reason": unknown_reason,
         "watcher_drain_status": watcher_drain_status,
         "coverage_status": coverage_status,
+        "coverage_stage": coverage_stage,
+        "coverage_subreason": coverage_subreason,
         "target_count": target_count,
         "remaining_process_count": None,
         "remaining_process_group_count": None,
@@ -1288,6 +1476,8 @@ def _write_command_cleanup_unknown_receipt(  # noqa: PLR0913
         evidence_status="observation-unknown",
         receipt_sha256=receipt.receipt_sha256,
         unknown_reason=receipt.unknown_reason,
+        cleanup_coverage_stage=receipt.coverage_stage,
+        cleanup_coverage_subreason=receipt.coverage_subreason,
     )
 
 
@@ -1395,10 +1585,34 @@ def _require_cleanup_identity_evidence_consistency(
     status: CleanupIdentityEvidenceKind,
     receipt_sha256: str | None,
     unknown_reason: CleanupUnknownReason | None,
+    coverage_stage: CleanupCoverageStage | None,
+    coverage_subreason: CleanupCoverageSubreason | None,
 ) -> None:
+    coverage_diagnostic_present = coverage_stage is not None or coverage_subreason is not None
+    if coverage_diagnostic_present:
+        _require_cleanup_coverage_diagnostic(
+            coverage_status="unknown",
+            stage=coverage_stage,
+            subreason=coverage_subreason,
+        )
+    if status == "observation-unknown":
+        if unknown_reason == "coverage_unknown" and (
+            not coverage_diagnostic_present or coverage_stage == "target_observation"
+        ):
+            raise ValueError("coverage-unknown evidence requires its coverage diagnostic")
+        if unknown_reason == "target_observation_unknown" and (
+            coverage_stage != "target_observation" or coverage_subreason != "observation_unknown"
+        ):
+            raise ValueError("target-observation evidence requires its diagnostic")
     valid = {
-        "authenticated": receipt_sha256 is not None and unknown_reason is None,
-        "no-target-observed": receipt_sha256 is None and unknown_reason is None,
+        "authenticated": (
+            receipt_sha256 is not None
+            and unknown_reason is None
+            and not coverage_diagnostic_present
+        ),
+        "no-target-observed": (
+            receipt_sha256 is None and unknown_reason is None and not coverage_diagnostic_present
+        ),
         "observation-unknown": (
             receipt_sha256 is not None
             and unknown_reason
@@ -1413,6 +1627,7 @@ def _require_cleanup_identity_evidence_consistency(
         ),
         "write-failed": (
             receipt_sha256 is None
+            and not coverage_diagnostic_present
             and unknown_reason
             in {
                 "cleanup_receipt_path_missing",
@@ -1424,6 +1639,41 @@ def _require_cleanup_identity_evidence_consistency(
     }[status]
     if not valid:
         raise ValueError("cleanup identity evidence status and digest differ")
+
+
+def _require_cleanup_coverage_diagnostic(
+    *,
+    coverage_status: CleanupCoverage,
+    stage: CleanupCoverageStage | None,
+    subreason: CleanupCoverageSubreason | None,
+    allow_legacy_missing: bool = False,
+) -> None:
+    if (stage is None) != (subreason is None):
+        raise ValueError("cleanup coverage stage and subreason must be paired")
+    if stage is None:
+        if coverage_status == "unknown" and not allow_legacy_missing:
+            raise ValueError("unknown cleanup coverage requires a diagnostic")
+        return
+    if coverage_status != "unknown":
+        raise ValueError("complete cleanup coverage cannot carry a diagnostic")
+    allowed: dict[CleanupCoverageStage, frozenset[CleanupCoverageSubreason]] = {
+        "first_snapshot": frozenset({"snapshot_failure"}),
+        "second_snapshot": frozenset({"snapshot_failure"}),
+        "watcher_capture": frozenset({"capture_failure"}),
+        "post_exit_snapshot": frozenset({"snapshot_failure"}),
+        "final_snapshot": frozenset({"snapshot_failure"}),
+        "group_table": frozenset({"table_incomplete"}),
+        "group_member": frozenset(
+            {
+                "uncaptured_member",
+                "changed_identity_or_group_member",
+                "observation_unknown",
+            },
+        ),
+        "target_observation": frozenset({"observation_unknown"}),
+    }
+    if subreason not in allowed[stage]:
+        raise ValueError("cleanup coverage stage and subreason differ")
 
 
 def _cleanup_unknown_reason(

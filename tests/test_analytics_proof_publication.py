@@ -200,6 +200,129 @@ def test_outer_unknown_candidate_cleanup_requires_typed_unknown_evidence() -> No
         )
 
 
+def test_candidate_runner_and_boundary_bind_cleanup_coverage_diagnostic() -> None:
+    runner = build_codex_native_candidate_runner_receipt(
+        candidate_commit=CANDIDATE,
+        candidate_tree="2" * 40,
+        phase="exit",
+        spawned=True,
+        exit_code=1,
+        command_sha256="3" * 64,
+        command_schema_sha256="4" * 64,
+        result_sha256=None,
+        cleanup_status="unknown",
+        cleanup_identity_evidence_status="observation-unknown",
+        cleanup_identity_receipt_sha256="d" * 64,
+        cleanup_unknown_reason="coverage_unknown",
+        cleanup_coverage_stage="group_member",
+        cleanup_coverage_subreason="uncaptured_member",
+    )
+    assert runner.cleanup_coverage_stage == "group_member"
+    assert runner.cleanup_coverage_subreason == "uncaptured_member"
+    assert verify_codex_native_candidate_runner_receipt(runner.model_dump_json()) == runner
+
+    boundary = build_codex_native_boundary_failure(
+        candidate_commit=CANDIDATE,
+        reason="proof_candidate_runner_cleanup_failed",
+        boundary_phase="candidate_runner",
+        candidate_runner_receipt_sha256=runner.receipt_sha256,
+        candidate_runner_cleanup_status="unknown",
+        candidate_runner_cleanup_evidence_status="observation-unknown",
+        candidate_runner_cleanup_receipt_sha256="d" * 64,
+        candidate_runner_cleanup_unknown_reason="coverage_unknown",
+        candidate_runner_cleanup_coverage_stage="group_member",
+        candidate_runner_cleanup_coverage_subreason="uncaptured_member",
+    )
+    publication = build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=ANALYSIS_KIND_COUNT,
+        evidence_receipt_count=EVIDENCE_RECEIPT_COUNT,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="boundary_failure",
+        result=boundary,
+    )
+
+    parsed = verify_codex_native_proof_publication(publication.model_dump_json())
+    assert isinstance(parsed.result, CodexNativeBoundaryFailureReceipt)
+    assert parsed.result.candidate_runner_cleanup_coverage_stage == "group_member"
+    assert parsed.result.candidate_runner_cleanup_coverage_subreason == "uncaptured_member"
+
+    tampered = publication.model_dump(mode="json")
+    tampered_result = cast("dict[str, Any]", tampered["result"])
+    tampered_result["candidate_runner_cleanup_coverage_subreason"] = (
+        "changed_identity_or_group_member"
+    )
+    with pytest.raises(ValidationError):
+        verify_codex_native_proof_publication(json.dumps(tampered))
+
+
+def test_current_unknown_cleanup_claim_requires_coverage_diagnostic() -> None:
+    """New receipts cannot use the legacy missing-diagnostic shape with a current digest."""
+    with pytest.raises(ValidationError):
+        build_codex_native_candidate_runner_receipt(
+            candidate_commit=CANDIDATE,
+            candidate_tree="2" * 40,
+            phase="exit",
+            spawned=True,
+            exit_code=1,
+            command_sha256="3" * 64,
+            command_schema_sha256="4" * 64,
+            result_sha256=None,
+            cleanup_status="unknown",
+            cleanup_identity_evidence_status="observation-unknown",
+            cleanup_identity_receipt_sha256="d" * 64,
+            cleanup_unknown_reason="coverage_unknown",
+        )
+    with pytest.raises(ValidationError):
+        build_codex_native_boundary_failure(
+            candidate_commit=CANDIDATE,
+            reason="proof_candidate_runner_cleanup_failed",
+            boundary_phase="candidate_runner",
+            candidate_runner_receipt_sha256="e" * 64,
+            candidate_runner_cleanup_status="unknown",
+            candidate_runner_cleanup_evidence_status="observation-unknown",
+            candidate_runner_cleanup_receipt_sha256="d" * 64,
+            candidate_runner_cleanup_unknown_reason="coverage_unknown",
+        )
+
+
+def test_prior_candidate_runner_without_coverage_diagnostic_remains_verifiable() -> None:
+    """The pre-diagnostic signed receipt shape remains readable, but cannot be newly emitted."""
+    current = build_codex_native_candidate_runner_receipt(
+        candidate_commit=CANDIDATE,
+        candidate_tree="2" * 40,
+        phase="exit",
+        spawned=True,
+        exit_code=1,
+        command_sha256="3" * 64,
+        command_schema_sha256="4" * 64,
+        result_sha256=None,
+        cleanup_status="unknown",
+        cleanup_identity_evidence_status="observation-unknown",
+        cleanup_identity_receipt_sha256="d" * 64,
+        cleanup_unknown_reason="coverage_unknown",
+        cleanup_coverage_stage="group_member",
+        cleanup_coverage_subreason="uncaptured_member",
+    )
+    payload = current.model_dump(mode="json")
+    payload.pop("cleanup_coverage_stage")
+    payload.pop("cleanup_coverage_subreason")
+    material = {key: value for key, value in payload.items() if key != "receipt_sha256"}
+    payload["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+
+    verified = verify_codex_native_candidate_runner_receipt(json.dumps(payload))
+
+    assert verified.cleanup_coverage_stage is None
+    assert verified.cleanup_coverage_subreason is None
+
+
 def test_legacy_verified_failure_without_eval_summary_remains_verifiable() -> None:
     bootstrap = CodexNativeBootstrapVerification(
         status="missing",

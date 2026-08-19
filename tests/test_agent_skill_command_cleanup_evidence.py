@@ -20,6 +20,8 @@ OWNER_FILE_MODE = 0o600
 REUSED_PID = 4242
 REUSED_PGID = 4343
 LEADER_REUSE_AFTER_READS = 2
+ROOT_BINDING_POLL_COUNT = 2
+POST_AND_FINAL_SNAPSHOT_COUNT = 2
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -346,6 +348,8 @@ def test_birth_bound_cleanup_terminal_rescan_rejects_late_member_after_leader_ex
     assert group_scans >= MIN_GROUP_SCANS
     assert all(target.pid != late_pid for target in snapshot.targets)
     assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "uncaptured_member"
     assert snapshot.remaining_process_count is None
     assert snapshot.remaining_process_group_count is None
 
@@ -396,6 +400,8 @@ def test_birth_bound_cleanup_reused_group_leader_never_signals_members(
 
     assert signals == []
     assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "changed_identity_or_group_member"
     assert snapshot.remaining_process_count is None
     assert snapshot.remaining_process_group_count is None
     assert tuple(target.pid for target in snapshot.targets) == (REUSED_PGID,)
@@ -454,6 +460,8 @@ def test_absent_group_leader_never_discovers_or_signals_uncaptured_member(
     assert signals == []
     assert tuple(target.pid for target in snapshot.targets) == (leader_pid,)
     assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "uncaptured_member"
     assert snapshot.remaining_process_count is None
     assert snapshot.remaining_process_group_count is None
 
@@ -977,10 +985,48 @@ def test_birth_bound_cleanup_unknown_identity_coverage_fails_unknown(
     snapshot = cleanup(
         (identity,),
         tracked_pids=(REUSED_PID, unknown_pid),
+        tracked_pgids=(),
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "observation_unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+
+
+def test_birth_bound_cleanup_incomplete_group_table_has_typed_unknown_cause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="known-birth",
+        initial_state="running",
+    )
+
+    def incomplete_group(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        return (), False
+
+    def missing_observation(_pid: int) -> command_runner.ProcessObservation | None:
+        return None
+
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        incomplete_group,
+    )
+    monkeypatch.setattr(command_runner, "read_process_observation", missing_observation)
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (identity,),
+        tracked_pids=(REUSED_PID,),
         tracked_pgids=(REUSED_PGID,),
     )
 
     assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_table"
+    assert snapshot.coverage_subreason == "table_incomplete"
     assert snapshot.remaining_process_count is None
     assert snapshot.remaining_process_group_count is None
 
@@ -1287,12 +1333,14 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
         if pid == replacement_pid:
             replacement_running = False
 
-    def record_cleanup(
+    def record_cleanup(  # noqa: PLR0913
         identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
         coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         admitted_for_cleanup.extend(identity.pid for identity in identities)
         return original_cleanup(
@@ -1300,6 +1348,8 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
             coverage_status=coverage_status,
+            coverage_stage=coverage_stage,
+            coverage_subreason=coverage_subreason,
         )
 
     def fake_popen(*_args: object, **_kwargs: object) -> ExitedProcess:
@@ -1497,12 +1547,14 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         signals.append((pid, sig))
         running[pid] = False
 
-    def record_cleanup(
+    def record_cleanup(  # noqa: PLR0913
         identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
         coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         admitted_for_cleanup.extend(identity.pid for identity in identities)
         return original_cleanup(
@@ -1510,6 +1562,8 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
             coverage_status=coverage_status,
+            coverage_stage=coverage_stage,
+            coverage_subreason=coverage_subreason,
         )
 
     def fake_popen(*_args: object, **_kwargs: object) -> ActiveProcess:
@@ -1579,12 +1633,14 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
     original_remaining_pids = command_runner.remaining_live_pids
     original_remaining_pgids = command_runner.remaining_live_pgids
 
-    def counted_cleanup(
+    def counted_cleanup(  # noqa: PLR0913
         identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
         coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls, cleanup_complete, inside_cleanup
         cleanup_calls += 1
@@ -1596,6 +1652,8 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
                 tracked_pids=tracked_pids,
                 tracked_pgids=tracked_pgids,
                 coverage_status=coverage_status,
+                coverage_stage=coverage_stage,
+                coverage_subreason=coverage_subreason,
             )
         finally:
             inside_cleanup = False
@@ -1678,12 +1736,14 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
         _ = (root_pid, pgid)
         raise OSError("injected_post_spawn_observation_failure")
 
-    def counted_cleanup(
+    def counted_cleanup(  # noqa: PLR0913
         identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
         coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         nonlocal cleanup_calls
         cleanup_calls += 1
@@ -1693,6 +1753,8 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
             coverage_status=coverage_status,
+            coverage_stage=coverage_stage,
+            coverage_subreason=coverage_subreason,
         )
 
     monkeypatch.setattr(command_runner, "_snapshot_tree_checked", broken_snapshot)
@@ -1886,6 +1948,8 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
                 tracked_pids=(*scope.tracked_pids, escaped_pid),
                 tracked_pgids=(*scope.tracked_pgids, escaped_pid),
                 coverage_status=scope.coverage_status,
+                coverage_stage=scope.coverage_stage,
+                coverage_subreason=scope.coverage_subreason,
             )
             watcher_scope_ready.set()
             if not release_watcher.wait(timeout=5):
@@ -1893,12 +1957,14 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
             watcher_finished.set()
         return scope
 
-    def record_cleanup(
+    def record_cleanup(  # noqa: PLR0913
         identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
         coverage_status: command_runner.CleanupCoverage = "complete",
+        coverage_stage: command_runner.CleanupCoverageStage | None = None,
+        coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
         cleanup_identity_pids.extend(identity.pid for identity in identities)
         return original_cleanup(
@@ -1906,6 +1972,8 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
             coverage_status=coverage_status,
+            coverage_stage=coverage_stage,
+            coverage_subreason=coverage_subreason,
         )
 
     code = (
@@ -2099,6 +2167,8 @@ def test_run_command_watcher_capture_oserror_is_unknown(
     assert caught.value.remaining_process_group_count is None
     assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
     assert caught.value.cleanup_unknown_reason == "watcher_drain_unknown"
+    assert caught.value.cleanup_coverage_stage == "watcher_capture"
+    assert caught.value.cleanup_coverage_subreason == "capture_failure"
     assert caught.value.cleanup_identity_receipt_sha256 is not None
     unknown_receipt = command_runner.verify_command_cleanup_unknown_receipt(
         receipt_path,
@@ -2108,6 +2178,8 @@ def test_run_command_watcher_capture_oserror_is_unknown(
     assert unknown_receipt.unknown_reason == "watcher_drain_unknown"
     assert unknown_receipt.watcher_drain_status == "unknown"
     assert unknown_receipt.coverage_status == "unknown"
+    assert unknown_receipt.coverage_stage == "watcher_capture"
+    assert unknown_receipt.coverage_subreason == "capture_failure"
     assert unknown_receipt.remaining_process_count is None
     assert unknown_receipt.remaining_process_group_count is None
 
@@ -2178,7 +2250,132 @@ def test_root_bound_scope_keeps_transient_checked_snapshot_failure_unknown(
 
     assert calls == failed_snapshot
     assert scope.coverage_status == "unknown"
+    assert scope.coverage_stage == ("first_snapshot" if failed_snapshot == 1 else "second_snapshot")
+    assert scope.coverage_subreason == "snapshot_failure"
     assert scope.identities == (root_identity,)
+
+
+@pytest.mark.parametrize(
+    ("failed_snapshot", "expected_stage"),
+    [(1, "post_exit_snapshot"), (2, "final_snapshot")],
+)
+def test_run_command_binds_post_exit_and_final_snapshot_failures(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_snapshot: int,
+    expected_stage: command_runner.CleanupCoverageStage,
+) -> None:
+    root_pid = REUSED_PGID
+    snapshot_calls = 0
+    receipt_path = (tmp_path / f"{expected_stage}.json").resolve()
+
+    class ExitingProcess:
+        pid = root_pid
+        returncode: int | None = None
+        poll_calls = 0
+
+        def poll(self) -> int | None:
+            self.poll_calls += 1
+            if self.poll_calls <= ROOT_BINDING_POLL_COUNT:
+                return None
+            self.returncode = 0
+            return 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            _ = timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ExitingProcess:
+        return ExitingProcess()
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        assert pid == root_pid
+        return command_runner.ProcessObservation(
+            pid=root_pid,
+            pgid=root_pid,
+            birth_identity="root-birth",
+            state="running",
+        )
+
+    def capture_scope(
+        _admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        return command_runner.ProcessCleanupScope(
+            identities=(),
+            tracked_pids=(root_pid,),
+            tracked_pgids=(root_pid,),
+            coverage_status="complete",
+        )
+
+    def checked_snapshot(
+        observed_root_pid: int | None,
+        observed_root_pgid: int | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], command_runner.CleanupCoverage]:
+        nonlocal snapshot_calls
+        assert observed_root_pid == root_pid
+        assert observed_root_pgid == root_pid
+        snapshot_calls += 1
+        return (
+            (root_pid,),
+            (root_pid,),
+            "unknown" if snapshot_calls == failed_snapshot else "complete",
+        )
+
+    def root_group_id(_pid: int) -> int:
+        return root_pid
+
+    def empty_group(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        return (), True
+
+    monkeypatch.setattr(command_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        capture_scope,
+    )
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", checked_snapshot)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        empty_group,
+    )
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "snapshot_failure",
+            ("ignored",),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    assert snapshot_calls == POST_AND_FINAL_SNAPSHOT_COUNT
+    assert caught.value.cleanup_unknown_reason == "coverage_unknown"
+    assert caught.value.cleanup_coverage_stage == expected_stage
+    assert caught.value.cleanup_coverage_subreason == "snapshot_failure"
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=caught.value.cleanup_identity_receipt_sha256 or "",
+    )
+    assert receipt is not None
+    assert receipt.coverage_stage == expected_stage
+    assert receipt.coverage_subreason == "snapshot_failure"
 
 
 def test_process_cleanup_scope_rejects_unknown_coverage_value() -> None:
@@ -2242,6 +2439,8 @@ def test_run_command_keeps_recovered_watcher_process_table_failure_unknown(
     assert caught.value.remaining_process_group_count is None
     assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
     assert caught.value.cleanup_unknown_reason == "coverage_unknown"
+    assert caught.value.cleanup_coverage_stage in {"first_snapshot", "second_snapshot"}
+    assert caught.value.cleanup_coverage_subreason == "snapshot_failure"
     digest = caught.value.cleanup_identity_receipt_sha256
     assert digest is not None
     receipt = command_runner.verify_command_cleanup_unknown_receipt(
@@ -2251,6 +2450,8 @@ def test_run_command_keeps_recovered_watcher_process_table_failure_unknown(
     assert receipt is not None
     assert receipt.unknown_reason == "coverage_unknown"
     assert receipt.coverage_status == "unknown"
+    assert receipt.coverage_stage == caught.value.cleanup_coverage_stage
+    assert receipt.coverage_subreason == "snapshot_failure"
     assert receipt.remaining_process_count is None
     assert receipt.remaining_process_group_count is None
 
@@ -2290,6 +2491,8 @@ def test_run_command_terminal_target_observation_error_writes_unknown_receipt(
     assert caught.value.remaining_process_group_count is None
     assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
     assert caught.value.cleanup_unknown_reason == "target_observation_unknown"
+    assert caught.value.cleanup_coverage_stage == "target_observation"
+    assert caught.value.cleanup_coverage_subreason == "observation_unknown"
     digest = caught.value.cleanup_identity_receipt_sha256
     assert digest is not None
     receipt = command_runner.verify_command_cleanup_unknown_receipt(
@@ -2299,6 +2502,8 @@ def test_run_command_terminal_target_observation_error_writes_unknown_receipt(
     assert receipt is not None
     assert receipt.unknown_reason == "target_observation_unknown"
     assert receipt.coverage_status == "unknown"
+    assert receipt.coverage_stage == "target_observation"
+    assert receipt.coverage_subreason == "observation_unknown"
     assert receipt.remaining_process_count is None
     assert receipt.remaining_process_group_count is None
     assert "PRIVATE_TERMINAL" not in receipt_path.read_text(encoding="utf-8")
@@ -2377,3 +2582,124 @@ def test_unknown_cleanup_receipt_is_bound_private_and_rejects_reason_tamper(
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("stage", "subreason"),
+    [
+        ("post_exit_snapshot", "snapshot_failure"),
+        ("final_snapshot", "snapshot_failure"),
+        ("group_table", "table_incomplete"),
+        ("group_member", "uncaptured_member"),
+        ("group_member", "changed_identity_or_group_member"),
+        ("group_member", "observation_unknown"),
+    ],
+)
+def test_unknown_cleanup_receipt_authenticates_allowlisted_coverage_diagnostic(
+    tmp_path: Path,
+    stage: command_runner.CleanupCoverageStage,
+    subreason: command_runner.CleanupCoverageSubreason,
+) -> None:
+    """Every cleanup uncertainty class remains distinct in the digest-bound receipt."""
+    receipt_path = (tmp_path / f"{stage}-{subreason}.json").resolve()
+    snapshot = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="unknown",
+        coverage_stage=stage,
+        coverage_subreason=subreason,
+    )
+
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="coverage_diagnostic",
+        argv=("python",),
+        cwd=tmp_path,
+        root_pid=111,
+        root_pgid=111,
+        terminal_snapshot=snapshot,
+    )
+
+    assert evidence.cleanup_coverage_stage == stage
+    assert evidence.cleanup_coverage_subreason == subreason
+    assert evidence.receipt_sha256 is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+    assert receipt is not None
+    assert receipt.coverage_stage == stage
+    assert receipt.coverage_subreason == subreason
+
+
+def test_unknown_cleanup_receipt_rejects_diagnostic_tamper_and_reads_legacy(
+    tmp_path: Path,
+) -> None:
+    receipt_path = (tmp_path / "coverage-diagnostic.json").resolve()
+    snapshot = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="unknown",
+        coverage_stage="group_member",
+        coverage_subreason="uncaptured_member",
+    )
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="coverage_diagnostic",
+        argv=("python",),
+        cwd=tmp_path,
+        root_pid=112,
+        root_pgid=112,
+        terminal_snapshot=snapshot,
+    )
+    assert evidence.receipt_sha256 is not None
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload["coverage_subreason"] = "changed_identity_or_group_member"
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=evidence.receipt_sha256,
+        )
+        is None
+    )
+
+    legacy = dict(payload)
+    legacy["coverage_subreason"] = "uncaptured_member"
+    legacy.pop("coverage_stage")
+    legacy.pop("coverage_subreason")
+    material = {key: value for key, value in legacy.items() if key != "receipt_sha256"}
+    legacy["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(legacy), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    verified = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=legacy["receipt_sha256"],
+    )
+    assert verified is not None
+    assert verified.coverage_stage is None
+    assert verified.coverage_subreason is None
+
+
+def test_current_cleanup_evidence_rejects_missing_or_mismatched_diagnostic() -> None:
+    """Only a parsed legacy receipt may omit coverage diagnostics."""
+    with pytest.raises(ValueError, match="coverage-unknown"):
+        command_runner.CommandCleanupIdentityEvidence(
+            evidence_status="observation-unknown",
+            receipt_sha256="d" * 64,
+            unknown_reason="coverage_unknown",
+        )
+    with pytest.raises(ValueError, match="target-observation"):
+        command_runner.CommandCleanupIdentityEvidence(
+            evidence_status="observation-unknown",
+            receipt_sha256="d" * 64,
+            unknown_reason="target_observation_unknown",
+            cleanup_coverage_stage="group_member",
+            cleanup_coverage_subreason="observation_unknown",
+        )

@@ -14,7 +14,12 @@ from typing import Final, Literal, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
-from saxo_bank_mcp.agent_skill_command_runner import CleanupUnknownReason
+from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupCoverageStage,
+    CleanupCoverageSubreason,
+    CleanupUnknownReason,
+)
+from saxo_bank_mcp.agent_skill_eval_tool_protocol import NonSaxoEventDescriptor
 from saxo_bank_mcp.auth_status import EffectiveReadEnvironment, EnvironmentName
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
@@ -161,6 +166,10 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
     model_command_event_count: int | None = Field(ge=0)
     model_mcp_event_count: int | None = Field(ge=0)
     model_saxo_event_count: int | None = Field(ge=0)
+    non_saxo_event_descriptors: tuple[NonSaxoEventDescriptor, ...] | None = Field(
+        default=None,
+        max_length=128,
+    )
     plugin_list_exit_code: int | None = None
     plugin_list_stdout_schema_sha256: str | None = Field(
         default=None,
@@ -218,6 +227,12 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
     @model_validator(mode="after")
     def _validate_allowlisted_case(self) -> Self:
         self._validate_model_output_observability()
+        if (
+            self.non_saxo_event_descriptors is not None
+            and self.model_mcp_event_count is not None
+            and len(self.non_saxo_event_descriptors) > self.model_mcp_event_count
+        ):
+            raise ValueError("summary non-Saxo descriptors exceed MCP event count")
         invoked_ids = self.invoked_logical_tool_ids or ()
         logical_ids = (*self.required_logical_tool_ids, *invoked_ids)
         if any(_SAFE_LOGICAL_TOOL_ID_PATTERN.fullmatch(tool_id) is None for tool_id in logical_ids):
@@ -270,6 +285,7 @@ class CodexNativeAgentEvaluationCaseSummary(_StrictModel):
             self.model_command_event_count,
             self.model_mcp_event_count,
             self.model_saxo_event_count,
+            self.non_saxo_event_descriptors,
         )
         if self.model_output_observability == "unknown":
             if any(value is not None for value in parse_derived_fields):
@@ -435,7 +451,7 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
     summary_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_summary(self) -> Self:
+    def _validate_summary(self) -> Self:  # noqa: C901
         if self.case_count != len(self.cases):
             raise ValueError("agent evaluation summary case count differs")
         if self.failed_case_count != sum(case.status == "failed" for case in self.cases):
@@ -445,6 +461,18 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             raise ValueError("agent evaluation summary case ids must be unique")
         material = self.model_dump(mode="json", exclude={"summary_sha256"})
         if self.summary_sha256 != _digest(material):
+            if all(
+                "non_saxo_event_descriptors" not in case.model_fields_set for case in self.cases
+            ):
+                prior_descriptor_material = dict(material)
+                prior_descriptor_cases: list[dict[str, JsonValue]] = []
+                for case in self.cases:
+                    case_material = case.model_dump(mode="json")
+                    case_material.pop("non_saxo_event_descriptors")
+                    prior_descriptor_cases.append(case_material)
+                prior_descriptor_material["cases"] = prior_descriptor_cases
+                if self.summary_sha256 == _digest(prior_descriptor_material):
+                    return self
             if self._matches_prior_observability_digest(material):
                 return self
             observability_fields = _MODEL_OUTPUT_OBSERVABILITY_FIELDS
@@ -463,6 +491,7 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
                 "raw_assistant_required_all_assertion_results",
                 "raw_assistant_required_any_assertion_results",
                 "raw_assistant_forbidden_assertion_absent_results",
+                "non_saxo_event_descriptors",
             }
             if self.cleanup is not None or any(
                 legacy_fields & case.model_fields_set for case in self.cases
@@ -730,6 +759,8 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
         pattern=_SHA256_PATTERN,
     )
     outer_process_cleanup_unknown_reason: CleanupUnknownReason | None = None
+    outer_process_cleanup_coverage_stage: CleanupCoverageStage | None = None
+    outer_process_cleanup_coverage_subreason: CleanupCoverageSubreason | None = None
     child_envelope_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     reason: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     redacted_publication: Literal[True] = True
@@ -742,6 +773,15 @@ class CodexNativeVerifiedChildFailure(_StrictModel):
             status=self.outer_process_cleanup_evidence_status,
             receipt_sha256=self.outer_process_cleanup_receipt_sha256,
             unknown_reason=self.outer_process_cleanup_unknown_reason,
+            coverage_stage=self.outer_process_cleanup_coverage_stage,
+            coverage_subreason=self.outer_process_cleanup_coverage_subreason,
+            allow_legacy_missing=not bool(
+                {
+                    "outer_process_cleanup_coverage_stage",
+                    "outer_process_cleanup_coverage_subreason",
+                }
+                & self.model_fields_set
+            ),
         ):
             raise ValueError("outer process cleanup evidence status and digest differ")
         if self.bootstrap_authenticated != (self.bootstrap_evidence_status == "authenticated"):
@@ -1099,6 +1139,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
     cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus = ("no-target-observed"),
     cleanup_identity_receipt_sha256: str | None = None,
     cleanup_identity_unknown_reason: CleanupUnknownReason | None = None,
+    cleanup_identity_coverage_stage: CleanupCoverageStage | None = None,
+    cleanup_identity_coverage_subreason: CleanupCoverageSubreason | None = None,
 ) -> CodexNativeVerifiedChildFailure:
     """Authenticate a failed child's one-line envelope or publish unknown facts."""
     expected = {
@@ -1166,6 +1208,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
         status=cleanup_identity_evidence_status,
         receipt_sha256=cleanup_identity_receipt_sha256,
         unknown_reason=cleanup_identity_unknown_reason,
+        coverage_stage=cleanup_identity_coverage_stage,
+        coverage_subreason=cleanup_identity_coverage_subreason,
     )
     normalized_cleanup_evidence_status: OuterProcessCleanupEvidenceStatus = (
         cleanup_identity_evidence_status if cleanup_evidence_consistent else "write-failed"
@@ -1177,6 +1221,12 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_unknown_reason
         if cleanup_evidence_consistent
         else "cleanup_evidence_inconsistent"
+    )
+    normalized_cleanup_coverage_stage = (
+        cleanup_identity_coverage_stage if cleanup_evidence_consistent else None
+    )
+    normalized_cleanup_coverage_subreason = (
+        cleanup_identity_coverage_subreason if cleanup_evidence_consistent else None
     )
     cleanup_counts_are_observable = normalized_cleanup_evidence_status in {
         "authenticated",
@@ -1212,6 +1262,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
             cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
             cleanup_identity_unknown_reason=normalized_cleanup_unknown_reason,
+            cleanup_identity_coverage_stage=normalized_cleanup_coverage_stage,
+            cleanup_identity_coverage_subreason=normalized_cleanup_coverage_subreason,
             bootstrap_verification=bootstrap_verification,
         )
     if status != "authenticated":
@@ -1230,6 +1282,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
             cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
             cleanup_identity_unknown_reason=normalized_cleanup_unknown_reason,
+            cleanup_identity_coverage_stage=normalized_cleanup_coverage_stage,
+            cleanup_identity_coverage_subreason=normalized_cleanup_coverage_subreason,
             child_envelope_sha256=envelope.envelope_sha256 if envelope is not None else None,
             bootstrap_verification=bootstrap_verification,
         )
@@ -1267,6 +1321,8 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
         cleanup_identity_evidence_status=normalized_cleanup_evidence_status,
         cleanup_identity_receipt_sha256=normalized_cleanup_receipt_sha256,
         cleanup_identity_unknown_reason=normalized_cleanup_unknown_reason,
+        cleanup_identity_coverage_stage=normalized_cleanup_coverage_stage,
+        cleanup_identity_coverage_subreason=normalized_cleanup_coverage_subreason,
         child_envelope_sha256=envelope.envelope_sha256,
         reason=envelope.reason,
         bootstrap_verification=bootstrap_verification,
@@ -1301,6 +1357,8 @@ def _unknown_verified_failure(  # noqa: PLR0913
     cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     cleanup_identity_unknown_reason: CleanupUnknownReason | None,
+    cleanup_identity_coverage_stage: CleanupCoverageStage | None,
+    cleanup_identity_coverage_subreason: CleanupCoverageSubreason | None,
     child_envelope_sha256: str | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
@@ -1345,6 +1403,8 @@ def _unknown_verified_failure(  # noqa: PLR0913
         cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         cleanup_identity_unknown_reason=cleanup_identity_unknown_reason,
+        cleanup_identity_coverage_stage=cleanup_identity_coverage_stage,
+        cleanup_identity_coverage_subreason=cleanup_identity_coverage_subreason,
         child_envelope_sha256=child_envelope_sha256,
         reason=reason_by_status[status],
         bootstrap_verification=bootstrap_verification,
@@ -1369,6 +1429,8 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
     cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     cleanup_identity_unknown_reason: CleanupUnknownReason | None,
+    cleanup_identity_coverage_stage: CleanupCoverageStage | None,
+    cleanup_identity_coverage_subreason: CleanupCoverageSubreason | None,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> CodexNativeVerifiedChildFailure:
     """Keep phase and positive facts while making unfinished outcomes unknown."""
@@ -1408,6 +1470,8 @@ def _cleanup_failed_verified_failure(  # noqa: PLR0913
         cleanup_identity_evidence_status=cleanup_identity_evidence_status,
         cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
         cleanup_identity_unknown_reason=cleanup_identity_unknown_reason,
+        cleanup_identity_coverage_stage=cleanup_identity_coverage_stage,
+        cleanup_identity_coverage_subreason=cleanup_identity_coverage_subreason,
         child_envelope_sha256=envelope.envelope_sha256,
         reason="proof_child_cleanup_failed",
         bootstrap_verification=bootstrap_verification,
@@ -1450,6 +1514,8 @@ def _verified_material(  # noqa: PLR0913
     cleanup_identity_evidence_status: OuterProcessCleanupEvidenceStatus,
     cleanup_identity_receipt_sha256: str | None,
     cleanup_identity_unknown_reason: CleanupUnknownReason | None,
+    cleanup_identity_coverage_stage: CleanupCoverageStage | None,
+    cleanup_identity_coverage_subreason: CleanupCoverageSubreason | None,
     child_envelope_sha256: str | None,
     reason: str,
     bootstrap_verification: CodexNativeBootstrapVerification,
@@ -1501,6 +1567,8 @@ def _verified_material(  # noqa: PLR0913
         "outer_process_cleanup_evidence_status": cleanup_identity_evidence_status,
         "outer_process_cleanup_receipt_sha256": cleanup_identity_receipt_sha256,
         "outer_process_cleanup_unknown_reason": cleanup_identity_unknown_reason,
+        "outer_process_cleanup_coverage_stage": cleanup_identity_coverage_stage,
+        "outer_process_cleanup_coverage_subreason": cleanup_identity_coverage_subreason,
         "child_envelope_sha256": child_envelope_sha256,
         "reason": reason,
         "redacted_publication": True,
@@ -1517,31 +1585,90 @@ def _digest(value: object) -> str:
     return hashlib.sha256(rendered).hexdigest()
 
 
-def _outer_cleanup_evidence_is_consistent(
+def _outer_cleanup_evidence_is_consistent(  # noqa: PLR0911, PLR0913
     *,
     status: OuterProcessCleanupEvidenceStatus,
     receipt_sha256: str | None,
     unknown_reason: CleanupUnknownReason | None,
+    coverage_stage: CleanupCoverageStage | None,
+    coverage_subreason: CleanupCoverageSubreason | None,
+    allow_legacy_missing: bool = False,
 ) -> bool:
+    if not _cleanup_coverage_diagnostic_is_consistent(
+        stage=coverage_stage,
+        subreason=coverage_subreason,
+    ):
+        return False
+    has_diagnostic = coverage_stage is not None
     if status == "authenticated":
-        return receipt_sha256 is not None and unknown_reason is None
+        return receipt_sha256 is not None and unknown_reason is None and not has_diagnostic
     if status == "no-target-observed":
-        return receipt_sha256 is None and unknown_reason is None
+        return receipt_sha256 is None and unknown_reason is None and not has_diagnostic
     if status == "observation-unknown":
-        return receipt_sha256 is not None and unknown_reason in {
+        if receipt_sha256 is None or unknown_reason not in {
             "watcher_publication_discarded",
             "watcher_still_running",
             "watcher_drain_unknown",
             "coverage_unknown",
             "target_observation_unknown",
             "cleanup_state_unknown",
+        }:
+            return False
+        if unknown_reason == "coverage_unknown":
+            return (
+                allow_legacy_missing
+                if not has_diagnostic
+                else coverage_stage != "target_observation"
+            )
+        if unknown_reason == "target_observation_unknown":
+            return (
+                allow_legacy_missing
+                if not has_diagnostic
+                else (
+                    coverage_stage == "target_observation"
+                    and coverage_subreason == "observation_unknown"
+                )
+            )
+        return True
+    return (
+        receipt_sha256 is None
+        and not has_diagnostic
+        and unknown_reason
+        in {
+            "cleanup_receipt_path_missing",
+            "cleanup_receipt_write_failed",
+            "cleanup_evidence_inconsistent",
+            "cleanup_evidence_unavailable",
         }
-    return receipt_sha256 is None and unknown_reason in {
-        "cleanup_receipt_path_missing",
-        "cleanup_receipt_write_failed",
-        "cleanup_evidence_inconsistent",
-        "cleanup_evidence_unavailable",
+    )
+
+
+def _cleanup_coverage_diagnostic_is_consistent(
+    *,
+    stage: CleanupCoverageStage | None,
+    subreason: CleanupCoverageSubreason | None,
+) -> bool:
+    if (stage is None) != (subreason is None):
+        return False
+    if stage is None:
+        return True
+    allowed: dict[CleanupCoverageStage, frozenset[CleanupCoverageSubreason]] = {
+        "first_snapshot": frozenset({"snapshot_failure"}),
+        "second_snapshot": frozenset({"snapshot_failure"}),
+        "watcher_capture": frozenset({"capture_failure"}),
+        "post_exit_snapshot": frozenset({"snapshot_failure"}),
+        "final_snapshot": frozenset({"snapshot_failure"}),
+        "group_table": frozenset({"table_incomplete"}),
+        "group_member": frozenset(
+            {
+                "uncaptured_member",
+                "changed_identity_or_group_member",
+                "observation_unknown",
+            },
+        ),
+        "target_observation": frozenset({"observation_unknown"}),
     }
+    return subreason in allowed[stage]
 
 
 def _nonnegative_or_none(value: int | None) -> int | None:

@@ -99,6 +99,8 @@ class EvalProcessManager:
             tracked_pids=scope.tracked_pids,
             tracked_pgids=scope.tracked_pgids,
             coverage_status=scope.coverage_status,
+            coverage_stage=scope.coverage_stage,
+            coverage_subreason=scope.coverage_subreason,
         )
         self._cleanup_snapshots.append(snapshot)
         terminated = snapshot.signaled_process_count

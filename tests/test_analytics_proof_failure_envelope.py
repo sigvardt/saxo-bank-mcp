@@ -12,6 +12,7 @@ from typing import Any, Literal, NoReturn, cast
 import pytest
 from pydantic import ValidationError
 
+import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_process as eval_process
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
@@ -338,6 +339,193 @@ def _verify(raw: str, **overrides: object) -> CodexNativeVerifiedChildFailure:
     }
     values.update(overrides)
     return verify_child_failure_envelope(**cast("Any", values))
+
+
+def test_non_saxo_event_descriptor_survives_authenticated_failure_publication() -> None:
+    """A failed case keeps only hashed/allowlisted event identity through every signed layer."""
+    case = next(
+        item for item in load_eval_cases(Path("evals/saxo-analytics")) if item.id == "scenario"
+    )
+    grants = resolve_tool_grants("codex", case.exact_tool_grants["codex"])
+    private_server = "PRIVATE_FOREIGN_SERVER_DO_NOT_PUBLISH"
+    private_tool = "PRIVATE_FOREIGN_TOOL_DO_NOT_PUBLISH"
+    stream = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "foreign",
+                "type": "mcp_tool_call",
+                "server": private_server,
+                "tool": private_tool,
+            },
+        },
+    )
+    record = eval_execution._record_from_process(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case,
+        "codex",
+        grants,
+        ManagedProcessResult(
+            stdout=stream,
+            stderr="",
+            returncode=0,
+            timed_out=False,
+            created_processes=1,
+            terminated_processes=0,
+            remaining_processes=0,
+            process_cleanup="passed",
+        ),
+    )
+    assert record.error == "non_saxo_mcp_event"
+    assert record.non_saxo_event_descriptors is not None
+    assert len(record.non_saxo_event_descriptors) == 1
+    report = EvalRunReport(
+        status="failed",
+        harness="codex",
+        environment="LOCAL",
+        execution_mode="model_execution",
+        selected_case_count=1,
+        case_count=1,
+        records=(record,),
+        cleanup={
+            "complete": True,
+            "process_cleanup": "passed",
+            "runtime_cleanup": "passed",
+            "token_promote": "passed",
+            "created_processes": 1,
+            "terminated_processes": 0,
+            "remaining_processes": 0,
+            "process_timed_out": False,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={},
+        after_global_state={},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=CANDIDATE,
+    )
+    report_bytes = json.dumps(
+        report.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    summary = producer._agent_evaluation_failure_summary(  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+    assert summary is not None
+    assert summary.cases[0].non_saxo_event_descriptors == record.non_saxo_event_descriptors
+
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    producer._record_agent_report_progress(progress, report)  # noqa: SLF001
+    progress.record_agent_evaluation_failure(summary)
+    verified = _verify(
+        _failure(
+            progress,
+            reason="installed_agent_evaluation_command_failed",
+        ).model_dump_json(),
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    rendered = publication.model_dump_json()
+    assert private_server not in rendered
+    assert private_tool not in rendered
+    parsed = publication_module.verify_codex_native_proof_publication(rendered)
+    parsed_summary = parsed.result.agent_evaluation_failure_summary
+    assert parsed_summary is not None
+    assert parsed_summary.cases[0].non_saxo_event_descriptors == (record.non_saxo_event_descriptors)
+
+    case_payload = summary.cases[0].model_dump(mode="json")
+    descriptors = cast("list[dict[str, Any]]", case_payload["non_saxo_event_descriptors"])
+    descriptors[0]["raw_server"] = private_server
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationCaseSummary.model_validate(case_payload, strict=True)
+
+    tampered = summary.model_dump(mode="json")
+    tampered_cases = cast("list[dict[str, Any]]", tampered["cases"])
+    tampered_descriptors = cast(
+        "list[dict[str, Any]]",
+        tampered_cases[0]["non_saxo_event_descriptors"],
+    )
+    tampered_descriptors[0]["server_sha256"] = "f" * 64
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationFailureSummary.model_validate(tampered, strict=True)
+
+
+def test_child_failure_binds_cleanup_coverage_diagnostic_through_publication() -> None:
+    progress = _progress()
+    child = _failure(progress)
+    verified = _verify(
+        child.model_dump_json(),
+        remaining_process_count=None,
+        remaining_process_group_count=None,
+        runtime_cleanup_status="unknown",
+        cleanup_identity_evidence_status="observation-unknown",
+        cleanup_identity_receipt_sha256="d" * 64,
+        cleanup_identity_unknown_reason="coverage_unknown",
+        cleanup_identity_coverage_stage="final_snapshot",
+        cleanup_identity_coverage_subreason="snapshot_failure",
+    )
+
+    assert verified.failure_evidence_status == "cleanup_failed"
+    assert verified.outer_process_cleanup_coverage_stage == "final_snapshot"
+    assert verified.outer_process_cleanup_coverage_subreason == "snapshot_failure"
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+    assert parsed.result.outer_process_cleanup_coverage_stage == "final_snapshot"
+    assert parsed.result.outer_process_cleanup_coverage_subreason == "snapshot_failure"
+
+    payload = publication.model_dump(mode="json")
+    result_payload = cast("dict[str, Any]", payload["result"])
+    result_payload["outer_process_cleanup_coverage_stage"] = "post_exit_snapshot"
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(json.dumps(payload))
+
+
+def test_child_failure_missing_current_cleanup_diagnostic_is_normalized_unknown() -> None:
+    """Current coverage uncertainty without its typed subcause cannot authenticate."""
+    verified = _verify(
+        _failure(_progress()).model_dump_json(),
+        remaining_process_count=None,
+        remaining_process_group_count=None,
+        runtime_cleanup_status="unknown",
+        cleanup_identity_evidence_status="observation-unknown",
+        cleanup_identity_receipt_sha256="d" * 64,
+        cleanup_identity_unknown_reason="coverage_unknown",
+    )
+
+    assert verified.failure_evidence_status == "cleanup_failed"
+    assert verified.outer_process_cleanup_evidence_status == "write-failed"
+    assert verified.outer_process_cleanup_receipt_sha256 is None
+    assert verified.outer_process_cleanup_unknown_reason == "cleanup_evidence_inconsistent"
+    assert verified.outer_process_cleanup_coverage_stage is None
+    assert verified.outer_process_cleanup_coverage_subreason is None
+    assert verified.model_event_count is None
+    assert verified.mcp_event_count is None
+    assert verified.saxo_event_count is None
 
 
 def _load_proof_matrix_script() -> ModuleType:
@@ -1143,6 +1331,7 @@ def test_failed_eval_report_survives_temp_cleanup_as_strict_summary(  # noqa: PL
         "model_command_event_count",
         "model_mcp_event_count",
         "model_saxo_event_count",
+        "non_saxo_event_descriptors",
         "plugin_list_exit_code",
         "plugin_list_stdout_schema_sha256",
         "mcp_probe_stage",

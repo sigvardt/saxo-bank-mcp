@@ -8,6 +8,7 @@ from typing import Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from saxo_bank_mcp._evidence import JsonValue
+from saxo_bank_mcp.agent_skill_eval_tool_protocol import NonSaxoEventDescriptor
 
 type Harness = Literal["codex", "claude"]
 type HarnessSelector = Literal["codex", "claude", "both"]
@@ -150,6 +151,10 @@ class EvalRunRecord(BaseModel):
     model_command_event_count: int | None = None
     model_mcp_event_count: int | None = None
     model_saxo_event_count: int | None = None
+    non_saxo_event_descriptors: tuple[NonSaxoEventDescriptor, ...] | None = Field(
+        default=None,
+        max_length=128,
+    )
     plugin_list_exit_code: int | None = None
     plugin_list_stdout_schema_sha256: str | None = Field(
         default=None,
@@ -206,6 +211,12 @@ class EvalRunRecord(BaseModel):
     @model_validator(mode="after")
     def _validate_mcp_probe_evidence(self) -> EvalRunRecord:  # noqa: C901
         self._validate_model_output_observability()
+        if (
+            self.non_saxo_event_descriptors is not None
+            and self.model_mcp_event_count is not None
+            and len(self.non_saxo_event_descriptors) > self.model_mcp_event_count
+        ):
+            raise ValueError("non-Saxo event descriptors exceed MCP event count")
         paired = (self.mcp_probe_exit_code is None) == (self.mcp_probe_stdout_schema_sha256 is None)
         completed_command = self.mcp_probe_stage in {
             "command_exit",
@@ -293,6 +304,7 @@ class EvalRunRecord(BaseModel):
             self.model_saxo_event_count,
             self.invoked_logical_tools,
             self.invoked_logical_tool_count,
+            self.non_saxo_event_descriptors,
         )
         if self.model_output_observability == "unknown":
             if any(value is not None for value in parse_derived_fields):

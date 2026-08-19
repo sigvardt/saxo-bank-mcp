@@ -180,6 +180,8 @@ def test_nested_eval_cleanup_keeps_unknown_remaining_count_nullable(
     unknown = command_runner.ProcessCleanupTerminalSnapshot(
         targets=(),
         coverage_status="unknown",
+        coverage_stage="target_observation",
+        coverage_subreason="observation_unknown",
     )
     if with_known_zero:
         cleanup_snapshots.append(

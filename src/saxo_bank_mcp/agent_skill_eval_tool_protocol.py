@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 
@@ -68,6 +69,60 @@ CODEX_MCP_DISCOVERY_TOOLS: Final = frozenset(
     },
 )
 type HarnessName = Literal["codex", "claude"]
+type SafeProtocolName = Literal[
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "list_resources",
+    "list_tools",
+    "list_prompts",
+    "read_resource",
+    "complete",
+    "ping",
+]
+
+
+class NonSaxoEventDescriptor(BaseModel):
+    """Content-free identity for one Codex MCP event not mapped to a Saxo logical tool."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
+
+    outer_event_type: Literal[
+        "item.started",
+        "item.updated",
+        "item.completed",
+        "other",
+    ]
+    item_type: Literal["mcp_tool_call"] = "mcp_tool_call"
+    server_category: Literal[
+        "foreign_mcp",
+        "codex_protocol",
+        "saxo_protocol",
+        "identity_unknown",
+        "unrecognized_mcp",
+    ]
+    protocol_name: SafeProtocolName | None = None
+    server_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    tool_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    name_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_identity(self) -> Self:
+        hashes = (self.server_sha256, self.tool_sha256, self.name_sha256)
+        if self.server_category in {"codex_protocol", "saxo_protocol"}:
+            if self.protocol_name is None or any(value is not None for value in hashes):
+                raise ValueError("allowlisted protocol descriptor cannot carry identity hashes")
+            if self.server_category == "codex_protocol" and (
+                self.protocol_name not in CODEX_MCP_DISCOVERY_TOOLS
+            ):
+                raise ValueError("Codex protocol descriptor name is not allowlisted")
+            if self.server_category == "saxo_protocol" and (
+                self.protocol_name not in SAXO_SERVER_PROTOCOL_TOOLS
+            ):
+                raise ValueError("Saxo protocol descriptor name is not allowlisted")
+        elif self.protocol_name is not None or any(value is None for value in hashes):
+            raise ValueError("non-protocol descriptor requires hashed identity fields")
+        return self
 
 
 class _CodexItem(BaseModel):
@@ -129,6 +184,7 @@ class ModelToolTrace:
     # Ephemeral decoded assistant-event text used only to derive privacy-safe diagnostics.
     # Eval reports persist only counts, hashes, and assertion booleans.
     assistant_event_texts: tuple[str, ...] = ()
+    non_saxo_event_descriptors: tuple[NonSaxoEventDescriptor, ...] = ()
 
 
 def parse_codex_model_output(stream: str) -> ModelToolTrace:
@@ -143,6 +199,7 @@ def parse_codex_model_output(stream: str) -> ModelToolTrace:
     counts = _EventCounts()
     answer_parts: list[str] = []
     assistant_event_parts: list[str] = []
+    non_saxo_descriptors: list[NonSaxoEventDescriptor] = []
     for event in events:
         item = event.item
         if item is None:
@@ -158,12 +215,19 @@ def parse_codex_model_output(stream: str) -> ModelToolTrace:
             continue
         seen_ids.add(identity)
         counts.tool += 1
-        _classify_codex_item(item, counts, order)
+        _classify_codex_item(
+            event.type,
+            item,
+            counts,
+            order,
+            non_saxo_descriptors,
+        )
     return _trace_from_counts(
         counts,
         order,
         "\n".join(answer_parts),
         assistant_event_texts=tuple(assistant_event_parts),
+        non_saxo_event_descriptors=tuple(non_saxo_descriptors),
     )
 
 
@@ -265,7 +329,13 @@ class _EventCounts:
     parse_error: str = ""
 
 
-def _classify_codex_item(item: _CodexItem, counts: _EventCounts, order: list[str]) -> None:
+def _classify_codex_item(
+    outer_event_type: str,
+    item: _CodexItem,
+    counts: _EventCounts,
+    order: list[str],
+    descriptors: list[NonSaxoEventDescriptor],
+) -> None:
     if item.type in CODEX_COMMAND_ITEM_TYPES:
         counts.command += 1
     if item.type in CODEX_FILE_ITEM_TYPES:
@@ -287,7 +357,9 @@ def _classify_codex_item(item: _CodexItem, counts: _EventCounts, order: list[str
         order.append(logical)
         return
     if classification == "saxo_protocol":
+        descriptors.append(_non_saxo_event_descriptor(outer_event_type, item, classification))
         return
+    descriptors.append(_non_saxo_event_descriptor(outer_event_type, item, classification))
     counts.non_saxo_mcp += 1
     counts.parse_error = counts.parse_error or (
         "unknown_mcp_event" if classification == "unknown" else "non_saxo_mcp_event"
@@ -337,6 +409,69 @@ def _codex_mcp_classification(item: _CodexItem) -> str:
             return "saxo_protocol"
         return "unknown"
     return "non_saxo"
+
+
+def _non_saxo_event_descriptor(
+    outer_event_type: str,
+    item: _CodexItem,
+    classification: str,
+) -> NonSaxoEventDescriptor:
+    protocol_name = _allowlisted_protocol_name(item) if classification == "saxo_protocol" else None
+    if protocol_name is not None:
+        category = (
+            "codex_protocol"
+            if _is_codex_mcp_discovery(server=item.server, tool=item.tool, name=item.name)
+            else "saxo_protocol"
+        )
+        return NonSaxoEventDescriptor(
+            outer_event_type=_safe_outer_event_type(outer_event_type),
+            server_category=category,
+            protocol_name=protocol_name,
+        )
+    category = (
+        "foreign_mcp"
+        if classification == "non_saxo"
+        else "identity_unknown"
+        if not (item.server.strip() or item.tool.strip() or item.name.strip())
+        else "unrecognized_mcp"
+    )
+    return NonSaxoEventDescriptor(
+        outer_event_type=_safe_outer_event_type(outer_event_type),
+        server_category=category,
+        server_sha256=_text_sha256(item.server),
+        tool_sha256=_text_sha256(item.tool),
+        name_sha256=_text_sha256(item.name),
+    )
+
+
+def _allowlisted_protocol_name(item: _CodexItem) -> SafeProtocolName | None:
+    candidates = (item.tool.strip().lower(), item.name.strip().lower())
+    allowed = CODEX_MCP_DISCOVERY_TOOLS | SAXO_SERVER_PROTOCOL_TOOLS
+    for candidate in candidates:
+        bare = candidate.rsplit("__", 1)[-1] if "__" in candidate else candidate
+        if bare and bare in allowed:
+            return cast("SafeProtocolName", bare)
+    return None
+
+
+def _safe_outer_event_type(
+    value: str,
+) -> Literal[
+    "item.started",
+    "item.updated",
+    "item.completed",
+    "other",
+]:
+    if value in {"item.started", "item.updated", "item.completed"}:
+        return cast(
+            'Literal["item.started", "item.updated", "item.completed"]',
+            value,
+        )
+    return "other"
+
+
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _is_known_saxo_protocol_tool(*candidates: str) -> bool:
@@ -410,6 +545,7 @@ def _trace_from_counts(
     assistant_text: str,
     *,
     assistant_event_texts: tuple[str, ...] = (),
+    non_saxo_event_descriptors: tuple[NonSaxoEventDescriptor, ...] = (),
 ) -> ModelToolTrace:
     return ModelToolTrace(
         assistant_text=assistant_text,
@@ -424,6 +560,7 @@ def _trace_from_counts(
         non_saxo_mcp_event_count=counts.non_saxo_mcp,
         parse_error=counts.parse_error,
         assistant_event_texts=assistant_event_texts,
+        non_saxo_event_descriptors=non_saxo_event_descriptors,
     )
 
 
@@ -441,4 +578,5 @@ def _empty_trace(*, parse_error: str) -> ModelToolTrace:
         non_saxo_mcp_event_count=0,
         parse_error=parse_error,
         assistant_event_texts=(),
+        non_saxo_event_descriptors=(),
     )

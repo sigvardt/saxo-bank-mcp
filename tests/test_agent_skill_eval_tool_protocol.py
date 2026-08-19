@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Final
@@ -178,6 +179,64 @@ def test_codex_parser_counts_forbidden_command_and_non_saxo_mcp() -> None:
     assert trace.non_saxo_mcp_event_count == 1
     assert trace.parse_error == "non_saxo_mcp_event"
     assert trace.invoked_logical_tools == ()
+    assert len(trace.non_saxo_event_descriptors) == 1
+    descriptor = trace.non_saxo_event_descriptors[0]
+    assert descriptor.outer_event_type == "item.completed"
+    assert descriptor.item_type == "mcp_tool_call"
+    assert descriptor.server_category == "foreign_mcp"
+    assert descriptor.protocol_name is None
+    assert descriptor.server_sha256 == hashlib.sha256(b"playwright").hexdigest()
+    assert descriptor.tool_sha256 == hashlib.sha256(b"browser_navigate").hexdigest()
+    assert descriptor.name_sha256 == hashlib.sha256(b"").hexdigest()
+    assert "playwright" not in descriptor.model_dump_json()
+    assert "browser_navigate" not in descriptor.model_dump_json()
+
+
+def test_codex_parser_describes_allowlisted_protocol_without_raw_identity() -> None:
+    stream = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "protocol",
+                "type": "mcp_tool_call",
+                "server": "codex",
+                "tool": "list_mcp_resources",
+            },
+        },
+    )
+
+    trace = parse_codex_model_output(stream)
+
+    assert trace.parse_error == ""
+    assert trace.non_saxo_mcp_event_count == 0
+    assert len(trace.non_saxo_event_descriptors) == 1
+    descriptor = trace.non_saxo_event_descriptors[0]
+    assert descriptor.server_category == "codex_protocol"
+    assert descriptor.protocol_name == "list_mcp_resources"
+    assert descriptor.server_sha256 is None
+    assert descriptor.tool_sha256 is None
+    assert descriptor.name_sha256 is None
+
+
+def test_codex_parser_describes_empty_unknown_mcp_identity_with_hashes() -> None:
+    trace = parse_codex_model_output(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {"id": "empty", "type": "mcp_tool_call"},
+            },
+        ),
+    )
+
+    assert trace.parse_error == "unknown_mcp_event"
+    assert len(trace.non_saxo_event_descriptors) == 1
+    descriptor = trace.non_saxo_event_descriptors[0]
+    assert descriptor.server_category == "identity_unknown"
+    assert descriptor.protocol_name is None
+    empty_sha256 = hashlib.sha256(b"").hexdigest()
+    assert descriptor.server_sha256 == empty_sha256
+    assert descriptor.tool_sha256 == empty_sha256
+    assert descriptor.name_sha256 == empty_sha256
 
 
 def test_claude_parser_successful_required_sequence() -> None:
