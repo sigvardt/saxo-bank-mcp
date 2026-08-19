@@ -785,3 +785,34 @@ runtime consumption and cleanup receipts authenticate complete removal, the proo
 and later observation finds zero task processes, but those later facts do not repair unknown
 cleanup coverage. No numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, controlled
 lifecycle, account equality, or activation ran. All 54 profiles remain quarantined with 0/54 active.
+
+## Local cleanup and non-Saxo diagnostic hardening
+
+Local source `a7bbf4aca5100a6e8ee06d31adc66d857193728a`, tree
+`603ef56df322ca32c93c7ff22b9c07436a2108c6`, adds diagnostic provenance without changing the
+sealed result. Cleanup uncertainty now retains one strict stage and subreason across the process
+scope, terminal snapshot, owner-only digest-bound receipt, child failure, candidate runner, and
+outer publication. The allowlist distinguishes first- and second-snapshot failure, watcher capture
+failure, post-exit and final-snapshot failure, incomplete group tables, uncaptured or changed group
+members, and target-observation uncertainty. Current receipts with unknown coverage require this
+diagnostic and nullable remaining counts; malformed, inconsistent, or tampered combinations fail
+closed. Historical authenticated receipts retain their legacy verification path and are not
+reinterpreted.
+
+Failed-case evidence now also carries a strict privacy-safe descriptor for a classified non-Saxo
+event. It records only the outer event type, item type, fixed server category, and either an
+allowlisted protocol name or SHA-256 identities for server/tool/name. Raw names, arguments,
+payloads, handles, paths, transcripts, and broker/account values are forbidden by schema and tests.
+Foreign MCP, known Codex protocol, empty/unknown identity, tamper, and privacy cases are covered.
+
+TDD first reproduced 19 expected failures. Focused verification passed 195 tests twice; the selected
+related/auth/privacy partition passed 676 tests. Ruff lint and changed-file formatting passed,
+BasedPyright reported 0 errors, 0 warnings, and 0 notes, and plugin, nine-skill static,
+60-tool/294-operation catalog, 34-case evaluation-manifest, nine-path source privacy, and diff checks
+passed. No install, model, production MCP server, Saxo request, browser, sealed proof, or broker/data
+network activity ran in this source/test batch.
+
+This correction does not reconstruct or guess the sealed attempt's exact cleanup subcause or the
+identity of its non-Saxo event. Its 10/11 result, unknown aggregate broker and cleanup facts, no-retry
+boundary, and 0/54 activation remain unchanged. Independent static review of `a7bbf4a` is the next
+gate; no exact install or sealed proof is authorized by this local correction alone.

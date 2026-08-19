@@ -356,3 +356,12 @@ that path to be absent. No clone, plugin install, client, retained runtime, mode
 global-state work ran, and no retry was permitted. A separately authorized attempt must pass an
 absent installer-owned run root. No exact `f96a3b2` install, suite, proof, or activation evidence
 exists; sealed `e5dc932` and 0/54 activation remain unchanged.
+
+Superseding local diagnostic handoff: source `a7bbf4a`, tree `603ef56d`, binds strict cleanup
+stage/subreason provenance and privacy-safe non-Saxo event descriptors through authenticated child,
+candidate, and outer failure evidence. Unknown cleanup retains null remaining counts, and only fixed
+event/item/category fields plus an allowlisted protocol name or hashed identities may survive the
+privacy boundary. Local focused tests passed twice plus related/auth/privacy, Ruff/format, type,
+plugin, static, catalog, eval-manifest, privacy, and diff gates. The prior sealed attempt remains
+10/11 with an unrecoverable exact cleanup subcause and non-Saxo identity; it is not relabeled. This
+source remains uninstalled and unsealed pending independent static review, with 0/54 active.

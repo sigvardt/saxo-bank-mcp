@@ -30,3 +30,18 @@ parsing or observable record construction; invalid or malformed structured outpu
 unobservable for either harness. Unknown router evidence has no decision, grading result, invoked
 tool identity, or model/command/MCP/Saxo count. A fully decoded successful router decision remains
 eligible for observable exact-zero event evidence.
+
+Diagnostic provenance completion rule: cleanup uncertainty carries one authenticated stage and
+subreason through the scope, terminal snapshot, owner-only receipt, child failure, candidate runner,
+and outer publication. The fixed vocabulary distinguishes first snapshot, second snapshot, watcher
+capture, post-exit snapshot, final snapshot, group-table incompleteness, uncaptured member, changed
+identity/group member, and target observation. Unknown coverage keeps remaining counts null.
+Missing, inconsistent, or tampered current diagnostics fail closed; legacy digest-bound receipts
+remain readable without being rewritten.
+
+Non-Saxo descriptor completion rule: a failed case may retain only an outer event type, item type,
+fixed server category, and either an allowlisted protocol name or SHA-256 server/tool/name
+identities. Unknown/empty identity remains explicit. Raw names outside the allowlist, arguments,
+payloads, paths, handles, transcripts, and account or money values are forbidden. The descriptor is
+strictly authenticated through the failed-case summary and may diagnose a future attempt only; it
+must never be used to infer missing facts from historical evidence.

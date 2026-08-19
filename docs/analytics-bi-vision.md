@@ -2436,6 +2436,15 @@ account equality, or activation followed; activation remains 0/54. The next work
 of non-Saxo event classification and both unknown cleanup-coverage boundaries before any new exact
 candidate or sealed attempt.
 
+Local source `a7bbf4a`, tree `603ef56d`, now makes future diagnostic failures attributable without
+weakening those boundaries. Unknown cleanup carries an authenticated allowlisted stage/subreason
+and nullable counts through child, candidate, and outer receipts. A failed case may retain only a
+strict privacy-safe non-Saxo descriptor: fixed event/item/category plus an allowlisted protocol name
+or hashed identities. Raw protocol names outside the allowlist, arguments, payloads, paths, handles,
+transcripts, and account values are excluded. The historical sealed receipt is not relabeled, so its
+exact cleanup subcause and non-Saxo identity remain unavailable rather than inferred. Independent
+static review of `a7bbf4a` is next; install and proof remain stopped, and activation stays 0/54.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
