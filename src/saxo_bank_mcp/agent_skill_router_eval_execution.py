@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Final
 
 from saxo_bank_mcp.agent_skill_eval_failure_records import (
+    normalize_unobservable_failure_reason,
     unobservable_model_failure_record,
 )
 from saxo_bank_mcp.agent_skill_eval_models import (
@@ -32,6 +33,15 @@ ROUTER_SOURCE_PATHS: Final = (
     Path("skills/saxo-bank/references/router-contract.md"),
 )
 GIT_EXECUTABLE: Final = shutil.which("git") or "git"
+CLIENT_VERSION_TIMEOUT_SECONDS: Final = 30.0
+
+
+class ClientVersionProbeError(RuntimeError):
+    """A version child started or was attempted but its lifecycle is not proven clean."""
+
+    def __init__(self, reason: str | BaseException) -> None:  # noqa: D107
+        self.reason = normalize_unobservable_failure_reason(reason)
+        super().__init__(self.reason)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,13 +249,21 @@ def execute_router_model_case(  # noqa: PLR0911, PLR0913
                 router_source_sha256=source_digest,
             )
         client_version = _client_version(harness, launch_env, process_manager=manager)
+    except ClientVersionProbeError as exc:
+        return unobservable_model_failure_record(
+            case,
+            harness,
+            grants,
+            exc.reason,
+            router_source_sha256=source_digest,
+        )
     except (OSError, ValueError, KeyError) as exc:
         if manager.created_processes > created_before:
             return unobservable_model_failure_record(
                 case,
                 harness,
                 grants,
-                type(exc).__name__,
+                exc,
                 router_source_sha256=source_digest,
             )
         return _router_record(
@@ -369,10 +387,19 @@ def _client_version(
             command,
             cwd=Path(launch_env.get("TMPDIR") or launch_env.get("HOME") or "."),
             env=launch_env,
-            timeout_seconds=30,
+            timeout_seconds=CLIENT_VERSION_TIMEOUT_SECONDS,
         )
-    except OSError:
-        return "unknown"
+    except (OSError, ValueError, KeyError) as exc:
+        raise ClientVersionProbeError(exc) from exc
+    if result.timed_out:
+        raise ClientVersionProbeError("client_version_timeout")
+    if result.remaining_processes is None or result.process_cleanup == "unknown":
+        raise ClientVersionProbeError("client_version_cleanup_unknown")
+    if result.remaining_processes > 0 or result.process_cleanup not in {
+        "passed",
+        "not_required",
+    }:
+        raise ClientVersionProbeError("client_version_cleanup_residue")
     text = (result.stdout or result.stderr).strip()
     return text.splitlines()[0] if text else "unknown"
 

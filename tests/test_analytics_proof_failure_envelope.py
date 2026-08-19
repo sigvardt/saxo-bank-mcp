@@ -18,6 +18,9 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     CommandResult,
     run_command,
 )
+from saxo_bank_mcp.agent_skill_eval_failure_records import (
+    unobservable_model_failure_record,
+)
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport, load_eval_cases
 from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
@@ -1949,6 +1952,111 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
     assert child.agent_evaluation_failure_summary == summary
     assert verified.agent_evaluation_failure_summary == summary
     assert parsed.result.agent_evaluation_failure_summary == summary
+    assert parsed.result.broker_write_made is None
+    assert parsed.result.live_mutation_calls is None
+    assert parsed.result.purchase_occurred is None
+    assert parsed.result.disclaimer_response_made is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        (OSError("private operating-system detail"), "os_error"),
+        (PermissionError("private permission detail"), "permission_error"),
+        (FileNotFoundError("private path detail"), "file_not_found_error"),
+        (ProcessLookupError("private process detail"), "process_lookup_error"),
+        (ValueError("private value detail"), "value_error"),
+        (KeyError("private key detail"), "key_error"),
+        (RuntimeError("private runtime detail"), "model_execution_error"),
+    ],
+)
+def test_exception_reason_is_allowlisted_and_signed_through_publication(
+    failure: Exception,
+    expected_reason: str,
+) -> None:
+    """Caught exception types survive every signed layer without private detail."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    case = next(
+        item for item in load_eval_cases(Path("evals/saxo-bank")) if item.id == "router-auth"
+    )
+    record = unobservable_model_failure_record(case, "codex", (), failure)
+    assert record.error == expected_reason
+    assert record.error in {
+        "os_error",
+        "permission_error",
+        "file_not_found_error",
+        "process_lookup_error",
+        "value_error",
+        "key_error",
+        "model_execution_error",
+    }
+    report = EvalRunReport(
+        status="failed",
+        harness="codex",
+        environment="LOCAL",
+        execution_mode="model_execution",
+        selected_case_count=1,
+        case_count=1,
+        records=(record,),
+        cleanup={
+            "complete": True,
+            "process_cleanup": "passed",
+            "runtime_cleanup": "passed",
+            "token_promote": "passed",
+            "created_processes": 1,
+            "terminated_processes": 1,
+            "remaining_processes": 0,
+            "process_timed_out": False,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={},
+        after_global_state={},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=CANDIDATE,
+    )
+    report_bytes = json.dumps(
+        report.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    summary = producer._agent_evaluation_failure_summary(  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+    assert summary is not None
+    assert summary.cases[0].error == expected_reason
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    progress.record_agent_evaluation_failure(summary)
+    child = _failure(progress, reason="installed_agent_evaluation_command_failed")
+    verified = _verify(child.model_dump_json())
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert child.agent_evaluation_failure_summary is not None
+    assert child.agent_evaluation_failure_summary.cases[0].error == expected_reason
+    assert verified.agent_evaluation_failure_summary is not None
+    assert verified.agent_evaluation_failure_summary.cases[0].error == expected_reason
+    assert parsed.result.agent_evaluation_failure_summary is not None
+    assert parsed.result.agent_evaluation_failure_summary.cases[0].error == expected_reason
+    rendered = publication.model_dump_json()
+    assert "private " not in rendered
     assert parsed.result.broker_write_made is None
     assert parsed.result.live_mutation_calls is None
     assert parsed.result.purchase_occurred is None

@@ -15,6 +15,7 @@ from typing import Any, Final, cast
 
 import pytest
 
+import saxo_bank_mcp.agent_skill_eval_commands as eval_commands
 import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_process as eval_process
 import saxo_bank_mcp.agent_skill_eval_runner as eval_runner
@@ -22,6 +23,7 @@ import saxo_bank_mcp.agent_skill_matrix_env as matrix_env
 import saxo_bank_mcp.agent_skill_router_eval_execution as router_execution
 from saxo_bank_mcp import agent_skill_install_cli_driver as cli_driver
 from saxo_bank_mcp.agent_skill_command_runner import (
+    ProcessCleanupTerminalSnapshot,
     process_group_members,
     process_still_running,
     remaining_live_pgids,
@@ -71,6 +73,7 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 CASE_ROOT: Final = ROOT / "evals/saxo-bank"
 DIGEST: Final = "d" * 64
 BOTH_HARNESS_COUNT: Final = 2
+VERSION_PROBE_CLEANUP_CALL_INDEX: Final = 2
 
 
 def _sim_token(
@@ -2036,6 +2039,244 @@ def test_router_post_launch_unobservable_results_never_publish_empty_trace(
     assert record.assertion_status == "unknown"
     assert record.router_decision is None
     assert "private-malformed-router-output" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+@pytest.mark.parametrize(
+    ("version_failure", "expected_error"),
+    [
+        ("timeout", "client_version_timeout"),
+        ("cleanup_unknown", "client_version_cleanup_unknown"),
+        ("cleanup_residue", "client_version_cleanup_residue"),
+        ("permission_error", "permission_error"),
+    ],
+)
+def test_router_version_probe_lifecycle_failure_is_unobservable(  # noqa: C901, PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: str,
+    version_failure: str,
+    expected_error: str,
+) -> None:
+    """A real post-model version child cannot be discarded as a harmless string."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
+    assert case.router_expectation is not None
+    decision = RouterDecision(
+        **case.router_expectation.model_dump(mode="python"),
+        execution_allowed=False,
+    )
+    stream = (
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "answer",
+                    "type": "agent_message",
+                    "text": decision.model_dump_json(),
+                },
+            },
+        )
+        if harness == "codex"
+        else json.dumps(
+            {
+                "type": "result",
+                "structured_output": decision.model_dump(mode="json"),
+            },
+        )
+    )
+    stream_path = tmp_path / "router.jsonl"
+    stream_path.write_text(stream + "\n", encoding="utf-8")
+    version_cli = tmp_path / "version-cli"
+    if version_failure == "timeout":
+        version_cli.write_text("#!/bin/sh\nsleep 0.25\nprintf 'fixture 1.0\\n'\n", encoding="utf-8")
+    else:
+        version_cli.write_text("#!/bin/sh\nprintf 'fixture 1.0\\n'\n", encoding="utf-8")
+    version_cli.chmod(0o700)
+    denied_executable = tmp_path / "denied-executable"
+    denied_executable.mkdir()
+
+    def fake_router_command(_spec: object, **_kwargs: object) -> tuple[str, ...]:
+        return ("/bin/cat", str(stream_path))
+
+    def resolve_version_cli(_name: str, _env: dict[str, str]) -> str:
+        return str(denied_executable if version_failure == "permission_error" else version_cli)
+
+    monkeypatch.setattr(router_execution, "_router_command", fake_router_command)
+    monkeypatch.setattr(eval_commands, "resolve_cli_executable", resolve_version_cli)
+    monkeypatch.setattr(
+        router_execution,
+        "CLIENT_VERSION_TIMEOUT_SECONDS",
+        0.05 if version_failure == "timeout" else 1.0,
+        raising=False,
+    )
+    original_cleanup = eval_process.cleanup_birth_bound_processes
+    cleanup_call_count = 0
+
+    def lifecycle_cleanup(*args: object, **kwargs: object) -> ProcessCleanupTerminalSnapshot:
+        nonlocal cleanup_call_count
+        cleanup_call_count += 1
+        snapshot = original_cleanup(*args, **kwargs)  # type: ignore[arg-type]
+        if cleanup_call_count != VERSION_PROBE_CLEANUP_CALL_INDEX:
+            return snapshot
+        if version_failure == "cleanup_unknown":
+            return replace(snapshot, coverage_status="unknown")
+        if version_failure == "cleanup_residue":
+            assert snapshot.targets
+            first = snapshot.targets[0]
+            running = first.model_copy(
+                update={
+                    "terminal_state": "running",
+                    "termination_outcome": "still_running",
+                    "terminal_birth_identity_sha256": first.birth_identity_sha256,
+                },
+            )
+            return replace(snapshot, targets=(running, *snapshot.targets[1:]))
+        return snapshot
+
+    monkeypatch.setattr(eval_process, "cleanup_birth_bound_processes", lifecycle_cleanup)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(runtime),
+        "TMPDIR": str(runtime),
+    }
+    manager = EvalProcessManager()
+
+    record = execute_router_model_case(
+        case,
+        cast("Any", harness),
+        (),
+        RouterCaseContext(
+            plugin_root=ROOT,
+            homes=RouterHomes(),
+            expected_router_source_sha256=None,
+        ),
+        env=env,
+        process_manager=manager,
+    )
+
+    assert record.status == "failed"
+    assert record.error == expected_error
+    assert record.model_output_observability == "unknown"
+    assert record.router_decision is None
+    assert record.transcript_assertions_passed is None
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
+    assert manager.created_processes >= 1
+    if version_failure == "timeout":
+        assert manager.timed_out is True
+
+    cleanup = manager.finalize()
+    cleanup["process_timed_out"] = cleanup.pop("timed_out")
+    cleanup.update(
+        {
+            # Deliberately optimistic. Report assembly must honor the lifecycle fields.
+            "complete": True,
+            "runtime_cleanup": "passed",
+            "token_promote": "passed",
+        },
+    )
+
+    def failed_outcome(_options: object, **_kwargs: object) -> object:
+        return SimpleNamespace(
+            records=(record,),
+            enforced_mode="ephemeral-owner-only-copy",
+            versions={},
+            cleanup=cleanup,
+            error=record.error,
+        )
+
+    _install_binding(monkeypatch)
+    monkeypatch.setattr(eval_runner, "_select_execution_outcome", failed_outcome)
+    options = _options(
+        tmp_path,
+        dry_run=False,
+        credential_mode="ephemeral-owner-only-copy",
+        harness=harness,
+        expected_source_commit="abc123",
+    )
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["status"] == "failed"
+    assert payload["records"][0]["model_output_observability"] == "unknown"
+    assert payload["records"][0]["no_mcp_call"] is None
+    assert payload["records"][0]["no_saxo_call"] is None
+    assert payload["cleanup"]["model_tool_events"] is None
+    assert payload["cleanup"]["model_command_events"] is None
+    assert payload["cleanup"]["created_mcp_calls"] is None
+    assert payload["cleanup"]["model_saxo_events"] is None
+    assert payload["cleanup"]["invoked_logical_tool_count"] is None
+    if version_failure in {"timeout", "cleanup_unknown", "cleanup_residue"}:
+        assert payload["cleanup"]["complete"] is False
+
+
+def test_eval_report_rejects_sticky_version_timeout_after_zero_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleaned-up version timeout still makes the full evaluation report fail."""
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, _claude_src = _seed_cli_sources(tmp_path)
+    _install_binding(monkeypatch)
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-auth")
+
+    def timed_out_version(
+        *,
+        env: dict[str, str],
+        process_manager: EvalProcessManager | None = None,
+    ) -> str:
+        assert process_manager is not None
+        result = process_manager.run(
+            ("/bin/sh", "-c", "sleep 0.25"),
+            cwd=Path(env["TMPDIR"]),
+            env=env,
+            timeout_seconds=0.05,
+        )
+        assert result.timed_out is True
+        assert result.remaining_processes == 0
+        assert result.process_cleanup == "passed"
+        return "unknown"
+
+    def passed_case(*_args: object, **_kwargs: object) -> EvalRunRecord:
+        return _passed_record(case, "codex")
+
+    monkeypatch.setattr(eval_runner, "codex_client_version", timed_out_version)
+    monkeypatch.setattr(eval_runner, "execute_model_case", passed_case)
+    options = replace(
+        _options(
+            tmp_path,
+            dry_run=False,
+            credential_mode="ephemeral-owner-only-copy",
+            harness="codex",
+            source_codex_home=codex_src,
+            expected_source_commit="abc123",
+        ),
+        harness_policy="codex_native_v1",
+    )
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code != 0
+    assert payload["status"] == "failed"
+    assert payload["cleanup"]["complete"] is False
+    assert payload["cleanup"]["process_timed_out"] is True
+    assert payload["cleanup"]["process_cleanup"] == "passed"
+    assert payload["cleanup"]["remaining_processes"] == 0
+    assert payload["cleanup"]["runtime_error"] == "process_timeout"
 
 
 def test_process_manager_kills_fake_parent_and_descendant_group(tmp_path: Path) -> None:

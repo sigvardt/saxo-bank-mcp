@@ -45,6 +45,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     require_matrix_runtime_cleanup,
 )
 from saxo_bank_mcp.agent_skill_router_eval_execution import (
+    ClientVersionProbeError,
     RouterBindingRequest,
     RouterSourceBinding,
     client_versions,
@@ -182,12 +183,13 @@ def run_eval_suite(options: EvalRunOptions) -> int:
     skipped_count = sum(1 for record in records if record.status == "skipped")
     empty_selection = not cases or not records
     planned = bool(options.dry_run) and not empty_selection and not report_error
+    cleanup_complete = _report_cleanup_complete(outcome.cleanup)
     failed = (
         validation.status != "passed"
         or bool(report_error)
         or empty_selection
         or any(record.status == "failed" for record in records)
-        or not bool(outcome.cleanup.get("complete", True))
+        or not cleanup_complete
     )
     skipped_failure = bool(options.nonzero_on_skip and skipped_count)
     status: Literal["passed", "failed", "skipped", "planned"] = (
@@ -218,7 +220,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
         case_count=len(records),
         records=records,
         cleanup={
-            "complete": bool(outcome.cleanup.get("complete", True)),
+            "complete": cleanup_complete,
             "created_processes": _cleanup_int(outcome.cleanup, "created_processes"),
             "terminated_processes": _cleanup_int(outcome.cleanup, "terminated_processes"),
             "remaining_processes": _cleanup_remaining_count(outcome.cleanup),
@@ -297,7 +299,7 @@ def run_eval_suite(options: EvalRunOptions) -> int:
     )
     payload = report.to_json_value()
     payload["run_cleanup"] = {
-        "complete": bool(outcome.cleanup.get("complete", True)),
+        "complete": cleanup_complete,
         "process_cleanup": outcome.cleanup.get("process_cleanup", "not_required"),
         "runtime_cleanup": outcome.cleanup.get("runtime_cleanup", "not_required"),
         "token_promote": outcome.cleanup.get("token_promote", "not_required"),
@@ -438,6 +440,8 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
             process_manager=process_manager,
         )
         execution_error = _first_record_error(records)
+    except ClientVersionProbeError as exc:
+        execution_error = exc.reason
     except OSError as exc:
         execution_error = type(exc).__name__
     finally:
@@ -453,6 +457,8 @@ def _run_cases_then_cleanup(  # noqa: PLR0913
             "not_required",
         }:
             process_error = "process_cleanup_residue"
+        elif process_manager.timed_out:
+            process_error = "process_timeout"
         try:
             promote_rotated_sim_token_cache(runtime)
         except MatrixEnvError as exc:
@@ -852,7 +858,7 @@ def _cleanup_fields(
         "unknown"
         if process_error == "process_cleanup_unknown"
         else "residue"
-        if process_error is not None
+        if process_error == "process_cleanup_residue"
         else process_manager.process_cleanup
     )
     return {
@@ -934,6 +940,16 @@ def _cleanup_remaining_count(cleanup: dict[str, JsonValue]) -> int | None:
     if value is None:
         return None
     return value if isinstance(value, int) else 0
+
+
+def _report_cleanup_complete(cleanup: dict[str, JsonValue]) -> bool:
+    """Require the sticky process lifecycle fields, not only the summary flag."""
+    return (
+        bool(cleanup.get("complete", True))
+        and not bool(cleanup.get("process_timed_out", False))
+        and cleanup.get("process_cleanup", "not_required") in {"passed", "not_required"}
+        and _cleanup_remaining_count(cleanup) == 0
+    )
 
 
 def _sum_observable_counts(values: Iterable[int | None]) -> int | None:
