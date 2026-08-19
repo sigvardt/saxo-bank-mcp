@@ -2445,6 +2445,14 @@ transcripts, and account values are excluded. The historical sealed receipt is n
 exact cleanup subcause and non-Saxo identity remain unavailable rather than inferred. Independent
 static review of `a7bbf4a` is next; install and proof remain stopped, and activation stays 0/54.
 
+Local source `1d213ff`, tree `edd8347`, closes the nested historical-digest compatibility gap for
+that descriptor without weakening current evidence. A single helper recognizes only a present
+evaluation summary whose every case truly omitted the descriptor field, and applies that one legacy
+shape consistently at summary, child, verified-child, and outer-publication boundaries. Parsed
+historical descriptors remain `None`; mixed, current, extra, or tampered material refuses. Local
+tests and static/privacy gates pass, no external gate ran, and the next step is independent static
+review. The sealed result and 0/54 activation are unchanged.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.

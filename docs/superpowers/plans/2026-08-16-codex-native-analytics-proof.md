@@ -365,3 +365,12 @@ privacy boundary. Local focused tests passed twice plus related/auth/privacy, Ru
 plugin, static, catalog, eval-manifest, privacy, and diff gates. The prior sealed attempt remains
 10/11 with an unrecoverable exact cleanup subcause and non-Saxo identity; it is not relabeled. This
 source remains uninstalled and unsealed pending independent static review, with 0/54 active.
+
+Superseding compatibility handoff: source `1d213ff`, tree `edd8347`, uses one shared helper for the
+descriptor-free historical summary material at summary, child, verified-child, and outer verified-
+failure publication boundaries. Compatibility applies only when every case in a present parsed
+historical summary omitted the descriptor field from `model_fields_set`; parsed descriptors remain
+`None`. Current, mixed, extra, and recomputed tamper material stays strict. Focused tests passed
+twice plus failure/publication, related, auth/privacy, Ruff/format, type, plugin, static, catalog,
+eval-manifest, privacy, and diff gates. No install or proof ran; independent static review is next,
+the prior sealed result remains unchanged, and 0/54 profiles are active.

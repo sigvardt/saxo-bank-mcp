@@ -45,3 +45,11 @@ identities. Unknown/empty identity remains explicit. Raw names outside the allow
 payloads, paths, handles, transcripts, and account or money values are forbidden. The descriptor is
 strictly authenticated through the failed-case summary and may diagnose a future attempt only; it
 must never be used to infer missing facts from historical evidence.
+
+Historical descriptor compatibility rule: use one shared material helper across the summary,
+child envelope, verified-child receipt, and outer verified-failure publication. It may remove the
+nested descriptor field only when every case in a present parsed historical summary omitted that
+field from `model_fields_set`. It must preserve `None` after parsing and reject current, mixed,
+extra, malformed, or tampered material. Source `1d213ff` passes focused-twice, related,
+auth/privacy, Ruff/format, type, plugin, static, catalog, eval-manifest, privacy, and diff gates and
+remains uninstalled/unsealed pending independent review.

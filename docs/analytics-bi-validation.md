@@ -816,3 +816,23 @@ This correction does not reconstruct or guess the sealed attempt's exact cleanup
 identity of its non-Saxo event. Its 10/11 result, unknown aggregate broker and cleanup facts, no-retry
 boundary, and 0/54 activation remain unchanged. Independent static review of `a7bbf4a` is the next
 gate; no exact install or sealed proof is authorized by this local correction alone.
+
+## Descriptor-free historical failure compatibility
+
+Local source `1d213ff9180dd2e65c424a49d3449aaa4412bb18`, tree
+`edd8347350b15f79072652362d4daf8361b6d3c7`, completes the historical compatibility boundary for
+the privacy-safe non-Saxo descriptor. One shared material helper removes the nested
+`non_saxo_event_descriptors` field only when a present historical evaluation summary proves that
+every case omitted the field from its parsed field set. The same helper now governs the summary
+digest, child-envelope digest, verified-child material, and outer verified-failure publication.
+The parsed descriptor remains `None`; current, mixed-presence, extra, malformed, or recomputed
+tamper material remains strict and is rejected.
+
+TDD reproduced the child and publication digest mismatch before the correction. Final local
+verification passed the five focused regressions twice, 130 failure/publication tests, 385 related
+proof/evaluation tests, and 262 auth/privacy tests. Ruff lint and changed-file format checks passed;
+BasedPyright reported 0 errors, 0 warnings, and 0 notes; plugin validation, nine-skill static gates,
+the 60-tool/294-operation catalog, the 34-case eval manifest, three-path source privacy, and diff
+checks passed. No install, model, production MCP, Saxo request, browser, network, or proof ran.
+The prior sealed 10/11 evidence remains unchanged and is not relabeled; 0/54 profiles remain active.
+Independent static review of `1d213ff` is the next gate.
