@@ -60,7 +60,7 @@ def test_escaped_session_cleanup_writes_owner_only_identity_receipt(
             child_seen = True
         elif pid == root_pid and child_seen and result is not None and result.state == "running":
             root_checks_after_child += 1
-            if root_checks_after_child >= 2:  # noqa: PLR2004
+            if root_checks_after_child >= 3:  # noqa: PLR2004
                 admission_marker.touch(mode=OWNER_FILE_MODE)
         return result
 
@@ -1306,7 +1306,16 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
     assert caught.value.remaining_process_group_count is None
 
 
-@pytest.mark.parametrize("child_transition", ["legitimate", "replaced-self-group"])
+@pytest.mark.parametrize(
+    "child_transition",
+    [
+        "legitimate",
+        "replaced-self-group",
+        "moved-group-after-observation",
+        "missing-after-observation",
+        "unknown-after-observation",
+    ],
+)
 def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1315,8 +1324,12 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
     """A child must retain its discovered root scope through identity admission."""
     root_pid = REUSED_PGID
     child_pid = root_pid + 1
-    running = {root_pid: True, child_pid: True}
+    group_peer_pid = root_pid + 2
+    running = {root_pid: True, child_pid: True, group_peer_pid: True}
     child_observed = False
+    child_group_moved = False
+    second_scope_taken = False
+    poll_calls = 0
     admitted_for_cleanup: list[int] = []
     signals: list[tuple[int, signal.Signals]] = []
     original_cleanup = command_runner.cleanup_birth_bound_processes
@@ -1325,7 +1338,20 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         pid = root_pid
         returncode: int | None = None
 
-        def poll(self) -> None:
+        def poll(self) -> int | None:
+            nonlocal poll_calls
+            poll_calls += 1
+            if (
+                child_transition
+                in {
+                    "moved-group-after-observation",
+                    "missing-after-observation",
+                    "unknown-after-observation",
+                }
+                and poll_calls >= 4  # noqa: PLR2004
+            ):
+                self.returncode = 3
+                return 3
             return None
 
         def communicate(self, timeout: float | None = None) -> tuple[str, str]:
@@ -1346,13 +1372,27 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         nonlocal child_observed
         if not running[pid]:
             return None
+        if pid == child_pid and second_scope_taken:
+            if child_transition == "missing-after-observation":
+                return None
+            if child_transition == "unknown-after-observation":
+                return command_runner.ProcessObservation(
+                    pid=pid,
+                    pgid=root_pid,
+                    birth_identity="child-original",
+                    state="unknown",
+                )
         if pid == child_pid:
             child_observed = True
         return command_runner.ProcessObservation(
             pid=pid,
             pgid=(
                 child_pid
-                if pid == child_pid and child_transition == "replaced-self-group"
+                if pid == child_pid
+                and (
+                    child_transition == "replaced-self-group"
+                    or (child_transition == "moved-group-after-observation" and child_group_moved)
+                )
                 else root_pid
             ),
             birth_identity=(
@@ -1361,6 +1401,8 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
                 else "unrelated-replacement"
                 if child_transition == "replaced-self-group"
                 else "child-original"
+                if pid == child_pid
+                else "peer-original"
             ),
             state="running",
         )
@@ -1369,8 +1411,13 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         observed_root_pid: int | None,
         observed_pgid: int | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        nonlocal child_group_moved, second_scope_taken
         assert observed_root_pid == root_pid
         assert observed_pgid == root_pid
+        if child_observed:
+            second_scope_taken = True
+        if child_transition == "moved-group-after-observation" and child_observed:
+            child_group_moved = True
         visible = tuple(
             pid
             for pid, is_running in running.items()
@@ -1379,6 +1426,8 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
                 pid == child_pid and child_transition == "replaced-self-group" and child_observed
             )
         )
+        if child_transition == "moved-group-after-observation" and child_group_moved:
+            return visible, (root_pid, child_pid)
         return visible, (root_pid,)
 
     def group_members(pgid: int) -> tuple[int, ...]:
@@ -1387,7 +1436,15 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
             pid
             for pid, is_running in running.items()
             if is_running
-            and (pid == pgid if child_transition == "replaced-self-group" else pgid == root_pid)
+            and (
+                pid == child_pid
+                if pgid == child_pid
+                else pid != child_pid
+                or not (
+                    child_transition == "replaced-self-group"
+                    or (child_transition == "moved-group-after-observation" and child_group_moved)
+                )
+            )
         )
 
     def group_members_with_coverage(pgid: int) -> tuple[tuple[int, ...], bool]:
@@ -1443,8 +1500,15 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
             timeout_seconds=0,
         )
 
-    assert caught.value.receipt.timed_out is True
-    if child_transition == "replaced-self-group":
+    refused_transitions = {
+        "replaced-self-group",
+        "moved-group-after-observation",
+        "missing-after-observation",
+        "unknown-after-observation",
+    }
+    root_exits_early = refused_transitions - {"replaced-self-group"}
+    assert caught.value.receipt.timed_out is (child_transition not in root_exits_early)
+    if child_transition in refused_transitions:
         assert child_pid not in admitted_for_cleanup
         assert all(pid != child_pid for pid, _sig in signals)
         assert caught.value.remaining_process_count is None

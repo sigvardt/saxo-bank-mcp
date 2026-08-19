@@ -313,6 +313,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         )
         second_scope_pids: tuple[int, ...] = ()
         second_scope_pgids: tuple[int, ...] = ()
+        confirmed_identity_scope: set[tuple[int, str, int]] = set()
         if allow_new and _root_allows_new_identity():
             try:
                 second_scope_pids, second_scope_pgids = _snapshot_tree(root_pid, pgid)
@@ -320,6 +321,22 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 identity_admission_closed.set()
                 allow_new = False
             else:
+                for observation in observations:
+                    reobserved = read_process_observation(observation.pid)
+                    if (
+                        reobserved is not None
+                        and reobserved.state != "unknown"
+                        and reobserved.pid == observation.pid
+                        and reobserved.birth_identity == observation.birth_identity
+                        and reobserved.pgid == observation.pgid
+                    ):
+                        confirmed_identity_scope.add(
+                            (
+                                observation.pid,
+                                observation.birth_identity,
+                                observation.pgid,
+                            )
+                        )
                 allow_new = _root_allows_new_identity()
         else:
             allow_new = False
@@ -334,6 +351,12 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                         and not identity_admission_closed.is_set()
                         and observation.pid in admitted_pid_scope
                         and observation.pgid in admitted_pgid_scope
+                        and (
+                            observation.pid,
+                            observation.birth_identity,
+                            observation.pgid,
+                        )
+                        in confirmed_identity_scope
                     ):
                         continue
                     tracked_identities[observation.pid] = ProcessCleanupIdentity(

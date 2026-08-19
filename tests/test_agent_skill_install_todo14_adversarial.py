@@ -396,8 +396,8 @@ def test_failed_command_redirected_sleeper_cleaned(
             child_seen = True
         elif pid == root_pid and child_seen and result is not None and result.state == "running":
             root_checks_after_child += 1
-            if root_checks_after_child >= 2:  # noqa: PLR2004
-                # Release the root only after the post-scope birth-bound check.
+            if root_checks_after_child >= 3:  # noqa: PLR2004
+                # Release only after candidate re-observation and the final root check.
                 observed_marker.touch(mode=0o600)
         return result
 
