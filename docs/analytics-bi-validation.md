@@ -694,3 +694,28 @@ invocation error does not invalidate the already reviewed source, but it provide
 for `f96a3b2`. Sealed `e5dc932` remains the latest sealed evidence, its downstream facts remain
 unknown, and all 54 profiles remain quarantined with 0/54 active. A new exact install attempt needs
 fresh authorization and an absent installer-owned run root.
+
+## Terminal exact `f96a3b2` second install attempt
+
+Fresh authorization reused the independently approved source
+`f96a3b2df57ab66c71d6bf04e40b5637b40ef09b`, tree
+`265a11abb3abbd19d6f54cdd122c19d8bb4453f0`, without relabeling or replacing the first refusal
+receipt. Read-only prechecks proved that the first attempt's empty installer root was owner-only,
+not a symlink, unused, and separate from its retained evidence. A new owner-only evidence namespace
+was created while its unique installer-owned child run root was left absent for transactional
+creation. The detached source was clean and exact, no task-owned install/proof process existed, and
+the system disk had 76 GiB free before launch.
+
+The one authorized retained-runtime install ran once and exited 1. Its mode-0600 typed report says
+`codex_install_self_verify_failed` with the sole error
+`codex_global_state_verify_window_mismatch`. The report publishes no candidate, inventory,
+retained-runtime, or cleanup fields, so install exactness and authenticated cleanup completion are
+unknown. A final local observation found no task-owned process or open file, but the remaining
+owner-only 28 MiB run root was preserved because that later observation cannot repair the missing
+authenticated cleanup result.
+
+The stop-on-failure rule prevented verify-only, the signed full suite, post-suite static/readback
+gates, SIM auth, session capability, model evaluation, sealed proof, numerical proof, the fresh
+60-tool SIM matrix, reconciliation, account comparison, or activation. No later broker-bound stage
+was invoked, no retry ran, and no result is promoted from this failed install. Sealed `e5dc932`
+remains the latest sealed evidence; all 54 profiles remain quarantined with 0/54 active.

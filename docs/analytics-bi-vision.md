@@ -2390,6 +2390,17 @@ corrected invocation in the same sequence. `f96a3b2` therefore remains locally v
 exact install evidence. A fresh authorization must begin with an absent installer-owned run root;
 until then sealed `e5dc932` remains historical and activation stays 0/54.
 
+A separately authorized second exact attempt began with a new, absent installer-owned run root and
+passed its source, disk, process, ownership, and path preconditions. Its sole retained-runtime
+install nevertheless exited 1 at self-verification with
+`codex_global_state_verify_window_mismatch`. The typed failure receipt does not publish candidate,
+inventory, retained-runtime, or cleanup fields, so those facts remain unknown. No verify-only, full
+suite, later static/readback gate, SIM session call, sealed proof, downstream numerical proof,
+fresh matrix, reconciliation, account comparison, or activation ran. The owner-only residual run
+root is preserved, no retry is permitted, sealed `e5dc932` remains the latest sealed evidence, and
+activation remains 0/54. The next action is an independent diagnosis or new authorization; this
+attempt must not be retried or described as an exact install pass.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
