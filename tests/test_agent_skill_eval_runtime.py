@@ -745,16 +745,26 @@ def test_parser_exception_after_launch_is_unobservable(
     assert "private-unparsed-output" not in record.model_dump_json()
 
 
+@pytest.mark.parametrize("case_id", ["qa-evidence-readiness", "router-auth"])
 @pytest.mark.parametrize("failure", [ProcessLookupError(), OSError("post-spawn failure")])
-def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(
+def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(  # noqa: PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
     failure: OSError,
 ) -> None:
     """A production runner cannot publish complete cleanup or zero calls after Popen."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     _write_auth_sources(tmp_path, monkeypatch)
     codex_src, claude_src = _seed_cli_sources(tmp_path)
     _install_binding(monkeypatch)
+    if case_id == "router-auth":
+        actual_digest = router_execution.router_source_digest(ROOT)
+
+        def resolve_router_binding(_request: object) -> RouterSourceBinding:
+            return replace(_binding(), router_source_sha256=actual_digest)
+
+        monkeypatch.setattr(eval_runner, "resolve_router_source_binding", resolve_router_binding)
     monkeypatch.setattr(eval_runner, "client_versions", _stub_versions)
 
     class FakeProcess:
@@ -774,7 +784,7 @@ def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(
         tmp_path,
         dry_run=False,
         credential_mode="ephemeral-owner-only-copy",
-        case_id="qa-evidence-readiness",
+        case_id=case_id,
         harness="codex",
         source_codex_home=codex_src,
         source_claude_home=claude_src,
@@ -813,7 +823,6 @@ def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(
     report_payload.pop("run_cleanup")
     report = EvalRunReport.model_validate(report_payload)
     report_bytes = options.out.read_bytes()
-    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     summary = producer._agent_evaluation_failure_summary(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
         report_bytes=report_bytes,
         report=report,
@@ -1755,9 +1764,11 @@ def test_non_router_success_path_with_real_zero_returncode(
     assert record.transcript_assertions_passed is True
 
 
+@pytest.mark.parametrize("harness", ["codex", "claude"])
 def test_router_success_path_with_real_zero_returncode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    harness: str,
 ) -> None:
     """Router path can pass when the real managed process exits 0 with structured output."""
     case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-qa")
@@ -1776,20 +1787,29 @@ def test_router_success_path_with_real_zero_returncode(
         trade_choice_refused=case.router_expectation.trade_choice_refused,
         execution_allowed=False,
     )
-    stream = "\n".join(
-        (
-            json.dumps({"type": "thread.started", "thread_id": "fixture"}),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "id": "answer",
-                        "type": "agent_message",
-                        "text": decision.model_dump_json(),
+    stream = (
+        "\n".join(
+            (
+                json.dumps({"type": "thread.started", "thread_id": "fixture"}),
+                json.dumps(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "id": "answer",
+                            "type": "agent_message",
+                            "text": decision.model_dump_json(),
+                        },
                     },
-                },
+                ),
             ),
-        ),
+        )
+        if harness == "codex"
+        else json.dumps(
+            {
+                "type": "result",
+                "structured_output": decision.model_dump(mode="json"),
+            },
+        )
     )
     stream_path = tmp_path / "router-success.jsonl"
     stream_path.write_text(stream + "\n", encoding="utf-8")
@@ -1812,7 +1832,7 @@ def test_router_success_path_with_real_zero_returncode(
     monkeypatch.setattr(router_execution, "_router_command", fake_router_command)
     record = execute_router_model_case(
         case,
-        "codex",
+        cast("Any", harness),
         (),
         RouterCaseContext(
             plugin_root=ROOT,
@@ -1830,6 +1850,192 @@ def test_router_success_path_with_real_zero_returncode(
     assert record.model_tool_event_count == 0
     assert record.model_mcp_event_count == 0
     assert record.model_saxo_event_count == 0
+
+
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+@pytest.mark.parametrize(
+    ("result", "expected_error"),
+    [
+        (
+            ManagedProcessResult(
+                stdout="valid-router-output",
+                stderr="",
+                returncode=124,
+                timed_out=True,
+                created_processes=1,
+                terminated_processes=1,
+                remaining_processes=0,
+                process_cleanup="passed",
+            ),
+            "timeout_expired",
+        ),
+        (
+            ManagedProcessResult(
+                stdout="valid-router-output",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=1,
+                remaining_processes=0,
+                process_cleanup="unknown",
+            ),
+            "process_cleanup_unknown",
+        ),
+        (
+            ManagedProcessResult(
+                stdout="valid-router-output",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=1,
+                remaining_processes=None,
+                process_cleanup="passed",
+            ),
+            "process_cleanup_unknown",
+        ),
+        (
+            ManagedProcessResult(
+                stdout="valid-router-output",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=0,
+                remaining_processes=1,
+                process_cleanup="residue",
+            ),
+            "process_cleanup_residue",
+        ),
+        (
+            ManagedProcessResult(
+                stdout="private-malformed-router-output",
+                stderr="",
+                returncode=0,
+                timed_out=False,
+                created_processes=1,
+                terminated_processes=1,
+                remaining_processes=0,
+                process_cleanup="passed",
+            ),
+            "structured_output_invalid",
+        ),
+    ],
+)
+def test_router_post_launch_unobservable_results_never_publish_empty_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    harness: str,
+    result: ManagedProcessResult,
+    expected_error: str,
+) -> None:
+    """Router timeout, cleanup, and parse failures retain unknown parse-derived facts."""
+    case = next(item for item in load_eval_cases(CASE_ROOT) if item.id == "router-qa")
+    assert case.router_expectation is not None
+    decision = RouterDecision(
+        environment=case.router_expectation.environment,
+        intent=case.router_expectation.intent,
+        mutation_risk=case.router_expectation.mutation_risk,
+        evidence_need=case.router_expectation.evidence_need,
+        primary_skill=case.router_expectation.primary_skill,
+        follow_on_skills=case.router_expectation.follow_on_skills,
+        requires_environment_clarification=(
+            case.router_expectation.requires_environment_clarification
+        ),
+        approval_bypass_refused=case.router_expectation.approval_bypass_refused,
+        trade_choice_refused=case.router_expectation.trade_choice_refused,
+        execution_allowed=False,
+    )
+    valid_stdout = (
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "answer",
+                    "type": "agent_message",
+                    "text": decision.model_dump_json(),
+                },
+            },
+        )
+        if harness == "codex"
+        else json.dumps(
+            {
+                "type": "result",
+                "structured_output": decision.model_dump(mode="json"),
+            },
+        )
+    )
+    routed_result = replace(
+        result,
+        stdout=(
+            result.stdout if result.stdout == "private-malformed-router-output" else valid_stdout
+        ),
+    )
+
+    def fake_run(
+        _self: EvalProcessManager,
+        _command: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: float,
+    ) -> ManagedProcessResult:
+        del cwd, env, timeout_seconds
+        return routed_result
+
+    def fake_router_command(_spec: object, **_kwargs: object) -> tuple[str, ...]:
+        return ("/bin/true",)
+
+    def fake_client_version(
+        _harness: object,
+        _env: object,
+        *,
+        process_manager: object,
+    ) -> str:
+        del process_manager
+        return "fixture-client"
+
+    monkeypatch.setattr(EvalProcessManager, "run", fake_run)
+    monkeypatch.setattr(router_execution, "_router_command", fake_router_command)
+    monkeypatch.setattr(router_execution, "_client_version", fake_client_version)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path / "home"),
+        "TMPDIR": str(tmp_path / "tmp"),
+    }
+    (tmp_path / "home").mkdir()
+    (tmp_path / "tmp").mkdir()
+
+    record = execute_router_model_case(
+        case,
+        cast("Any", harness),
+        (),
+        RouterCaseContext(
+            plugin_root=ROOT,
+            homes=RouterHomes(),
+            expected_router_source_sha256=None,
+        ),
+        env=env,
+        process_manager=EvalProcessManager(),
+    )
+
+    assert record.status == "failed"
+    assert record.error == expected_error
+    assert record.model_output_observability == "unknown"
+    assert record.transcript_assertions_passed is None
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert record.grant_status == "unknown"
+    assert record.assertion_status == "unknown"
+    assert record.router_decision is None
+    assert "private-malformed-router-output" not in record.model_dump_json()
 
 
 def test_process_manager_kills_fake_parent_and_descendant_group(tmp_path: Path) -> None:

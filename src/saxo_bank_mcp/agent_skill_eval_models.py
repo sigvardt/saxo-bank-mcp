@@ -286,6 +286,7 @@ class EvalRunRecord(BaseModel):
             self.transcript_assertions_passed,
             self.no_mcp_call,
             self.no_saxo_call,
+            self.router_decision,
             self.model_tool_event_count,
             self.model_command_event_count,
             self.model_mcp_event_count,

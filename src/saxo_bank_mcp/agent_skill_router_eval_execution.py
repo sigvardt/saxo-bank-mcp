@@ -8,8 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from pydantic import ValidationError
-
+from saxo_bank_mcp.agent_skill_eval_failure_records import (
+    unobservable_model_failure_record,
+)
 from saxo_bank_mcp.agent_skill_eval_models import (
     EvalRunRecord,
     Harness,
@@ -151,7 +152,7 @@ def resolve_router_source_binding_request(
     )
 
 
-def execute_router_model_case(  # noqa: PLR0913
+def execute_router_model_case(  # noqa: PLR0911, PLR0913
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
@@ -161,6 +162,9 @@ def execute_router_model_case(  # noqa: PLR0913
     process_manager: EvalProcessManager | None = None,
 ) -> EvalRunRecord:
     manager = process_manager or EvalProcessManager()
+    created_before = manager.created_processes
+    source = ""
+    source_digest = ""
     try:
         source = router_source_text(context.plugin_root)
         source_digest = hashlib.sha256(source.encode()).hexdigest()
@@ -210,8 +214,40 @@ def execute_router_model_case(  # noqa: PLR0913
             env=launch_env,
             timeout_seconds=case.timeout_seconds,
         )
+        if result.timed_out:
+            return unobservable_model_failure_record(
+                case,
+                harness,
+                grants,
+                "TimeoutExpired",
+                router_source_sha256=source_digest,
+            )
+        if result.remaining_processes is None or result.process_cleanup == "unknown":
+            return unobservable_model_failure_record(
+                case,
+                harness,
+                grants,
+                "process_cleanup_unknown",
+                router_source_sha256=source_digest,
+            )
+        if result.remaining_processes > 0 or result.process_cleanup == "residue":
+            return unobservable_model_failure_record(
+                case,
+                harness,
+                grants,
+                "process_cleanup_residue",
+                router_source_sha256=source_digest,
+            )
         client_version = _client_version(harness, launch_env, process_manager=manager)
-    except (OSError, ValidationError, KeyError):
+    except (OSError, ValueError, KeyError) as exc:
+        if manager.created_processes > created_before:
+            return unobservable_model_failure_record(
+                case,
+                harness,
+                grants,
+                type(exc).__name__,
+                router_source_sha256=source_digest,
+            )
         return _router_record(
             case,
             harness,
@@ -225,17 +261,19 @@ def execute_router_model_case(  # noqa: PLR0913
             if harness == "codex"
             else parse_claude_router_output(result.stdout)
         )
-    except ValidationError:
+    except (TypeError, ValueError):
         error = (
             "process_nonzero_exit"
             if result.returncode != 0 and harness == "claude"
             else "structured_output_invalid"
         )
-        return _router_record(
+        return unobservable_model_failure_record(
             case,
             harness,
             grants,
-            _RouterOutcome(None, source, error, client_version),
+            error,
+            client_version=client_version,
+            router_source_sha256=source_digest,
         )
     # Claude 2.x stream-json may exit non-zero while still emitting valid structured output.
     process_ok = result.returncode == 0 or harness == "claude"

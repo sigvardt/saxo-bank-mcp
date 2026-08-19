@@ -12,15 +12,21 @@ from typing import Any, Literal, NoReturn, cast
 import pytest
 from pydantic import ValidationError
 
+import saxo_bank_mcp.agent_skill_eval_process as eval_process
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
     run_command,
 )
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport, load_eval_cases
-from saxo_bank_mcp.agent_skill_eval_process import ManagedProcessResult
+from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager, ManagedProcessResult
 from saxo_bank_mcp.agent_skill_eval_runner import resolve_tool_grants
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
+from saxo_bank_mcp.agent_skill_router_eval_execution import (
+    RouterCaseContext,
+    RouterHomes,
+    execute_router_model_case,
+)
 from saxo_bank_mcp.qa_analytics_proof_failure import (
     CodexNativeAgentEvaluationCaseSummary,
     CodexNativeAgentEvaluationFailureSummary,
@@ -1455,6 +1461,161 @@ def test_cleanup_unknown_eval_evidence_stays_unknown_through_publication() -> No
     assert published.result.live_mutation_calls is None
     assert published.result.purchase_occurred is None
     assert published.result.disclaimer_response_made is None
+    assert private_sentinel not in publication.model_dump_json()
+
+
+def test_router_post_spawn_failure_stays_unknown_through_publication(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router Popen followed by PGID failure keeps signed facts unknown end to end."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    case = next(
+        item for item in load_eval_cases(Path("evals/saxo-bank")) if item.id == "router-auth"
+    )
+    private_sentinel = "private-router-post-spawn-output"
+
+    class FakeProcess:
+        pid = 73_300
+        returncode: int | None = None
+
+    def fake_popen(*_args: object, **_kwargs: object) -> FakeProcess:
+        return FakeProcess()
+
+    def fail_getpgid(_pid: int) -> int:
+        raise ProcessLookupError("injected post-spawn failure")
+
+    monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(eval_process.os, "getpgid", fail_getpgid)
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    manager = EvalProcessManager()
+    record = execute_router_model_case(
+        case,
+        "codex",
+        (),
+        RouterCaseContext(
+            plugin_root=Path.cwd(),
+            homes=RouterHomes(),
+            expected_router_source_sha256=None,
+        ),
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(runtime_root),
+            "TMPDIR": str(runtime_root),
+        },
+        process_manager=manager,
+    )
+    cleanup = manager.finalize()
+
+    assert record.error == "process_lookup_error"
+    assert record.model_output_observability == "unknown"
+    assert record.router_decision is None
+    assert record.no_mcp_call is None
+    assert record.no_saxo_call is None
+    assert record.model_tool_event_count is None
+    assert record.model_command_event_count is None
+    assert record.model_mcp_event_count is None
+    assert record.model_saxo_event_count is None
+    assert record.invoked_logical_tools is None
+    assert record.invoked_logical_tool_count is None
+    assert cleanup["created_processes"] == 1
+    assert cleanup["remaining_processes"] is None
+    assert cleanup["process_cleanup"] == "unknown"
+    assert private_sentinel not in record.model_dump_json()
+
+    injected_record = record.model_dump(mode="json")
+    assert case.router_expectation is not None
+    injected_record["router_decision"] = {
+        **case.router_expectation.model_dump(mode="json"),
+        "execution_allowed": False,
+    }
+    with pytest.raises(ValidationError):
+        EvalRunRecord.model_validate(injected_record, strict=True)
+
+    report = EvalRunReport(
+        status="failed",
+        harness="codex",
+        environment="LOCAL",
+        execution_mode="model_execution",
+        selected_case_count=1,
+        case_count=1,
+        records=(record,),
+        cleanup={
+            "complete": False,
+            "process_cleanup": "unknown",
+            "runtime_cleanup": "passed",
+            "token_promote": "not_required",
+            "created_processes": 1,
+            "terminated_processes": 0,
+            "remaining_processes": None,
+            "process_timed_out": False,
+            "raw_transcripts_persisted": 0,
+        },
+        before_global_state={},
+        after_global_state={},
+        global_state_unchanged=True,
+        skipped_count=0,
+        nonzero_on_skip=True,
+        source_commit=CANDIDATE,
+    )
+    report_bytes = json.dumps(
+        report.model_dump(mode="json"),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    summary = producer._agent_evaluation_failure_summary(  # noqa: SLF001
+        report_bytes=report_bytes,
+        report=report,
+    )
+    assert summary is not None
+    case_summary = summary.cases[0]
+    assert case_summary.model_output_observability == "unknown"
+    assert case_summary.no_mcp_call is None
+    assert case_summary.no_saxo_call is None
+    assert case_summary.invoked_logical_tool_ids is None
+    assert case_summary.invoked_logical_tool_count is None
+    assert case_summary.model_mcp_event_count is None
+    assert case_summary.model_saxo_event_count is None
+
+    injected_summary = case_summary.model_dump(mode="json")
+    injected_summary["model_mcp_event_count"] = 0
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationCaseSummary.model_validate(injected_summary, strict=True)
+
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    producer._record_agent_report_progress(progress, report)  # noqa: SLF001
+    progress.record_agent_evaluation_failure(summary)
+    verified = _verify(
+        _failure(
+            progress,
+            reason="installed_agent_evaluation_command_failed",
+        ).model_dump_json(),
+    )
+    assert verified.mcp_event_count is None
+    assert verified.saxo_event_count is None
+    assert verified.agent_evaluation_failure_summary == summary
+
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    published = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+    assert published == publication
+    assert published.result.mcp_event_count is None
+    assert published.result.saxo_event_count is None
     assert private_sentinel not in publication.model_dump_json()
 
 
