@@ -18,7 +18,10 @@ from saxo_bank_mcp.agent_skill_command_runner import (
     CleanupUnknownReason,
 )
 from saxo_bank_mcp.evidence_publication import write_scanned_json
-from saxo_bank_mcp.qa_analytics_proof_failure import CodexNativeVerifiedChildFailure
+from saxo_bank_mcp.qa_analytics_proof_failure import (
+    CodexNativeVerifiedChildFailure,
+    legacy_agent_evaluation_summary_material,
+)
 from saxo_bank_mcp.qa_analytics_proof_producer import (
     CodexNativeBoundaryPhase,
     CodexNativeCleanupStatus,
@@ -312,6 +315,12 @@ class CodexNativeProofPublication(_StrictModel):
                             field,
                         ),
                     )
+            publication_materials.extend(
+                _publication_legacy_summary_variants(
+                    publication_materials,
+                    self.result,
+                ),
+            )
         if isinstance(self.result, CodexNativeBoundaryFailureReceipt):
             publication_materials.extend(
                 {**material, "result": result_material}
@@ -672,4 +681,32 @@ def _publication_variants_without_result_field(
         result = dict(cast("dict[str, object]", material["result"]))
         result.pop(field)
         variants.append({**material, "result": result})
+    return variants
+
+
+def _publication_legacy_summary_variants(
+    materials: list[dict[str, object]],
+    result: CodexNativeVerifiedChildFailure,
+) -> list[dict[str, object]]:
+    summary = result.agent_evaluation_failure_summary
+    if summary is None:
+        return []
+    variants: list[dict[str, object]] = []
+    for publication_material in tuple(materials):
+        result_material = cast(
+            "dict[str, object]",
+            publication_material["result"],
+        )
+        summary_material = result_material.get("agent_evaluation_failure_summary")
+        if not isinstance(summary_material, dict):
+            continue
+        legacy_summary_material = legacy_agent_evaluation_summary_material(
+            summary=summary,
+            material=cast("dict[str, object]", summary_material),
+        )
+        if legacy_summary_material is None:
+            continue
+        legacy_result_material = dict(result_material)
+        legacy_result_material["agent_evaluation_failure_summary"] = legacy_summary_material
+        variants.append({**publication_material, "result": legacy_result_material})
     return variants

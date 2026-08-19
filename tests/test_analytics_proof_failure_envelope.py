@@ -311,6 +311,47 @@ def _failure(
     )
 
 
+def _json_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+
+
+def _descriptor_free_historical_summary_payload(
+    summary: CodexNativeAgentEvaluationFailureSummary,
+) -> dict[str, Any]:
+    payload = summary.model_dump(mode="json")
+    cases = cast("list[dict[str, Any]]", payload["cases"])
+    assert cases
+    for case in cases:
+        assert case.pop("non_saxo_event_descriptors") is None
+    material = {key: value for key, value in payload.items() if key != "summary_sha256"}
+    payload["summary_sha256"] = _json_sha256(material)
+    return payload
+
+
+def _descriptor_free_historical_child_payload(
+    progress: CodexNativeProofProgress,
+) -> dict[str, Any]:
+    summary = progress.agent_evaluation_failure_summary
+    assert summary is not None
+    payload = _failure(
+        progress,
+        reason="installed_agent_evaluation_command_failed",
+    ).model_dump(mode="json")
+    payload["agent_evaluation_failure_summary"] = _descriptor_free_historical_summary_payload(
+        summary
+    )
+    material = {key: value for key, value in payload.items() if key != "envelope_sha256"}
+    payload["envelope_sha256"] = _json_sha256(material)
+    return payload
+
+
 def _consumption_evidence() -> SimpleNamespace:
     return SimpleNamespace(
         intent=SimpleNamespace(intent_sha256="a" * 64),
@@ -2145,6 +2186,160 @@ def test_failed_eval_summary_is_authenticated_through_publication(tmp_path: Path
     assert parsed.result.live_mutation_calls is None
     assert parsed.result.purchase_occurred is None
     assert parsed.result.disclaimer_response_made is None
+
+
+def test_descriptor_free_historical_eval_summary_keeps_descriptors_none(
+    tmp_path: Path,
+) -> None:
+    """The old signed case shape remains readable without inventing descriptor evidence."""
+    summary = _progress_with_failed_agent_summary(tmp_path).agent_evaluation_failure_summary
+    assert summary is not None
+
+    parsed = CodexNativeAgentEvaluationFailureSummary.model_validate_json(
+        json.dumps(_descriptor_free_historical_summary_payload(summary)),
+        strict=True,
+    )
+
+    assert all(case.non_saxo_event_descriptors is None for case in parsed.cases)
+    assert all("non_saxo_event_descriptors" not in case.model_fields_set for case in parsed.cases)
+
+
+def test_present_descriptor_free_historical_summary_authenticates_child_envelope(
+    tmp_path: Path,
+) -> None:
+    """A retained historical summary is preserved rather than mistaken for absent evidence."""
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    raw = json.dumps(
+        _descriptor_free_historical_child_payload(progress),
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    verified = _verify(raw)
+
+    assert verified.failure_evidence_status == "authenticated"
+    assert verified.agent_evaluation_failure_summary is not None
+    assert all(
+        case.non_saxo_event_descriptors is None
+        for case in verified.agent_evaluation_failure_summary.cases
+    )
+    assert all(
+        "non_saxo_event_descriptors" not in case.model_fields_set
+        for case in verified.agent_evaluation_failure_summary.cases
+    )
+
+
+def test_descriptor_free_historical_summary_authenticates_verified_failure_publication(
+    tmp_path: Path,
+) -> None:
+    """The outer digest accepts only the exact descriptor-free historical nested shape."""
+    progress = _progress_with_failed_agent_summary(tmp_path)
+    verified = _verify(
+        _failure(
+            progress,
+            reason="installed_agent_evaluation_command_failed",
+        ).model_dump_json(),
+    )
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    payload = publication.model_dump(mode="json")
+    result_payload = cast("dict[str, Any]", payload["result"])
+    summary = verified.agent_evaluation_failure_summary
+    assert summary is not None
+    result_payload["agent_evaluation_failure_summary"] = (
+        _descriptor_free_historical_summary_payload(summary)
+    )
+    publication_material = {
+        key: value for key, value in payload.items() if key != "publication_sha256"
+    }
+    payload["publication_sha256"] = _json_sha256(publication_material)
+
+    parsed = publication_module.verify_codex_native_proof_publication(
+        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
+    )
+
+    parsed_summary = parsed.result.agent_evaluation_failure_summary
+    assert parsed_summary is not None
+    assert all(case.non_saxo_event_descriptors is None for case in parsed_summary.cases)
+
+    tampered = json.loads(json.dumps(payload))
+    tampered_result = cast("dict[str, Any]", tampered["result"])
+    tampered_summary = cast(
+        "dict[str, Any]",
+        tampered_result["agent_evaluation_failure_summary"],
+    )
+    tampered_cases = cast("list[dict[str, Any]]", tampered_summary["cases"])
+    tampered_cases[0]["non_saxo_event_descriptors"] = [
+        {
+            "outer_event_type": "item.completed",
+            "item_type": "mcp_tool_call",
+            "server_category": "codex_protocol",
+            "protocol_name": "list_tools",
+            "server_sha256": None,
+            "tool_sha256": None,
+            "name_sha256": None,
+        },
+    ]
+    tampered_summary_material = {
+        key: value for key, value in tampered_summary.items() if key != "summary_sha256"
+    }
+    tampered_summary["summary_sha256"] = _json_sha256(tampered_summary_material)
+    tampered_publication_material = {
+        key: value for key, value in tampered.items() if key != "publication_sha256"
+    }
+    tampered["publication_sha256"] = _json_sha256(tampered_publication_material)
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
+
+
+def test_mixed_descriptor_presence_cannot_use_historical_summary_digest(
+    tmp_path: Path,
+) -> None:
+    """One current case cannot unlock descriptor removal for other historical cases."""
+    summary = _progress_with_failed_agent_summary(tmp_path).agent_evaluation_failure_summary
+    assert summary is not None
+    payload = _descriptor_free_historical_summary_payload(summary)
+    cases = cast("list[dict[str, Any]]", payload["cases"])
+    cases[0]["non_saxo_event_descriptors"] = None
+    material = {key: value for key, value in payload.items() if key != "summary_sha256"}
+    payload["summary_sha256"] = _json_sha256(material)
+
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationFailureSummary.model_validate_json(
+            json.dumps(payload),
+            strict=True,
+        )
+
+
+def test_current_descriptor_material_does_not_use_historical_compatibility(
+    tmp_path: Path,
+) -> None:
+    """Current all-present fields retain strict digest coverage."""
+    summary = _progress_with_failed_agent_summary(tmp_path).agent_evaluation_failure_summary
+    assert summary is not None
+    current_payload = summary.model_dump(mode="json")
+
+    parsed = CodexNativeAgentEvaluationFailureSummary.model_validate_json(
+        json.dumps(current_payload),
+        strict=True,
+    )
+    assert all("non_saxo_event_descriptors" in case.model_fields_set for case in parsed.cases)
+
+    cases = cast("list[dict[str, Any]]", current_payload["cases"])
+    cases[0]["non_saxo_event_descriptors"] = []
+    with pytest.raises(ValidationError):
+        CodexNativeAgentEvaluationFailureSummary.model_validate_json(
+            json.dumps(current_payload),
+            strict=True,
+        )
 
 
 @pytest.mark.parametrize(

@@ -461,18 +461,14 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             raise ValueError("agent evaluation summary case ids must be unique")
         material = self.model_dump(mode="json", exclude={"summary_sha256"})
         if self.summary_sha256 != _digest(material):
-            if all(
-                "non_saxo_event_descriptors" not in case.model_fields_set for case in self.cases
+            prior_descriptor_material = legacy_agent_evaluation_summary_material(
+                summary=self,
+                material=material,
+            )
+            if prior_descriptor_material is not None and self.summary_sha256 == _digest(
+                prior_descriptor_material
             ):
-                prior_descriptor_material = dict(material)
-                prior_descriptor_cases: list[dict[str, JsonValue]] = []
-                for case in self.cases:
-                    case_material = case.model_dump(mode="json")
-                    case_material.pop("non_saxo_event_descriptors")
-                    prior_descriptor_cases.append(case_material)
-                prior_descriptor_material["cases"] = prior_descriptor_cases
-                if self.summary_sha256 == _digest(prior_descriptor_material):
-                    return self
+                return self
             if self._matches_prior_observability_digest(material):
                 return self
             observability_fields = _MODEL_OUTPUT_OBSERVABILITY_FIELDS
@@ -522,6 +518,46 @@ class CodexNativeAgentEvaluationFailureSummary(_StrictModel):
             prior_cases.append(case_material)
         prior_material["cases"] = prior_cases
         return self.summary_sha256 == _digest(prior_material)
+
+
+def legacy_agent_evaluation_summary_material(
+    *,
+    summary: CodexNativeAgentEvaluationFailureSummary | None,
+    material: dict[str, object],
+) -> dict[str, object] | None:
+    """Return the one descriptor-free historical summary shape, if proven by field presence."""
+    if summary is None or any(
+        case.non_saxo_event_descriptors is not None
+        or "non_saxo_event_descriptors" in case.model_fields_set
+        for case in summary.cases
+    ):
+        return None
+    serialized_cases_value = material.get("cases")
+    if not isinstance(serialized_cases_value, (list, tuple)):
+        return None
+    serialized_cases = cast(
+        "list[object] | tuple[object, ...]",
+        serialized_cases_value,
+    )
+    if len(serialized_cases) != len(
+        summary.cases,
+    ):
+        return None
+    prior_cases: list[dict[str, object]] = []
+    for serialized_case in serialized_cases:
+        if (
+            not isinstance(serialized_case, dict)
+            or "non_saxo_event_descriptors" not in serialized_case
+        ):
+            return None
+        prior_case = dict(cast("dict[str, object]", serialized_case))
+        prior_case.pop("non_saxo_event_descriptors")
+        prior_cases.append(prior_case)
+    prior_material = dict(material)
+    prior_material["cases"] = (
+        tuple(prior_cases) if isinstance(serialized_cases, tuple) else prior_cases
+    )
+    return prior_material
 
 
 class CodexNativeBootstrapEnvelope(_StrictModel):
@@ -1195,6 +1231,19 @@ def verify_child_failure_envelope(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     legacy_material = dict(material)
                     legacy_material.pop("agent_evaluation_failure_summary")
                     accepted_digests.add(_digest(legacy_material))
+                else:
+                    summary_material = material.get("agent_evaluation_failure_summary")
+                    if isinstance(summary_material, dict):
+                        legacy_summary_material = legacy_agent_evaluation_summary_material(
+                            summary=envelope.agent_evaluation_failure_summary,
+                            material=cast("dict[str, object]", summary_material),
+                        )
+                        if legacy_summary_material is not None:
+                            legacy_material = dict(material)
+                            legacy_material["agent_evaluation_failure_summary"] = (
+                                legacy_summary_material
+                            )
+                            accepted_digests.add(_digest(legacy_material))
                 if (
                     envelope.envelope_sha256 not in accepted_digests
                     or envelope.child_exit_code != child_exit_code
@@ -1520,6 +1569,19 @@ def _verified_material(  # noqa: PLR0913
     reason: str,
     bootstrap_verification: CodexNativeBootstrapVerification,
 ) -> dict[str, object]:
+    summary_material: dict[str, object] | None = None
+    if agent_evaluation_failure_summary is not None:
+        current_summary_material = cast(
+            "dict[str, object]",
+            agent_evaluation_failure_summary.model_dump(mode="python"),
+        )
+        summary_material = (
+            legacy_agent_evaluation_summary_material(
+                summary=agent_evaluation_failure_summary,
+                material=current_summary_material,
+            )
+            or current_summary_material
+        )
     return {
         "schema_version": "1",
         "receipt_kind": "codex_native_verified_child_failure",
@@ -1544,11 +1606,7 @@ def _verified_material(  # noqa: PLR0913
         "model_event_count": model_event_count,
         "mcp_event_count": mcp_event_count,
         "saxo_event_count": saxo_event_count,
-        "agent_evaluation_failure_summary": (
-            agent_evaluation_failure_summary.model_dump(mode="python")
-            if agent_evaluation_failure_summary is not None
-            else None
-        ),
+        "agent_evaluation_failure_summary": summary_material,
         "execution_performed": execution_performed,
         "broker_write_made": broker_write_made,
         "live_mutation_calls": live_mutation_calls,
