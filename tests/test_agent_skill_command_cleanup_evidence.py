@@ -3035,7 +3035,7 @@ def test_reused_pid_and_pgid_are_hashed_and_never_signalled(
     )
 
 
-def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legacy(
+def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legacy(  # noqa: PLR0915
     tmp_path: Path,
 ) -> None:
     receipt_path = (tmp_path / "private-observations.json").resolve()
@@ -3072,6 +3072,7 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
     digest = evidence.receipt_sha256
     assert digest is not None
     original = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert original["observation_evidence_state"] == "current"
 
     tampered = json.loads(json.dumps(original))
     tampered["offending_observations"][0]["pid"] = 9999
@@ -3101,6 +3102,23 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
         is None
     )
 
+    prior_current_shape = json.loads(json.dumps(original))
+    prior_current_shape.pop("observation_evidence_state")
+    material = {key: value for key, value in prior_current_shape.items() if key != "receipt_sha256"}
+    prior_current_shape["receipt_sha256"] = hashlib.sha256(
+        json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(prior_current_shape), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    prior_current = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=prior_current_shape["receipt_sha256"],
+    )
+    assert prior_current is not None
+    assert prior_current.observation_evidence_state == "legacy-current"
+    assert prior_current.offending_observations is not None
+    assert prior_current.offending_observations[0].occurrence_count == 1
+
     prior_observation_shape = json.loads(json.dumps(original))
     for field in (
         "expected_pgid",
@@ -3108,6 +3126,7 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
         "occurrence_count",
     ):
         prior_observation_shape["offending_observations"][0].pop(field)
+    prior_observation_shape.pop("observation_evidence_state")
     material = {
         key: value for key, value in prior_observation_shape.items() if key != "receipt_sha256"
     }
@@ -3127,11 +3146,37 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
     )
     assert prior_verified is not None
     assert prior_verified.offending_observations is not None
+    assert prior_verified.observation_evidence_state == "historical"
     assert prior_verified.offending_observations[0].expected_pgid is None
-    assert prior_verified.offending_observations[0].occurrence_count == 1
+    assert prior_verified.offending_observations[0].occurrence_count is None
+
+    mixed = json.loads(json.dumps(original))
+    mixed.pop("observation_evidence_state")
+    historical_observation = json.loads(json.dumps(mixed["offending_observations"][0]))
+    for field in (
+        "expected_pgid",
+        "expected_birth_identity_sha256",
+        "occurrence_count",
+    ):
+        historical_observation.pop(field)
+    mixed["offending_observations"].append(historical_observation)
+    material = {key: value for key, value in mixed.items() if key != "receipt_sha256"}
+    mixed["receipt_sha256"] = hashlib.sha256(
+        json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(mixed), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=mixed["receipt_sha256"],
+        )
+        is None
+    )
 
     legacy = json.loads(json.dumps(original))
     legacy.pop("offending_observations")
+    legacy.pop("observation_evidence_state")
     material = {key: value for key, value in legacy.items() if key != "receipt_sha256"}
     legacy["receipt_sha256"] = hashlib.sha256(
         json.dumps(material, allow_nan=False, separators=(",", ":"), sort_keys=True).encode(),
@@ -3143,6 +3188,7 @@ def test_unknown_cleanup_observation_schema_rejects_tamper_extra_and_reads_legac
         expected_receipt_sha256=legacy["receipt_sha256"],
     )
     assert verified is not None
+    assert verified.observation_evidence_state == "none"
     assert verified.offending_observations is None
     raw = receipt_path.read_text(encoding="utf-8")
     assert "PRIVATE" not in raw

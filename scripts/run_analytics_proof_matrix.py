@@ -359,6 +359,9 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                 cleanup_identity_receipt_path=_proof_child_cleanup_identity_receipt_path(
                     args.out,
                 ),
+                agent_evaluation_cleanup_receipt_path=(
+                    _agent_evaluation_cleanup_receipt_path(args.out)
+                ),
             )
             if args.harness_policy == "codex_native_v1"
             else run_verified_installed_producer(
@@ -750,6 +753,10 @@ def _candidate_runner_cleanup_receipt_path(output: Path) -> Path:
 
 def _proof_child_cleanup_identity_receipt_path(output: Path) -> Path:
     return output.with_name(f"{output.name}.proof-child-cleanup.json").resolve()
+
+
+def _agent_evaluation_cleanup_receipt_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.agent-eval-cleanup.json").resolve()
 
 
 def _prepare_candidate_result_path(path: Path) -> None:

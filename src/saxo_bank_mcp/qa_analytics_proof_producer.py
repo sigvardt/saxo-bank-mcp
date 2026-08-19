@@ -30,6 +30,7 @@ from saxo_bank_mcp.agent_skill_codex_install import (
 from saxo_bank_mcp.agent_skill_command_runner import (
     CommandFailureError,
     CommandResult,
+    retain_eval_process_cleanup_receipt,
     run_command,
 )
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunRecord, EvalRunReport
@@ -105,6 +106,7 @@ _MATRIX_CHILD_TIMEOUT_SECONDS = 1800
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
 _NATIVE_PROOF_PROJECT_ENVIRONMENT = "SAXO_ANALYTICS_PROOF_PROJECT_ENVIRONMENT"
+_AGENT_EVAL_CLEANUP_RECEIPT_ENVIRONMENT = "SAXO_ANALYTICS_AGENT_EVAL_CLEANUP_RECEIPT"
 _MATRIX_CHILD_ENV_KEYS: Final = (
     "HOME",
     "PATH",
@@ -606,13 +608,14 @@ def run_verified_installed_producer(
     )
 
 
-def run_verified_codex_native_producer(  # noqa: C901
+def run_verified_codex_native_producer(  # noqa: C901, PLR0913
     install: CodexInstallEvidenceReport,
     *,
     candidate_commit: str,
     install_report_path: Path,
     source_repo: Path,
     cleanup_identity_receipt_path: Path | None = None,
+    agent_evaluation_cleanup_receipt_path: Path | None = None,
 ) -> CodexNativeVerifiedInstalledProofValidation:
     """Execute the unchanged proof suite with the native Codex harness quorum."""
     if type(install) is not CodexInstallEvidenceReport:
@@ -657,6 +660,7 @@ def run_verified_codex_native_producer(  # noqa: C901
             producer_module_sha256=expected_module_sha256,
             catalog_sha256=catalog_sha256,
             contract_sha256=contract_sha256,
+            agent_evaluation_cleanup_receipt_path=(agent_evaluation_cleanup_receipt_path),
             **execution_kwargs,
         )
     except (CodexNativeBoundaryFailureError, CodexNativeProofFailureError):
@@ -1738,10 +1742,20 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
             )
         except CommandFailureError as error:
             if progress is not None:
+                retained_cleanup_raw = os.environ.get(
+                    _AGENT_EVAL_CLEANUP_RECEIPT_ENVIRONMENT,
+                    "",
+                ).strip()
                 _record_failed_agent_report_progress(
                     progress,
                     report_path=report_path,
                     candidate_commit=candidate_commit,
+                    transient_cleanup_receipt_path=report_path.with_name(
+                        f"{report_path.name}.process-cleanup.json",
+                    ),
+                    retained_cleanup_receipt_path=(
+                        Path(retained_cleanup_raw) if retained_cleanup_raw else None
+                    ),
                 )
             raise ProofProducerError("installed_agent_evaluation_command_failed") from error
         return consume_process_report(
@@ -1803,6 +1817,8 @@ def _record_failed_agent_report_progress(
     *,
     report_path: Path,
     candidate_commit: str,
+    transient_cleanup_receipt_path: Path | None = None,
+    retained_cleanup_receipt_path: Path | None = None,
 ) -> None:
     """Observe safe partial event counts without trusting a failed report as proof."""
     try:
@@ -1826,6 +1842,12 @@ def _record_failed_agent_report_progress(
         return
     if report.source_commit != candidate_commit:
         return
+    if not _retain_failed_agent_cleanup_receipt(
+        report,
+        transient_cleanup_receipt_path=transient_cleanup_receipt_path,
+        retained_cleanup_receipt_path=retained_cleanup_receipt_path,
+    ):
+        return
     _record_agent_report_progress(progress, report)
     try:
         summary = _agent_evaluation_failure_summary(
@@ -1836,6 +1858,37 @@ def _record_failed_agent_report_progress(
         return
     if summary is not None:
         progress.record_agent_evaluation_failure(summary)
+
+
+def _retain_failed_agent_cleanup_receipt(
+    report: EvalRunReport,
+    *,
+    transient_cleanup_receipt_path: Path | None,
+    retained_cleanup_receipt_path: Path | None,
+) -> bool:
+    """Retain a verified private nested receipt before signing its public digest."""
+    cleanup = report.cleanup
+    evidence_status = cleanup.get("process_cleanup_evidence_status")
+    expected_digest = cleanup.get("process_cleanup_receipt_sha256")
+    if evidence_status != "observation-unknown":
+        return expected_digest is None
+    if (
+        not isinstance(expected_digest, str)
+        or _SHA256_PATTERN.fullmatch(expected_digest) is None
+        or transient_cleanup_receipt_path is None
+        or retained_cleanup_receipt_path is None
+        or not retained_cleanup_receipt_path.is_absolute()
+        or retained_cleanup_receipt_path.is_relative_to(transient_cleanup_receipt_path.parent)
+    ):
+        return False
+    return (
+        retain_eval_process_cleanup_receipt(
+            transient_cleanup_receipt_path,
+            retained_cleanup_receipt_path,
+            expected_receipt_sha256=expected_digest,
+        )
+        is not None
+    )
 
 
 def _agent_evaluation_failure_summary(
@@ -2746,6 +2799,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
     catalog_sha256: str,
     contract_sha256: str,
     cleanup_identity_receipt_path: Path | None = None,
+    agent_evaluation_cleanup_receipt_path: Path | None = None,
 ) -> _CodexNativeChildExecution:
     proof_runtime = install.proof_runtime
     if proof_runtime is None:
@@ -2856,6 +2910,10 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
         env["SAXO_ANALYTICS_CODEX_HOME"] = str(runtime.codex_home.resolve())
         env["SAXO_ANALYTICS_SOURCE_REPO"] = str(source_repo.resolve())
         env["SAXO_ANALYTICS_HARNESS_POLICY"] = "codex_native_v1"
+        if agent_evaluation_cleanup_receipt_path is not None:
+            env[_AGENT_EVAL_CLEANUP_RECEIPT_ENVIRONMENT] = str(
+                agent_evaluation_cleanup_receipt_path.resolve(),
+            )
         if uv_cache := os.environ.get("UV_CACHE_DIR"):
             env["UV_CACHE_DIR"] = uv_cache
         try:

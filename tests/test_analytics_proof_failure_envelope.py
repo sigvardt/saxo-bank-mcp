@@ -12,6 +12,7 @@ from typing import Any, Literal, NoReturn, cast
 import pytest
 from pydantic import ValidationError
 
+import saxo_bank_mcp.agent_skill_command_runner as command_runner
 import saxo_bank_mcp.agent_skill_eval_execution as eval_execution
 import saxo_bank_mcp.agent_skill_eval_process as eval_process
 from saxo_bank_mcp.agent_skill_command_runner import (
@@ -2269,6 +2270,103 @@ def test_nested_cleanup_receipt_digest_survives_signed_failure_publication(
     assert "process_identity" not in rendered
 
 
+def test_failed_eval_cleanup_receipt_is_verified_and_retained_before_summary(
+    tmp_path: Path,
+) -> None:
+    """The producer must retain the private receipt outside its temporary eval root."""
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    execution_root = tmp_path / "temporary-eval"
+    execution_root.mkdir(mode=0o700)
+    transient_receipt = execution_root / "failed-eval.json.process-cleanup.json"
+    retained_receipt = (tmp_path / "retained-process-cleanup.json").resolve()
+    observation = command_runner.ProcessCleanupOffendingObservation(
+        pid=8801,
+        pgid=8800,
+        expected_pgid=8800,
+        ppid=8800,
+        birth_identity_sha256="a" * 64,
+        expected_birth_identity_sha256=None,
+        detection_source="post_signal_group_rescan",
+        observation_state="running",
+        admission_phase="admission_closed",
+        occurrence_count=1,
+        process_identity_sha256="b" * 64,
+    )
+    evidence = command_runner.write_eval_process_cleanup_receipt(
+        transient_receipt,
+        snapshots=(
+            command_runner.ProcessCleanupTerminalSnapshot(
+                targets=(),
+                coverage_status="unknown",
+                coverage_stage="group_member",
+                coverage_subreason="uncaptured_member",
+                offending_observations=(observation,),
+            ),
+        ),
+    )
+    assert evidence.receipt_sha256 is not None
+
+    report_path = execution_root / "failed-eval.json"
+    _write_failed_agent_report(report_path)
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    payload["cleanup"].update(
+        {
+            "complete": False,
+            "process_cleanup": "unknown",
+            "remaining_processes": None,
+            "process_cleanup_evidence_status": "observation-unknown",
+            "process_cleanup_receipt_sha256": evidence.receipt_sha256,
+            "process_cleanup_unknown_reason": "coverage_unknown",
+            "process_cleanup_coverage_stage": "group_member",
+            "process_cleanup_coverage_subreason": "uncaptured_member",
+        },
+    )
+    report_path.write_text(
+        json.dumps(payload, allow_nan=False, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    report_path.chmod(OWNER_FILE_MODE)
+    report = EvalRunReport.model_validate(
+        {
+            key: value
+            for key, value in payload.items()
+            if key not in {"run_cleanup", "installation_fixture_preserved"}
+        },
+    )
+    same_root_destination = execution_root / "not-durable.json"
+    assert not producer._retain_failed_agent_cleanup_receipt(  # noqa: SLF001
+        report,
+        transient_cleanup_receipt_path=transient_receipt,
+        retained_cleanup_receipt_path=same_root_destination,
+    )
+    assert not same_root_destination.exists()
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+
+    producer._record_failed_agent_report_progress(  # noqa: SLF001
+        progress,
+        report_path=report_path,
+        candidate_commit=CANDIDATE,
+        transient_cleanup_receipt_path=transient_receipt,
+        retained_cleanup_receipt_path=retained_receipt,
+    )
+
+    summary = progress.agent_evaluation_failure_summary
+    assert summary is not None
+    assert summary.cleanup is not None
+    assert summary.cleanup.process_cleanup_receipt_sha256 == evidence.receipt_sha256
+    retained = command_runner.verify_eval_process_cleanup_receipt(
+        retained_receipt,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+    assert retained is not None
+    assert retained.offending_observation_count == 1
+    assert str(execution_root) not in retained_receipt.read_text(encoding="utf-8")
+
+
 def test_descriptor_free_historical_eval_summary_keeps_descriptors_none(
     tmp_path: Path,
 ) -> None:
@@ -3539,7 +3637,12 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
     candidate_root = tmp_path / "candidate"
     _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
 
-    def fail_producer(*_args: object, **_kwargs: object) -> NoReturn:
+    retained_cleanup_paths: list[Path] = []
+
+    def fail_producer(*_args: object, **kwargs: object) -> NoReturn:
+        retained_cleanup_paths.append(
+            cast("Path", kwargs["agent_evaluation_cleanup_receipt_path"]),
+        )
         raise producer.CodexNativeProofFailureError(receipt)
 
     monkeypatch.setattr(script, "run_verified_codex_native_producer", fail_producer)
@@ -3572,6 +3675,9 @@ def test_proof_matrix_cli_publishes_typed_native_failure(
     assert payload["result"]["network_call_made"] is False
     assert payload["result"]["broker_write_made"] is False
     assert payload["result"]["reason"] == "proof_before_preflight_injected"
+    assert retained_cleanup_paths == [
+        output.with_name(f"{output.name}.agent-eval-cleanup.json").resolve(),
+    ]
     assert "raw_stdout" not in payload
     assert "raw_stderr" not in payload
 

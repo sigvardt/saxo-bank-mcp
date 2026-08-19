@@ -385,6 +385,27 @@ def test_nested_eval_cleanup_writes_digest_bound_private_observation_receipt(
         is None
     )
 
+    receipt_path.chmod(OWNER_FILE_MODE)
+    retained_path = (tmp_path / "retained-cleanup.json").resolve()
+    retained = command_runner.retain_eval_process_cleanup_receipt(
+        receipt_path,
+        retained_path,
+        expected_receipt_sha256=digest,
+    )
+    assert retained is not None
+    assert retained.receipt_sha256 == digest
+    assert retained_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+    retained_bytes = retained_path.read_bytes()
+    assert (
+        command_runner.retain_eval_process_cleanup_receipt(
+            receipt_path,
+            retained_path,
+            expected_receipt_sha256=digest,
+        )
+        is None
+    )
+    assert retained_path.read_bytes() == retained_bytes
+
 
 def test_nested_eval_merge_preserves_repeated_observation_count(
     tmp_path: Path,

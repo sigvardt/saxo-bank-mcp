@@ -81,6 +81,12 @@ type CleanupObservationState = Literal[
 ]
 type CleanupAdmissionPhase = Literal["admission_open", "admission_closed"]
 type CleanupProcessCategory = Literal["process_observer"]
+type CleanupObservationEvidenceState = Literal[
+    "current",
+    "legacy-current",
+    "historical",
+    "none",
+]
 type CleanupUnknownReason = Literal[
     "watcher_publication_discarded",
     "watcher_still_running",
@@ -152,7 +158,7 @@ class ProcessCleanupOffendingObservation(_StrictModel):
     detection_source: CleanupObservationDetectionSource
     observation_state: CleanupObservationState
     admission_phase: CleanupAdmissionPhase
-    occurrence_count: int = Field(default=1, ge=1)
+    occurrence_count: int | None = Field(default=None, ge=1)
     process_category: CleanupProcessCategory | None = None
     process_identity_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
 
@@ -175,7 +181,7 @@ class ProcessCleanupOffendingObservation(_StrictModel):
             raise ValueError("cleanup observation correlation fields must be complete")
         if not present_correlation_fields:
             return self
-        if self.expected_pgid is None:
+        if self.expected_pgid is None or self.occurrence_count is None:
             raise ValueError("current cleanup observation requires an expected process group")
         if self.observation_state == "group_changed" and self.expected_pgid == self.pgid:
             raise ValueError("changed-group cleanup observation requires different groups")
@@ -322,10 +328,11 @@ class CommandCleanupUnknownReceipt(_StrictModel):
     remaining_process_count: int | None = Field(default=None, ge=0)
     remaining_process_group_count: int | None = Field(default=None, ge=0)
     offending_observations: tuple[ProcessCleanupOffendingObservation, ...] | None = None
+    observation_evidence_state: CleanupObservationEvidenceState = "none"
     receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_receipt(self) -> Self:  # noqa: C901, PLR0912
+    def _validate_receipt(self) -> Self:  # noqa: C901, PLR0912, PLR0915
         expected = _cleanup_unknown_reason(
             watcher_drain_status=self.watcher_drain_status,
             coverage_status=self.coverage_status,
@@ -356,10 +363,35 @@ class CommandCleanupUnknownReceipt(_StrictModel):
             "expected_birth_identity_sha256",
             "occurrence_count",
         }
-        current_observations = bool(self.offending_observations) and all(
-            correlation_fields <= observation.model_fields_set
+        observation_state_field_present = "observation_evidence_state" in self.model_fields_set
+        observation_shapes = {
+            "current"
+            if correlation_fields <= observation.model_fields_set
+            else "historical"
+            if not (correlation_fields & observation.model_fields_set)
+            else "partial"
             for observation in self.offending_observations or ()
+        }
+        if "partial" in observation_shapes or len(observation_shapes) > 1:
+            raise ValueError("cleanup observations must use one complete evidence schema")
+        inferred_evidence_state: CleanupObservationEvidenceState = (
+            "legacy-current"
+            if observation_shapes == {"current"}
+            else "historical"
+            if observation_shapes == {"historical"}
+            else "none"
         )
+        if observation_state_field_present:
+            if self.observation_evidence_state == "current":
+                if observation_shapes != {"current"}:
+                    raise ValueError("current cleanup evidence requires current observations")
+            elif self.observation_evidence_state == "none":
+                if observation_shapes:
+                    raise ValueError("empty cleanup evidence cannot contain observations")
+            else:
+                raise ValueError("legacy cleanup evidence state cannot be newly serialized")
+            inferred_evidence_state = self.observation_evidence_state
+        current_observations = inferred_evidence_state in {"current", "legacy-current"}
         if (
             observation_field_present
             and self.coverage_stage == "group_member"
@@ -377,26 +409,22 @@ class CommandCleanupUnknownReceipt(_StrictModel):
                 raise ValueError("group-member cleanup evidence differs from its diagnostic")
         material = self.model_dump(mode="json", exclude={"receipt_sha256"})
         accepted_materials = [material]
-        if (
-            observation_field_present
-            and self.offending_observations
-            and any(
-                not (correlation_fields & observation.model_fields_set)
-                for observation in self.offending_observations
-            )
-        ):
+        if not observation_state_field_present:
             prior_observation_material = dict(material)
+            prior_observation_material.pop("observation_evidence_state")
             prior_observations: list[dict[str, JsonValue]] = []
-            for observation in self.offending_observations:
+            for observation in self.offending_observations or ():
                 observation_material = observation.model_dump(mode="json")
                 if not (correlation_fields & observation.model_fields_set):
                     for field in correlation_fields:
                         observation_material.pop(field)
                 prior_observations.append(observation_material)
-            prior_observation_material["offending_observations"] = prior_observations
+            if observation_field_present:
+                prior_observation_material["offending_observations"] = prior_observations
             accepted_materials.append(prior_observation_material)
         if not observation_field_present and self.offending_observations is None:
             legacy_observations = dict(material)
+            legacy_observations.pop("observation_evidence_state")
             legacy_observations.pop("offending_observations")
             accepted_materials.append(legacy_observations)
         if self.coverage_stage is None and self.coverage_subreason is None:
@@ -408,6 +436,10 @@ class CommandCleanupUnknownReceipt(_StrictModel):
         accepted = {_digest(candidate) for candidate in accepted_materials}
         if self.receipt_sha256 not in accepted:
             raise ValueError("cleanup unknown receipt digest mismatch")
+        if not observation_state_field_present:
+            return self.model_copy(
+                update={"observation_evidence_state": inferred_evidence_state},
+            )
         return self
 
 
@@ -425,7 +457,7 @@ class EvalProcessCleanupSnapshotEvidence(_StrictModel):
             subreason=self.coverage_subreason,
         )
         if self.offending_observation_count != sum(
-            item.occurrence_count for item in self.offending_observations
+            item.occurrence_count or 0 for item in self.offending_observations
         ):
             raise ValueError("nested cleanup snapshot observation count differs")
         if self.coverage_stage == "group_member" and not self.offending_observations:
@@ -461,7 +493,7 @@ class EvalProcessCleanupUnknownReceipt(_StrictModel):
         if len(self.cleanup_snapshots) > self.unknown_snapshot_count:
             raise ValueError("nested cleanup evidence snapshots exceed unknown snapshots")
         if self.offending_observation_count != sum(
-            item.occurrence_count for item in self.offending_observations
+            item.occurrence_count or 0 for item in self.offending_observations
         ):
             raise ValueError("nested cleanup observation count differs")
         if any(
@@ -1807,14 +1839,20 @@ def merge_process_cleanup_observations(
         material = observation.model_dump(mode="json", exclude={"occurrence_count"})
         key = _digest(material)
         existing = unique.get(key)
-        unique[key] = (
-            observation
-            if existing is None
-            else existing.model_copy(
-                update={
-                    "occurrence_count": existing.occurrence_count + observation.occurrence_count,
-                },
-            )
+        observation_count = observation.occurrence_count
+        existing_count = existing.occurrence_count if existing is not None else None
+        if observation_count is None or (existing is not None and existing_count is None):
+            unique[f"{key}:{len(unique)}"] = observation
+            continue
+        if existing is None:
+            unique[key] = observation
+            continue
+        if existing_count is None:
+            raise ValueError("cleanup observation count became unknown")
+        unique[key] = existing.model_copy(
+            update={
+                "occurrence_count": existing_count + observation_count,
+            },
         )
     return tuple(unique.values())
 
@@ -1951,6 +1989,7 @@ def _write_command_cleanup_unknown_receipt(  # noqa: PLR0913
         "offending_observations": tuple(
             observation.model_dump(mode="python") for observation in offending_observations
         ),
+        "observation_evidence_state": "current" if offending_observations else "none",
     }
     receipt = CommandCleanupUnknownReceipt.model_validate(
         {**material, "receipt_sha256": _digest(material)},
@@ -2061,7 +2100,8 @@ def write_eval_process_cleanup_receipt(
                 "coverage_stage": snapshot.coverage_stage,
                 "coverage_subreason": snapshot.coverage_subreason,
                 "offending_observation_count": sum(
-                    observation.occurrence_count for observation in snapshot.offending_observations
+                    observation.occurrence_count or 0
+                    for observation in snapshot.offending_observations
                 ),
                 "offending_observations": tuple(
                     observation.model_dump(mode="python")
@@ -2071,7 +2111,7 @@ def write_eval_process_cleanup_receipt(
             for snapshot in evidence_snapshots
         ),
         "offending_observation_count": sum(
-            observation.occurrence_count for observation in observations
+            observation.occurrence_count or 0 for observation in observations
         ),
         "offending_observations": tuple(
             observation.model_dump(mode="python") for observation in observations
@@ -2121,6 +2161,27 @@ def verify_eval_process_cleanup_receipt(
     ):
         return None
     return receipt
+
+
+def retain_eval_process_cleanup_receipt(
+    source: Path,
+    destination: Path,
+    *,
+    expected_receipt_sha256: str,
+) -> EvalProcessCleanupUnknownReceipt | None:
+    """Verify and atomically retain one nested receipt outside its temporary run root."""
+    receipt = verify_eval_process_cleanup_receipt(
+        source,
+        expected_receipt_sha256=expected_receipt_sha256,
+    )
+    if receipt is None or os.path.lexists(destination):
+        return None
+    if not _atomic_owner_only_write(destination, receipt.model_dump_json() + "\n"):
+        return None
+    return verify_eval_process_cleanup_receipt(
+        destination,
+        expected_receipt_sha256=expected_receipt_sha256,
+    )
 
 
 def _atomic_owner_only_write(path: Path, text: str) -> bool:
