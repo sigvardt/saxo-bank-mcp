@@ -513,15 +513,16 @@ def test_candidate_runner_cleanup_failure_preserves_authenticated_inner_result(
     inner_publication = _candidate_publication(script, result_kind=result_kind)
     output = tmp_path / "proof.json"
 
-    def fail_after_result(
+    def fail_after_result(  # noqa: PLR0913
         name: str,
         argv: tuple[str, ...],
         *,
         cwd: Path,
         env: dict[str, str],
         timeout_seconds: int,
+        cleanup_identity_receipt_path: Path | None = None,
     ) -> NoReturn:
-        del env, timeout_seconds
+        del env, timeout_seconds, cleanup_identity_receipt_path
         result_path = Path(argv[argv.index("--out") + 1])
         assert result_path == output.with_name(f"{output.name}.candidate-result.json")
         assert result_path != output
@@ -590,6 +591,103 @@ def test_candidate_runner_cleanup_failure_preserves_authenticated_inner_result(
     assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
 
 
+def test_candidate_runner_unknown_cleanup_propagates_typed_digest_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    script = _load_proof_matrix_script()
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    candidate_root = tmp_path / "candidate"
+    candidate_root.mkdir(mode=0o700)
+    _patch_candidate_entrypoint_binding(monkeypatch, script, candidate_root)
+    inner_publication = _candidate_publication(script, result_kind="verified_child_failure")
+    output = tmp_path / "proof.json"
+    cleanup_digest = "d" * 64
+    try:
+        command_error = CommandFailureError(
+            CommandReceipt(
+                name="analytics_candidate_runner",
+                argv=("candidate",),
+                cwd=str(candidate_root),
+                pid=17,
+                pgid=17,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=None,
+            remaining_process_group_count=None,
+            cleanup_identity_evidence_status="observation-unknown",
+            cleanup_identity_receipt_sha256=cleanup_digest,
+            cleanup_unknown_reason="watcher_drain_unknown",
+        )
+    except TypeError as error:
+        pytest.fail(f"typed candidate cleanup evidence is not accepted: {type(error).__name__}")
+
+    def fail_after_result(  # noqa: PLR0913
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+        cleanup_identity_receipt_path: Path | None = None,
+    ) -> NoReturn:
+        del name, cwd, env, timeout_seconds, cleanup_identity_receipt_path
+        result_path = Path(argv[argv.index("--out") + 1])
+        result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
+        result_path.chmod(0o600)
+        raise command_error
+
+    monkeypatch.setattr(script, "run_command", fail_after_result)
+
+    exit_code = script.main(
+        [
+            "--candidate-commit",
+            CANDIDATE,
+            "--candidate-source-root",
+            str(candidate_root),
+            "--install-report",
+            str(tmp_path / "install.json"),
+            "--codex-global-home",
+            str(tmp_path / "codex-home"),
+            "--harness-policy",
+            "codex_native_v1",
+            "--out",
+            str(output),
+        ],
+    )
+
+    outer = publication_module.verify_codex_native_proof_publication(
+        output.read_text(encoding="utf-8"),
+    )
+    receipt_path = output.with_name(f"{output.name}.candidate-runner.json")
+    receipt = publication_module.verify_codex_native_candidate_runner_receipt(
+        receipt_path.read_text(encoding="utf-8"),
+    )
+
+    assert exit_code == 1
+    assert outer.result.reason == "proof_candidate_runner_cleanup_failed"
+    assert outer.result.candidate_runner_cleanup_status == "unknown"
+    assert outer.result.candidate_runner_cleanup_evidence_status == "observation-unknown"
+    assert outer.result.candidate_runner_cleanup_receipt_sha256 == cleanup_digest
+    assert outer.result.candidate_runner_cleanup_unknown_reason == "watcher_drain_unknown"
+    assert receipt.cleanup_status == "unknown"
+    assert receipt.cleanup_identity_evidence_status == "observation-unknown"
+    assert receipt.cleanup_identity_receipt_sha256 == cleanup_digest
+    assert receipt.cleanup_unknown_reason == "watcher_drain_unknown"
+    assert outer.result.execution_performed is None
+    assert outer.result.model_event_count is None
+    assert outer.result.mcp_event_count is None
+    assert outer.result.saxo_event_count is None
+    assert outer.result.broker_write_made is None
+    assert outer.result.live_mutation_calls is None
+    assert outer.result.purchase_occurred is None
+    assert outer.result.disclaimer_response_made is None
+
+
 @pytest.mark.parametrize("mutation", ["malformed", "tampered", "binding"])
 def test_candidate_runner_cleanup_failure_copies_no_untrusted_inner_facts(
     monkeypatch: pytest.MonkeyPatch,
@@ -612,15 +710,16 @@ def test_candidate_runner_cleanup_failure_copies_no_untrusted_inner_facts(
     raw = "{" if mutation == "malformed" else json.dumps(untrusted, sort_keys=True)
     output = tmp_path / "proof.json"
 
-    def fail_after_result(
+    def fail_after_result(  # noqa: PLR0913
         name: str,
         argv: tuple[str, ...],
         *,
         cwd: Path,
         env: dict[str, str],
         timeout_seconds: int,
+        cleanup_identity_receipt_path: Path | None = None,
     ) -> NoReturn:
-        del env, timeout_seconds
+        del env, timeout_seconds, cleanup_identity_receipt_path
         result_path = Path(argv[argv.index("--out") + 1])
         result_path.write_text(raw, encoding="utf-8")
         result_path.chmod(0o600)
@@ -695,15 +794,16 @@ def test_candidate_runner_receipt_write_failure_retains_authenticated_inner_resu
     )
     output = tmp_path / "proof.json"
 
-    def child_result(
+    def child_result(  # noqa: PLR0913
         name: str,
         argv: tuple[str, ...],
         *,
         cwd: Path,
         env: dict[str, str],
         timeout_seconds: int,
+        cleanup_identity_receipt_path: Path | None = None,
     ) -> CommandResult:
-        del env, timeout_seconds
+        del env, timeout_seconds, cleanup_identity_receipt_path
         result_path = Path(argv[argv.index("--out") + 1])
         result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
         result_path.chmod(0o600)
@@ -787,15 +887,16 @@ def test_candidate_runner_cleanup_complete_publishes_authenticated_result(
     inner_publication = _candidate_publication(script, result_kind="verified_result")
     output = tmp_path / "proof.json"
 
-    def child_result(
+    def child_result(  # noqa: PLR0913
         name: str,
         argv: tuple[str, ...],
         *,
         cwd: Path,
         env: dict[str, str],
         timeout_seconds: int,
+        cleanup_identity_receipt_path: Path | None = None,
     ) -> CommandResult:
-        del env, timeout_seconds
+        del env, timeout_seconds, cleanup_identity_receipt_path
         result_path = Path(argv[argv.index("--out") + 1])
         result_path.write_text(inner_publication.model_dump_json(), encoding="utf-8")
         result_path.chmod(0o600)
@@ -1286,6 +1387,63 @@ def test_outer_cleanup_identity_receipt_digest_is_authenticated_and_public_only_
         publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
 
 
+def test_outer_unknown_cleanup_receipt_reason_is_authenticated_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    child = _failure(_progress_with_failed_agent_summary(tmp_path))
+    cleanup_digest = "d" * 64
+    try:
+        verified = _verify(
+            child.model_dump_json(),
+            cleanup_identity_evidence_status="observation-unknown",
+            cleanup_identity_receipt_sha256=cleanup_digest,
+            cleanup_identity_unknown_reason="watcher_drain_unknown",
+            remaining_process_count=None,
+            remaining_process_group_count=None,
+        )
+    except TypeError as error:
+        pytest.fail(f"typed unknown cleanup evidence is not accepted: {type(error).__name__}")
+
+    assert verified.failure_evidence_status == "cleanup_failed"
+    assert verified.reason == "proof_child_cleanup_failed"
+    assert verified.outer_process_cleanup_evidence_status == "observation-unknown"
+    assert verified.outer_process_cleanup_receipt_sha256 == cleanup_digest
+    assert verified.outer_process_cleanup_unknown_reason == "watcher_drain_unknown"
+    assert verified.model_event_count is None
+    assert verified.mcp_event_count is None
+    assert verified.saxo_event_count is None
+    assert verified.broker_write_made is None
+    assert verified.live_mutation_calls is None
+    assert verified.purchase_occurred is None
+    assert verified.disclaimer_response_made is None
+
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    round_trip = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+    assert round_trip.result.outer_process_cleanup_receipt_sha256 == cleanup_digest
+    assert round_trip.result.outer_process_cleanup_unknown_reason == "watcher_drain_unknown"
+    rendered = round_trip.model_dump_json()
+    assert "PRIVATE" not in rendered
+    assert "pid" not in rendered.lower()
+    assert "birth" not in rendered.lower()
+
+    tampered = publication.model_dump(mode="json")
+    cast("dict[str, Any]", tampered["result"])["outer_process_cleanup_unknown_reason"] = (
+        "watcher_still_running"
+    )
+    with pytest.raises(ValidationError):
+        publication_module.verify_codex_native_proof_publication(json.dumps(tampered))
+
+
 @pytest.mark.parametrize(
     ("status", "digest"),
     [
@@ -1310,8 +1468,11 @@ def test_outer_cleanup_inconsistent_optional_digest_is_normalized_fail_closed(
 
     assert verified.failure_evidence_status == "cleanup_failed"
     assert verified.reason == "proof_child_cleanup_failed"
-    assert verified.outer_process_cleanup_evidence_status == "observation-unknown"
+    assert verified.outer_process_cleanup_evidence_status == "write-failed"
     assert verified.outer_process_cleanup_receipt_sha256 is None
+    assert verified.outer_process_cleanup_unknown_reason == "cleanup_evidence_inconsistent"
+    assert verified.outer_remaining_process_count is None
+    assert verified.outer_remaining_process_group_count is None
 
 
 def test_outer_cleanup_missing_receipt_fails_closed_and_is_privacy_safe(tmp_path: Path) -> None:
@@ -1320,6 +1481,7 @@ def test_outer_cleanup_missing_receipt_fails_closed_and_is_privacy_safe(tmp_path
         child.model_dump_json(),
         cleanup_identity_evidence_status="write-failed",
         cleanup_identity_receipt_sha256=None,
+        cleanup_identity_unknown_reason="cleanup_receipt_write_failed",
     )
     publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
     publication = publication_module.build_codex_native_proof_publication(
@@ -1338,6 +1500,9 @@ def test_outer_cleanup_missing_receipt_fails_closed_and_is_privacy_safe(tmp_path
     assert round_trip.result.reason == "proof_child_cleanup_failed"
     assert round_trip.result.outer_process_cleanup_evidence_status == "write-failed"
     assert round_trip.result.outer_process_cleanup_receipt_sha256 is None
+    assert round_trip.result.outer_process_cleanup_unknown_reason == "cleanup_receipt_write_failed"
+    assert round_trip.result.outer_remaining_process_count is None
+    assert round_trip.result.outer_remaining_process_group_count is None
     assert round_trip.result.model_event_count is None
     assert round_trip.result.mcp_event_count is None
     assert round_trip.result.saxo_event_count is None

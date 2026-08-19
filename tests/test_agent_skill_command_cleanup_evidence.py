@@ -1745,8 +1745,16 @@ def test_cleanup_evidence_distinguishes_no_target_unknown_and_write_failure(
         identities=(identity,),
     )
     assert unknown.evidence_status == "observation-unknown"
-    assert unknown.receipt_sha256 is None
-    assert not receipt_path.exists()
+    assert unknown.receipt_sha256 is not None
+    assert unknown.unknown_reason == "target_observation_unknown"
+    verified_unknown = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=unknown.receipt_sha256,
+    )
+    assert verified_unknown is not None
+    assert verified_unknown.unknown_reason == "target_observation_unknown"
+    assert verified_unknown.remaining_process_count is None
+    assert verified_unknown.remaining_process_group_count is None
 
     known_target = unknown_target.model_copy(
         update={
@@ -1776,6 +1784,50 @@ def test_cleanup_evidence_distinguishes_no_target_unknown_and_write_failure(
     )
     assert write_failed.evidence_status == "write-failed"
     assert write_failed.receipt_sha256 is None
+
+
+def test_cleanup_observation_error_writes_bound_unknown_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_path = (tmp_path / "observation-error.json").resolve()
+    identity = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PID,
+        birth_identity="known-birth",
+        initial_state="running",
+    )
+
+    def fail_observation(
+        _identity: command_runner.ProcessCleanupIdentity,
+    ) -> command_runner.ProcessCleanupTargetReceipt:
+        raise OSError("injected_private_observation_error")
+
+    monkeypatch.setattr(command_runner, "observe_process_cleanup_target", fail_observation)
+
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="observation-error",
+        argv=("python",),
+        cwd=tmp_path,
+        root_pid=REUSED_PID,
+        root_pgid=REUSED_PID,
+        identities=(identity,),
+    )
+
+    assert evidence.evidence_status == "observation-unknown"
+    assert evidence.unknown_reason == "target_observation_unknown"
+    assert evidence.receipt_sha256 is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+    assert receipt is not None
+    assert receipt.unknown_reason == "target_observation_unknown"
+    assert receipt.target_count == 1
+    assert receipt.remaining_process_count is None
+    assert receipt.remaining_process_group_count is None
+    assert "injected_private" not in receipt_path.read_text(encoding="utf-8")
 
 
 def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa: PLR0915
@@ -1874,8 +1926,18 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
         assert error.remaining_process_count is None
         assert error.remaining_process_group_count is None
         assert error.cleanup_identity_evidence_status == "observation-unknown"
-        assert error.cleanup_identity_receipt_sha256 is None
-        assert not receipt_path.exists()
+        assert error.cleanup_unknown_reason == "watcher_still_running"
+        assert error.cleanup_identity_receipt_sha256 is not None
+        unknown_receipt = command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=error.cleanup_identity_receipt_sha256,
+        )
+        assert unknown_receipt is not None
+        assert unknown_receipt.unknown_reason == "watcher_still_running"
+        assert unknown_receipt.watcher_drain_status == "still-running"
+        assert unknown_receipt.coverage_status == "complete"
+        assert unknown_receipt.remaining_process_count is None
+        assert unknown_receipt.remaining_process_group_count is None
         assert escaped_pid not in cleanup_identity_pids
     finally:
         release_watcher.set()
@@ -1963,8 +2025,18 @@ def test_run_command_watcher_join_oserror_is_unknown(
     assert caught.value.remaining_process_count is None
     assert caught.value.remaining_process_group_count is None
     assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
-    assert caught.value.cleanup_identity_receipt_sha256 is None
-    assert not receipt_path.exists()
+    assert caught.value.cleanup_unknown_reason == "watcher_drain_unknown"
+    assert caught.value.cleanup_identity_receipt_sha256 is not None
+    unknown_receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=caught.value.cleanup_identity_receipt_sha256,
+    )
+    assert unknown_receipt is not None
+    assert unknown_receipt.unknown_reason == "watcher_drain_unknown"
+    assert unknown_receipt.watcher_drain_status == "unknown"
+    assert unknown_receipt.coverage_status == "complete"
+    assert unknown_receipt.remaining_process_count is None
+    assert unknown_receipt.remaining_process_group_count is None
 
 
 def test_run_command_watcher_capture_oserror_is_unknown(
@@ -2002,8 +2074,18 @@ def test_run_command_watcher_capture_oserror_is_unknown(
     assert caught.value.remaining_process_count is None
     assert caught.value.remaining_process_group_count is None
     assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
-    assert caught.value.cleanup_identity_receipt_sha256 is None
-    assert not receipt_path.exists()
+    assert caught.value.cleanup_unknown_reason == "watcher_drain_unknown"
+    assert caught.value.cleanup_identity_receipt_sha256 is not None
+    unknown_receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=caught.value.cleanup_identity_receipt_sha256,
+    )
+    assert unknown_receipt is not None
+    assert unknown_receipt.unknown_reason == "watcher_drain_unknown"
+    assert unknown_receipt.watcher_drain_status == "unknown"
+    assert unknown_receipt.coverage_status == "complete"
+    assert unknown_receipt.remaining_process_count is None
+    assert unknown_receipt.remaining_process_group_count is None
 
 
 @pytest.mark.parametrize("drain_status", ["discarded", "still-running", "unknown"])
@@ -2019,3 +2101,63 @@ def test_watcher_drain_failure_makes_semantic_cleanup_unknown(
     assert snapshot.cleanup_status == "unknown"
     assert snapshot.remaining_process_count is None
     assert snapshot.remaining_process_group_count is None
+
+
+def test_unknown_cleanup_receipt_is_bound_private_and_rejects_reason_tamper(
+    tmp_path: Path,
+) -> None:
+    receipt_path = (tmp_path / "unknown-cleanup.json").resolve()
+    snapshot = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="complete",
+        watcher_drain_status="discarded",
+    )
+
+    evidence = command_runner.write_command_cleanup_identity_receipt(
+        receipt_path,
+        name="PRIVATE_COMMAND_DO_NOT_PUBLISH",
+        argv=("/private/interpreter", "PRIVATE_ARGUMENT_DO_NOT_PUBLISH"),
+        cwd=tmp_path,
+        root_pid=101,
+        root_pgid=101,
+        terminal_snapshot=snapshot,
+    )
+
+    assert evidence.evidence_status == "observation-unknown"
+    assert evidence.unknown_reason == "watcher_publication_discarded"
+    assert evidence.receipt_sha256 is not None
+    receipt = command_runner.verify_command_cleanup_unknown_receipt(
+        receipt_path,
+        expected_receipt_sha256=evidence.receipt_sha256,
+    )
+    assert receipt is not None
+    assert receipt.unknown_reason == "watcher_publication_discarded"
+    assert receipt.watcher_drain_status == "discarded"
+    assert receipt.coverage_status == "complete"
+    assert receipt.remaining_process_count is None
+    assert receipt.remaining_process_group_count is None
+    raw = receipt_path.read_text(encoding="utf-8")
+    assert "PRIVATE" not in raw
+    assert str(tmp_path) not in raw
+    assert receipt_path.stat().st_mode & 0o777 == OWNER_FILE_MODE
+
+    payload = json.loads(raw)
+    payload["unknown_reason"] = "watcher_still_running"
+    material = {key: value for key, value in payload.items() if key != "receipt_sha256"}
+    payload["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_unknown_receipt(
+            receipt_path,
+            expected_receipt_sha256=payload["receipt_sha256"],
+        )
+        is None
+    )

@@ -761,6 +761,10 @@ def test_codex_native_analytics_execution_binds_schema_valid_fixture_arguments(
     assert "The harness owns cleanup for this contained fixture" in prompt
     assert "Never call an ungranted capability or deletion tool" in prompt
     assert "Final answer must include: analysis_id; owner-only; quality warnings" in prompt
+    assert (
+        "Final receipt: `analysis_id: <returned or fixture id>; "
+        "state: <verified|degraded|refused>; owner-only; quality warnings`."
+    ) in prompt
 
 
 def test_codex_native_research_precheck_prompt_requires_exact_final_receipt() -> None:

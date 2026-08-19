@@ -2890,6 +2890,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
                 remaining_process_group_count=command_error.remaining_process_group_count,
                 cleanup_identity_evidence_status=(command_error.cleanup_identity_evidence_status),
                 cleanup_identity_receipt_sha256=(command_error.cleanup_identity_receipt_sha256),
+                cleanup_identity_unknown_reason=command_error.cleanup_unknown_reason,
                 runtime_cleanup_status=(
                     "complete"
                     if (

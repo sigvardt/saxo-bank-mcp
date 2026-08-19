@@ -19,7 +19,12 @@ from saxo_bank_mcp.agent_skill_codex_install import (
     CodexInstallEvidenceReport,
     load_verified_codex_install_report,
 )
-from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, run_command
+from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupIdentityEvidenceKind,
+    CleanupUnknownReason,
+    CommandFailureError,
+    run_command,
+)
 from saxo_bank_mcp.agent_skill_install_models import InstallEvidenceReport
 from saxo_bank_mcp.agent_skill_install_qa import load_verified_install_report
 from saxo_bank_mcp.evidence_publication import write_scanned_json, write_scanned_text
@@ -245,6 +250,19 @@ def main(argv: list[str] | None = None) -> int:  # noqa: C901, PLR0911, PLR0912,
                     ),
                     candidate_runner_cleanup_status=(
                         receipt.cleanup_status if receipt is not None else "unknown"
+                    ),
+                    candidate_runner_cleanup_evidence_status=(
+                        receipt.cleanup_identity_evidence_status
+                        if receipt is not None
+                        else "write-failed"
+                    ),
+                    candidate_runner_cleanup_receipt_sha256=(
+                        receipt.cleanup_identity_receipt_sha256 if receipt is not None else None
+                    ),
+                    candidate_runner_cleanup_unknown_reason=(
+                        receipt.cleanup_unknown_reason
+                        if receipt is not None
+                        else "cleanup_evidence_unavailable"
                     ),
                     candidate_runner_result_sha256=(error.authenticated_result_sha256),
                 ),
@@ -587,6 +605,9 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
     env[_CANDIDATE_RECEIPT_COUNT_ENV] = str(evidence_receipt_count)
     command_state: CodexNativeCommandState = "completed"
     cleanup_status: CodexNativeCleanupStatus = "complete"
+    cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+    cleanup_identity_receipt_sha256: str | None = None
+    cleanup_unknown_reason: CleanupUnknownReason | None = None
     spawned = True
     try:
         completed = run_command(
@@ -595,15 +616,26 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cwd=candidate_source_root,
             env=env,
             timeout_seconds=_CANDIDATE_RUNNER_TIMEOUT_SECONDS,
+            cleanup_identity_receipt_path=_candidate_runner_cleanup_receipt_path(out),
         )
         exit_code = completed.receipt.exit_code
+        cleanup_identity_evidence_status = completed.cleanup_identity_evidence_status
+        cleanup_identity_receipt_sha256 = completed.cleanup_identity_receipt_sha256
+        cleanup_unknown_reason = completed.cleanup_unknown_reason
     except CommandFailureError as exc:
         spawned = exc.receipt.pid is not None
         exit_code = exc.receipt.exit_code if spawned else None
+        cleanup_identity_evidence_status = exc.cleanup_identity_evidence_status
+        cleanup_identity_receipt_sha256 = exc.cleanup_identity_receipt_sha256
+        cleanup_unknown_reason = exc.cleanup_unknown_reason
         if not spawned:
             command_state = "start_failed"
             cleanup_status = "not_started"
-        elif exc.remaining_process_count == 0 and exc.remaining_process_group_count == 0:
+        elif (
+            exc.remaining_process_count == 0
+            and exc.remaining_process_group_count == 0
+            and exc.cleanup_identity_evidence_status in {"authenticated", "no-target-observed"}
+        ):
             cleanup_status = "complete"
         elif (
             exc.remaining_process_count is not None
@@ -633,6 +665,9 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
         command_schema_sha256=command_schema_sha256,
         result_sha256=result_sha256,
         cleanup_status=cleanup_status,
+        cleanup_identity_evidence_status=cleanup_identity_evidence_status,
+        cleanup_identity_receipt_sha256=cleanup_identity_receipt_sha256,
+        cleanup_unknown_reason=cleanup_unknown_reason,
     )
     if not write_codex_native_candidate_runner_receipt(receipt_path, exit_receipt):
         raise _CandidateRunnerError(
@@ -691,6 +726,10 @@ def _run_candidate_entrypoint(  # noqa: C901, PLR0912, PLR0913, PLR0915
 
 def _candidate_runner_result_path(output: Path) -> Path:
     return output.with_name(f"{output.name}.candidate-result.json")
+
+
+def _candidate_runner_cleanup_receipt_path(output: Path) -> Path:
+    return output.with_name(f"{output.name}.candidate-runner-cleanup.json").resolve()
 
 
 def _proof_child_cleanup_identity_receipt_path(output: Path) -> Path:

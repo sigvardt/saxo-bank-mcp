@@ -766,6 +766,11 @@ def _codex_native_fixture_bound_case(
             " Final receipt: `analysis_id: <result analysis_id or fixture analysis_id>; "
             "state: <verified|degraded|refused>; stop before broker write`."
         )
+    if case.id == "artifact-delivery":
+        fixture_protocol += (
+            " Final receipt: `analysis_id: <returned or fixture id>; "
+            "state: <verified|degraded|refused>; owner-only; quality warnings`."
+        )
     if case.id == "scenario":
         fixture_protocol += (
             " Final scenario receipt must contain this exact ordered text: "

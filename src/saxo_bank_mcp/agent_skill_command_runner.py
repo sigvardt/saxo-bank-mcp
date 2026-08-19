@@ -41,6 +41,18 @@ type WatcherDrainState = Literal[
     "still-running",
     "unknown",
 ]
+type CleanupUnknownReason = Literal[
+    "watcher_publication_discarded",
+    "watcher_still_running",
+    "watcher_drain_unknown",
+    "coverage_unknown",
+    "target_observation_unknown",
+    "cleanup_state_unknown",
+    "cleanup_receipt_path_missing",
+    "cleanup_receipt_write_failed",
+    "cleanup_evidence_inconsistent",
+    "cleanup_evidence_unavailable",
+]
 
 
 class _StrictModel(BaseModel):
@@ -124,6 +136,18 @@ class ProcessCleanupTerminalSnapshot:
             },
         )
 
+    @property
+    def unknown_reason(self) -> CleanupUnknownReason | None:
+        if self.cleanup_status != "unknown":
+            return None
+        return _cleanup_unknown_reason(
+            watcher_drain_status=self.watcher_drain_status,
+            coverage_status=self.coverage_status,
+            target_observation_unknown=any(
+                target.termination_outcome == "unknown" for target in self.targets
+            ),
+        )
+
 
 class CommandCleanupIdentityReceipt(_StrictModel):
     schema_version: Literal["1"] = "1"
@@ -168,6 +192,42 @@ class CommandCleanupIdentityReceipt(_StrictModel):
     @property
     def cleanup_status(self) -> Literal["complete", "failed"]:
         return "failed" if self.remaining_process_count else "complete"
+
+
+class CommandCleanupUnknownReceipt(_StrictModel):
+    """Path-free diagnostic receipt for one fail-closed cleanup result."""
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["command_cleanup_unknown"] = "command_cleanup_unknown"
+    command_identity_sha256: str = Field(pattern=_SHA256_PATTERN)
+    root_pid: int = Field(gt=0)
+    root_pgid: int = Field(gt=0)
+    unknown_reason: CleanupUnknownReason
+    watcher_drain_status: WatcherDrainState
+    coverage_status: Literal["complete", "unknown"]
+    target_count: int = Field(ge=0)
+    remaining_process_count: int | None = Field(default=None, ge=0)
+    remaining_process_group_count: int | None = Field(default=None, ge=0)
+    receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def _validate_receipt(self) -> Self:
+        expected = _cleanup_unknown_reason(
+            watcher_drain_status=self.watcher_drain_status,
+            coverage_status=self.coverage_status,
+            target_observation_unknown=self.unknown_reason == "target_observation_unknown",
+        )
+        if self.unknown_reason != expected:
+            raise ValueError("cleanup unknown reason differs from semantic state")
+        if (
+            self.remaining_process_count is not None
+            or self.remaining_process_group_count is not None
+        ):
+            raise ValueError("unknown cleanup receipt cannot prove remaining counts")
+        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
+        if self.receipt_sha256 != _digest(material):
+            raise ValueError("cleanup unknown receipt digest mismatch")
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,11 +388,15 @@ class RootBoundProcessCleanupAdmission:
 class CommandCleanupIdentityEvidence:
     evidence_status: CleanupIdentityEvidenceKind
     receipt_sha256: str | None = None
+    unknown_reason: CleanupUnknownReason | None = None
 
     def __post_init__(self) -> None:
-        """Require authenticated evidence to carry exactly one digest."""
-        if (self.evidence_status == "authenticated") != (self.receipt_sha256 is not None):
-            raise ValueError("cleanup identity evidence status and digest differ")
+        """Require evidence kind, digest, and safe reason to agree."""
+        _require_cleanup_identity_evidence_consistency(
+            self.evidence_status,
+            self.receipt_sha256,
+            self.unknown_reason,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,12 +406,14 @@ class CommandResult:
     stderr: str
     cleanup_identity_receipt_sha256: str | None = None
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+    cleanup_unknown_reason: CleanupUnknownReason | None = None
 
     def __post_init__(self) -> None:
         """Require command cleanup status and digest consistency."""
         _require_cleanup_identity_evidence_consistency(
             self.cleanup_identity_evidence_status,
             self.cleanup_identity_receipt_sha256,
+            self.cleanup_unknown_reason,
         )
 
     def json_stdout(self) -> dict[str, JsonValue]:
@@ -372,12 +438,14 @@ class CommandFailureError(Exception):
     remaining_process_group_count: int | None = None
     cleanup_identity_receipt_sha256: str | None = None
     cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+    cleanup_unknown_reason: CleanupUnknownReason | None = None
 
     def __post_init__(self) -> None:
         """Require failed-command cleanup status and digest consistency."""
         _require_cleanup_identity_evidence_consistency(
             self.cleanup_identity_evidence_status,
             self.cleanup_identity_receipt_sha256,
+            self.cleanup_unknown_reason,
         )
 
 
@@ -473,7 +541,14 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     )
 
     def _write_cleanup_receipt() -> CommandCleanupIdentityEvidence:
-        if cleanup_identity_receipt_path is None or root_pid is None or pgid is None:
+        if root_pid is None or pgid is None:
+            return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
+        if cleanup_identity_receipt_path is None:
+            if terminal_snapshot.cleanup_status == "unknown":
+                return CommandCleanupIdentityEvidence(
+                    evidence_status="write-failed",
+                    unknown_reason="cleanup_receipt_path_missing",
+                )
             return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
         return write_command_cleanup_identity_receipt(
             cleanup_identity_receipt_path,
@@ -622,6 +697,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             remaining_process_group_count=remaining_process_group_count,
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
         ) from process_error
 
     if timed_out:
@@ -646,6 +722,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             remaining_process_group_count=remaining_process_group_count,
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
         )
 
     if process is not None:
@@ -669,6 +746,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         stderr=stderr,
         cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
         cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+        cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
     )
     cleanup_closed = terminal_snapshot.cleanup_status == "complete" and (
         cleanup_identity_receipt_path is None
@@ -688,6 +766,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             remaining_process_group_count=remaining_process_group_count,
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
         )
     if exit_code != 0:
         raise CommandFailureError(
@@ -698,6 +777,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             remaining_process_group_count=remaining_process_group_count,
             cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
             cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
         )
     return result
 
@@ -1025,7 +1105,18 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
                 observe_process_cleanup_target(identity) for identity in supplied_identities
             )
         except (OSError, ValueError):
-            return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
+            return _write_command_cleanup_unknown_receipt(
+                path,
+                name=name,
+                argv=argv,
+                cwd=cwd,
+                root_pid=root_pid,
+                root_pgid=root_pgid,
+                unknown_reason="target_observation_unknown",
+                watcher_drain_status="not-applicable",
+                coverage_status="unknown",
+                target_count=len(supplied_identities),
+            )
         terminal_snapshot = ProcessCleanupTerminalSnapshot(
             targets=targets,
             coverage_status=(
@@ -1035,7 +1126,19 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
             ),
         )
     if terminal_snapshot.cleanup_status == "unknown":
-        return CommandCleanupIdentityEvidence(evidence_status="observation-unknown")
+        unknown_reason = terminal_snapshot.unknown_reason or "cleanup_state_unknown"
+        return _write_command_cleanup_unknown_receipt(
+            path,
+            name=name,
+            argv=argv,
+            cwd=cwd,
+            root_pid=root_pid,
+            root_pgid=root_pgid,
+            unknown_reason=unknown_reason,
+            watcher_drain_status=terminal_snapshot.watcher_drain_status,
+            coverage_status=terminal_snapshot.coverage_status,
+            target_count=len(terminal_snapshot.targets),
+        )
     targets = terminal_snapshot.targets
     if not targets:
         return CommandCleanupIdentityEvidence(evidence_status="no-target-observed")
@@ -1056,10 +1159,57 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
         strict=True,
     )
     if not _atomic_owner_only_write(path, receipt.model_dump_json() + "\n"):
-        return CommandCleanupIdentityEvidence(evidence_status="write-failed")
+        return CommandCleanupIdentityEvidence(
+            evidence_status="write-failed",
+            unknown_reason="cleanup_receipt_write_failed",
+        )
     return CommandCleanupIdentityEvidence(
         evidence_status="authenticated",
         receipt_sha256=receipt.receipt_sha256,
+    )
+
+
+def _write_command_cleanup_unknown_receipt(  # noqa: PLR0913
+    path: Path,
+    *,
+    name: str,
+    argv: tuple[str, ...],
+    cwd: Path,
+    root_pid: int,
+    root_pgid: int,
+    unknown_reason: CleanupUnknownReason,
+    watcher_drain_status: WatcherDrainState,
+    coverage_status: Literal["complete", "unknown"],
+    target_count: int,
+) -> CommandCleanupIdentityEvidence:
+    material = {
+        "schema_version": "1",
+        "receipt_kind": "command_cleanup_unknown",
+        "command_identity_sha256": _digest(
+            {"name": name, "argv": argv, "cwd": str(cwd.resolve())},
+        ),
+        "root_pid": root_pid,
+        "root_pgid": root_pgid,
+        "unknown_reason": unknown_reason,
+        "watcher_drain_status": watcher_drain_status,
+        "coverage_status": coverage_status,
+        "target_count": target_count,
+        "remaining_process_count": None,
+        "remaining_process_group_count": None,
+    }
+    receipt = CommandCleanupUnknownReceipt.model_validate(
+        {**material, "receipt_sha256": _digest(material)},
+        strict=True,
+    )
+    if not _atomic_owner_only_write(path, receipt.model_dump_json() + "\n"):
+        return CommandCleanupIdentityEvidence(
+            evidence_status="write-failed",
+            unknown_reason="cleanup_receipt_write_failed",
+        )
+    return CommandCleanupIdentityEvidence(
+        evidence_status="observation-unknown",
+        receipt_sha256=receipt.receipt_sha256,
+        unknown_reason=receipt.unknown_reason,
     )
 
 
@@ -1071,6 +1221,33 @@ def verify_command_cleanup_identity_receipt(
     try:
         metadata = os.lstat(path)
         receipt = CommandCleanupIdentityReceipt.model_validate_json(
+            path.read_bytes(),
+            strict=True,
+        )
+    except (OSError, ValidationError):
+        return None
+    if not (
+        path.is_absolute()
+        and stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == _OWNER_FILE_MODE
+        and receipt.receipt_sha256 == expected_receipt_sha256
+    ):
+        return None
+    return receipt
+
+
+def verify_command_cleanup_unknown_receipt(
+    path: Path,
+    *,
+    expected_receipt_sha256: str,
+) -> CommandCleanupUnknownReceipt | None:
+    """Verify one owner-only diagnostic receipt without exposing command details."""
+    try:
+        metadata = os.lstat(path)
+        receipt = CommandCleanupUnknownReceipt.model_validate_json(
             path.read_bytes(),
             strict=True,
         )
@@ -1139,9 +1316,55 @@ def _atomic_owner_only_write(path: Path, text: str) -> bool:
 def _require_cleanup_identity_evidence_consistency(
     status: CleanupIdentityEvidenceKind,
     receipt_sha256: str | None,
+    unknown_reason: CleanupUnknownReason | None,
 ) -> None:
-    if (status == "authenticated") != (receipt_sha256 is not None):
+    valid = {
+        "authenticated": receipt_sha256 is not None and unknown_reason is None,
+        "no-target-observed": receipt_sha256 is None and unknown_reason is None,
+        "observation-unknown": (
+            receipt_sha256 is not None
+            and unknown_reason
+            in {
+                "watcher_publication_discarded",
+                "watcher_still_running",
+                "watcher_drain_unknown",
+                "coverage_unknown",
+                "target_observation_unknown",
+                "cleanup_state_unknown",
+            }
+        ),
+        "write-failed": (
+            receipt_sha256 is None
+            and unknown_reason
+            in {
+                "cleanup_receipt_path_missing",
+                "cleanup_receipt_write_failed",
+                "cleanup_evidence_inconsistent",
+                "cleanup_evidence_unavailable",
+            }
+        ),
+    }[status]
+    if not valid:
         raise ValueError("cleanup identity evidence status and digest differ")
+
+
+def _cleanup_unknown_reason(
+    *,
+    watcher_drain_status: WatcherDrainState,
+    coverage_status: Literal["complete", "unknown"],
+    target_observation_unknown: bool,
+) -> CleanupUnknownReason:
+    if watcher_drain_status == "discarded":
+        return "watcher_publication_discarded"
+    if watcher_drain_status == "still-running":
+        return "watcher_still_running"
+    if watcher_drain_status == "unknown":
+        return "watcher_drain_unknown"
+    if target_observation_unknown:
+        return "target_observation_unknown"
+    if coverage_status == "unknown":
+        return "coverage_unknown"
+    return "cleanup_state_unknown"
 
 
 def _digest(value: object) -> str:

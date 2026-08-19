@@ -16,7 +16,9 @@ from saxo_bank_mcp.qa_analytics_proof_publication import (
     CodexNativeBoundaryFailureReceipt,
     CodexNativeProofPublication,
     build_codex_native_boundary_failure,
+    build_codex_native_candidate_runner_receipt,
     build_codex_native_proof_publication,
+    verify_codex_native_candidate_runner_receipt,
     verify_codex_native_proof_publication,
 )
 
@@ -97,6 +99,105 @@ def test_native_publication_rejects_unsigned_extra_field() -> None:
 
     with pytest.raises(ValidationError):
         verify_codex_native_proof_publication(json.dumps(payload))
+
+
+def test_legacy_runner_digest_cannot_authenticate_new_cleanup_claims() -> None:
+    receipt = build_codex_native_candidate_runner_receipt(
+        candidate_commit=CANDIDATE,
+        candidate_tree="2" * 40,
+        phase="entry",
+        spawned=False,
+        exit_code=None,
+        command_sha256="3" * 64,
+        command_schema_sha256="4" * 64,
+        result_sha256=None,
+        cleanup_status="not_started",
+    )
+    payload = receipt.model_dump(mode="json")
+    legacy_material = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "receipt_sha256",
+            "cleanup_identity_evidence_status",
+            "cleanup_identity_receipt_sha256",
+            "cleanup_unknown_reason",
+        }
+    }
+    payload["receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            legacy_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    payload["cleanup_identity_evidence_status"] = "observation-unknown"
+    payload["cleanup_identity_receipt_sha256"] = "d" * 64
+    payload["cleanup_unknown_reason"] = "watcher_drain_unknown"
+
+    with pytest.raises(ValidationError):
+        verify_codex_native_candidate_runner_receipt(json.dumps(payload))
+
+
+def test_legacy_boundary_digest_cannot_authenticate_new_cleanup_claims() -> None:
+    result = build_codex_native_boundary_failure(
+        candidate_commit=CANDIDATE,
+        reason="proof_producer_native_boundary_failed",
+    )
+    payload = result.model_dump(mode="json")
+    legacy_material = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "boundary_receipt_sha256",
+            "candidate_runner_cleanup_evidence_status",
+            "candidate_runner_cleanup_receipt_sha256",
+            "candidate_runner_cleanup_unknown_reason",
+        }
+    }
+    payload["boundary_receipt_sha256"] = hashlib.sha256(
+        json.dumps(
+            legacy_material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    payload["candidate_runner_cleanup_evidence_status"] = "observation-unknown"
+    payload["candidate_runner_cleanup_receipt_sha256"] = "d" * 64
+    payload["candidate_runner_cleanup_unknown_reason"] = "watcher_drain_unknown"
+
+    with pytest.raises(ValidationError):
+        CodexNativeBoundaryFailureReceipt.model_validate(payload)
+
+
+def test_spawned_runner_unknown_cleanup_requires_typed_unknown_evidence() -> None:
+    with pytest.raises(ValidationError):
+        build_codex_native_candidate_runner_receipt(
+            candidate_commit=CANDIDATE,
+            candidate_tree="2" * 40,
+            phase="exit",
+            spawned=True,
+            exit_code=1,
+            command_sha256="3" * 64,
+            command_schema_sha256="4" * 64,
+            result_sha256=None,
+            cleanup_status="unknown",
+        )
+
+
+def test_outer_unknown_candidate_cleanup_requires_typed_unknown_evidence() -> None:
+    with pytest.raises(ValidationError):
+        build_codex_native_boundary_failure(
+            candidate_commit=CANDIDATE,
+            reason="proof_candidate_runner_cleanup_failed",
+            boundary_phase="candidate_runner",
+            candidate_runner_receipt_sha256="d" * 64,
+            candidate_runner_cleanup_status="unknown",
+        )
 
 
 def test_legacy_verified_failure_without_eval_summary_remains_verifiable() -> None:

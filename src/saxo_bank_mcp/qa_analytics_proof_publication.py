@@ -7,10 +7,14 @@ import json
 import os
 import stat
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from saxo_bank_mcp.agent_skill_command_runner import (
+    CleanupIdentityEvidenceKind,
+    CleanupUnknownReason,
+)
 from saxo_bank_mcp.evidence_publication import write_scanned_json
 from saxo_bank_mcp.qa_analytics_proof_failure import CodexNativeVerifiedChildFailure
 from saxo_bank_mcp.qa_analytics_proof_producer import (
@@ -53,6 +57,12 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
         pattern=_SHA256_PATTERN,
     )
     candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown"
+    candidate_runner_cleanup_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+    candidate_runner_cleanup_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    candidate_runner_cleanup_unknown_reason: CleanupUnknownReason | None = None
     candidate_runner_result_status: Literal["unknown", "authenticated"] = "unknown"
     candidate_runner_result_sha256: str | None = Field(
         default=None,
@@ -80,12 +90,29 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
     boundary_receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
-    def _validate_digest(self) -> Self:
+    def _validate_digest(self) -> Self:  # noqa: C901
+        material = self.model_dump(mode="json", exclude={"boundary_receipt_sha256"})
+        accepted_materials = _boundary_material_variants(material)
+        legacy_cleanup = self.boundary_receipt_sha256 != _digest(material)
+        if not legacy_cleanup and not _cleanup_evidence_is_consistent(
+            status=self.candidate_runner_cleanup_evidence_status,
+            receipt_sha256=self.candidate_runner_cleanup_receipt_sha256,
+            unknown_reason=self.candidate_runner_cleanup_unknown_reason,
+        ):
+            raise ValueError("native candidate runner cleanup evidence differs")
         if (
             self.candidate_runner_receipt_sha256 is None
             and self.candidate_runner_cleanup_status != "unknown"
         ):
             raise ValueError("native candidate runner cleanup lacks receipt")
+        if (
+            not legacy_cleanup
+            and self.candidate_runner_receipt_sha256 is not None
+            and self.candidate_runner_cleanup_status == "unknown"
+            and self.candidate_runner_cleanup_evidence_status
+            not in {"observation-unknown", "write-failed"}
+        ):
+            raise ValueError("unknown native candidate cleanup lacks typed evidence")
         if (self.candidate_runner_result_status == "authenticated") != (
             self.candidate_runner_result_sha256 is not None
         ):
@@ -107,16 +134,7 @@ class CodexNativeBoundaryFailureReceipt(_StrictModel):
             raise ValueError("unproved native boundary cleanup cannot have receipts")
         if self.outer_runtime_cleanup_status != self.cleanup_status:
             raise ValueError("native boundary cleanup states do not match")
-        material = self.model_dump(mode="json", exclude={"boundary_receipt_sha256"})
-        accepted_digests = {_digest(material)}
-        previous_material = dict(material)
-        previous_material.pop("candidate_runner_result_status")
-        previous_material.pop("candidate_runner_result_sha256")
-        accepted_digests.add(_digest(previous_material))
-        legacy_material = dict(previous_material)
-        legacy_material.pop("candidate_runner_receipt_sha256")
-        legacy_material.pop("candidate_runner_cleanup_status")
-        accepted_digests.add(_digest(legacy_material))
+        accepted_digests = {_digest(candidate) for candidate in accepted_materials}
         if self.boundary_receipt_sha256 not in accepted_digests:
             raise ValueError("native boundary receipt digest mismatch")
         return self
@@ -138,10 +156,33 @@ class CodexNativeCandidateRunnerReceipt(_StrictModel):
     result_present: bool
     result_sha256: str | None = Field(default=None, pattern=_SHA256_PATTERN)
     cleanup_status: CodexNativeCleanupStatus
+    cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed"
+    cleanup_identity_receipt_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_PATTERN,
+    )
+    cleanup_unknown_reason: CleanupUnknownReason | None = None
     receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
     def _validate_receipt(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
+        legacy_material = dict(material)
+        legacy_material.pop("cleanup_identity_evidence_status")
+        legacy_material.pop("cleanup_identity_receipt_sha256")
+        legacy_material.pop("cleanup_unknown_reason")
+        legacy_defaults = (
+            self.cleanup_identity_evidence_status == "no-target-observed"
+            and self.cleanup_identity_receipt_sha256 is None
+            and self.cleanup_unknown_reason is None
+        )
+        legacy_cleanup = legacy_defaults and self.receipt_sha256 == _digest(legacy_material)
+        if not legacy_cleanup and not _cleanup_evidence_is_consistent(
+            status=self.cleanup_identity_evidence_status,
+            receipt_sha256=self.cleanup_identity_receipt_sha256,
+            unknown_reason=self.cleanup_unknown_reason,
+        ):
+            raise ValueError("candidate runner cleanup evidence differs")
         if self.phase == "entry" and self.spawned:
             raise ValueError("candidate runner entry cannot prove spawn")
         if not self.spawned and (
@@ -153,10 +194,19 @@ class CodexNativeCandidateRunnerReceipt(_StrictModel):
             raise ValueError("unspawned candidate runner has execution facts")
         if self.spawned and (self.phase != "exit" or self.exit_code is None):
             raise ValueError("spawned candidate runner lacks exit evidence")
+        if (
+            not legacy_cleanup
+            and self.spawned
+            and self.cleanup_status == "unknown"
+            and self.cleanup_identity_evidence_status not in {"observation-unknown", "write-failed"}
+        ):
+            raise ValueError("unknown candidate cleanup lacks typed evidence")
         if self.result_present != (self.result_sha256 is not None):
             raise ValueError("candidate runner result digest mismatch")
-        material = self.model_dump(mode="json", exclude={"receipt_sha256"})
-        if self.receipt_sha256 != _digest(material):
+        accepted_digests = {_digest(material)}
+        if legacy_defaults:
+            accepted_digests.add(_digest(legacy_material))
+        if self.receipt_sha256 not in accepted_digests:
             raise ValueError("candidate runner receipt digest mismatch")
         return self
 
@@ -205,29 +255,30 @@ class CodexNativeProofPublication(_StrictModel):
         if self.result.harness_policy != self.harness_policy:
             raise ValueError("native publication policy mismatch")
         material = self.model_dump(mode="json", exclude={"publication_sha256"})
-        accepted_digests = {_digest(material)}
-        if (
-            isinstance(self.result, CodexNativeVerifiedChildFailure)
-            and self.result.agent_evaluation_failure_summary is None
-        ):
-            legacy_material = dict(material)
-            legacy_result = dict(legacy_material["result"])
-            legacy_result.pop("agent_evaluation_failure_summary")
-            legacy_material["result"] = legacy_result
-            accepted_digests.add(_digest(legacy_material))
+        publication_materials = [material]
+        if isinstance(self.result, CodexNativeVerifiedChildFailure):
+            if self.result.agent_evaluation_failure_summary is None:
+                publication_materials.extend(
+                    _publication_variants_without_result_field(
+                        publication_materials,
+                        "agent_evaluation_failure_summary",
+                    ),
+                )
+            if self.result.outer_process_cleanup_unknown_reason is None:
+                publication_materials.extend(
+                    _publication_variants_without_result_field(
+                        publication_materials,
+                        "outer_process_cleanup_unknown_reason",
+                    ),
+                )
         if isinstance(self.result, CodexNativeBoundaryFailureReceipt):
-            previous_material = dict(material)
-            previous_result = dict(previous_material["result"])
-            previous_result.pop("candidate_runner_result_status")
-            previous_result.pop("candidate_runner_result_sha256")
-            previous_material["result"] = previous_result
-            accepted_digests.add(_digest(previous_material))
-            legacy_material = dict(previous_material)
-            legacy_result = dict(legacy_material["result"])
-            legacy_result.pop("candidate_runner_receipt_sha256")
-            legacy_result.pop("candidate_runner_cleanup_status")
-            legacy_material["result"] = legacy_result
-            accepted_digests.add(_digest(legacy_material))
+            publication_materials.extend(
+                {**material, "result": result_material}
+                for result_material in _boundary_material_variants(
+                    dict(material["result"]),
+                )[1:]
+            )
+        accepted_digests = {_digest(candidate) for candidate in publication_materials}
         if self.publication_sha256 not in accepted_digests:
             raise ValueError("native publication digest mismatch")
         return self
@@ -242,6 +293,9 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
     cleanup_status: CodexNativeCleanupStatus = "unknown",
     candidate_runner_receipt_sha256: str | None = None,
     candidate_runner_cleanup_status: CodexNativeCleanupStatus = "unknown",
+    candidate_runner_cleanup_evidence_status: CleanupIdentityEvidenceKind = ("no-target-observed"),
+    candidate_runner_cleanup_receipt_sha256: str | None = None,
+    candidate_runner_cleanup_unknown_reason: CleanupUnknownReason | None = None,
     candidate_runner_result_sha256: str | None = None,
     runtime_consumption_intent_sha256: str | None = None,
     runtime_cleanup_receipt_sha256: str | None = None,
@@ -259,6 +313,9 @@ def build_codex_native_boundary_failure(  # noqa: PLR0913
         "cleanup_status": cleanup_status,
         "candidate_runner_receipt_sha256": candidate_runner_receipt_sha256,
         "candidate_runner_cleanup_status": candidate_runner_cleanup_status,
+        "candidate_runner_cleanup_evidence_status": candidate_runner_cleanup_evidence_status,
+        "candidate_runner_cleanup_receipt_sha256": candidate_runner_cleanup_receipt_sha256,
+        "candidate_runner_cleanup_unknown_reason": candidate_runner_cleanup_unknown_reason,
         "candidate_runner_result_status": (
             "authenticated" if candidate_runner_result_sha256 is not None else "unknown"
         ),
@@ -300,6 +357,9 @@ def build_codex_native_candidate_runner_receipt(  # noqa: PLR0913
     command_schema_sha256: str,
     result_sha256: str | None,
     cleanup_status: CodexNativeCleanupStatus,
+    cleanup_identity_evidence_status: CleanupIdentityEvidenceKind = "no-target-observed",
+    cleanup_identity_receipt_sha256: str | None = None,
+    cleanup_unknown_reason: CleanupUnknownReason | None = None,
 ) -> CodexNativeCandidateRunnerReceipt:
     """Build one self-authenticating path-free runner receipt."""
     material = {
@@ -316,6 +376,9 @@ def build_codex_native_candidate_runner_receipt(  # noqa: PLR0913
         "result_present": result_sha256 is not None,
         "result_sha256": result_sha256,
         "cleanup_status": cleanup_status,
+        "cleanup_identity_evidence_status": cleanup_identity_evidence_status,
+        "cleanup_identity_receipt_sha256": cleanup_identity_receipt_sha256,
+        "cleanup_unknown_reason": cleanup_unknown_reason,
     }
     return CodexNativeCandidateRunnerReceipt.model_validate(
         {**material, "receipt_sha256": _digest(material)},
@@ -428,3 +491,77 @@ def _digest(value: object) -> str:
             sort_keys=True,
         ).encode(),
     ).hexdigest()
+
+
+def _cleanup_evidence_is_consistent(
+    *,
+    status: CleanupIdentityEvidenceKind,
+    receipt_sha256: str | None,
+    unknown_reason: CleanupUnknownReason | None,
+) -> bool:
+    if status == "authenticated":
+        return receipt_sha256 is not None and unknown_reason is None
+    if status == "no-target-observed":
+        return receipt_sha256 is None and unknown_reason is None
+    if status == "observation-unknown":
+        return receipt_sha256 is not None and unknown_reason in {
+            "watcher_publication_discarded",
+            "watcher_still_running",
+            "watcher_drain_unknown",
+            "coverage_unknown",
+            "target_observation_unknown",
+            "cleanup_state_unknown",
+        }
+    return receipt_sha256 is None and unknown_reason in {
+        "cleanup_receipt_path_missing",
+        "cleanup_receipt_write_failed",
+        "cleanup_evidence_inconsistent",
+        "cleanup_evidence_unavailable",
+    }
+
+
+def _boundary_material_variants(material: dict[str, object]) -> tuple[dict[str, object], ...]:
+    """Return the current boundary material and exact historical default-only shapes."""
+    variants = [dict(material)]
+    if not (
+        material.get("candidate_runner_cleanup_evidence_status") == "no-target-observed"
+        and material.get("candidate_runner_cleanup_receipt_sha256") is None
+        and material.get("candidate_runner_cleanup_unknown_reason") is None
+    ):
+        return tuple(variants)
+    without_cleanup = dict(material)
+    without_cleanup.pop("candidate_runner_cleanup_evidence_status")
+    without_cleanup.pop("candidate_runner_cleanup_receipt_sha256")
+    without_cleanup.pop("candidate_runner_cleanup_unknown_reason")
+    variants.append(without_cleanup)
+    if not (
+        material.get("candidate_runner_result_status") == "unknown"
+        and material.get("candidate_runner_result_sha256") is None
+    ):
+        return tuple(variants)
+    without_result = dict(without_cleanup)
+    without_result.pop("candidate_runner_result_status")
+    without_result.pop("candidate_runner_result_sha256")
+    variants.append(without_result)
+    if not (
+        material.get("candidate_runner_receipt_sha256") is None
+        and material.get("candidate_runner_cleanup_status") == "unknown"
+    ):
+        return tuple(variants)
+    oldest = dict(without_result)
+    oldest.pop("candidate_runner_receipt_sha256")
+    oldest.pop("candidate_runner_cleanup_status")
+    variants.append(oldest)
+    return tuple(variants)
+
+
+def _publication_variants_without_result_field(
+    materials: list[dict[str, object]],
+    field: str,
+) -> list[dict[str, object]]:
+    variants: list[dict[str, object]] = []
+    for material in tuple(materials):
+        result = dict(cast("dict[str, object]", material["result"]))
+        result.pop(field)
+        variants.append({**material, "result": result})
+    return variants
