@@ -208,9 +208,10 @@ admission gate closes permanently on completion, reaping, absence, reuse, unknow
 birth mismatch. Candidate numeric PIDs are discovered first and their birth identities are
 observed; a second root-bound PID and process-group scope snapshot, bracketed by the same root
 checks, must still contain both the observed PID and its observed group before admission. A
-replacement, group change, disappearance, or incomplete re-observation remains detection-only and
-makes coverage unknown if still present. The resulting set is frozen as the only possible signal
-targets before cleanup;
+post-scope re-observation must also match the candidate's original PID, birth identity, and group
+before the final root check. A replacement, group change, disappearance, unknown observation, or
+incomplete re-observation remains detection-only and makes coverage unknown if still present. The
+resulting set is frozen as the only possible signal targets before cleanup;
 nested native evaluation and exact install consume the same primitive. Every signal rechecks the
 target birth identity, and terminal tracked-group scans detect late members without admitting
 them. Historical numeric process groups are never signaled. Only a member admitted during the

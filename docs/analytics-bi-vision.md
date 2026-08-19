@@ -2340,29 +2340,31 @@ disclaimer-response facts remain unknown. Authenticated runtime-consumption and 
 cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
 process, or proof run root. No retry ran.
 
-Local corrective source `ec73f8c`, tree `d6e2d7a`, keeps the sealed `c716047` evidence unchanged
+Local corrective source `7467f11`, tree `7d43d5d`, keeps the sealed `c716047` evidence unchanged
 while incorporating the `94a8643` scenario contract and all shared cleanup work through `d81621d`.
 The final cleanup boundary is absolute about signal targets, but its capture window is now stated
 precisely. `run_command` may admit a new identity only while the original `Popen` root is unreaped,
 `poll()` reports it active, and bracketing observations retain the captured birth identity and
 process group. Completion, reaping, absence, reuse, unknown observation, or birth mismatch closes
 that gate permanently. For each candidate numeric PID, identity observation is followed by a
-second root-bound PID and group snapshot, itself bracketed by the same root checks. Admission
-requires the observed PID and its observed group to remain in that second scope. Every replacement,
-scope mismatch, or later PID/process-group scan is detection only and never admits a signal target.
+second root-bound PID and group snapshot, itself bracketed by the same root checks. Each candidate
+is then re-observed, and admission requires its PID, birth identity, and process group to match the
+first observation while that exact PID and group remain in the second scope. Every changed,
+missing, unknown, replacement, scope-mismatched, or later PID/process-group scan is detection only
+and never admits a signal target.
 Any uncaptured member, changed birth identity, or incomplete observation makes coverage unknown.
 A child admitted during the valid root window can still be cleaned after leader exit while its own
 birth identity and group match. The shared command, nested-evaluation, and exact-install paths
 retain immediate per-signal identity checks, terminal membership scans, and strict authenticated
 zero-count rules.
 
-The local corrective source passed 151 focused tests twice, 355 related tests, 431 safe
+The local corrective source passed 154 focused tests twice, 358 related tests, 431 safe
 auth/privacy tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/
 0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No exact
 install, model, production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity
 ran. The source is not installed or sealed and does not relabel `c716047`.
 
-The independent native review should verify `ec73f8c` before any exact install or sealed attempt.
+The independent native review should verify `7467f11` before any exact install or sealed attempt.
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.

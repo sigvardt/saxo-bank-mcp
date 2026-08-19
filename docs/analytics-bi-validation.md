@@ -331,4 +331,32 @@ unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Sax
 account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
 quarantined and 0/54 are active. The branch remains local and unpushed.
 
+## Post-scope identity re-observation correction after `ec73f8c`
+
+Local source `7467f112feebf0d836a402596c36d3b5e089c069`, tree
+`7d43d5db4ffebd924a182a652f668f6cceca02c6`, closes the remaining stale PID/group relationship
+window without changing the sealed `c716047` evidence. After the second root-bound scope snapshot,
+`run_command` re-observes every candidate and requires the same PID, birth identity, and process
+group seen before that snapshot. Only a candidate whose first observation, second scope, and final
+observation agree may pass the existing final active, unreaped, same-birth root check and enter the
+immutable cleanup target set. A moved, replaced, missing, or unknown candidate is never admitted or
+signaled; if it remains detectable without a confirmed identity, cleanup evidence stays unknown.
+
+The deterministic RED kept the child PID visible while it moved from the original group to a new
+group and a peer kept the original group present. Both group IDs were in the second scope, so the
+former independent PID/group membership checks admitted the stale relationship. The companion
+stable-child and already-refused replacement cases passed. Final coverage also proves missing and
+unknown post-scope observations refuse fail-closed. Local verification passed 154 focused cleanup/
+install/failure-envelope tests twice, 358 related cleanup/install/evaluation/proof tests, and 431
+safe auth/privacy tests. Ruff check and changed-file format passed; BasedPyright reported 0 errors,
+0 warnings, and 0 notes; plugin, nine-skill static, 60-tool/294-operation catalog, 34-case
+evaluation-manifest, bounded privacy, and `git diff --check` gates passed.
+
+No exact install, model, production MCP server, Saxo request, broker operation, browser, sealed
+proof, or broker/data network activity ran. This source is not installed or sealed and does not
+relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 hard cases with
+unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
+account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
+quarantined and 0/54 are active. The branch remains local and unpushed.
+
 I cannot take secrets in chat. Use the local browser login or configured owner-only cache flow, then I can check redacted status.
