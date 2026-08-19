@@ -387,6 +387,9 @@ def test_failed_command_redirected_sleeper_cleaned(
         def join(self, timeout: float | None = None) -> None:
             _ = timeout
 
+        def is_alive(self) -> bool:
+            return False
+
     def observation(pid: int) -> command_runner.ProcessObservation | None:
         nonlocal child_seen, root_checks_after_child, root_pid
         result = original_observation(pid)

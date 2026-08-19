@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Self, cast
@@ -24,6 +24,7 @@ from saxo_bank_mcp.subprocess_environment import preserve_parent_temp_environmen
 JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
+WATCHER_DRAIN_SECONDS = 1.0
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
@@ -32,6 +33,13 @@ type CleanupIdentityEvidenceKind = Literal[
     "no-target-observed",
     "observation-unknown",
     "write-failed",
+]
+type WatcherDrainState = Literal[
+    "not-applicable",
+    "drained",
+    "discarded",
+    "still-running",
+    "unknown",
 ]
 
 
@@ -84,9 +92,12 @@ class ProcessCleanupTerminalSnapshot:
     targets: tuple[ProcessCleanupTargetReceipt, ...]
     coverage_status: Literal["complete", "unknown"]
     signaled_process_count: int = 0
+    watcher_drain_status: WatcherDrainState = "not-applicable"
 
     @property
     def cleanup_status(self) -> Literal["complete", "failed", "unknown"]:
+        if self.watcher_drain_status in {"discarded", "still-running", "unknown"}:
+            return "unknown"
         if self.coverage_status == "unknown" or any(
             target.termination_outcome == "unknown" for target in self.targets
         ):
@@ -122,6 +133,7 @@ class CommandCleanupIdentityReceipt(_StrictModel):
     root_pgid: int = Field(gt=0)
     target_count: int = Field(ge=1)
     targets: tuple[ProcessCleanupTargetReceipt, ...] = Field(min_length=1)
+    watcher_drain_status: Literal["not-applicable", "drained"] = "not-applicable"
     receipt_sha256: str = Field(pattern=_SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -393,6 +405,11 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     tracked_identities: dict[int, ProcessCleanupIdentity] = {}
     stop_watch = threading.Event()
     watch_lock = threading.Lock()
+    admission_publication_state: Literal["open", "draining", "frozen"] = "open"
+    watcher_capture_inflight = 0
+    watcher_capture_failed = False
+    watcher_publication_discarded = False
+    watcher_drain_status: WatcherDrainState = "not-applicable"
     timed_out = False
     stdout = ""
     stderr = ""
@@ -418,10 +435,26 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         return return_code
 
     def _capture_identities() -> None:
+        nonlocal watcher_capture_failed, watcher_capture_inflight, watcher_publication_discarded
         if admission is None:
             return
-        scope = admission.capture_scope()
         with watch_lock:
+            if admission_publication_state != "open":
+                return
+            watcher_capture_inflight += 1
+        try:
+            scope = admission.capture_scope()
+        except BaseException:
+            with watch_lock:
+                watcher_capture_inflight -= 1
+                watcher_capture_failed = True
+            raise
+        with watch_lock:
+            watcher_capture_inflight -= 1
+            # Another thread can advance the state while capture_scope runs.
+            if str(admission_publication_state) == "frozen":
+                watcher_publication_discarded = True
+                return
             tracked_pids[:] = sorted(set(tracked_pids) | set(scope.tracked_pids))
             tracked_pgids[:] = sorted(set(tracked_pgids) | set(scope.tracked_pgids))
             for candidate in scope.identities:
@@ -457,7 +490,10 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             if admission is None:
                 time.sleep(0.001)
                 continue
-            _capture_identities()
+            try:
+                _capture_identities()
+            except (OSError, RuntimeError, ValueError):
+                return
             time.sleep(0.001)
 
     watcher: threading.Thread | None = None
@@ -500,16 +536,35 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     except OSError as exc:
         process_error = exc
     finally:
+        # Stop new admission under the publication lock, then give any already registered pass
+        # one bounded drain window. A pass either publishes while draining or is discarded once
+        # the immutable target snapshot is frozen below.
+        with watch_lock:
+            admission_publication_state = "draining"
+            if admission is not None:
+                admission.close()
         stop_watch.set()
         if watcher is not None:
-            watcher.join(timeout=1.0)
+            try:
+                watcher.join(timeout=WATCHER_DRAIN_SECONDS)
+                watcher_drain_status = "still-running" if watcher.is_alive() else "drained"
+            except (OSError, RuntimeError):
+                watcher_drain_status = "unknown"
         with watch_lock:
+            admission_publication_state = "frozen"
+            if (
+                watcher_capture_failed or watcher_capture_inflight
+            ) and watcher_drain_status == "drained":
+                watcher_drain_status = "unknown"
+            elif watcher_publication_discarded and watcher_drain_status == "drained":
+                watcher_drain_status = "discarded"
             pids, pgids = _merge_snapshots(
                 pids,
                 pgids,
                 tuple(tracked_pids),
                 tuple(tracked_pgids),
             )
+            identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
         try:
             final_pids, final_pgids = _snapshot_tree(root_pid, pgid)
         except OSError:
@@ -520,21 +575,15 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         if pgid is not None:
             pgids = tuple(sorted(set(pgids) | {pgid}))
             pids = tuple(sorted(set(pids) | set(process_group_members(pgid))))
-        _capture_identities()
-        with watch_lock:
-            pids, pgids = _merge_snapshots(
-                pids,
-                pgids,
-                tuple(tracked_pids),
-                tuple(tracked_pgids),
-            )
-            identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
         # Signal only still-running processes whose birth identity still matches. The returned
         # terminal snapshot is the sole source for the receipt and remaining candidate counts.
-        terminal_snapshot = cleanup_birth_bound_processes(
-            identities,
-            tracked_pids=pids,
-            tracked_pgids=pgids,
+        terminal_snapshot = replace(
+            cleanup_birth_bound_processes(
+                identities,
+                tracked_pids=pids,
+                tracked_pgids=pgids,
+            ),
+            watcher_drain_status=watcher_drain_status,
         )
         if process is not None:
             try:
@@ -1000,6 +1049,7 @@ def write_command_cleanup_identity_receipt(  # noqa: PLR0913
         "root_pgid": root_pgid,
         "target_count": len(targets),
         "targets": tuple(target.model_dump(mode="python") for target in targets),
+        "watcher_drain_status": terminal_snapshot.watcher_drain_status,
     }
     receipt = CommandCleanupIdentityReceipt.model_validate(
         {**material, "receipt_sha256": _digest(material)},

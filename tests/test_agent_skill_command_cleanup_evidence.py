@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -50,6 +51,9 @@ def test_escaped_session_cleanup_writes_owner_only_identity_receipt(
 
         def join(self, timeout: float | None = None) -> None:
             _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
 
     def observation(pid: int) -> command_runner.ProcessObservation | None:
         nonlocal child_seen, root_checks_after_child, root_pid
@@ -1138,6 +1142,7 @@ def test_cleanup_identity_receipt_rejects_tamper_binding_and_private_content(
         expected_receipt_sha256=digest,
     )
     assert verified is not None
+    assert verified.watcher_drain_status == "drained"
     assert (
         command_runner.verify_command_cleanup_identity_receipt(
             receipt_path,
@@ -1154,6 +1159,28 @@ def test_cleanup_identity_receipt_rejects_tamper_binding_and_private_content(
         command_runner.verify_command_cleanup_identity_receipt(
             receipt_path,
             expected_receipt_sha256=digest,
+        )
+        is None
+    )
+
+    payload = json.loads(raw)
+    payload["watcher_drain_status"] = "discarded"
+    material = {key: value for key, value in payload.items() if key != "receipt_sha256"}
+    tampered_digest = hashlib.sha256(
+        json.dumps(
+            material,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode(),
+    ).hexdigest()
+    payload["receipt_sha256"] = tampered_digest
+    receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+    receipt_path.chmod(OWNER_FILE_MODE)
+    assert (
+        command_runner.verify_command_cleanup_identity_receipt(
+            receipt_path,
+            expected_receipt_sha256=tampered_digest,
         )
         is None
     )
@@ -1201,6 +1228,9 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
 
         def join(self, timeout: float | None = None) -> None:
             _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
 
     def observation(pid: int) -> command_runner.ProcessObservation | None:
         if pid == root_pid:
@@ -1367,6 +1397,9 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
 
         def join(self, timeout: float | None = None) -> None:
             _ = timeout
+
+        def is_alive(self) -> bool:
+            return False
 
     def observation(pid: int) -> command_runner.ProcessObservation | None:
         nonlocal child_observed
@@ -1743,3 +1776,246 @@ def test_cleanup_evidence_distinguishes_no_target_unknown_and_write_failure(
     )
     assert write_failed.evidence_status == "write-failed"
     assert write_failed.receipt_sha256 is None
+
+
+def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An admission pass still in flight at the drain deadline cannot prove cleanup."""
+    root_release = (tmp_path / "release-root").resolve()
+    receipt_path = (tmp_path / "watcher-cleanup.json").resolve()
+    watcher_scope_ready = threading.Event()
+    release_watcher = threading.Event()
+    watcher_finished = threading.Event()
+    escaped_pid = REUSED_PID + 900
+    cleanup_identity_pids: list[int] = []
+    outcome: dict[str, object] = {}
+    original_capture = command_runner.RootBoundProcessCleanupAdmission.capture_scope
+    original_cleanup = command_runner.cleanup_birth_bound_processes
+
+    def delayed_watcher_capture(
+        admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        scope = original_capture(admission)
+        if (
+            threading.current_thread().name.startswith("cmd-watch-")
+            and not watcher_scope_ready.is_set()
+        ):
+            escaped = command_runner.ProcessCleanupIdentity(
+                pid=escaped_pid,
+                pgid=escaped_pid,
+                birth_identity="escaped-before-freeze",
+                initial_state="running",
+            )
+            scope = command_runner.ProcessCleanupScope(
+                identities=(*scope.identities, escaped),
+                tracked_pids=(*scope.tracked_pids, escaped_pid),
+                tracked_pgids=(*scope.tracked_pgids, escaped_pid),
+            )
+            watcher_scope_ready.set()
+            if not release_watcher.wait(timeout=5):
+                raise AssertionError("watcher release was not delivered")
+            watcher_finished.set()
+        return scope
+
+    def record_cleanup(
+        identities: tuple[command_runner.ProcessCleanupIdentity, ...],
+        *,
+        tracked_pids: tuple[int, ...],
+        tracked_pgids: tuple[int, ...],
+    ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        cleanup_identity_pids.extend(identity.pid for identity in identities)
+        return original_cleanup(
+            identities,
+            tracked_pids=tracked_pids,
+            tracked_pgids=tracked_pgids,
+        )
+
+    code = (
+        "import os,time\n"
+        "while not os.path.exists(os.environ['ROOT_RELEASE']):\n"
+        "    time.sleep(0.001)\n"
+    )
+    env = _env(tmp_path)
+    env["ROOT_RELEASE"] = str(root_release)
+
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        delayed_watcher_capture,
+    )
+    monkeypatch.setattr(command_runner, "cleanup_birth_bound_processes", record_cleanup)
+    monkeypatch.setattr(command_runner, "WATCHER_DRAIN_SECONDS", 0.01, raising=False)
+
+    def invoke() -> None:
+        try:
+            outcome["result"] = command_runner.run_command(
+                "watcher_freeze_probe",
+                (sys.executable, "-c", code),
+                cwd=tmp_path,
+                env=env,
+                timeout_seconds=5,
+                cleanup_identity_receipt_path=receipt_path,
+            )
+        except BaseException as exc:  # noqa: BLE001 - test captures thread outcome
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=invoke, name="watcher-freeze-test")
+    worker.start()
+    try:
+        assert watcher_scope_ready.wait(timeout=5)
+        root_release.touch(mode=OWNER_FILE_MODE)
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        error = outcome.get("error")
+        assert isinstance(error, command_runner.CommandFailureError)
+        assert error.stderr == "process_cleanup_unknown"
+        assert error.remaining_process_count is None
+        assert error.remaining_process_group_count is None
+        assert error.cleanup_identity_evidence_status == "observation-unknown"
+        assert error.cleanup_identity_receipt_sha256 is None
+        assert not receipt_path.exists()
+        assert escaped_pid not in cleanup_identity_pids
+    finally:
+        release_watcher.set()
+        worker.join(timeout=5)
+    assert watcher_finished.wait(timeout=5)
+
+
+def test_run_command_completed_watcher_publish_is_drained_and_authenticated(
+    tmp_path: Path,
+) -> None:
+    """A watcher that publishes and drains before freeze retains complete evidence."""
+    receipt_path = (tmp_path / "drained-watcher.json").resolve()
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "drained_watcher_probe",
+            (sys.executable, "-c", "import time; time.sleep(0.05); raise SystemExit(7)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    digest = caught.value.cleanup_identity_receipt_sha256
+    assert caught.value.cleanup_identity_evidence_status == "authenticated"
+    assert digest is not None
+    receipt = command_runner.verify_command_cleanup_identity_receipt(
+        receipt_path,
+        expected_receipt_sha256=digest,
+    )
+    assert receipt is not None
+    assert receipt.watcher_drain_status == "drained"
+    assert receipt.remaining_process_count == 0
+    assert receipt.remaining_process_group_count == 0
+
+
+def test_run_command_watcher_join_oserror_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed watcher drain observation cannot authenticate complete cleanup."""
+    receipt_path = (tmp_path / "watcher-join-oserror.json").resolve()
+    real_thread = threading.Thread
+    watcher_instances: list[JoinErrorWatcher] = []
+
+    class JoinErrorWatcher:
+        def __init__(
+            self,
+            *,
+            target: object,
+            name: str,
+            daemon: bool,
+        ) -> None:
+            assert callable(target)
+            self._thread = real_thread(target=target, name=name, daemon=daemon)
+            watcher_instances.append(self)
+
+        def start(self) -> None:
+            self._thread.start()
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+            raise OSError("injected_watcher_join_failure")
+
+        def is_alive(self) -> bool:
+            return self._thread.is_alive()
+
+        def wait_for_exit(self) -> None:
+            self._thread.join(timeout=5)
+
+    monkeypatch.setattr(command_runner.threading, "Thread", JoinErrorWatcher)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "watcher_join_oserror",
+            (sys.executable, "-c", "import time; time.sleep(0.05)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    for watcher in watcher_instances:
+        watcher.wait_for_exit()
+    assert caught.value.stderr == "process_cleanup_unknown"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+    assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
+    assert caught.value.cleanup_identity_receipt_sha256 is None
+    assert not receipt_path.exists()
+
+
+def test_run_command_watcher_capture_oserror_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed in-watcher admission observation cannot authenticate cleanup."""
+    receipt_path = (tmp_path / "watcher-capture-oserror.json").resolve()
+    original_capture = command_runner.RootBoundProcessCleanupAdmission.capture_scope
+
+    def fail_watcher_capture(
+        admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        if threading.current_thread().name.startswith("cmd-watch-"):
+            raise OSError("injected_watcher_capture_failure")
+        return original_capture(admission)
+
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        fail_watcher_capture,
+    )
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "watcher_capture_oserror",
+            (sys.executable, "-c", "import time; time.sleep(0.05)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+            cleanup_identity_receipt_path=receipt_path,
+        )
+
+    assert caught.value.stderr == "process_cleanup_unknown"
+    assert caught.value.remaining_process_count is None
+    assert caught.value.remaining_process_group_count is None
+    assert caught.value.cleanup_identity_evidence_status == "observation-unknown"
+    assert caught.value.cleanup_identity_receipt_sha256 is None
+    assert not receipt_path.exists()
+
+
+@pytest.mark.parametrize("drain_status", ["discarded", "still-running", "unknown"])
+def test_watcher_drain_failure_makes_semantic_cleanup_unknown(
+    drain_status: command_runner.WatcherDrainState,
+) -> None:
+    snapshot = command_runner.ProcessCleanupTerminalSnapshot(
+        targets=(),
+        coverage_status="complete",
+        watcher_drain_status=drain_status,
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
