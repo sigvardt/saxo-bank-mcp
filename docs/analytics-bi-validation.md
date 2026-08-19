@@ -836,3 +836,43 @@ the 60-tool/294-operation catalog, the 34-case eval manifest, three-path source 
 checks passed. No install, model, production MCP, Saxo request, browser, network, or proof ran.
 The prior sealed 10/11 evidence remains unchanged and is not relabeled; 0/54 profiles remain active.
 Independent static review of `1d213ff` is the next gate.
+
+## Exact `1d213ff` diagnostic validation
+
+Independent review approved source `1d213ff9180dd2e65c424a49d3449aaa4412bb18`, tree
+`edd8347350b15f79072652362d4daf8361b6d3c7`. Thirteen identical caller-cache samples over
+680 seconds established the required quiet window before a fresh owner-only run. The one retained-
+runtime install passed with 621 exact files, 9 skills, 1 MCP server, 60 tools, unchanged caller
+state, privacy-clean evidence, and complete install-process cleanup. The one verify-only readback
+passed with 60 tools and unchanged caller state.
+
+The signed exact-candidate full suite passed 2,967 tests with zero failures, errors, or skips;
+candidate source was clean before and after and raw output was not retained. Ruff lint, correctly
+bound BasedPyright (0 errors, 0 warnings, 0 notes), plugin validation, all nine skill/static gates,
+the 60-tool/294-operation catalog, the 34-case evaluation manifest, and a 16-path source privacy
+scan passed. The first post-suite structural receipt is preserved as a 19/20 refusal because an
+ambient caller plugin-cache refresh changed the install-time fingerprint. Its other 19 binding,
+inventory, digest, mode, privacy, cleanup, and unconsumed-runtime checks passed. The single allowed
+quiet-window recovery against that same install then passed all 20 checks with the current caller
+fingerprint stable start-to-end, zero runtime open files, and zero task processes; neither the
+install nor the full suite was rerun.
+
+Local status proved requested/effective `SIM`, LIVE reads false, LIVE writes false, a readable
+unexpired SIM cache, and no blocker. The exactly one session-capability read passed with truthful
+`network_call_made=true`, `token_refreshed=false`, one call, and no retry.
+
+The exactly one sealed `codex_native_v1` proof exited 1 and was not retried. Its authenticated
+candidate result proves the producer started, SIM preflight passed, and execution reached
+`agent_evaluation`. It does not contain an authenticated evaluation summary. Proof-child cleanup
+and candidate-runner cleanup both fail closed as `observation-unknown` / `coverage_unknown` at
+`group_member:uncaptured_member`; watcher drain is known complete but remaining process and group
+counts are null. The inner reason is `proof_child_cleanup_failed` and the authenticated outer
+publication is `proof_candidate_runner_cleanup_failed`. Model, MCP, and Saxo event counts and all
+broker-write, mutation, purchase, and disclaimer-response facts remain unknown rather than false.
+
+Authenticated one-shot runtime consumption and cleanup passed, the retained runtime and run-owned
+proof temp are absent, later local observation finds zero task processes, and installed inventory
+still matches all 621 files. Those later facts do not repair the authenticated cleanup uncertainty.
+The terminal ten-file publication privacy scan passed with zero findings and zero scan errors. No
+54-kind numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, controlled lifecycle,
+account-equality comparison, or activation ran. All profiles remain quarantined at 0/54.

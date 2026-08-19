@@ -2453,6 +2453,21 @@ historical descriptors remain `None`; mixed, current, extra, or tampered materia
 tests and static/privacy gates pass, no external gate ran, and the next step is independent static
 review. The sealed result and 0/54 activation are unchanged.
 
+Independent review then approved exact `1d213ff`. Its retained-runtime install, verify-only,
+signed 2,967-test suite, lint, type, plugin, nine-skill static, 60-tool catalog, 34-case manifest,
+privacy, and supported quiet-window structural-recovery gates passed. Local auth and the one
+session-capability read proved SIM with both LIVE gates false.
+
+The one sealed native proof nevertheless refuses at authenticated cleanup uncertainty. It reached
+the passed SIM preflight and `agent_evaluation`, but no authenticated per-case summary survived.
+Both proof-child and candidate-runner cleanup report drained watchers plus
+`group_member:uncaptured_member`, unknown coverage, and null remaining counts. Runtime consumption
+and later local cleanup are complete, but they cannot convert that boundary to a pass. Event and
+broker facts remain unknown; numerical proof, the fresh SIM matrix, reconciliation, account
+equality, and activation did not run. The next action is an independent review and bounded local
+diagnosis of the two uncaptured-member cleanup boundaries before any new candidate or sealed run.
+Activation remains 0/54.
+
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
