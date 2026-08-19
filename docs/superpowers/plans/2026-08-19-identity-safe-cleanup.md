@@ -65,16 +65,22 @@ receipt digest plus typed cleanup reason/stage. Source `139704b`, tree `a95547d`
 twice, related/auth/privacy, Ruff/format, BasedPyright, plugin/static/catalog/eval, privacy, and diff
 gates and remains uninstalled/unsealed pending independent review.
 
-Nested cleanup-receipt completion rule: current private observations add the expected process
-group, expected birth-identity digest, and an occurrence count as one all-or-none correlation set.
-Changed-group and changed-identity states must prove the corresponding observed difference, and a
-current group-member unknown receipt must retain observations consistent with its typed subreason.
-Nested evaluation writes a separate owner-only mode-0600 receipt binding total/unknown snapshot
-counts, snapshot stage/subreason pairs, deduplicated correlated observations, and their summed
-occurrences. The runner and proof failure schemas may expose only evidence status, digest, typed
-reason, and stage/subreason. Missing path, failed write, malformed or tampered receipt, inconsistent
-snapshot material, or absent required observations remains unknown; it must never create a cleanup
-pass, zero remaining count, process exemption, or negative model/MCP/Saxo/broker fact. Source
-`2dba1a1`, tree `d1e51ec`, passes focused 191 twice, prior related 163 and auth/privacy 253,
-Ruff/format, BasedPyright 0/0/0, plugin/static/catalog/eval, eight-path privacy 0/0, and diff checks.
-It remains uninstalled and unsealed pending independent review.
+Durable nested cleanup-receipt completion rule: current private observations add the expected
+process group, expected birth-identity digest, and occurrence count as one all-or-none correlation
+set, and the receipt explicitly marks the uniform current evidence state. Historical observations
+remain uniformly historical; partial or mixed historical/current arrays reject and no default
+current values may appear authenticated. Changed-group and changed-identity states still prove the
+corresponding observed difference.
+
+Nested evaluation writes a transient owner-only mode-0600 receipt binding total/unknown snapshot
+counts, stage/subreason pairs, deduplicated observations, and summed occurrences. Before a failed
+summary is signed, the producer must verify it, promote it outside the temporary evaluation root,
+and re-verify the digest. Promotion validates the owner-only destination directory and uses an
+fsynced mode-0600 temporary file, atomic create-only hard link to an absent name, directory fsync,
+temporary unlink, and a second directory fsync. It must never replace or follow an existing target.
+Any verify, ownership, mode, link-count, destination, write, link, or fsync failure remains unknown.
+Only status, digest, typed reason, and stage/subreason cross the public proof boundary; no private
+identity or negative model/MCP/Saxo/broker fact is promoted. Source `e931ed3`, tree `427d477`, passes
+focused 224 twice, related 163, auth/privacy 253, Ruff/format, BasedPyright 0/0/0,
+plugin/static/catalog/eval, two-path privacy 0/0, and diff checks. Independent review returned
+APPROVE; it remains uninstalled and unsealed.

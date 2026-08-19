@@ -2521,18 +2521,23 @@ readable under their historical shape. Local gates passed without install, suite
 Saxo, browser, network, or proof activity. The sealed `1d213ff` cleanup result is unchanged,
 activation remains 0/54, and independent static review is the next gate.
 
-## Nested cleanup-diagnostic boundary
+## Approved durable nested cleanup-diagnostic boundary
 
-Local source `2dba1a1`, tree `d1e51ec`, extends the private cleanup boundary into the nested native
-evaluation lifecycle. Current observations correlate expected and observed process group and birth
-identity, merge repeated sightings with an authenticated occurrence count, and require the retained
-states to agree with the typed group-member cleanup reason. One separate mode-0600 nested receipt
-binds the unknown snapshots and deduplicated observations; only its digest and typed cleanup
-provenance may cross into child, candidate, or outer proof evidence.
+Source `e931ed3`, tree `427d477`, extends the private cleanup boundary through the nested native
+evaluation lifecycle. Current observations use one explicit uniform evidence state, correlate
+expected and observed process group and birth identity, and merge repeated sightings with an
+authenticated occurrence count. Mixed or partial legacy/current arrays refuse. Historical receipts
+remain historical and cannot acquire default current evidence.
 
-This remains a diagnostic refusal, not a signal allowlist or proof recovery. The receipt cannot add
+For a failed evaluation, the producer verifies the transient mode-0600 receipt before its temporary
+run root disappears, promotes it to a separate owner-only proof-output destination, and re-verifies
+the exact digest. The destination is immutable create-only/no-clobber: the implementation validates
+the owner-only directory, fsyncs the temporary file, links only to an absent final name, and fsyncs
+the directory around temporary-name removal. The signed digest therefore has durable private
+evidence or the proof remains fail-closed; it never silently points only to deleted temporary bytes.
+
+This remains diagnostic evidence, not a signal allowlist or proof recovery. The receipt cannot add
 or exempt a process, make unknown coverage complete, turn null counts into zero, or promote unknown
-model, MCP, Saxo, broker-write, mutation, purchase, or disclaimer-response facts. Local validation
-and static/privacy gates passed without install, model, MCP, Saxo, browser, network, or proof
-activity. The sealed `1d213ff` result remains unchanged, activation remains 0/54, and independent
-static review of `2dba1a1` is next.
+model, MCP, Saxo, broker-write, mutation, purchase, or disclaimer-response facts. Final local gates
+passed without install, model, MCP, Saxo, browser, network, or proof activity. The sealed `1d213ff`
+result remains unchanged, activation remains 0/54, and independent review returned APPROVE.

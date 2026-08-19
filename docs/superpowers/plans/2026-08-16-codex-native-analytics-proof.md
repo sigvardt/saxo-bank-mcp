@@ -375,14 +375,15 @@ twice plus failure/publication, related, auth/privacy, Ruff/format, type, plugin
 eval-manifest, privacy, and diff gates. No install or proof ran; independent static review is next,
 the prior sealed result remains unchanged, and 0/54 profiles are active.
 
-Superseding nested-cleanup handoff: source `2dba1a1`, tree `d1e51ec`, adds correlated expected-group
-and expected-birth hashes plus occurrence counts to current private offending observations and
-requires current group-member diagnostics to contain matching evidence. Nested evaluation writes a
-separate owner-only mode-0600 digest-bound receipt over unknown snapshots and deduplicated
-observations. Only its status, digest, typed reason, and stage/subreason propagate through the
-authenticated evaluation cleanup, child, candidate, and outer publication; private identities do
-not. Missing or inconsistent evidence stays unknown and cannot promote broker or event negatives.
-Focused tests passed 191 twice; the prior related and auth/privacy slices passed 163 and 253; Ruff,
-changed-file format, BasedPyright 0/0/0, plugin/static/catalog/eval, eight-path privacy 0/0, and diff
-checks passed. No install, model, production MCP, Saxo, browser, network, or proof ran. Independent
-static review is next, the sealed result remains unchanged, and 0/54 profiles are active.
+Approved nested-cleanup handoff: source `e931ed3`, tree `427d477`, uses one explicit uniform
+evidence-state contract for current observations and authenticated legacy states for older shapes;
+partial or mixed historical/current arrays refuse. Correlated expected-group/birth hashes and
+occurrence counts remain private. Before the failed summary is signed, the producer verifies the
+transient nested receipt, promotes it outside the temporary evaluation root, and re-verifies the
+same digest. Publication is owner-only, create-only, and no-clobber, with file and directory fsync;
+an existing or invalid destination refuses instead of being replaced. Child, candidate, and outer
+publication still carry only status, digest, typed reason, and stage/subreason. Final gates passed
+focused 224 twice, related 163, auth/privacy 253, Ruff/changed-format, BasedPyright 0/0/0,
+plugin/static/catalog/eval, two-path privacy 0/0, and diff checks. No install, model, production MCP,
+Saxo, browser, network, or proof ran. Independent review returned APPROVE, the sealed result remains
+unchanged, and 0/54 profiles are active.

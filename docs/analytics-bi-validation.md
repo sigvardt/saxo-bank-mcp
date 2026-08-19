@@ -907,31 +907,38 @@ passed. No install, full suite, SIM/auth call, model, MCP, Saxo request, browser
 ran. The prior sealed cleanup uncertainty remains unchanged, downstream proof and activation did
 not run, and 0/54 profiles remain active pending independent static review.
 
-## Local nested cleanup-diagnostic retention
+## Approved durable nested cleanup-diagnostic retention
 
-Source `2dba1a17e5b1d567d7f3c26af1c57dab92edf4e1`, tree
-`d1e51ec27821359e08e8417bb2a41a33534876f7`, closes the remaining private nested-evaluation
-diagnostic gap without changing the sealed `1d213ff` result. Current offending observations now
-bind the expected process group, expected birth-identity hash, and occurrence count alongside the
-observed privacy-safe fields. Changed-group and changed-identity states require a real correlated
-before/after difference. A current group-member unknown receipt cannot authenticate an empty or
-semantically unrelated observation set.
+Independent review approved source `e931ed3cc62a3651fcdd6bf2c733361b63c70de2`, tree
+`427d47750af2ad262a405a3264291a535af8fc37`. Current offending observations bind the expected
+process group, expected birth-identity hash, and occurrence count alongside the observed
+privacy-safe fields. The strict evidence-state discriminator keeps current observations uniformly
+explicit and rejects partial or mixed historical/current arrays; genuinely historical shapes are
+parsed only under their authenticated legacy state rather than receiving default evidence fields.
+Changed-group and changed-identity states still require a correlated before/after difference.
 
-Unknown nested evaluation cleanup now writes one separate owner-only mode-0600 aggregate receipt.
-It binds total and unknown snapshot counts, each retained cleanup stage/subreason, deduplicated
-observations, and correlated occurrence counts. The eval runner carries only its evidence status,
-digest, typed reason, and stage/subreason into the authenticated cleanup summary, child failure,
-candidate result, and outer publication. Process identities remain private; the outer publication
-contains no observation array, raw command, path, argument, transcript, payload, account value, or
-broker data. Missing, unwritable, malformed, inconsistent, or tampered nested evidence remains
-unknown and cannot promote model, MCP, Saxo, mutation, purchase, or disclaimer-response negatives.
-Historical digest-bound observations remain readable under their exact older material.
+The nested evaluation first writes its mode-0600 receipt inside the evaluation run root. Before
+signing the failed evaluation summary, the producer verifies its digest, schema, ownership, mode,
+regular-file identity, and link count, then promotes and re-verifies the exact receipt at the
+separate owner-only proof-output destination outside the temporary run root. Promotion is
+create-only and no-clobber: it writes and fsyncs a mode-0600 temporary file in the validated
+owner-only directory, atomically links it to the previously absent destination, fsyncs the
+directory, removes the temporary name, and fsyncs the directory again. An existing destination,
+link/symlink or ownership mismatch, write/link/fsync failure, digest mismatch, or invalid receipt
+refuses retention and cannot be replaced.
 
-Final local validation passed 191 focused tests twice. The previously completed broader related
-slice passed 163 tests and the auth/privacy slice passed 253 tests. Ruff lint and changed-file
-format checks passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes. Plugin validation,
-nine-skill static gates, the 60-tool/294-operation catalog, the 34-case eval manifest, eight-path
-privacy scan with zero findings and zero scan errors, and diff checks passed. No install, model,
-production MCP, Saxo request, browser, network, or proof ran in the source/test batch. All 54
-profiles remain quarantined at 0/54, the branch remains local and unpushed, and independent static
-review of `2dba1a1` is the next gate.
+The retained private receipt binds total and unknown snapshot counts, each retained cleanup
+stage/subreason, deduplicated observations, and correlated occurrence counts. The authenticated
+cleanup summary, child failure, candidate result, and outer publication carry only its evidence
+status, digest, typed reason, and stage/subreason; no identity array, raw command, path, argument,
+transcript, payload, account value, or broker data crosses the public boundary. Missing, malformed,
+inconsistent, tampered, or unretained evidence remains unknown and cannot promote model, MCP, Saxo,
+mutation, purchase, or disclaimer-response negatives.
+
+Final local validation passed 224 focused tests twice, 163 related tests, and 253 auth/privacy
+tests. Ruff lint and changed-file format checks passed; BasedPyright reported 0 errors, 0 warnings,
+and 0 notes. Plugin validation, nine-skill static gates, the 60-tool/294-operation catalog, the
+34-case eval manifest, final two-path privacy with zero findings and zero scan errors, and diff
+checks passed. No install, model, production MCP, Saxo request, browser, network, or proof ran in
+the source/test batch. All 54 profiles remain quarantined at 0/54, the branch remains local and
+unpushed, and the source review verdict is APPROVE.
