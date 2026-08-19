@@ -1,23 +1,30 @@
 # Saxo analytics and BI suite: Task 24 native validation
 
 Status: partial validation; analytics activation is not approved
-Date: 2026-08-18
+Date: 2026-08-19
 Harness policy: `codex_native_v1`
 Independent review: pending the root orchestrator's separate native review
 
-Candidate `c716047a332a78cccd0d1c94ed4348e7edbd1169`, tree
-`3170c9d4dc7d3ff63987999892209e7b19b98275`, passed its exact Codex-only retained-runtime
-installation, signed 2,835-test full suite, required local gates, and current SIM safety preflight.
-Its one sealed proof command then returned an authenticated `verified_child_failure`. Ten of eleven
-native hard cases passed. The `scenario` case failed `transcript_assertion_failed` despite a passed
-grant check and exact invocation of its two required logical tools. Both raw decoded assistant
-events and final parsed text were observable and had the same required-all vector
-`[true, false, true]`: the exact required phrase `explicit numeric shocks` was absent. The outer
-failure reason is `proof_child_cleanup_failed`.
+Candidate `e5dc932f92fc850c9a2d7608074f3af0ae57b1c6`, tree
+`bd754a6288512ed9402dffbe0c4a336eae6130ef`, passed its exact Codex-only retained-runtime
+installation, signed 2,883-test full suite, required local gates, and current SIM safety preflight.
+Its one sealed proof command exited 1. The authenticated outer publication refused with
+`proof_candidate_runner_cleanup_failed` because candidate-runner cleanup coverage was unknown.
+The authenticated inner result retained the producer's `proof_child_cleanup_failed` boundary and
+the privacy-safe hard-evaluation summary: ten of eleven native cases passed. `artifact-delivery`
+failed `transcript_assertion_failed` even though its exact grant and all three required logical
+tool calls passed. Observable raw decoded assistant events and observable final parsed text both
+had required-all vector `[false, true, true]`, proving that `analysis_id` was absent before and
+after parsing.
 
-No retry ran. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, account-equality
-readback, and activation gates did not run. All 54 proof profiles remain quarantined and 0 are
-active.
+Nested evaluation cleanup reports complete with zero remaining evaluation processes and no raw
+output retained. The one-shot proof runtime was consumed and durably removed, and final local
+readback found zero run-owned processes. Those facts do not repair the authenticated unknown
+outer cleanup coverage or prove broker/account state. No retry ran. The numerical proof, fresh
+60-tool SIM matrix, Saxo reconciliation, account-equality readback, and activation gates did not
+run. All 54 proof profiles remain quarantined and 0 are active. The dedicated exact `e5dc932`
+section below supersedes earlier status summaries; historical candidate sections remain
+unchanged evidence for their named runs.
 
 Local corrective source `94a86430d90d4e8db770e1b9c4d96eceffa23b29`, tree
 `40cef275436f178f202300290ef9f21c65ef583a`, addresses the two independently confirmed local
@@ -272,6 +279,66 @@ unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Sax
 account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
 quarantined and 0/54 are active. The branch remains local and unpushed.
 
+## Exact `e5dc932` stable gates and sealed outcome
+
+Source `e5dc932f92fc850c9a2d7608074f3af0ae57b1c6`, tree
+`bd754a6288512ed9402dffbe0c4a336eae6130ef`, was checked out in a clean detached worktree. One
+owner-only retained-runtime installation passed with exact candidate and tree binding, 60 tools,
+9 skills, 1 MCP server, 620 exact compared files, no inventory mismatch, unchanged caller Codex
+state, privacy-clean evidence, and complete install-process cleanup. The one verify-only readback
+passed. A later read-only structural receipt revalidated the source and installed-cache bytes,
+dependency lock, producer module, interpreter, runtime binding, owner modes, current caller state,
+and unconsumed runtime.
+
+The one signed exact-candidate full suite passed 2,883 tests with zero failures, errors, or skips.
+Its owner-only JUnit and authenticated receipt bind the candidate, tree, clean before and after
+state, approved external temporary root, exit, counts, and digests. The guarded launcher removed
+its candidate-owned temporary root, final process readback was zero, and the system disk remained
+above the 50 GiB floor.
+
+Post-suite gates passed Ruff check; BasedPyright with 0 errors, 0 warnings, and 0 notes; plugin
+validation; the nine-skill static gate; the 60-tool, 294-operation catalog; the 34-case evaluation
+manifest; and a 16-path source privacy scan with zero findings and zero scan errors. The historical
+whole-repository format drift remains a separate observation and is not relabeled as passed.
+
+Local no-network auth status proved requested and effective `SIM`, LIVE reads false, LIVE writes
+false, a readable non-expired refreshable SIM cache, and no blocker. Exactly one separate
+read-only session-capability call passed with `network_call_made=true`, `token_refreshed=false`,
+LIVE write false, and no order or subscription creation. The sealed producer's authenticated SIM
+preflight also passed and recorded truthful network provenance before model work.
+
+Exactly one `codex_native_v1` sealed command then ran through the explicit exact
+candidate-source-root contract and exited 1. No retry ran. The authenticated outer publication is
+a `boundary_failure` with reason `proof_candidate_runner_cleanup_failed`: its runner receipt binds
+the authenticated candidate result, but runner cleanup coverage is `unknown`. The outer receipt
+therefore keeps execution, model/MCP/Saxo aggregates, broker writes, LIVE mutation count,
+purchase state, disclaimer-response state, and cleanup state unknown.
+
+The authenticated candidate result is a `verified_child_failure`. It preserves a passed SIM
+preflight, `network_call_made=true`, execution performed, current phase `agent_evaluation`, and
+reason `proof_child_cleanup_failed`. Its strict privacy-safe evaluation summary records 10 passed
+cases and one failed case. All 11 grant checks passed and every case invoked its exact required
+logical tool count. `artifact-delivery` alone failed `transcript_assertion_failed`: its three
+required tools were invoked, while both raw assistant events and final parsed text had required-all
+vector `[false, true, true]`. The missing required field was `analysis_id`; `owner-only` and
+`quality warnings` were present. The summary retains hashes and allowlisted outcomes only, not
+transcripts, arguments, handles, payloads, account data, or paths.
+
+Nested evaluation cleanup is independently authenticated as complete: 12 processes were created,
+zero remained, none timed out, runtime cleanup passed, and persisted raw output count was zero.
+The retained proof runtime has authenticated consumption intent and cleanup receipts and is absent.
+A final local process readback found zero run-owned processes and the proof temporary root absent.
+However, the inner outer-process cleanup evidence is `observation-unknown`, and the candidate
+runner cleanup receipt is also `unknown`; these later local observations cannot be promoted into
+an authenticated cleanup pass. Cleanup, broker mutation, purchase, disclaimer, and account-state
+claims therefore remain unknown.
+
+An eight-path terminal proof privacy scan passed with zero findings and zero scan errors. No
+numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation, controlled SIM lifecycle,
+attempt-bound account comparison, or activation ran. All 54 profiles remain quarantined and 0/54
+are active. Evidence is owner-only, the branch remains local and unpushed, and root retains the
+separate independent-review gate.
+
 ## Root-bound identity admission correction after `d81621d`
 
 Local source `d3efb6ebb2fde2bb679c0b6019a309ac41723062`, tree
@@ -431,3 +498,11 @@ relabel earlier evidence. The latest sealed result remains `c716047` at 10/11 ha
 unknown broker/account facts. The numerical proof, fresh 60-tool SIM matrix, Saxo reconciliation,
 account equality, controlled lifecycle, and activation did not run. All 54 profiles remain
 quarantined and 0/54 are active. The branch remains local and unpushed.
+
+## Current terminal status after exact `e5dc932`
+
+The exact `e5dc932` section above is the current sealed result and supersedes historical sentences
+that name `c716047` as the latest run. Candidate `e5dc932` passed every pre-proof gate and then
+failed closed at authenticated runner/child cleanup boundaries with 10/11 hard cases. No retry or
+downstream activation gate ran. Cleanup and broker/account facts remain unknown, and all 54
+profiles remain quarantined with 0/54 active.

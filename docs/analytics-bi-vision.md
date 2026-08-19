@@ -5,16 +5,17 @@ Date: 2026-07-29
 Scope: market research, portfolio analytics, quantitative modeling, visualization, reporting,
 and agent-deliverable artifacts
 Implementation status: implemented on `feat/analytics-bi-suite`; 21 analytics tools bring the
-catalog to 60. Exact candidate `c716047` passed its retained-runtime Codex-only installation,
-signed 2,835-test full suite, static, type, catalog, evaluation-manifest, privacy, install-readback,
-and SIM authorization gates. Its one sealed `codex_native_v1` proof returned an authenticated
-`verified_child_failure`: ten of eleven cases passed, while `scenario` omitted the required phrase
-`explicit numeric shocks` in both observable raw decoded assistant events and observable final
-parsed text despite a passed grant and both required tool calls. The outer reason remained
-`proof_child_cleanup_failed`. Aggregate broker safety facts remain unknown. Offline numerical
-proof, the fresh SIM matrix, Saxo reconciliation, account equality, and activation did not run.
-No retry or activation occurred; all 54 proof profiles remain quarantined. Exact evidence
-boundaries are recorded in `docs/analytics-bi-validation.md`.
+catalog to 60. Exact candidate `e5dc932` passed its retained-runtime Codex-only installation,
+signed 2,883-test full suite, static, type, catalog, evaluation-manifest, privacy, install-readback,
+and SIM authorization gates. Its one sealed `codex_native_v1` proof exited 1 and failed closed.
+The outer publication reports `proof_candidate_runner_cleanup_failed` with unknown cleanup
+coverage. The authenticated candidate result preserves a passed SIM preflight and a 10/11 hard-
+case summary: `artifact-delivery` invoked all three required tools but omitted `analysis_id` from
+both observable raw decoded assistant events and observable final parsed text. Nested evaluation
+cleanup and one-shot runtime removal completed locally, but aggregate cleanup, broker safety, and
+account facts remain unknown. Numerical proof, the fresh SIM matrix, Saxo reconciliation, account
+equality, and activation did not run. No retry or activation occurred; all 54 proof profiles remain
+quarantined. Exact evidence boundaries are recorded in `docs/analytics-bi-validation.md`.
 
 ## Executive conclusion
 
@@ -2325,47 +2326,35 @@ follows it, and benchmark comparison uses a disclosed Saxo-tradable proxy or ref
 
 ## Recommended immediate next action
 
-The latest sealed evidence is `c716047`. It passed an exact retained-runtime install with 60 tools,
-9 skills, 1 MCP server, and 617 exact files; a signed 2,835-test full suite; static, type, catalog,
-evaluation-manifest, privacy, install-readback, and SIM safety gates. The historical dual policy
-and evidence remain unchanged.
+The latest sealed evidence is exact source `e5dc932`, tree `bd754a6`. It passed one owner-only
+retained-runtime install with 60 tools, 9 skills, 1 MCP server, and 620 exact files; one verify-only
+readback; a signed 2,883-test full suite; Ruff, type, plugin, static, catalog, evaluation-manifest,
+privacy, install-readback, and SIM safety gates. The historical dual policy and its evidence remain
+unchanged.
 
 The single sealed native proof passed its child SIM preflight and recorded truthful network
-provenance. Ten of eleven hard cases passed. The `scenario` case failed its transcript assertion
-despite a passed grant check and exact invocation of both required tools. Privacy-safe raw decoded
-assistant events and final parsed text were both observable and both omitted the exact phrase
-`explicit numeric shocks`; this was not a parser-only loss. The outer publication refused with
-`proof_child_cleanup_failed`. Aggregate model, MCP, Saxo, broker-write, mutation, purchase, and
-disclaimer-response facts remain unknown. Authenticated runtime-consumption and candidate-runner
-cleanup evidence plus a final local readback found no retained proof runtime, exact-candidate
-process, or proof run root. No retry ran.
+provenance. Ten of eleven hard cases passed with exact grant and tool-count checks. The
+`artifact-delivery` case failed its transcript assertion because `analysis_id` was absent in both
+observable raw decoded assistant events and observable final parsed text; `owner-only` and
+`quality warnings` were present. This is not a parser-only loss and the grader was not relaxed.
 
-Local corrective source `e5dc932`, tree `bd754a6`, keeps the sealed `c716047` evidence unchanged
-while incorporating the scenario contract and all shared cleanup work through `9826b26`. The
-command runner and nested evaluator use the same root-handle-bound identity-admission gate.
-It requires the original `Popen` root to remain active, unreaped, and same-birth across two
-PID/process-group snapshots; every candidate is then re-observed and must retain the same PID,
-birth identity, and group before the final root check. Every changed, missing, unknown,
-replacement, scope-mismatched, or later PID/process-group observation is detection only and never
-admits a signal target. A still-visible unconfirmed member makes cleanup coverage unknown. A child
-confirmed during the valid root window remains individually cleanable after leader exit while its
-own birth identity and group match. Exact-install cleanup retains the same immutable-target,
-per-signal recheck, terminal membership scan, and strict authenticated zero-count rules.
+The authenticated candidate result failed closed with `proof_child_cleanup_failed` because outer
+process-cleanup observation was unknown. The authenticated outer publication then failed closed
+with `proof_candidate_runner_cleanup_failed` because runner cleanup coverage was also unknown.
+Nested evaluation cleanup separately reports 12 created processes, zero remaining, complete
+runtime cleanup, and zero persisted raw outputs. Authenticated consumption receipts prove that the
+one-shot runtime is absent, and final local readback found no run-owned process or proof temporary
+root. Those later facts cannot be promoted into the missing authenticated cleanup coverage.
+Execution aggregates, broker write, mutation, purchase, disclaimer response, cleanup, and account
+state therefore remain unknown. No retry ran.
 
-Command-runner admission publication now has a separate bounded drain/freeze boundary. Capture
-passes register before taking a scope. Cleanup closes new admission, lets already-registered passes
-publish only during the bounded drain, and then freezes the immutable target tuple. Any pass still
-alive, discarded after freeze, failed during capture, or affected by a join error makes cleanup
-unknown and cannot authenticate zero remaining processes. A drained pass is digest-bound in the
-owner-only cleanup receipt, whose strict verifier rejects drain-state tampering.
+The next source batch should remain local and TDD-first. Reproduce why the runner and proof-child
+cleanup observers reported unknown despite the nested evaluator's complete receipt, and separately
+make the `artifact-delivery` native fixture contract require the existing `analysis_id` assertion
+without fabricating output or weakening grading. Freeze a new candidate only after focused and
+related regressions, static/type/privacy gates, and independent review. Do not install or seal a
+new candidate under this attempt's authorization.
 
-The local corrective source passed 199 focused tests twice, 370 related tests, 431 safe
-auth/privacy tests, Ruff check and changed-file format check, BasedPyright with 0 errors/0 warnings/
-0 notes, and plugin, static, catalog, evaluation-manifest, and bounded privacy gates. No exact
-install, model, production MCP, Saxo, broker, browser, sealed proof, or broker/data network activity
-ran. The source is not installed or sealed and does not relabel `c716047`.
-
-The independent native review should verify `e5dc932` before any exact install or sealed attempt.
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
 not relabeled.
