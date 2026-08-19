@@ -329,3 +329,12 @@ spawn records cleanup pending and the root as created before fallible PGID or sc
 source passed focused tests twice plus related, auth/privacy, type, plugin, static, catalog,
 eval-manifest, privacy, and diff gates. It remains uninstalled and unsealed pending independent
 static review; sealed `e5dc932` and 0/54 activation remain unchanged.
+
+Superseding local handoff: source `9fbd2cb`, tree `40d6525`, applies the shared unobservable record
+contract to router cases. Both harnesses gate timeout, unknown/null cleanup, residue, structured-
+output failure, and post-spawn exceptions before observable router construction. Router decision,
+grading, invoked tools, and model/command/MCP/Saxo counts stay null through authenticated child,
+candidate, and outer evidence; observable successful router records remain unchanged. Local
+focused-twice, related, auth/privacy, catalog-status, Ruff/format, type, plugin, static, catalog,
+eval-manifest, privacy, and diff gates pass. The source remains uninstalled and unsealed pending
+independent static review; sealed `e5dc932` and 0/54 activation remain unchanged.

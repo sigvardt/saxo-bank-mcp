@@ -23,3 +23,10 @@ Timeout, uncertain or residual cleanup, parser failure, malformed output, and po
 system failure use the unobservable record path. Every parse-derived grading, tool identity, and
 model/command/MCP/Saxo event count stays null or unknown through the signed case, child, candidate,
 and outer schemas. Only a completely decoded observable result may publish zero or a no-call fact.
+
+Router completion rule: router and non-router cases use the same unobservable failure constructor.
+The router path checks timeout, null or unknown cleanup, residue, and post-spawn exceptions before
+parsing or observable record construction; invalid or malformed structured output also remains
+unobservable for either harness. Unknown router evidence has no decision, grading result, invoked
+tool identity, or model/command/MCP/Saxo count. A fully decoded successful router decision remains
+eligible for observable exact-zero event evidence.

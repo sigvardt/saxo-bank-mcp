@@ -613,3 +613,35 @@ evidence at 10/11 hard cases with unknown broker/account/overall-cleanup facts. 
 downstream numerical proof, fresh SIM matrix, reconciliation, account equality, or activation ran;
 all 54 profiles remain quarantined with 0/54 active. Independent static review of `dd85c9c` is the
 next gate.
+
+## Local router observability correction after `dd85c9c`
+
+Local source `9fbd2cbeaead752e6c8e490d3782a1c1b9eda872`, tree
+`40d65254641540e0e25cf685154750b298c857ce`, closes the router-model bypass without changing any
+sealed evidence. Router and non-router execution now share one non-circular unobservable failure
+constructor. For both Codex and the historical Claude harness, a router timeout, unknown or null
+cleanup result, cleanup residue, malformed or invalid structured output, or post-spawn exception
+retains null transcript grading, tool identities, and model, command, MCP, and Saxo event counts.
+An unobservable router decision must also remain null.
+
+Router results are gated immediately after the managed model process and before output parsing or
+observable record construction. A successful, fully decoded router result still reports its
+decision and exact zero tool, command, MCP, and Saxo events. A real production-shaped `Popen`
+followed by injected PGID failure records the root as created, cleanup and remaining processes as
+unknown, and preserves those nullable facts through the evaluation report, authenticated failure
+summary, verified child failure, candidate result, and outer publication. Strict schemas reject an
+injected router decision, event count, tool identity, grading result, or other parse-derived fact.
+
+TDD first reproduced 14 router failures. Final verification passed 191 focused tests twice, 370
+related evaluation/cleanup/proof tests, 388 bounded auth/privacy tests, and 15 catalog-status tests.
+Ruff and changed-file format passed; BasedPyright reported 0 errors, 0 warnings, and 0 notes;
+plugin, nine-skill static, 60-tool/294-operation catalog, 34-case evaluation-manifest, 11-path
+privacy, and diff gates passed. The new internal failure-record module is explicitly excluded from
+production MCP status routing, and generated catalog source digests were refreshed deterministically.
+
+No exact or product install, model, production MCP, Saxo request, broker action, browser, sealed
+proof, or broker/data network activity ran. This source is uninstalled and unsealed. Sealed
+`e5dc932` remains unchanged at 10/11 hard cases with unknown broker/account/overall-cleanup facts;
+no retry or downstream numerical proof, fresh SIM matrix, reconciliation, account equality, or
+activation ran. All 54 profiles remain quarantined with 0/54 active. Independent static review of
+`9fbd2cb` is the next gate.

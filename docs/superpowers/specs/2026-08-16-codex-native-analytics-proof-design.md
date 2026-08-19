@@ -151,6 +151,13 @@ counts. The authenticated per-case summary, child failure, candidate runner, and
 must preserve those nulls; no post-launch unobservable result may be represented as an observable
 empty trace.
 
+Router model cases use the same non-circular unobservable failure constructor. After launch, the
+router must reject timeout, null or unknown cleanup, residue, malformed or invalid structured
+output, and operating-system failure before constructing an observable router record. Unknown
+router evidence carries no decision, transcript grading, invoked tools, or model/command/MCP/Saxo
+counts. This applies to Codex and the retained historical dual harness; successful fully decoded
+router output retains its existing observable decision and exact event counts.
+
 The native path fails closed for an absent or unsafe Codex auth file, missing or expired SIM
 material, a dirty or mismatched candidate, an inexact installed cache, a non-Codex evaluation
 record, a skipped model call, an absent or unknown MCP event identity, incomplete tool coverage,

@@ -2365,14 +2365,13 @@ privacy-safe evidence and is not guessed. The next action is independent static 
 `0e8b625`. Do not install or seal it until that review approves the source and a separately
 authorized exact-candidate validation begins.
 
-Local source `dd85c9c`, tree `b8ad581`, supersedes `a59b231` as the next review candidate. It keeps
-every parse-derived event, tool, and grading fact unknown when a launched model process times out,
-has uncertain or residual cleanup, produces unparsed or malformed output, or fails during
-post-spawn process observation. It also records cleanup pending and at least one created process
-immediately after successful spawn, before fallible group or scope capture. These facts propagate
-strictly through authenticated child, candidate, and outer failure publications without promoting
-any no-call or safety negative. Independent static review of `dd85c9c` is now the next gate. No
-exact install or sealed proof is authorized by this local correction alone.
+Local source `9fbd2cb`, tree `40d6525`, supersedes `dd85c9c` as the next review candidate. Router and
+non-router model execution now share the same unobservable failure constructor. A Codex or
+historical Claude router timeout, uncertain or residual cleanup, malformed or invalid structured
+output, or post-spawn failure keeps its decision, grading, invoked tools, and all event counts null
+through authenticated child, candidate, and outer failure publication. Fully decoded successful
+router records remain observable and unchanged. Independent static review of `9fbd2cb` is now the
+next gate. No exact install or sealed proof is authorized by this local correction alone.
 
 The all-54 numerical proof, Saxo reconciliation, fresh 60-tool SIM matrix, attempt-bound account
 equality, and activation decision remain unrun. The historical matrix remains historical and is
