@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from collections.abc import Generator
+from contextlib import contextmanager
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -72,6 +74,11 @@ EXPECTED_RECEIPT_WRITE_COUNT = 2
 RAW_ASSISTANT_EVENT_COUNT = 2
 EVAL_CREATED_PROCESS_COUNT = 4
 EVAL_TERMINATED_PROCESS_COUNT = 2
+
+
+@contextmanager
+def _fake_sim_token_source_write_lease() -> Generator[object]:
+    yield object()
 
 
 def _bootstrap_envelope(
@@ -3053,6 +3060,11 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     tmp_path: Path,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    monkeypatch.setattr(
+        producer,
+        "sim_token_source_write_lease",
+        _fake_sim_token_source_write_lease,
+    )
     progress = _progress()
     progress.begin_phase("sim_preflight")
     progress.record_preflight(_passed_preflight())
@@ -3135,7 +3147,7 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
         bootstrap_verifier,
     )
 
-    def no_op(_value: object) -> None:
+    def no_op(_value: object, **_kwargs: object) -> None:
         return
 
     monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", no_op)
@@ -3178,11 +3190,237 @@ def test_native_wrapper_authenticates_nonzero_child_envelope(
     assert cleanup_calls == [install]
 
 
+def test_native_wrapper_holds_sim_token_source_lease_through_child_and_promotion(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    progress = _progress()
+    progress.begin_phase("sim_preflight")
+    progress.record_preflight(_passed_preflight())
+    progress.complete_phase("sim_preflight")
+    progress.begin_phase("agent_evaluation")
+    child = _failure(progress, reason="proof_agent_evaluation_command_failed")
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+    for path in (cache_root, source_repo, retained_codex_home):
+        path.mkdir(mode=0o700)
+
+    lease = object()
+    lease_active = False
+    events: list[str] = []
+
+    @contextmanager
+    def source_lease() -> Generator[object]:
+        nonlocal lease_active
+        lease_active = True
+        events.append("lease-enter")
+        try:
+            yield lease
+        finally:
+            events.append("lease-exit")
+            lease_active = False
+
+    def prepare(runtime_root: Path, **_kwargs: object) -> SimpleNamespace:
+        assert lease_active
+        events.append("prepare")
+        codex_home = runtime_root / "codex-home"
+        codex_home.mkdir(mode=0o700)
+        return SimpleNamespace(
+            env={"PATH": "/usr/bin:/bin"},
+            codex_home=codex_home,
+            run_root=runtime_root,
+        )
+
+    def fail_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> NoReturn:
+        del env, timeout_seconds
+        assert lease_active
+        events.append("child")
+        stdout = child.model_dump_json()
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=11,
+                pgid=11,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(stdout.encode()).hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            stdout=stdout,
+            stderr="",
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    def promote(_runtime: object, *, write_lease: object) -> None:
+        assert lease_active
+        assert write_lease is lease
+        events.append("promote")
+
+    def native_command(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        return ("proof-child",)
+
+    def bootstrap_verifier(
+        *_args: object,
+        **_kwargs: object,
+    ) -> CodexNativeBootstrapVerification:
+        return _bootstrap_verification()
+
+    def no_cleanup(_value: object) -> None:
+        return
+
+    def cleanup_runtime(_value: object) -> SimpleNamespace:
+        return _consumption_evidence()
+
+    monkeypatch.setattr(producer, "sim_token_source_write_lease", source_lease)
+    monkeypatch.setattr(producer, "prepare_eval_isolated_runtime", prepare)
+    monkeypatch.setattr(producer, "run_command", fail_command)
+    monkeypatch.setattr(
+        producer,
+        "_codex_native_producer_command",
+        native_command,
+    )
+    monkeypatch.setattr(
+        producer,
+        "verify_bootstrap_envelope_file",
+        bootstrap_verifier,
+    )
+    monkeypatch.setattr(producer, "promote_rotated_sim_token_cache", promote)
+    monkeypatch.setattr(producer, "require_matrix_runtime_cleanup", no_cleanup)
+    monkeypatch.setattr(
+        producer,
+        "cleanup_codex_proof_runtime",
+        cleanup_runtime,
+    )
+    monkeypatch.setattr(
+        producer,
+        "_installed_contract_digests",
+        lambda: (CATALOG_SHA256, CONTRACT_SHA256),
+    )
+
+    with pytest.raises(producer.CodexNativeProofFailureError):
+        producer._execute_codex_native_installed_child(  # noqa: SLF001
+            cache_root,
+            source_repo=source_repo,
+            retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
+        )
+
+    assert events == ["lease-enter", "prepare", "child", "promote", "lease-exit"]
+
+
+def test_native_wrapper_cleans_retained_runtime_when_sim_token_lease_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "cache"
+    source_repo = tmp_path / "source"
+    retained_codex_home = tmp_path / "retained-codex"
+    install_report = tmp_path / "install.json"
+    for directory in (cache_root, source_repo, retained_codex_home):
+        directory.mkdir(mode=0o700)
+    install_report.write_text('{"status":"passed"}\n', encoding="utf-8")
+    install_report.chmod(0o600)
+    install = SimpleNamespace(
+        proof_runtime=SimpleNamespace(
+            binding_path=tmp_path / "proof-runtime-binding.json",
+            binding=SimpleNamespace(
+                interpreter=tmp_path / "proof-runtime/bin/python",
+                binding_sha256=RUNTIME_BINDING_SHA256,
+            ),
+        ),
+    )
+
+    @contextmanager
+    def unavailable_lease() -> Generator[object]:
+        raise producer.MatrixEnvError("token_source_lease_unavailable")
+        yield object()
+
+    cleanup_calls: list[object] = []
+
+    def cleanup_runtime(value: object) -> SimpleNamespace:
+        cleanup_calls.append(value)
+        return _consumption_evidence()
+
+    monkeypatch.setattr(producer, "sim_token_source_write_lease", unavailable_lease)
+    monkeypatch.setattr(producer, "cleanup_codex_proof_runtime", cleanup_runtime)
+
+    def forbidden_prepare(*_args: object, **_kwargs: object) -> NoReturn:
+        pytest.fail("runtime preparation must not start")
+
+    monkeypatch.setattr(
+        producer,
+        "prepare_eval_isolated_runtime",
+        forbidden_prepare,
+    )
+
+    with pytest.raises(producer.ProofProducerError) as caught:
+        producer._execute_codex_native_installed_child(  # noqa: SLF001
+            cache_root,
+            source_repo=source_repo,
+            retained_codex_home=retained_codex_home,
+            install=install,
+            install_report_path=install_report,
+            install_report_sha256=hashlib.sha256(install_report.read_bytes()).hexdigest(),
+            candidate_commit=CANDIDATE,
+            installed_cache_sha256=CACHE_SHA256,
+            bootstrap_module_sha256="6" * 64,
+            producer_module_sha256=MODULE_SHA256,
+            catalog_sha256=CATALOG_SHA256,
+            contract_sha256=CONTRACT_SHA256,
+        )
+
+    assert type(caught.value).__name__ == "CodexNativeBoundaryFailureError"
+    assert caught.value.reason == "proof_sim_token_source_lease_unavailable"
+    assert caught.value.boundary_phase == "runtime_preparation"
+    assert caught.value.command_state == "not_started"
+    assert caught.value.cleanup_status == "complete"
+    assert cleanup_calls == [install]
+
+
 def test_native_wrapper_cleans_retained_runtime_when_eval_setup_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    monkeypatch.setattr(
+        producer,
+        "sim_token_source_write_lease",
+        _fake_sim_token_source_write_lease,
+    )
     install = SimpleNamespace(
         proof_runtime=SimpleNamespace(
             binding_path=tmp_path / "proof-runtime-binding.json",
@@ -3248,6 +3486,11 @@ def test_native_wrapper_preserves_bootstrap_verification_boundary(
     tmp_path: Path,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    monkeypatch.setattr(
+        producer,
+        "sim_token_source_write_lease",
+        _fake_sim_token_source_write_lease,
+    )
     cache_root = tmp_path / "cache"
     source_repo = tmp_path / "source"
     retained_codex_home = tmp_path / "retained-codex"
@@ -3311,7 +3554,7 @@ def test_native_wrapper_preserves_bootstrap_verification_boundary(
     ) -> CodexNativeBootstrapVerification:
         return CodexNativeBootstrapVerification(status="missing", envelope=None)
 
-    def no_op(_value: object) -> None:
+    def no_op(_value: object, **_kwargs: object) -> None:
         return
 
     def consume_runtime(_value: object) -> SimpleNamespace:
@@ -3365,6 +3608,11 @@ def test_native_wrapper_cleans_retained_runtime_after_success(
     tmp_path: Path,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    monkeypatch.setattr(
+        producer,
+        "sim_token_source_write_lease",
+        _fake_sim_token_source_write_lease,
+    )
     cache_root = tmp_path / "cache"
     source_repo = tmp_path / "source"
     retained_codex_home = tmp_path / "retained-codex"
@@ -3433,7 +3681,7 @@ def test_native_wrapper_cleans_retained_runtime_after_success(
             envelope=_bootstrap_envelope(child_exit_code=0, state="complete"),
         )
 
-    def no_op(_value: object) -> None:
+    def no_op(_value: object, **_kwargs: object) -> None:
         return
 
     def cleanup_proof_runtime(value: object) -> SimpleNamespace:
@@ -3484,6 +3732,11 @@ def test_native_wrapper_cleans_retained_runtime_after_child_crash(
     tmp_path: Path,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    monkeypatch.setattr(
+        producer,
+        "sim_token_source_write_lease",
+        _fake_sim_token_source_write_lease,
+    )
     cache_root = tmp_path / "cache"
     source_repo = tmp_path / "source"
     retained_codex_home = tmp_path / "retained-codex"
@@ -3554,7 +3807,7 @@ def test_native_wrapper_cleans_retained_runtime_after_child_crash(
             envelope=_bootstrap_envelope(child_exit_code=CRASH_EXIT_CODE),
         )
 
-    def no_op(_value: object) -> None:
+    def no_op(_value: object, **_kwargs: object) -> None:
         return
 
     def cleanup_proof_runtime(value: object) -> SimpleNamespace:

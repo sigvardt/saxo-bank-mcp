@@ -6,7 +6,8 @@ import os
 import shutil
 import stat
 import tempfile
-from contextlib import suppress
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final, cast
@@ -26,9 +27,11 @@ from saxo_bank_mcp.config_credentials import DEFAULT_SIM_CREDENTIAL_FILE
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.token_cache import (
     TokenCachePathError,
+    TokenCacheWriteLease,
     default_token_cache_path,
     load_token_cache,
     save_token_cache,
+    token_cache_write_lock,
 )
 from saxo_bank_mcp.token_cache import (
     token_cache_path as resolve_token_cache_path,
@@ -549,7 +552,11 @@ def _seed_retained_plugin_registration(
             )
 
 
-def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
+def promote_rotated_sim_token_cache(
+    runtime: MatrixIsolatedRuntime,
+    *,
+    write_lease: TokenCacheWriteLease | None = None,
+) -> None:
     """Optimistically promote a rotated SIM token from the disposable cache to source.
 
     No-op when the contained copy is unchanged. Fail closed with a stable sanitized
@@ -568,7 +575,7 @@ def promote_rotated_sim_token_cache(runtime: MatrixIsolatedRuntime) -> None:
     )
     if _regular_file_digest(destination) != runtime.sim_token_source_digest:
         raise MatrixEnvError("token_promote_source_changed")
-    _persist_and_verify_promotion(destination, token)
+    _persist_and_verify_promotion(destination, token, write_lease=write_lease)
 
 
 def promote_rotated_claude_credentials(runtime: MatrixIsolatedRuntime) -> None:
@@ -636,10 +643,15 @@ def _resolve_promotion_destination(source: Path) -> Path:
         raise MatrixEnvError("token_promote_destination_refused") from exc
 
 
-def _persist_and_verify_promotion(destination: Path, token: SaxoTokenSet) -> None:
+def _persist_and_verify_promotion(
+    destination: Path,
+    token: SaxoTokenSet,
+    *,
+    write_lease: TokenCacheWriteLease | None = None,
+) -> None:
     try:
-        save_token_cache(destination, token)
-    except OSError as exc:
+        save_token_cache(destination, token, lease=write_lease)
+    except (OSError, ValueError) as exc:
         raise MatrixEnvError("token_promote_write_failed") from exc
     try:
         _require_owner_only_regular_file(
@@ -752,6 +764,30 @@ def _resolve_sim_token_cache_source() -> Path:
     if raw:
         return Path(raw).expanduser()
     return default_token_cache_path()
+
+
+@contextmanager
+def sim_token_source_write_lease() -> Generator[TokenCacheWriteLease]:
+    """Hold the shared SIM cache write lease across isolated copy, use, and promotion."""
+    source = _resolve_sim_token_cache_source()
+    stack = ExitStack()
+    try:
+        write_lease = stack.enter_context(token_cache_write_lock(source))
+        locked_source, _digest = _resolve_sim_token_source_with_digest()
+        resolved_source = source.resolve(strict=True)
+    except MatrixEnvError:
+        stack.close()
+        raise
+    except (OSError, ValueError) as exc:
+        stack.close()
+        raise MatrixEnvError("token_source_lease_unavailable") from exc
+    if locked_source != resolved_source:
+        stack.close()
+        raise MatrixEnvError("token_source_lease_mismatch")
+    try:
+        yield write_lease
+    finally:
+        stack.close()
 
 
 def _resolve_sim_token_source_with_digest() -> tuple[Path, str]:

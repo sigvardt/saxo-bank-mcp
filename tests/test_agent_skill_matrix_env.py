@@ -25,6 +25,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
     resolve_matrix_child_evidence_path,
+    sim_token_source_write_lease,
 )
 from saxo_bank_mcp.auth import SaxoTokenSet, TokenEnvironment
 from saxo_bank_mcp.token_cache import TokenCachePathError, load_token_cache, save_token_cache
@@ -980,6 +981,43 @@ def test_source_concurrent_change_refuses_promotion_overwrite(
     assert "refresh-rotated" not in str(err.value)
     assert not matrix_runtime_root(evidence).exists()
     assert load_token_cache(source_token) == concurrent
+
+
+def test_existing_source_write_lease_covers_copy_rotation_and_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "manual"
+    evidence.mkdir()
+    original = _sim_token()
+    rotated = _sim_token(
+        access="access-after-contained-refresh",
+        refresh="refresh-after-contained-refresh",
+        verifier="verifier-after-contained-refresh",
+    )
+    _, source_token = _write_auth_sources(tmp_path, monkeypatch, token=original)
+
+    with sim_token_source_write_lease() as write_lease:
+        runtime = prepare_matrix_isolated_runtime(evidence)
+        assert load_token_cache(runtime.token_cache_path) == original
+        save_token_cache(runtime.token_cache_path, rotated)
+        promote_rotated_sim_token_cache(runtime, write_lease=write_lease)
+        assert load_token_cache(source_token) == rotated
+
+    assert cleanup_matrix_isolated_runtime(runtime.run_root) == []
+
+
+def test_source_write_lease_does_not_reclassify_body_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_auth_sources(tmp_path, monkeypatch, token=_sim_token())
+
+    with (
+        pytest.raises(ValueError, match="body-failed"),
+        sim_token_source_write_lease(),
+    ):
+        raise ValueError("body-failed")
 
 
 def _mutate_invalid_json(contained: Path, _source: Path) -> None:

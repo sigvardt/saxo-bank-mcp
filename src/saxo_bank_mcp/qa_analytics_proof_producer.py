@@ -12,7 +12,8 @@ import stat
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Self, cast
@@ -50,6 +51,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     promote_rotated_claude_credentials,
     promote_rotated_sim_token_cache,
     require_matrix_runtime_cleanup,
+    sim_token_source_write_lease,
 )
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
@@ -90,6 +92,7 @@ from saxo_bank_mcp.qa_auth_probes import call_saxo_auth_status, call_tool_payloa
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
 from saxo_bank_mcp.qa_installed_matrix_envelope import InstalledMatrixEnvelope
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
+from saxo_bank_mcp.token_cache import TokenCacheWriteLease
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
@@ -2792,6 +2795,43 @@ def _execute_installed_child(  # noqa: C901, PLR0912, PLR0913
         return result
 
 
+@contextmanager
+def _native_sim_token_source_write_lease(
+    install: CodexInstallEvidenceReport,
+) -> Generator[TokenCacheWriteLease]:
+    """Acquire the shared SIM token lease or consume the one-shot runtime fail-closed."""
+    stack = ExitStack()
+    try:
+        write_lease = stack.enter_context(sim_token_source_write_lease())
+    except MatrixEnvError as error:
+        stack.close()
+        consumption: CodexProofRuntimeConsumptionEvidence | None = None
+        retained_cleanup_error: ProofRuntimeCleanupError | None = None
+        try:
+            consumption = cleanup_codex_proof_runtime(install)
+        except ProofRuntimeCleanupError as proof_cleanup_error:
+            retained_cleanup_error = proof_cleanup_error
+        if retained_cleanup_error is not None:
+            raise _native_boundary_failure(
+                reason="proof_retained_runtime_cleanup_failed",
+                boundary_phase="retained_runtime_cleanup",
+                command_state="not_started",
+                consumption=consumption,
+                cleanup_failed=True,
+            ) from retained_cleanup_error
+        raise _native_boundary_failure(
+            reason="proof_sim_token_source_lease_unavailable",
+            boundary_phase="runtime_preparation",
+            command_state="not_started",
+            consumption=consumption,
+            cleanup_failed=False,
+        ) from error
+    try:
+        yield write_lease
+    finally:
+        stack.close()
+
+
 def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0915
     cache_root: Path,
     *,
@@ -2818,7 +2858,10 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
             cleanup_status="not_started",
         )
     temp_parent = Path(os.environ.get("TMPDIR", tempfile.gettempdir())).resolve()
-    with tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw:
+    with (
+        tempfile.TemporaryDirectory(prefix="analytics-codex-native-", dir=temp_parent) as raw,
+        _native_sim_token_source_write_lease(install) as token_write_lease,
+    ):
         runtime_root = Path(raw)
         runtime_root.chmod(0o700)
         try:
@@ -2948,7 +2991,7 @@ def _execute_codex_native_installed_child(  # noqa: C901, PLR0912, PLR0913, PLR0
             local_command_error = error
         finally:
             try:
-                promote_rotated_sim_token_cache(runtime)
+                promote_rotated_sim_token_cache(runtime, write_lease=token_write_lease)
             except MatrixEnvError as error:
                 promotion_error = error
             try:
