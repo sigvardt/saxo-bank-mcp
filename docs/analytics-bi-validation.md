@@ -942,3 +942,72 @@ and 0 notes. Plugin validation, nine-skill static gates, the 60-tool/294-operati
 checks passed. No install, model, production MCP, Saxo request, browser, network, or proof ran in
 the source/test batch. All 54 profiles remain quarantined at 0/54, the branch remains local and
 unpushed, and the source review verdict is APPROVE.
+
+## Exact `e931ed3` terminal diagnostic validation
+
+The exact approved source `e931ed3cc62a3651fcdd6bf2c733361b63c70de2`, tree
+`427d47750af2ad262a405a3264291a535af8fc37`, passed its one retained-runtime install and verify-only
+readback. The signed exact-candidate suite passed 2,984 tests with zero failures, errors, or skips.
+Ruff, type checking, plugin validation, static gates, catalog, eval manifest, privacy, and the final
+20/20 structural readback passed. Local status proved SIM and the one read-only session-capability
+call passed.
+
+The exactly one sealed `codex_native_v1` proof exited 1 and was not retried. Its authenticated outer
+publication is `boundary_failure` with reason `proof_candidate_runner_cleanup_failed`; the nested
+authenticated result is `verified_child_failure` with reason `proof_child_cleanup_failed`. The
+producer records a passed SIM preflight with `network_call_made=true`,
+`execution_performed=true`, and current phase `agent_evaluation`.
+
+No authenticated evaluation summary survived. The durable owner-only proof-child cleanup receipt
+retains 11 observations and the candidate-runner receipt retains 21. Both use current observation
+evidence, fixed source `historical_pid_check`, phase `admission_closed`, and fail closed at
+`coverage_unknown` / `group_member` / `uncaptured_member`; remaining process and process-group
+counts are null. The receipts do not establish what the observed identities were in public output.
+Model, MCP, Saxo, broker-write, mutation-call, purchase, and disclaimer-response facts therefore
+remain unknown rather than false.
+
+Authenticated runtime consumption and cleanup completed, the retained runtime and proof temporary
+root are absent, and later local observation found zero task processes. Those later facts do not
+repair the signed cleanup uncertainty. No numerical proof, fresh 60-tool SIM matrix, Saxo
+reconciliation, controlled lifecycle, account-equality comparison, or activation ran. Profiles
+remain quarantined at 0/54.
+
+## PID-reuse cleanup diagnosis and local correction
+
+The retained `e931ed3` child and candidate-runner receipts were re-examined without rerunning the
+proof. Their `historical_pid_check` observations referenced numeric PIDs whose original task
+processes had already ended; later local process-table inspection showed those numbers assigned to
+different births. The cleanup implementation had discarded birth history for detection-only
+members, so a replacement process using the same numeric PID was conservatively reported as an
+uncaptured member. This explains the signed cleanup uncertainty but does not rewrite it: the exact
+sealed result remains failed, its downstream facts remain unknown, and activation remains 0/54.
+
+Source `00392cf1cca772b5c0d611ec055a748b353228b9`, tree
+`3752237802fc803ceebfa7673b292651f926bf8e`, separates birth-bound observation history from the
+immutable signal-target set. A current process whose birth differs from every recorded birth for
+that numeric PID is treated as PID reuse and is never signaled. A same-birth survivor, missing
+history, changed group, or unreadable observation remains fail-closed with null remaining counts.
+Observed identities cannot enter the signal allowlist, and the strict cleanup-scope constructor
+rejects an observed PID outside its numeric tracked scope. `run_command` and the nested evaluation
+manager preserve the same comparison-only history.
+
+TDD first reproduced reused-PID false uncertainty, same-birth survival, missing history, nested
+propagation, and invalid-scope admission. Independent review of `00392cf` then found two additional
+fail-closed gaps: an unreadable current observation could be mistaken for reuse, and observation
+history validated tracked PID membership without tracked process-group membership. Source
+`1baca906768e5e4e1bd70be66cb374e4b4504f74`, tree
+`58e22e874e3fb3dd2d2a00c0f3225126c8987923`, checks unknown state before birth comparison,
+requires both PID and PGID scope, and excludes out-of-group observations from comparison history.
+
+Final local validation passed 90 focused tests twice, 263 related cleanup/evaluation/proof tests,
+and 254 safe auth/privacy tests. Ruff lint and changed-file format checks passed; BasedPyright
+reported 0 errors, 0 warnings, and 0 notes. Plugin validation, nine skill validators, the
+60-tool/294-operation catalog, the 34-case eval manifest, eight-path privacy, and diff checks
+passed. No install, model, production MCP, Saxo request, browser, network, or proof ran. Independent
+static re-review of the final source returned APPROVE with no findings.
+
+Documentation and Knowledge Base closeout updated the one existing active Project, Learning, and
+Session Log in place. Exact-title readback returned one row each at Content counts 59, 38, and 42,
+with exact type, unarchived state, Source, Summary, and final Content. No duplicate row or page-body
+edit was created. The branch remains local and unpushed; `e931ed3` remains the latest sealed result,
+and profiles remain 0/54.

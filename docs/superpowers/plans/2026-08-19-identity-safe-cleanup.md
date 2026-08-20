@@ -84,3 +84,36 @@ identity or negative model/MCP/Saxo/broker fact is promoted. Source `e931ed3`, t
 focused 224 twice, related 163, auth/privacy 253, Ruff/format, BasedPyright 0/0/0,
 plugin/static/catalog/eval, two-path privacy 0/0, and diff checks. Independent review returned
 APPROVE; it remains uninstalled and unsealed.
+
+Terminal diagnostic result: exact `e931ed3` subsequently passed install, verify-only, signed suite,
+local/static/privacy, 20/20 structural, SIM, and one capability-read gates. Its one sealed proof
+retained the durable nested sidecar as designed but still refused on cleanup coverage. The
+proof-child receipt has 11 and candidate-runner receipt 21 current observations, each from
+`historical_pid_check` after admission closed. Both authenticate
+`coverage_unknown/group_member/uncaptured_member` and null remaining counts. No evaluation summary
+survived, so model, MCP, Saxo, write, mutation, purchase, and disclaimer facts remain unknown.
+Complete later runtime cleanup, absent run-owned temporary state, and zero later task PIDs do not
+change the signed result. No retry or downstream activation ran; 0/54 remain active.
+
+PID-reuse completion rule: detection-only process history is stored separately from immutable
+birth-bound signal targets and cannot expand the signal set. A current process with a different
+birth from every recorded birth for the same numeric PID is PID reuse, not a surviving task
+process, and must not cause unknown cleanup or receive a signal. A same-birth survivor, missing
+history, group change, or observation failure remains unknown with nullable remaining counts.
+Observed identities must belong to the numeric tracked scope. Source `00392cf`, tree `3752237`,
+implements this rule through both `run_command` and nested evaluation and passes focused twice,
+related, safe auth/privacy, Ruff/format, BasedPyright, plugin/static/catalog/eval, privacy, and diff
+gates. It does not rewrite the sealed `e931ed3` result and remains pending independent static
+review before any exact install or proof.
+
+Review follow-up rule: PID reuse requires a reliable non-unknown current birth. Unknown or empty-
+birth observation stays fail-closed before any reuse comparison. Detection history must belong to
+both the tracked numeric PID and tracked numeric process group; an out-of-group observation is not
+retained as reuse evidence. Final source `1baca90`, tree `58e22e8`, implements these constraints and
+passes 90 focused tests twice, 263 related, 254 safe auth/privacy, Ruff/format, BasedPyright,
+plugin/static/catalog/eval, privacy, and diff gates. No install or proof ran; independent re-review
+returned APPROVE and the sealed `e931ed3` result remains unchanged.
+
+Documentation closeout updated and read back the one existing active Project, Learning, and Session
+Log at Content counts 59/38/42 without duplicate rows or page-body edits. The branch remains local
+and unpushed, and activation remains 0/54.

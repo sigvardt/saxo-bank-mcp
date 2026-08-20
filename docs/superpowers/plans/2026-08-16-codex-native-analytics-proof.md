@@ -387,3 +387,38 @@ focused 224 twice, related 163, auth/privacy 253, Ruff/changed-format, BasedPyri
 plugin/static/catalog/eval, two-path privacy 0/0, and diff checks. No install, model, production MCP,
 Saxo, browser, network, or proof ran. Independent review returned APPROVE, the sealed result remains
 unchanged, and 0/54 profiles are active.
+
+Terminal exact-candidate handoff: approved source `e931ed3`, tree `427d477`, passed retained-runtime
+install, verify-only, a signed 2,984/0/0/0 suite, Ruff/type/plugin/static/catalog/eval/privacy, the
+20/20 structural readback, local SIM status, and one read-only capability call. Its one sealed
+native proof exited 1 with no retry. The outer authenticated boundary is
+`proof_candidate_runner_cleanup_failed`; the inner verified-child reason is
+`proof_child_cleanup_failed`. SIM preflight passed with network and execution true at
+`agent_evaluation`, but no evaluation summary survived. Durable child/runner diagnostics retain
+11/21 current `historical_pid_check` observations at `admission_closed`, with
+`group_member/uncaptured_member` coverage unknown and nullable remaining counts. Model/MCP/Saxo and
+broker facts remain unknown. Runtime cleanup later completed and local task PIDs reached zero, but
+that cannot repair the signed refusal. Downstream proof, matrix, reconciliation, account equality,
+and activation did not run; 0/54 profiles remain active.
+
+Superseding local cleanup handoff: source `00392cf`, tree `3752237`, diagnoses the exact
+`e931ed3` cleanup refusal as numeric PID reuse after the original task processes ended. It records
+birth-bound observation history separately from immutable signal targets. Different-birth reuse
+does not count as a surviving task process and is never signaled; same-birth survivors, missing
+history, group changes, and unreadable evidence remain fail-closed. Strict cleanup scope validation
+rejects observed identities outside the numeric tracked scope, and both `run_command` and nested
+evaluation propagate the comparison-only history. Local 88-focused-twice, 263-related,
+254-auth/privacy, Ruff/format, type, plugin/static/catalog/eval, privacy, and diff gates pass. No
+install or proof ran. The sealed `e931ed3` failure and 0/54 activation remain unchanged pending
+independent static review.
+
+Review follow-up: independent review found that `00392cf` could dismiss an unreadable current
+observation as reuse and allowed comparison history whose PID was tracked but PGID was not. Final
+source `1baca90`, tree `58e22e8`, checks unknown state first, requires both tracked PID and PGID,
+and excludes out-of-group observations from comparison history. The final focused set is 90 tests
+twice; related 263, safe auth/privacy 254, and all static/privacy gates pass. No install or proof
+ran. Independent re-review returned APPROVE and 0/54 remains unchanged.
+
+Closeout readback: the one existing active Project, Learning, and Session Log were updated in place
+at Content counts 59/38/42 with no duplicate row or body edit. Source `1baca90` is approved, local,
+and unpushed; no exact install or proof has run for it.

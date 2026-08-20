@@ -2541,3 +2541,43 @@ or exempt a process, make unknown coverage complete, turn null counts into zero,
 model, MCP, Saxo, broker-write, mutation, purchase, or disclaimer-response facts. Final local gates
 passed without install, model, MCP, Saxo, browser, network, or proof activity. The sealed `1d213ff`
 result remains unchanged, activation remains 0/54, and independent review returned APPROVE.
+
+## Exact approved-candidate terminal boundary
+
+The exact `e931ed3` install, verify-only, signed 2,984-test suite, local/static/privacy gates,
+20/20 structural readback, SIM status, and single read-only capability call passed. The one sealed
+native proof nevertheless exited 1 without retry. Authenticated evidence proves passed SIM
+preflight, network activity, execution reaching `agent_evaluation`, and durable private cleanup
+diagnostics, but no evaluation summary survived.
+
+The proof-child and candidate-runner receipts retain 11 and 21 current observations respectively;
+both report `historical_pid_check`, `admission_closed`, and unknown coverage at the uncaptured group-
+member boundary with null remaining counts. Outer and inner reasons remain
+`proof_candidate_runner_cleanup_failed` and `proof_child_cleanup_failed`. Later zero task processes
+and complete run-owned cleanup do not rewrite those receipts. Model/MCP/Saxo and all broker safety
+facts remain unknown, downstream numerical/matrix/account gates did not run, and activation remains
+0/54.
+
+## PID-reuse-safe cleanup interpretation
+
+The exact `e931ed3` refusal remains authoritative, but its retained private observations now have a
+local root-cause explanation: numeric historical PIDs were reused by unrelated later processes
+after the original task processes ended. Source `00392cf`, tree `3752237`, preserves birth-bound
+observation history separately from immutable cleanup signal targets. Different-birth reuse is not
+a surviving task process and is never signaled; same-birth survival, absent history, group change,
+or unreadable evidence still remains unknown and fail-closed.
+
+Independent review found two additional fail-closed gaps in `00392cf`: unreadable current state
+could enter the reuse branch, and comparison history did not require tracked process-group
+membership. Final source `1baca90`, tree `58e22e8`, handles unknown state before birth comparison,
+requires both tracked PID and PGID, and excludes out-of-group observations from history.
+
+This correction improves cleanup truthfulness without relaxing safety or activating analytics
+profiles. Local focused, related, auth/privacy, lint, format, type, plugin, skill, catalog, eval,
+privacy, and diff gates passed. No new install or proof ran, the sealed `e931ed3` result is not
+relabeled, and activation remains 0/54. Independent static re-review returned APPROVE; any exact-
+candidate sequence remains separately gated.
+
+The existing Knowledge Base Project, Learning, and Session Log were updated and read back in place
+at Content counts 59/38/42 with no duplicates or page-body edits. The branch remains local and
+unpushed.
