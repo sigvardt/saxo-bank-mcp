@@ -87,7 +87,7 @@ def non_router_model_command(  # noqa: PLR0913
     harness: Harness,
     prompt: str,
     resolved_grants: tuple[str, ...],
-    plugin_root: Path,
+    work_root: Path,
     codex_home: Path | None,
     claude_mcp_config_path: Path | None = None,
     env: Mapping[str, str] | None = None,
@@ -97,7 +97,7 @@ def non_router_model_command(  # noqa: PLR0913
         case "codex":
             return codex_non_router_command(
                 prompt,
-                plugin_root=plugin_root,
+                work_root=work_root,
                 codex_home=codex_home,
                 env=path_env,
             )
@@ -116,7 +116,7 @@ def non_router_model_command(  # noqa: PLR0913
 def codex_non_router_command(
     prompt: str,
     *,
-    plugin_root: Path,
+    work_root: Path,
     codex_home: Path | None,
     env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
@@ -151,7 +151,7 @@ def codex_non_router_command(
         "--color",
         "never",
         "-C",
-        str(plugin_root),
+        str(work_root),
         "--json",
         prompt,
     )

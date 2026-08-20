@@ -586,6 +586,10 @@ class RootBoundProcessCleanupAdmission:
     def close(self) -> None:
         self._closed.set()
 
+    def root_pid_for_numeric_discovery(self) -> int | None:
+        """Return the numeric root only while the original process is still birth-bound."""
+        return self.process.pid if self._root_allows_admission() else None
+
     def capture_scope(self) -> ProcessCleanupScope:  # noqa: C901, PLR0911, PLR0912, PLR0915
         """Take two root-bracketed snapshots and admit only exact stable identities."""
         root_pid = self.process.pid
@@ -871,7 +875,7 @@ class RootBoundProcessCleanupAdmission:
     ) -> ProcessCleanupScope:
         try:
             pids, pgids, detected_coverage = _snapshot_tree_checked(
-                self.process.pid,
+                None,
                 self.root_pgid,
             )
         except (OSError, RuntimeError, ValueError):
@@ -1152,7 +1156,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             pgids = tuple(tracked_pgids)
         try:
             observed_pids, observed_pgids, observed_coverage = _snapshot_tree_checked(
-                root_pid,
+                admission.root_pid_for_numeric_discovery(),
                 pgid,
             )
         except (OSError, RuntimeError, ValueError):
@@ -1212,7 +1216,10 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 tracked_offending_observations,
             )
         try:
-            final_pids, final_pgids, final_coverage = _snapshot_tree_checked(root_pid, pgid)
+            final_pids, final_pgids, final_coverage = _snapshot_tree_checked(
+                (admission.root_pid_for_numeric_discovery() if admission is not None else None),
+                pgid,
+            )
         except (OSError, RuntimeError, ValueError):
             final_pids, final_pgids, final_coverage = (), (), "unknown"
         if final_coverage == "unknown":

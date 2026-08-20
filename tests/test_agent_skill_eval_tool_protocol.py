@@ -355,7 +355,7 @@ def test_non_router_commands_have_no_broad_grants(tmp_path: Path) -> None:
     mcp_config.write_text("{}", encoding="utf-8")
 
     # When: both non-router commands are built.
-    codex = codex_non_router_command("prompt", plugin_root=plugin, codex_home=codex_home)
+    codex = codex_non_router_command("prompt", work_root=plugin, codex_home=codex_home)
     claude = claude_non_router_command(
         "prompt",
         mcp_config_path=mcp_config,

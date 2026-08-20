@@ -21,6 +21,7 @@ REUSED_PID = 4242
 REUSED_PGID = 4343
 LEADER_REUSE_AFTER_READS = 2
 ROOT_BINDING_POLL_COUNT = 2
+ROOT_ADMISSION_POLL_COUNT = 5
 POST_AND_FINAL_SNAPSHOT_COUNT = 2
 EXPECTED_DEDUPED_OBSERVATION_COUNT = 2
 DUPLICATE_OCCURRENCE_COUNT = 2
@@ -1543,7 +1544,7 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
         tuple[int, ...],
         command_runner.CleanupCoverage,
     ]:
-        assert observed_root_pid == root_pid
+        assert observed_root_pid is None
         assert observed_pgid == root_pid
         if root_state == "original":
             return (root_pid,), (root_pid,), "complete"
@@ -1627,6 +1628,120 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
     assert caught.value.stderr == "process_cleanup_unknown"
     assert caught.value.remaining_process_count is None
     assert caught.value.remaining_process_group_count is None
+
+
+def test_run_command_post_exit_root_pid_reuse_does_not_expand_unrelated_tree(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A re-used numeric root PID cannot add another process group after exit."""
+    root_pid = REUSED_PID
+    unrelated_pid = root_pid + 100
+    unrelated_pgid = unrelated_pid
+    root_state = "original"
+    snapshot_root_args: list[int | None] = []
+
+    class ExitingProcess:
+        pid = root_pid
+        returncode: int | None = None
+        poll_count = 0
+
+        def poll(self) -> int | None:
+            nonlocal root_state
+            self.poll_count += 1
+            if self.poll_count <= ROOT_ADMISSION_POLL_COUNT:
+                return None
+            root_state = "exited"
+            self.returncode = 0
+            return 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            del timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == root_pid:
+            if root_state == "exited":
+                return None
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=root_pid,
+                birth_identity="root-birth",
+                state="running",
+            )
+        if pid == unrelated_pid:
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=unrelated_pgid,
+                birth_identity="unrelated-birth",
+                state="running",
+            )
+        return None
+
+    def snapshot(
+        observed_root_pid: int | None,
+        observed_pgid: int | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], command_runner.CleanupCoverage]:
+        assert observed_pgid == root_pid
+        snapshot_root_args.append(observed_root_pid)
+        if root_state == "original":
+            return (root_pid,), (root_pid,), "complete"
+        if observed_root_pid is None:
+            return (), (root_pid,), "complete"
+        return (root_pid, unrelated_pid), (root_pid, unrelated_pgid), "complete"
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ExitingProcess:
+        return ExitingProcess()
+
+    def root_group_id(_pid: int) -> int:
+        return root_pid
+
+    def empty_group(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        return (), True
+
+    def no_sleep(_seconds: float) -> None:
+        return
+
+    monkeypatch.setattr(
+        command_runner.subprocess,
+        "Popen",
+        fake_popen,
+    )
+    monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", snapshot)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        empty_group,
+    )
+    monkeypatch.setattr(command_runner.time, "sleep", no_sleep)
+
+    result = command_runner.run_command(
+        "post_exit_unrelated_tree",
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        cwd=tmp_path,
+        env=_env(tmp_path),
+        timeout_seconds=5,
+    )
+
+    assert result.receipt.exit_code == 0
+    assert unrelated_pid not in result.receipt.argv
+    assert snapshot_root_args[-POST_AND_FINAL_SNAPSHOT_COUNT:] == [None, None]
 
 
 @pytest.mark.parametrize(
@@ -1743,7 +1858,7 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         command_runner.CleanupCoverage,
     ]:
         nonlocal child_group_moved, second_scope_taken
-        assert observed_root_pid == root_pid
+        assert observed_root_pid in {None, root_pid}
         assert observed_pgid == root_pid
         if child_observed:
             second_scope_taken = True
@@ -2577,7 +2692,7 @@ def test_run_command_binds_post_exit_and_final_snapshot_failures(  # noqa: C901
         observed_root_pgid: int | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], command_runner.CleanupCoverage]:
         nonlocal snapshot_calls
-        assert observed_root_pid == root_pid
+        assert observed_root_pid is None
         assert observed_root_pgid == root_pid
         snapshot_calls += 1
         return (

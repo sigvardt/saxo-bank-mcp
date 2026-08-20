@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
@@ -87,36 +88,61 @@ def _execute_non_router_case(  # noqa: PLR0913, PLR0911
     env: dict[str, str],
     manager: EvalProcessManager,
 ) -> EvalRunRecord:
-    plugin_cwd = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
+    plugin_root = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
     # Harden PATH/CLI absolute resolution once per case so Node shebang CLIs and
     # bare-name fallbacks do not raise FileNotFoundError mid dual-harness run.
     launch_env = enrich_eval_cli_env(env)
-    if not plugin_cwd.is_dir():
+    if not plugin_root.is_dir():
         return _failed_record(case, harness, grants, "cwd_not_found")
-    command = _model_command(case, harness, grants, roots, env=launch_env)
+    temp_parent = Path(launch_env.get("TMPDIR") or launch_env.get("HOME") or ".").resolve()
+    try:
+        work_root = Path(
+            tempfile.mkdtemp(
+                prefix=f"agent-eval-{harness}-{case.id}-",
+                dir=temp_parent,
+            ),
+        ).resolve()
+        work_root.chmod(0o700)
+    except OSError:
+        return _failed_record(case, harness, grants, "cwd_not_found")
+    command = _model_command(
+        case,
+        harness,
+        grants,
+        roots,
+        work_root=work_root,
+        env=launch_env,
+    )
     try:
         result = manager.run(
             command,
-            cwd=plugin_cwd,
+            cwd=work_root,
             env=launch_env,
             timeout_seconds=case.timeout_seconds,
         )
     except FileNotFoundError as first_exc:
         # Process never started: one retry after re-enriching CLI PATH and bins.
         # Zero MCP/Saxo calls are guaranteed because Popen never launched.
-        if _fnfe_is_cwd(first_exc, plugin_cwd):
+        if _fnfe_is_cwd(first_exc, work_root):
             return _failed_record(case, harness, grants, "cwd_not_found")
         try:
             retry_env = enrich_eval_cli_env(launch_env)
-            retry_command = _model_command(case, harness, grants, roots, env=retry_env)
+            retry_command = _model_command(
+                case,
+                harness,
+                grants,
+                roots,
+                work_root=work_root,
+                env=retry_env,
+            )
             result = manager.run(
                 retry_command,
-                cwd=plugin_cwd,
+                cwd=work_root,
                 env=retry_env,
                 timeout_seconds=case.timeout_seconds,
             )
         except FileNotFoundError as retry_exc:
-            if _fnfe_is_cwd(retry_exc, plugin_cwd):
+            if _fnfe_is_cwd(retry_exc, work_root):
                 return _failed_record(case, harness, grants, "cwd_not_found")
             return _failed_record(
                 case,
@@ -154,12 +180,13 @@ def _fnfe_is_cwd(exc: FileNotFoundError, cwd: Path) -> bool:
         return str(filename) == str(cwd)
 
 
-def _model_command(
+def _model_command(  # noqa: PLR0913
     case: SkillEvalCase,
     harness: Harness,
     grants: tuple[str, ...],
     roots: HarnessRoots,
     *,
+    work_root: Path,
     env: dict[str, str],
 ) -> tuple[str, ...]:
     plugin_root = roots.codex_plugin_root if harness == "codex" else roots.claude_plugin_root
@@ -175,7 +202,7 @@ def _model_command(
         harness=harness,
         prompt=case.harness_prompts[harness],
         resolved_grants=grants,
-        plugin_root=plugin_root,
+        work_root=work_root,
         codex_home=roots.codex_home,
         claude_mcp_config_path=claude_mcp_config_path,
         env=env,

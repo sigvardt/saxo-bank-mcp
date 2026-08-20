@@ -1742,8 +1742,10 @@ def test_non_router_success_path_with_real_zero_returncode(
         _grants: tuple[str, ...],
         _roots: HarnessRoots,
         *,
+        work_root: Path,
         env: dict[str, str],
     ) -> tuple[str, ...]:
+        assert work_root.parent == tmp_path / "tmp"
         _ = env
         return ("/bin/cat", str(out_file))
 

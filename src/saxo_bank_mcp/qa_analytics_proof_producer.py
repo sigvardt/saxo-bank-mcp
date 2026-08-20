@@ -1507,7 +1507,7 @@ def _validate_installed_suite_coverage(evidence: InstalledProofSuiteEvidence) ->
         raise ProofProducerError("installed_artifact_contract_receipts_missing")
 
 
-def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
+def _run_installed_agent_evaluation(  # noqa: C901, PLR0912, PLR0915
     *,
     candidate_commit: str,
     installed_cache_sha256: str,
@@ -1521,13 +1521,13 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
         *,
         command: tuple[str, ...],
         report_path: Path,
-        cache_root: Path,
+        expected_cwd: Path,
     ) -> tuple[SkillScenarioEvidenceReceipt, ...]:
         receipt = command_result.receipt
         if (
             receipt.name != _AGENT_EVAL_COMMAND_NAME
             or receipt.argv != command
-            or Path(receipt.cwd).resolve() != cache_root
+            or Path(receipt.cwd).resolve() != expected_cwd
             or receipt.pid is None
             or receipt.pgid is None
             or receipt.exit_code != 0
@@ -1732,11 +1732,13 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
         env = dict(os.environ)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["UV_OFFLINE"] = "1"
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            env[name] = str(execution_root)
         try:
             result = run_command(
                 _AGENT_EVAL_COMMAND_NAME,
                 command,
-                cwd=codex_cache_root,
+                cwd=execution_root,
                 env=env,
                 timeout_seconds=7200,
             )
@@ -1762,7 +1764,7 @@ def _run_installed_agent_evaluation(  # noqa: C901, PLR0915
             result,
             command=command,
             report_path=report_path,
-            cache_root=codex_cache_root,
+            expected_cwd=execution_root,
         )
 
 
@@ -2099,11 +2101,10 @@ def _codex_native_agent_evaluation_command(
     report_path: Path,
 ) -> tuple[str, ...]:
     return (
-        "uv",
-        "run",
-        "--offline",
-        "python",
-        "scripts/run_dual_harness_skill_evals.py",
+        sys.executable,
+        "-I",
+        "-B",
+        str(codex_cache_root / "scripts/run_dual_harness_skill_evals.py"),
         "--harness",
         "codex",
         "--harness-policy",
@@ -2111,7 +2112,7 @@ def _codex_native_agent_evaluation_command(
         "--tag",
         "codex-native-proof",
         "--case-root",
-        "evals",
+        str(codex_cache_root / "evals"),
         "--codex-plugin-root",
         str(codex_cache_root),
         "--codex-home",
@@ -2140,15 +2141,14 @@ def _agent_evaluation_command(  # noqa: PLR0913
     report_path: Path,
 ) -> tuple[str, ...]:
     return (
-        "uv",
-        "run",
-        "--offline",
-        "python",
-        "scripts/run_dual_harness_skill_evals.py",
+        sys.executable,
+        "-I",
+        "-B",
+        str(codex_cache_root / "scripts/run_dual_harness_skill_evals.py"),
         "--harness",
         "both",
         "--case-root",
-        "evals",
+        str(codex_cache_root / "evals"),
         "--codex-plugin-root",
         str(codex_cache_root),
         "--claude-plugin-root",
