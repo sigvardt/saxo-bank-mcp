@@ -403,6 +403,218 @@ def test_numeric_pid_without_birth_history_remains_fail_closed(
     assert snapshot.offending_observations[0].expected_birth_identity_sha256 is None
 
 
+def test_unobserved_pid_reused_outside_discovery_group_is_not_cleanup_residue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery-time group binding proves later cross-group numeric PID reuse."""
+    discovery_pgid = REUSED_PGID
+    replacement_pgid = discovery_pgid + 1
+    replacement = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=replacement_pgid,
+        birth_identity="unrelated-replacement-birth",
+        state="running",
+    )
+
+    def replacement_observation(_pid: int) -> command_runner.ProcessObservation:
+        return replacement
+
+    monkeypatch.setattr(
+        command_runner,
+        "read_process_observation",
+        replacement_observation,
+    )
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(discovery_pgid,),
+        tracked_pid_groups=((REUSED_PID, discovery_pgid),),
+    )
+
+    assert snapshot.cleanup_status == "complete"
+    assert snapshot.remaining_process_count == 0
+    assert snapshot.remaining_process_group_count == 0
+    assert snapshot.offending_observations == ()
+
+
+def test_unobserved_pid_still_in_discovery_group_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-group live PID without a birth identity remains genuine uncertainty."""
+    current = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="unbound-current-birth",
+        state="running",
+    )
+
+    def current_observation(_pid: int) -> command_runner.ProcessObservation:
+        return current
+
+    monkeypatch.setattr(
+        command_runner,
+        "read_process_observation",
+        current_observation,
+    )
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(REUSED_PGID,),
+        tracked_pid_groups=((REUSED_PID, REUSED_PGID),),
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "uncaptured_member"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+    assert snapshot.offending_observations[0].expected_pgid == REUSED_PGID
+
+
+def test_checked_tree_snapshot_retains_each_discovery_time_pid_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_pid = 81_000
+    child_pid = 81_001
+    root_pgid = root_pid
+    child_pgid = child_pid
+
+    monkeypatch.setattr(
+        command_runner,
+        "_process_table_checked",
+        lambda: (
+            (
+                (root_pid, 1, root_pgid),
+                (child_pid, root_pid, child_pgid),
+            ),
+            True,
+        ),
+    )
+
+    pids, pgids, coverage, pid_groups = command_runner._snapshot_tree_checked(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        root_pid,
+        root_pgid,
+    )
+
+    assert pids == (root_pid, child_pid)
+    assert pgids == (root_pgid, child_pgid)
+    assert coverage == "complete"
+    assert pid_groups == (
+        (root_pid, root_pgid),
+        (child_pid, child_pgid),
+    )
+
+
+def test_root_bound_scope_retains_group_for_child_that_vanishes_before_birth_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_pid = 82_000
+    child_pid = 82_001
+    child_pgid = child_pid
+    root_identity = command_runner.ProcessCleanupIdentity(
+        pid=root_pid,
+        pgid=root_pid,
+        birth_identity="root-birth",
+        initial_state="running",
+    )
+
+    class ActiveProcess:
+        pid = root_pid
+
+        def poll(self) -> None:
+            return None
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == root_pid:
+            return command_runner.ProcessObservation(
+                pid=root_pid,
+                pgid=root_pid,
+                birth_identity="root-birth",
+                state="running",
+            )
+        assert pid == child_pid
+        return None
+
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner,
+        "_process_table_checked",
+        lambda: (
+            (
+                (root_pid, 1, root_pid),
+                (child_pid, root_pid, child_pgid),
+            ),
+            True,
+        ),
+    )
+
+    admission = command_runner.RootBoundProcessCleanupAdmission(
+        process=ActiveProcess(),  # type: ignore[arg-type]
+        root_pgid=root_pid,
+        root_identity=root_identity,
+    )
+    scope = admission.capture_scope()
+
+    assert scope.coverage_status == "complete"
+    assert scope.identities == (root_identity,)
+    assert scope.tracked_pid_groups == (
+        (root_pid, root_pid),
+        (child_pid, child_pgid),
+    )
+
+
+def test_closed_root_detection_does_not_create_trusted_pid_group_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_pid = 82_050
+    replacement_pid = root_pid + 1
+    replacement_pgid = root_pid + 2
+    root_identity = command_runner.ProcessCleanupIdentity(
+        pid=root_pid,
+        pgid=root_pid,
+        birth_identity="root-birth",
+        initial_state="running",
+    )
+
+    class ExitedProcess:
+        pid = root_pid
+
+        def poll(self) -> int:
+            return 0
+
+    def snapshot(
+        observed_root_pid: int | None,
+        observed_pgid: int | None,
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+        tuple[tuple[int, int], ...],
+    ]:
+        assert observed_root_pid is None
+        assert observed_pgid == root_pid
+        return (
+            (replacement_pid,),
+            (root_pid, replacement_pgid),
+            "complete",
+            ((replacement_pid, replacement_pgid),),
+        )
+
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", snapshot)
+
+    scope = command_runner.RootBoundProcessCleanupAdmission(
+        process=ExitedProcess(),  # type: ignore[arg-type]
+        root_pgid=root_pid,
+        root_identity=root_identity,
+    ).capture_scope()
+
+    assert replacement_pid in scope.tracked_pids
+    assert replacement_pgid in scope.tracked_pgids
+    assert scope.tracked_pid_groups == ((root_pid, root_pid),)
+
+
 def test_cleanup_scope_keeps_detection_only_identities_separate_from_signal_targets() -> None:
     historical = command_runner.ProcessCleanupIdentity(
         pid=REUSED_PID,
@@ -1574,6 +1786,7 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         observed_identities: tuple[command_runner.ProcessCleanupIdentity, ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
@@ -1584,6 +1797,7 @@ def test_run_command_closed_root_gate_never_admits_replacement(  # noqa: C901, P
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            tracked_pid_groups=tracked_pid_groups,
             observed_identities=observed_identities,
             coverage_status=coverage_status,
             coverage_stage=coverage_stage,
@@ -1742,6 +1956,139 @@ def test_run_command_post_exit_root_pid_reuse_does_not_expand_unrelated_tree(  #
     assert result.receipt.exit_code == 0
     assert unrelated_pid not in result.receipt.argv
     assert snapshot_root_args[-POST_AND_FINAL_SNAPSHOT_COUNT:] == [None, None]
+
+
+def test_run_command_ignores_cross_group_reuse_of_unobserved_discovered_child(  # noqa: C901
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vanished child reused in another group is not task cleanup residue."""
+    root_pid = 82_100
+    vanished_child_pid = root_pid + 1
+    vanished_child_pgid = root_pid + 10
+    replacement_pgid = root_pid + 20
+    root_running = True
+    signals: list[tuple[int, signal.Signals]] = []
+
+    class ExitingProcess:
+        pid = root_pid
+        returncode: int | None = None
+        poll_count = 0
+
+        def poll(self) -> int | None:
+            nonlocal root_running
+            self.poll_count += 1
+            if self.poll_count <= ROOT_ADMISSION_POLL_COUNT:
+                return None
+            root_running = False
+            self.returncode = 0
+            return 0
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            del timeout
+            return "", ""
+
+    class PassiveWatcher:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+        def is_alive(self) -> bool:
+            return False
+
+    def observation(pid: int) -> command_runner.ProcessObservation | None:
+        if pid == root_pid:
+            if not root_running:
+                return None
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=root_pid,
+                birth_identity="root-birth",
+                state="running",
+            )
+        if pid == vanished_child_pid:
+            return command_runner.ProcessObservation(
+                pid=pid,
+                pgid=replacement_pgid,
+                birth_identity="unrelated-replacement-birth",
+                state="running",
+            )
+        return None
+
+    def capture_scope(
+        admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        assert admission.root_identity is not None
+        return command_runner.ProcessCleanupScope(
+            identities=(admission.root_identity,),
+            tracked_pids=(root_pid, vanished_child_pid),
+            tracked_pgids=(root_pid, vanished_child_pgid),
+            coverage_status="complete",
+            tracked_pid_groups=(
+                (root_pid, root_pid),
+                (vanished_child_pid, vanished_child_pgid),
+            ),
+            observed_identities=(admission.root_identity,),
+        )
+
+    def snapshot(
+        observed_root_pid: int | None,
+        observed_pgid: int | None,
+    ) -> tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        command_runner.CleanupCoverage,
+        tuple[tuple[int, int], ...],
+    ]:
+        assert observed_root_pid is None
+        assert observed_pgid == root_pid
+        return (), (root_pid, vanished_child_pgid), "complete", ()
+
+    def empty_group(_pgid: int) -> tuple[tuple[int, ...], bool]:
+        return (), True
+
+    def fake_popen(*_args: object, **_kwargs: object) -> ExitingProcess:
+        return ExitingProcess()
+
+    def record_signal(pid: int, sig: signal.Signals) -> None:
+        signals.append((pid, sig))
+
+    def root_group_id(_pid: int) -> int:
+        return root_pid
+
+    monkeypatch.setattr(command_runner.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(command_runner.os, "getpgid", root_group_id)
+    monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
+    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        capture_scope,
+    )
+    monkeypatch.setattr(command_runner, "_snapshot_tree_checked", snapshot)
+    monkeypatch.setattr(
+        command_runner,
+        "process_group_members_with_coverage",
+        empty_group,
+    )
+    monkeypatch.setattr(command_runner, "_signal_pid", record_signal)
+
+    result = command_runner.run_command(
+        "cross_group_child_pid_reuse",
+        (sys.executable, "-c", "raise SystemExit(0)"),
+        cwd=tmp_path,
+        env=_env(tmp_path),
+        timeout_seconds=5,
+    )
+
+    assert result.receipt.exit_code == 0
+    assert result.cleanup_identity_evidence_status == "no-target-observed"
+    assert signals == []
 
 
 @pytest.mark.parametrize(
@@ -1905,6 +2252,7 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         observed_identities: tuple[command_runner.ProcessCleanupIdentity, ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
@@ -1916,6 +2264,7 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            tracked_pid_groups=tracked_pid_groups,
             observed_identities=observed_identities,
             coverage_status=coverage_status,
             coverage_stage=coverage_stage,
@@ -1998,6 +2347,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         observed_identities: tuple[command_runner.ProcessCleanupIdentity, ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
@@ -2012,6 +2362,7 @@ def test_timeout_cleans_once_before_terminal_observation_write_and_count(
                 identities,
                 tracked_pids=tracked_pids,
                 tracked_pgids=tracked_pgids,
+                tracked_pid_groups=tracked_pid_groups,
                 observed_identities=observed_identities,
                 coverage_status=coverage_status,
                 coverage_stage=coverage_stage,
@@ -2103,6 +2454,7 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         observed_identities: tuple[command_runner.ProcessCleanupIdentity, ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
@@ -2115,6 +2467,7 @@ def test_post_spawn_oserror_cleans_once_and_observes_terminal_survivor_state(
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            tracked_pid_groups=tracked_pid_groups,
             observed_identities=observed_identities,
             coverage_status=coverage_status,
             coverage_stage=coverage_stage,
@@ -2327,6 +2680,7 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         observed_identities: tuple[command_runner.ProcessCleanupIdentity, ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
@@ -2337,6 +2691,7 @@ def test_run_command_discards_late_watcher_scope_and_refuses_false_zero(  # noqa
             identities,
             tracked_pids=tracked_pids,
             tracked_pgids=tracked_pgids,
+            tracked_pid_groups=tracked_pid_groups,
             observed_identities=observed_identities,
             coverage_status=coverage_status,
             coverage_stage=coverage_stage,
@@ -2773,15 +3128,16 @@ def test_run_command_keeps_recovered_watcher_process_table_failure_unknown(
         tuple[int, ...],
         tuple[int, ...],
         command_runner.CleanupCoverage,
+        tuple[tuple[int, int], ...],
     ]:
         nonlocal injected
-        pids, pgids, coverage = original_checked(root_pid, root_pgid)
+        pids, pgids, coverage, pid_groups = original_checked(root_pid, root_pgid)
         if threading.current_thread().name.startswith("cmd-watch-"):
             with injection_lock:
                 if not injected:
                     injected = True
-                    return pids, pgids, "unknown"
-        return pids, pgids, coverage
+                    return pids, pgids, "unknown", pid_groups
+        return pids, pgids, coverage, pid_groups
 
     monkeypatch.setattr(
         command_runner,
@@ -3623,16 +3979,17 @@ def test_run_command_binds_scope_observations_only_into_private_unknown_receipt(
             offending_observations=(offender,),
         )
 
-    def unknown_cleanup(
+    def unknown_cleanup(  # noqa: PLR0913
         _identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         *,
         tracked_pids: tuple[int, ...],
         tracked_pgids: tuple[int, ...],
+        tracked_pid_groups: tuple[tuple[int, int], ...] = (),
         coverage_status: command_runner.CleanupCoverage = "complete",
         coverage_stage: command_runner.CleanupCoverageStage | None = None,
         coverage_subreason: command_runner.CleanupCoverageSubreason | None = None,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
-        del tracked_pids, tracked_pgids
+        del tracked_pids, tracked_pgids, tracked_pid_groups
         assert coverage_status == "unknown"
         return command_runner.ProcessCleanupTerminalSnapshot(
             targets=(),
