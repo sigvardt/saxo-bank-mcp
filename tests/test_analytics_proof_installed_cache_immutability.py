@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import subprocess
 import sys
 from collections.abc import Mapping
 from importlib import import_module
@@ -156,10 +158,46 @@ def test_installed_proof_suite_routes_pytest_and_hypothesis_state_outside_cache(
     environment = cast("dict[str, str]", observed["env"])
     hypothesis_root = Path(environment["HYPOTHESIS_STORAGE_DIRECTORY"])
     assert {"-p", "no:cacheprovider"} <= set(command)
+    assert environment["UV_NO_SYNC"] == "1"
+    assert environment["UV_NO_BUILD_ISOLATION"] == "1"
     assert hypothesis_root != cache_root
     assert not hypothesis_root.is_relative_to(cache_root)
     assert not (cache_root / ".pytest_cache").exists()
     assert not (cache_root / ".hypothesis").exists()
+
+
+def test_offline_wheel_build_uses_bound_backend_without_shared_cache(
+    tmp_path: Path,
+) -> None:
+    uv_path = shutil.which("uv")
+    assert uv_path is not None
+    isolated_cache = tmp_path / "uv-cache"
+    project_environment = Path(sys.prefix).resolve()
+    result = subprocess.run(
+        (
+            uv_path,
+            "build",
+            "--offline",
+            "--wheel",
+            "--out-dir",
+            str(tmp_path / "wheel"),
+        ),
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "UV_CACHE_DIR": str(isolated_cache),
+            "UV_NO_BUILD_ISOLATION": "1",
+            "UV_NO_SYNC": "1",
+            "UV_OFFLINE": "1",
+            "UV_PROJECT_ENVIRONMENT": str(project_environment),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert tuple((tmp_path / "wheel").glob("saxo_bank_mcp-*.whl"))
 
 
 def test_model_case_uses_private_work_root_not_installed_plugin(

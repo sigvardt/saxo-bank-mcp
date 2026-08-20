@@ -49,6 +49,7 @@ packages = ["src/saxo_bank_mcp"]
 [dependency-groups]
 dev = [
   "basedpyright>=1.34.0",
+  "hatchling==1.32.0",
   "hypothesis>=6.0.0,<7.0",
   "pytest>=9.0.2",
   "ruff>=0.14.8",

@@ -1295,7 +1295,9 @@ def _run_installed_offline_proof_suite(
             env.update(
                 {
                     "UV_CACHE_DIR": str(native_uv_cache),
+                    "UV_NO_BUILD_ISOLATION": "1",
                     "UV_NO_MODIFY_PATH": "1",
+                    "UV_NO_SYNC": "1",
                     "UV_PROJECT_ENVIRONMENT": str(native_project_environment),
                     "UV_PYTHON_INSTALL_DIR": str(native_uv_python),
                 },
