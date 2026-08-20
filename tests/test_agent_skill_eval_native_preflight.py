@@ -26,7 +26,11 @@ from saxo_bank_mcp.agent_skill_eval_process import EvalProcessManager
 from saxo_bank_mcp.agent_skill_eval_runner import EvalRunOptions
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_probe import probe_root_stdio
-from saxo_bank_mcp.agent_skill_matrix_env import OWNER_FILE_MODE, MatrixIsolatedRuntime
+from saxo_bank_mcp.agent_skill_matrix_env import (
+    OWNER_FILE_MODE,
+    MatrixEnvError,
+    MatrixIsolatedRuntime,
+)
 from saxo_bank_mcp.server_eval_tool_filter import derive_eval_tool_filter_env
 
 ROOT: Final = Path(__file__).resolve().parents[1]
@@ -88,6 +92,45 @@ def _fake_codex(tmp_path: Path) -> Path:
     )
     executable.chmod(0o700)
     return executable
+
+
+def test_runner_registers_supplied_codex_plugin_without_retained_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    options = EvalRunOptions(
+        harness="codex",
+        case_id=None,
+        tag=None,
+        environment="LOCAL",
+        case_root=CASE_ROOT,
+        codex_plugin_root=ROOT,
+        claude_plugin_root=ROOT,
+        codex_home=None,
+        claude_home=None,
+        out=tmp_path / "eval.json",
+        dry_run=False,
+        nonzero_on_skip=True,
+        credential_mode="ephemeral-owner-only-copy",
+        harness_policy="codex_native_v1",
+    )
+
+    def capture_prepare(_evidence_root: Path, **kwargs: object) -> MatrixIsolatedRuntime:
+        observed.update(kwargs)
+        raise MatrixEnvError("sentinel_stop")
+
+    monkeypatch.setattr(eval_runner, "prepare_eval_isolated_runtime", capture_prepare)
+
+    outcome = eval_runner._execute_with_ephemeral_runtime(  # noqa: SLF001
+        options,
+        cases=(),
+        roots=HarnessRoots(ROOT, ROOT, None, None),
+        binding=None,
+    )
+
+    assert outcome.error == "sentinel_stop"
+    assert observed["retained_codex_plugin_root"] == ROOT
 
 
 def _use_real_plugin_list_subprocess(

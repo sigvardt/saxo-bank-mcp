@@ -416,9 +416,7 @@ def _execute_with_ephemeral_runtime(
             source_claude_home=options.source_claude_home,
             retained_codex_home=options.codex_home,
             retained_claude_home=options.claude_home,
-            retained_codex_plugin_root=(
-                options.codex_plugin_root if options.codex_home is not None else None
-            ),
+            retained_codex_plugin_root=options.codex_plugin_root,
             harness_policy=options.harness_policy,
         )
     except MatrixEnvError as exc:

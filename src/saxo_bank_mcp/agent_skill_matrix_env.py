@@ -16,7 +16,11 @@ from saxo_bank_mcp.agent_skill_install_env import (
     build_isolated_env,
     write_bearing_env_keys,
 )
-from saxo_bank_mcp.agent_skill_install_paths import ensure_owner_only
+from saxo_bank_mcp.agent_skill_install_paths import (
+    ensure_owner_only,
+    export_publishable_tree,
+    publishable_tracked_files,
+)
 from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config_credentials import DEFAULT_SIM_CREDENTIAL_FILE
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
@@ -55,8 +59,16 @@ _CLAUDE_PLUGIN_SEED_RELATIVES: Final = (
 # Exact basenames only — never substring-match plugin package names.
 _EXCLUDED_SEED_NAMES: Final = frozenset(
     {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
         "history",
         "history.jsonl",
+        "node_modules",
         "transcripts",
         "transcript",
         "sessions",
@@ -360,7 +372,10 @@ def _register_codex_native_plugin(
 
     source = runtime.codex_home / "marketplace-source"
     try:
-        _copy_owner_only_tree(retained_plugin_root.expanduser().resolve(strict=True), source)
+        _copy_plugin_source_tree(
+            retained_plugin_root.expanduser().resolve(strict=True),
+            source,
+        )
         marketplace, plugin, version = codex_plugin_identity(source)
         if marketplace != MARKETPLACE_NAME or plugin != PLUGIN_NAME:
             raise MatrixEnvError("codex_plugin_registration_invalid")  # noqa: TRY301
@@ -868,12 +883,22 @@ def _seed_codex_plugin_tree(
         if plugin_resolved.is_relative_to(home):
             relative = plugin_resolved.relative_to(home)
             target = runtime.codex_home / relative
-            _copy_owner_only_tree(plugin_resolved, target)
+            _copy_plugin_source_tree(plugin_resolved, target)
             return target
     # Fallback placement preserves plugins/cache layout without absolute path leakage.
     target = runtime.codex_home / "plugins" / "cache" / "retained" / plugin_resolved.name
-    _copy_owner_only_tree(plugin_resolved, target)
+    _copy_plugin_source_tree(plugin_resolved, target)
     return target
+
+
+def _copy_plugin_source_tree(source: Path, target: Path) -> None:
+    """Copy a checkout's publishable files, or a retained cache's safe tree."""
+    publishable = publishable_tracked_files(source)
+    if publishable:
+        export_publishable_tree(source, target, publishable=publishable)
+        _tighten_owner_only_tree(target)
+        return
+    _copy_owner_only_tree(source, target)
 
 
 def _copy_owner_only_tree(source: Path, target: Path) -> None:

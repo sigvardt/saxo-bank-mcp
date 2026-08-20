@@ -94,19 +94,22 @@ UNSAFE_PATH_PARTS_LOWER: Final = frozenset(part.lower() for part in UNSAFE_PATH_
 def publishable_tracked_files(source: Path) -> tuple[str, ...]:
     raw = git_output(source, "ls-files", "-z") or ""
     selected = [
-        relative
-        for relative in raw.split("\0")
-        if relative and _is_publishable_relative(relative)
+        relative for relative in raw.split("\0") if relative and _is_publishable_relative(relative)
     ]
     return tuple(sorted(selected))
 
 
-def export_publishable_tree(source: Path, destination: Path) -> tuple[str, ...]:
+def export_publishable_tree(
+    source: Path,
+    destination: Path,
+    *,
+    publishable: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
     destination.chmod(0o700)
-    relatives = publishable_tracked_files(source)
+    relatives = publishable if publishable is not None else publishable_tracked_files(source)
     for relative in relatives:
         src = source / relative
         _reject_non_regular_source(src, relative)

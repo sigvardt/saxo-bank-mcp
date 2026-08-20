@@ -230,6 +230,15 @@ def _seed_retained_plugin_homes(tmp_path: Path) -> tuple[Path, Path, Path]:
     return codex, claude, plugin_root
 
 
+def _write_ignored_plugin_checkout_noise(plugin_root: Path) -> None:
+    dev_venv = plugin_root / ".venv" / "bin"
+    dev_venv.mkdir(parents=True)
+    (dev_venv / "python").symlink_to("/usr/bin/python3")
+    git_metadata = plugin_root / ".git"
+    git_metadata.mkdir()
+    (git_metadata / "config").write_text("private checkout metadata\n", encoding="utf-8")
+
+
 def _seed_cli_sources(tmp_path: Path) -> tuple[Path, Path]:
     """Compat helper: auth sources only (plugin state is seeded separately)."""
     return _seed_cli_auth_sources(tmp_path)
@@ -378,6 +387,7 @@ def test_prepare_eval_runtime_strips_parent_secrets_and_is_owner_only(
     _write_auth_sources(tmp_path, monkeypatch)
     codex_src, claude_src = _seed_cli_auth_sources(tmp_path)
     retained_codex, retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    _write_ignored_plugin_checkout_noise(plugin_root)
     monkeypatch.setenv("HOME", str(tmp_path / "evil-home"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "evil-codex"))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-openai")
@@ -426,6 +436,8 @@ def test_prepare_eval_runtime_strips_parent_secrets_and_is_owner_only(
             plugin_root / "skills" / "saxo-bank" / "SKILL.md"
         ).read_bytes()
         assert not (seeded_plugin / "history.jsonl").exists()
+        assert not (seeded_plugin / ".venv").exists()
+        assert not (seeded_plugin / ".git").exists()
         # File-auth only: never seed global settings, hooks, MCP, project, or history.
         _assert_runtime_excludes_claude_global_canaries(runtime.run_root)
         assert str(codex_src) not in json.dumps({"env": runtime.env})
@@ -757,6 +769,7 @@ def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(  
     failure: OSError,
 ) -> None:
     """A production runner cannot publish complete cleanup or zero calls after Popen."""
+    publishable = matrix_env.publishable_tracked_files(ROOT)
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     _write_auth_sources(tmp_path, monkeypatch)
     codex_src, claude_src = _seed_cli_sources(tmp_path)
@@ -778,6 +791,15 @@ def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(  
         return FakeProcess()
 
     monkeypatch.setattr(eval_process.subprocess, "Popen", fake_popen)
+
+    def precomputed_publishable(_source: Path) -> tuple[str, ...]:
+        return publishable
+
+    monkeypatch.setattr(
+        matrix_env,
+        "publishable_tracked_files",
+        precomputed_publishable,
+    )
 
     def fail_getpgid(_pid: int) -> int:
         raise failure
