@@ -1262,6 +1262,8 @@ def _run_installed_offline_proof_suite(
     with tempfile.TemporaryDirectory(prefix="analytics-proof-suite-", dir=temp_parent) as raw:
         runtime_root = Path(raw)
         runtime_root.chmod(0o700)
+        hypothesis_storage = runtime_root / "hypothesis"
+        hypothesis_storage.mkdir(mode=0o700)
         native_uv_cache = runtime_root / "uv-cache"
         native_uv_python = runtime_root / "uv-python"
         if native_project_environment is not None:
@@ -1272,12 +1274,15 @@ def _run_installed_offline_proof_suite(
             str(launcher),
             *(str(path.relative_to(root)) for path in test_paths),
             "-q",
+            "-p",
+            "no:cacheprovider",
             "-o",
             "junit_family=legacy",
             f"--junitxml={junit}",
         )
         env = {
             "HOME": str(runtime_root),
+            "HYPOTHESIS_STORAGE_DIRECTORY": str(hypothesis_storage),
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "PYTHONDONTWRITEBYTECODE": "1",
             "SAXO_MCP_ENVIRONMENT": "SIM",

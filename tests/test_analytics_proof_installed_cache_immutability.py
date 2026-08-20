@@ -83,6 +83,85 @@ def test_installed_eval_runner_never_uses_the_cache_as_writable_cwd(
     assert not (cache_root / ".pytest_cache").exists()
 
 
+def test_installed_proof_suite_routes_pytest_and_hypothesis_state_outside_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    cache_root = tmp_path / "installed-cache"
+    launcher = cache_root / "scripts/run-pytest"
+    test_file = cache_root / "tests/test_analytics_sample.py"
+    project_environment = tmp_path / "project-environment"
+    launcher.parent.mkdir(parents=True)
+    test_file.parent.mkdir()
+    project_environment.mkdir(mode=0o700)
+    launcher.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    test_file.write_text("def test_sample(): pass\n", encoding="utf-8")
+    monkeypatch.chdir(cache_root)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+    def native_project_environment(_root: Path) -> Path:
+        return project_environment
+
+    monkeypatch.setattr(
+        producer,
+        "_native_proof_project_environment",
+        native_project_environment,
+    )
+    observed: dict[str, object] = {}
+
+    def mutate_unrouted_state_then_fail(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int,
+    ) -> None:
+        del timeout_seconds
+        observed.update(name=name, argv=argv, cwd=cwd, env=env)
+        if not ({"-p", "no:cacheprovider"} <= set(argv)):
+            (cwd / ".pytest_cache").mkdir()
+        hypothesis_root = env.get("HYPOTHESIS_STORAGE_DIRECTORY")
+        if hypothesis_root is None:
+            (cwd / ".hypothesis").mkdir()
+        else:
+            Path(hypothesis_root).mkdir(parents=True, exist_ok=True)
+        raise CommandFailureError(
+            CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=23,
+                pgid=23,
+                exit_code=1,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    monkeypatch.setattr(producer, "run_command", mutate_unrouted_state_then_fail)
+
+    with pytest.raises(producer.ProofProducerError, match="installed_proof_suite_failed"):
+        producer._run_installed_offline_proof_suite(  # noqa: SLF001
+            harness_policy="codex_native_v1",
+        )
+
+    command = cast("tuple[str, ...]", observed["argv"])
+    environment = cast("dict[str, str]", observed["env"])
+    hypothesis_root = Path(environment["HYPOTHESIS_STORAGE_DIRECTORY"])
+    assert {"-p", "no:cacheprovider"} <= set(command)
+    assert hypothesis_root != cache_root
+    assert not hypothesis_root.is_relative_to(cache_root)
+    assert not (cache_root / ".pytest_cache").exists()
+    assert not (cache_root / ".hypothesis").exists()
+
+
 def test_model_case_uses_private_work_root_not_installed_plugin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
