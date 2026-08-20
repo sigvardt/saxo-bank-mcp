@@ -464,11 +464,14 @@ def seed_isolated_cli_homes(  # noqa: PLR0913
     )
     _seed_retained_plugin_registration(runtime, retained_codex_home, retained_claude_home)
     if retained_codex_plugin_root is not None:
-        _seed_codex_plugin_tree(
-            runtime,
-            retained_codex_home=retained_codex_home,
-            retained_plugin_root=retained_codex_plugin_root,
-        )
+        if retained_codex_home is None:
+            _register_codex_native_plugin(runtime, retained_codex_plugin_root)
+        else:
+            _seed_codex_plugin_tree(
+                runtime,
+                retained_codex_home=retained_codex_home,
+                retained_plugin_root=retained_codex_plugin_root,
+            )
     for path in (runtime.home, runtime.codex_home, runtime.home / ".claude"):
         if path.exists():
             path.chmod(OWNER_DIR_MODE)

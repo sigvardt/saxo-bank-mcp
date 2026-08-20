@@ -47,6 +47,7 @@ from saxo_bank_mcp.agent_skill_matrix_env import (
     OWNER_DIR_MODE,
     OWNER_FILE_MODE,
     MatrixEnvError,
+    MatrixIsolatedRuntime,
     eval_runtime_root,
     prepare_eval_isolated_runtime,
     require_matrix_runtime_cleanup,
@@ -536,6 +537,49 @@ def test_codex_native_runtime_uses_exact_marketplace_registration_flow(
         require_matrix_runtime_cleanup(runtime.run_root)
 
 
+def test_dual_runtime_registers_plugin_when_retained_codex_home_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    _write_auth_sources(tmp_path, monkeypatch)
+    codex_src, claude_src = _seed_cli_auth_sources(tmp_path)
+    _retained_codex, _retained_claude, plugin_root = _seed_retained_plugin_homes(tmp_path)
+    calls: list[Path] = []
+
+    def fake_install(marketplace: Path, env: dict[str, str]) -> tuple[object, ...]:
+        home = Path(env["CODEX_HOME"])
+        calls.append(marketplace.resolve())
+        target = home / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0"
+        shutil.copytree(marketplace, target)
+        (home / "config.toml").write_text("# disposable registration\n", encoding="utf-8")
+        (home / "config.toml").chmod(0o600)
+        return ()
+
+    monkeypatch.setattr(cli_driver, "run_codex_install", fake_install)
+
+    runtime = prepare_eval_isolated_runtime(
+        evidence,
+        source_codex_home=codex_src,
+        source_claude_home=claude_src,
+        retained_codex_home=None,
+        retained_claude_home=None,
+        retained_codex_plugin_root=plugin_root,
+        harness_policy="dual_v1",
+    )
+    try:
+        assert len(calls) == 1
+        assert calls[0].is_relative_to(runtime.run_root.resolve())
+        assert (runtime.codex_home / "config.toml").is_file()
+        assert (
+            runtime.codex_home
+            / "plugins/cache/sigvardt/saxo-bank-mcp/0.1.0/skills/saxo-bank/SKILL.md"
+        ).is_file()
+    finally:
+        require_matrix_runtime_cleanup(runtime.run_root)
+
+
 def test_prepare_eval_runtime_rejects_symlink_cli_auth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -795,10 +839,21 @@ def test_post_spawn_scope_failure_stays_unknown_in_runner_and_failure_summary(  
     def precomputed_publishable(_source: Path) -> tuple[str, ...]:
         return publishable
 
+    def isolated_registration_fixture(
+        _runtime: MatrixIsolatedRuntime,
+        retained_plugin_root: Path,
+    ) -> Path:
+        return retained_plugin_root
+
     monkeypatch.setattr(
         matrix_env,
         "publishable_tracked_files",
         precomputed_publishable,
+    )
+    monkeypatch.setattr(
+        matrix_env,
+        "_register_codex_native_plugin",
+        isolated_registration_fixture,
     )
 
     def fail_getpgid(_pid: int) -> int:
