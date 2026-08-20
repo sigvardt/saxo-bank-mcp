@@ -825,6 +825,16 @@ def _codex_native_fixture_bound_case(
             " Final scenario receipt must contain this exact ordered text: "
             "explicit numeric shocks -0.10 0.05."
         )
+    if case.id == "optimization":
+        fixture_protocol += (
+            " Final optimization receipt must use this exact label order: "
+            "`analysis_id: <result analysis_id or fixture analysis_id>; "
+            "state: <verified|degraded|refused>; target deltas: <summary>; "
+            "feasibility: <summary>; residuals: <summary>; stability: <summary>; "
+            "mathematical proposal: <summary>`. "
+            "Return only that receipt line in the final answer. "
+            "Do not add a contrast sentence about what kind of math it is."
+        )
     prompts = dict(case.harness_prompts)
     prompts["codex"] = prompts["codex"] + fixture_protocol
     return case.model_copy(update={"harness_prompts": prompts})
