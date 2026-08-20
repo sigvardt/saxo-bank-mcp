@@ -95,10 +95,16 @@ class _RuntimeOutcome:
 
 
 def run_eval_suite(options: EvalRunOptions) -> int:
-    validation_root = (
+    validation_case_root = (
         options.case_root.parent if options.case_root.parent.name == "evals" else options.case_root
     )
-    validation = validate_eval_suite(case_root=validation_root)
+    validation_source_root = (
+        validation_case_root.parent if validation_case_root.name == "evals" else Path()
+    )
+    validation = validate_eval_suite(
+        root=validation_source_root,
+        case_root=validation_case_root,
+    )
     cases = select_cases(
         load_eval_cases(options.case_root),
         case_id=options.case_id,

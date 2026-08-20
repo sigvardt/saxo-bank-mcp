@@ -614,6 +614,23 @@ def test_dry_run_and_none_mode_remain_usable_without_clients(tmp_path: Path) -> 
     assert payload["cleanup"]["runtime_cleanup"] == "not_required"
 
 
+def test_eval_validation_is_bound_to_absolute_case_checkout_not_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = _options(tmp_path, dry_run=True, credential_mode="none")
+    options.out.parent.mkdir(parents=True, exist_ok=True)
+    unrelated = tmp_path / "unrelated-cwd"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+
+    code = run_eval_suite(options)
+    payload = json.loads(options.out.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert payload["status"] == "planned"
+
+
 def test_unknown_credential_mode_fails_closed(tmp_path: Path) -> None:
     options = _options(tmp_path, dry_run=True, credential_mode="owned-copy")
     options.out.parent.mkdir(parents=True, exist_ok=True)
