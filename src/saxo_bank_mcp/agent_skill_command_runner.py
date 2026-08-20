@@ -566,7 +566,11 @@ class ProcessCleanupScope:
         if self.offending_observations and self.coverage_status != "unknown":
             raise ValueError("cleanup offending observations require unknown coverage")
         tracked_pids = frozenset(self.tracked_pids)
-        if any(identity.pid not in tracked_pids for identity in self.observed_identities):
+        tracked_pgids = frozenset(self.tracked_pgids)
+        if any(
+            identity.pid not in tracked_pids or identity.pgid not in tracked_pgids
+            for identity in self.observed_identities
+        ):
             raise ValueError("observed cleanup identity is outside tracked scope")
 
 
@@ -664,13 +668,14 @@ class RootBoundProcessCleanupAdmission:
                 birth_identity=observation.birth_identity,
                 initial_state=observation.state,
             )
-            observed_identities[
-                (
-                    observed_identity.pid,
-                    observed_identity.pgid,
-                    observed_identity.birth_identity,
-                )
-            ] = observed_identity
+            if observed_identity.pgid in tracked_pgids:
+                observed_identities[
+                    (
+                        observed_identity.pid,
+                        observed_identity.pgid,
+                        observed_identity.birth_identity,
+                    )
+                ] = observed_identity
         if not self._root_allows_admission():
             return ProcessCleanupScope(
                 identities=root_identities,
@@ -734,13 +739,14 @@ class RootBoundProcessCleanupAdmission:
                 birth_identity=observation.birth_identity,
                 initial_state=observation.state,
             )
-            observed_identities[
-                (
-                    observed_identity.pid,
-                    observed_identity.pgid,
-                    observed_identity.birth_identity,
-                )
-            ] = observed_identity
+            if observed_identity.pgid in tracked_pgids:
+                observed_identities[
+                    (
+                        observed_identity.pid,
+                        observed_identity.pgid,
+                        observed_identity.birth_identity,
+                    )
+                ] = observed_identity
         for observation in observations:
             reobserved = read_process_observation(observation.pid)
             if observation.pid not in second_pid_scope:
@@ -770,13 +776,14 @@ class RootBoundProcessCleanupAdmission:
                 birth_identity=reobserved.birth_identity,
                 initial_state=reobserved.state,
             )
-            observed_identities[
-                (
-                    reobserved_identity.pid,
-                    reobserved_identity.pgid,
-                    reobserved_identity.birth_identity,
-                )
-            ] = reobserved_identity
+            if reobserved_identity.pgid in tracked_pgids:
+                observed_identities[
+                    (
+                        reobserved_identity.pid,
+                        reobserved_identity.pgid,
+                        reobserved_identity.birth_identity,
+                    )
+                ] = reobserved_identity
             if not (
                 reobserved.pid == observation.pid
                 and reobserved.birth_identity == observation.birth_identity
@@ -1628,10 +1635,6 @@ def cleanup_birth_bound_processes(  # noqa: C901, PLR0912, PLR0913
             for identity in historical
             if observation is not None and observation.birth_identity == identity.birth_identity
         )
-        if observation is not None and historical and not matching_births:
-            # The numeric PID now belongs to a different process. Detection-only history is
-            # comparison evidence and never expands the immutable signal target set.
-            continue
         expected_identity = next(
             (
                 identity
@@ -1660,6 +1663,10 @@ def cleanup_birth_bound_processes(  # noqa: C901, PLR0912, PLR0913
                     ),
                 ),
             )
+        elif observation is not None and historical and not matching_births:
+            # A reliable current birth that differs from every observed historical birth proves
+            # numeric PID reuse. Detection-only history never expands the signal target set.
+            continue
         elif observation is not None and observation.state != "zombie":
             coverage_unknown = True
             moved_group = bool(

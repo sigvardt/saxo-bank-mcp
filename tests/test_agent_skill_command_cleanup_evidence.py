@@ -324,6 +324,50 @@ def test_detection_only_birth_history_keeps_same_process_fail_closed(
     )
 
 
+def test_detection_only_birth_history_keeps_unobservable_pid_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable current birth cannot authenticate PID reuse."""
+    historical = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="task-birth",
+        initial_state="running",
+    )
+    unobservable = command_runner.ProcessObservation(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="",
+        state="unknown",
+    )
+
+    def unobservable_observation(_pid: int) -> command_runner.ProcessObservation:
+        return unobservable
+
+    monkeypatch.setattr(
+        command_runner,
+        "read_process_observation",
+        unobservable_observation,
+    )
+
+    snapshot = command_runner.cleanup_birth_bound_processes(
+        (),
+        tracked_pids=(REUSED_PID,),
+        tracked_pgids=(),
+        observed_identities=(historical,),
+    )
+
+    assert snapshot.cleanup_status == "unknown"
+    assert snapshot.coverage_stage == "group_member"
+    assert snapshot.coverage_subreason == "observation_unknown"
+    assert snapshot.remaining_process_count is None
+    assert snapshot.remaining_process_group_count is None
+    assert len(snapshot.offending_observations) == 1
+    assert snapshot.offending_observations[0].expected_birth_identity_sha256 == (
+        hashlib.sha256(b"task-birth").hexdigest()
+    )
+
+
 def test_numeric_pid_without_birth_history_remains_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -392,6 +436,24 @@ def test_cleanup_scope_rejects_observed_identity_outside_numeric_scope() -> None
             observed_identities=(historical,),
             tracked_pids=(),
             tracked_pgids=(REUSED_PGID,),
+            coverage_status="complete",
+        )
+
+
+def test_cleanup_scope_rejects_observed_group_outside_numeric_scope() -> None:
+    historical = command_runner.ProcessCleanupIdentity(
+        pid=REUSED_PID,
+        pgid=REUSED_PGID,
+        birth_identity="task-birth",
+        initial_state="running",
+    )
+
+    with pytest.raises(ValueError, match="observed cleanup identity is outside tracked scope"):
+        command_runner.ProcessCleanupScope(
+            identities=(),
+            observed_identities=(historical,),
+            tracked_pids=(REUSED_PID,),
+            tracked_pgids=(REUSED_PGID + 1,),
             coverage_status="complete",
         )
 
@@ -1786,7 +1848,10 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
     }
     root_exits_early = refused_transitions - {"replaced-self-group"}
     assert caught.value.receipt.timed_out is (child_transition not in root_exits_early)
-    assert child_pid in observed_for_cleanup
+    if child_transition == "replaced-self-group":
+        assert child_pid not in observed_for_cleanup
+    else:
+        assert child_pid in observed_for_cleanup
     if child_transition in refused_transitions:
         assert child_pid not in admitted_for_cleanup
         assert all(pid != child_pid for pid, _sig in signals)
