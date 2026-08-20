@@ -618,7 +618,13 @@ class RootBoundProcessCleanupAdmission:
             )
 
         try:
-            first_pids, first_pgids, first_coverage, first_pid_groups = _tree_snapshot_parts(
+            (
+                first_pids,
+                first_pgids,
+                first_coverage,
+                first_pid_groups,
+                first_discovered_identities,
+            ) = _tree_snapshot_parts(
                 _snapshot_tree_checked(
                     root_pid,
                     self.root_pgid,
@@ -711,9 +717,19 @@ class RootBoundProcessCleanupAdmission:
                 ),
             )
         tracked_pid_groups.update(first_pid_groups)
+        for discovered in first_discovered_identities:
+            observed_identities[(discovered.pid, discovered.pgid, discovered.birth_identity)] = (
+                discovered
+            )
 
         try:
-            second_pids, second_pgids, second_coverage, second_pid_groups = _tree_snapshot_parts(
+            (
+                second_pids,
+                second_pgids,
+                second_coverage,
+                second_pid_groups,
+                second_discovered_identities,
+            ) = _tree_snapshot_parts(
                 _snapshot_tree_checked(
                     root_pid,
                     self.root_pgid,
@@ -842,6 +858,10 @@ class RootBoundProcessCleanupAdmission:
             confirmed = {identity.pid: identity for identity in root_identities}
         else:
             tracked_pid_groups.update(second_pid_groups)
+            for discovered in second_discovered_identities:
+                observed_identities[
+                    (discovered.pid, discovered.pgid, discovered.birth_identity)
+                ] = discovered
         return ProcessCleanupScope(
             identities=tuple(confirmed[pid] for pid in sorted(confirmed)),
             tracked_pids=tuple(sorted(tracked_pids)),
@@ -896,14 +916,20 @@ class RootBoundProcessCleanupAdmission:
         coverage_status: CleanupCoverage,
     ) -> ProcessCleanupScope:
         try:
-            pids, pgids, detected_coverage, _pid_groups = _tree_snapshot_parts(
+            pids, pgids, detected_coverage, _pid_groups, _discovered = _tree_snapshot_parts(
                 _snapshot_tree_checked(
                     None,
                     self.root_pgid,
                 ),
             )
         except (OSError, RuntimeError, ValueError):
-            pids, pgids, detected_coverage, _pid_groups = (), (), "unknown", ()
+            pids, pgids, detected_coverage, _pid_groups, _discovered = (
+                (),
+                (),
+                "unknown",
+                (),
+                (),
+            )
         tracked_pids.update(pids)
         tracked_pgids.update(pgids)
         return ProcessCleanupScope(
@@ -1189,6 +1215,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 observed_pgids,
                 observed_coverage,
                 _observed_pid_groups,
+                _observed_discovered_identities,
             ) = _tree_snapshot_parts(
                 _snapshot_tree_checked(
                     admission.root_pid_for_numeric_discovery(),
@@ -1196,10 +1223,17 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 ),
             )
         except (OSError, RuntimeError, ValueError):
-            observed_pids, observed_pgids, observed_coverage, _observed_pid_groups = (
+            (
+                observed_pids,
+                observed_pgids,
+                observed_coverage,
+                _observed_pid_groups,
+                _observed_discovered_identities,
+            ) = (
                 (),
                 (),
                 "unknown",
+                (),
                 (),
             )
         with watch_lock:
@@ -1258,14 +1292,26 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 tracked_offending_observations,
             )
         try:
-            final_pids, final_pgids, final_coverage, _final_pid_groups = _tree_snapshot_parts(
+            (
+                final_pids,
+                final_pgids,
+                final_coverage,
+                _final_pid_groups,
+                _final_discovered_identities,
+            ) = _tree_snapshot_parts(
                 _snapshot_tree_checked(
                     (admission.root_pid_for_numeric_discovery() if admission is not None else None),
                     pgid,
                 ),
             )
         except (OSError, RuntimeError, ValueError):
-            final_pids, final_pgids, final_coverage, _final_pid_groups = (), (), "unknown", ()
+            (
+                final_pids,
+                final_pgids,
+                final_coverage,
+                _final_pid_groups,
+                _final_discovered_identities,
+            ) = ((), (), "unknown", (), ())
         if final_coverage == "unknown":
             cleanup_coverage_status = "unknown"
             if cleanup_coverage_stage is None:
@@ -1724,16 +1770,6 @@ def cleanup_birth_bound_processes(  # noqa: C901, PLR0912, PLR0913, PLR0915
         elif observation is not None and historical and not matching_births:
             # A reliable current birth that differs from every observed historical birth proves
             # numeric PID reuse. Detection-only history never expands the signal target set.
-            continue
-        elif (
-            observation is not None
-            and not historical
-            and expected_groups
-            and observation.pgid not in expected_groups
-        ):
-            # The process vanished before birth capture, but its discovery-time group was
-            # retained. A later process under the same numeric PID in a different group is
-            # numeric reuse, not evidence of task residue.
             continue
         elif observation is not None and observation.state != "zombie":
             coverage_unknown = True
@@ -2765,17 +2801,28 @@ def _tree_snapshot_parts(
         tuple[int, ...],
         CleanupCoverage,
         tuple[tuple[int, int], ...],
+    ]
+    | tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        CleanupCoverage,
+        tuple[tuple[int, int], ...],
+        tuple[ProcessCleanupIdentity, ...],
     ],
 ) -> tuple[
     tuple[int, ...],
     tuple[int, ...],
     CleanupCoverage,
     tuple[tuple[int, int], ...],
+    tuple[ProcessCleanupIdentity, ...],
 ]:
-    """Normalize legacy three-part test snapshots to the bound production shape."""
+    """Normalize legacy test snapshots to the birth-bound production shape."""
     if len(snapshot) == 3:  # noqa: PLR2004
         pids, pgids, coverage = snapshot
-        return pids, pgids, coverage, ()
+        return pids, pgids, coverage, (), ()
+    if len(snapshot) == 4:  # noqa: PLR2004
+        pids, pgids, coverage, pid_groups = snapshot
+        return pids, pgids, coverage, pid_groups, ()
     return snapshot
 
 
@@ -2787,16 +2834,21 @@ def _snapshot_tree_checked(
     tuple[int, ...],
     CleanupCoverage,
     tuple[tuple[int, int], ...],
+    tuple[ProcessCleanupIdentity, ...],
 ]:
-    """Capture one tree/group view and retain process-table completeness."""
+    """Capture one tree/group view with same-row process birth identities."""
     pids: set[int] = set()
     pgids: set[int] = set()
-    table, observed = _process_table_checked()
+    table, observed = _process_identity_table_checked()
     children: dict[int, list[int]] = {}
     group_by_pid: dict[int, int] = {}
-    for pid, ppid, group in table:
+    identity_by_pid: dict[int, ProcessCleanupIdentity] = {}
+    for ppid, identity in table:
+        pid = identity.pid
+        group = identity.pgid
         children.setdefault(ppid, []).append(pid)
         group_by_pid[pid] = group
+        identity_by_pid[pid] = identity
     if root_pid is not None:
         stack = [root_pid]
         while stack:
@@ -2820,6 +2872,7 @@ def _snapshot_tree_checked(
         tuple(sorted(pgids)),
         "complete" if observed else "unknown",
         tuple(sorted((pid, group_by_pid[pid]) for pid in pids if pid in group_by_pid)),
+        tuple(identity_by_pid[pid] for pid in sorted(pids) if pid in identity_by_pid),
     )
 
 
@@ -2830,6 +2883,55 @@ def _merge_snapshots(
     pgids_b: tuple[int, ...],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     return tuple(sorted(set(pids_a) | set(pids_b))), tuple(sorted(set(pgids_a) | set(pgids_b)))
+
+
+def _process_identity_table_checked() -> tuple[
+    tuple[tuple[int, ProcessCleanupIdentity], ...],
+    bool,
+]:
+    """Read PID, parent, group, state, and birth in one process-table row."""
+    try:
+        output = subprocess.run(
+            ("ps", "-axo", "pid=,ppid=,pgid=,state=,lstart="),  # noqa: S607
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return (), False
+    if output.returncode != 0:
+        return (), False
+    rows: list[tuple[int, ProcessCleanupIdentity]] = []
+    malformed = False
+    for line in output.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 9:  # noqa: PLR2004
+            malformed = malformed or bool(parts)
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+            pgid = int(parts[2])
+        except ValueError:
+            malformed = True
+            continue
+        state_code = parts[3][:1].upper()
+        state: Literal["running", "zombie", "unknown"] = (
+            "zombie" if state_code == "Z" else "running" if state_code else "unknown"
+        )
+        rows.append(
+            (
+                ppid,
+                ProcessCleanupIdentity(
+                    pid=pid,
+                    pgid=pgid,
+                    birth_identity=" ".join(parts[4:9]),
+                    initial_state=state,
+                ),
+            ),
+        )
+    return tuple(rows), not malformed
 
 
 def _process_table() -> tuple[tuple[int, int, int], ...]:
