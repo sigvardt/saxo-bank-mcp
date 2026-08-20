@@ -549,6 +549,7 @@ class ProcessCleanupScope:
     tracked_pids: tuple[int, ...]
     tracked_pgids: tuple[int, ...]
     coverage_status: CleanupCoverage
+    observed_identities: tuple[ProcessCleanupIdentity, ...] = ()
     coverage_stage: CleanupCoverageStage | None = None
     coverage_subreason: CleanupCoverageSubreason | None = None
     offending_observations: tuple[ProcessCleanupOffendingObservation, ...] = ()
@@ -564,6 +565,9 @@ class ProcessCleanupScope:
         )
         if self.offending_observations and self.coverage_status != "unknown":
             raise ValueError("cleanup offending observations require unknown coverage")
+        tracked_pids = frozenset(self.tracked_pids)
+        if any(identity.pid not in tracked_pids for identity in self.observed_identities):
+            raise ValueError("observed cleanup identity is outside tracked scope")
 
 
 @dataclass(slots=True)
@@ -582,11 +586,16 @@ class RootBoundProcessCleanupAdmission:
         """Take two root-bracketed snapshots and admit only exact stable identities."""
         root_pid = self.process.pid
         root_identities = (self.root_identity,) if self.root_identity is not None else ()
+        observed_identities: dict[tuple[int, int, str], ProcessCleanupIdentity] = {
+            (identity.pid, identity.pgid, identity.birth_identity): identity
+            for identity in root_identities
+        }
         tracked_pids: set[int] = {root_pid}
         tracked_pgids: set[int] = {self.root_pgid}
         if not self._root_allows_admission():
             return self._detection_scope(
                 root_identities,
+                tuple(observed_identities.values()),
                 tracked_pids,
                 tracked_pgids,
                 coverage_status="complete",
@@ -604,6 +613,7 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                observed_identities=tuple(observed_identities.values()),
                 coverage_stage="first_snapshot",
                 coverage_subreason="snapshot_failure",
             )
@@ -616,6 +626,7 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                observed_identities=tuple(observed_identities.values()),
                 coverage_stage="first_snapshot",
                 coverage_subreason="snapshot_failure",
             )
@@ -647,12 +658,26 @@ class RootBoundProcessCleanupAdmission:
                 )
                 continue
             observations.append(observation)
+            observed_identity = ProcessCleanupIdentity(
+                pid=observation.pid,
+                pgid=observation.pgid,
+                birth_identity=observation.birth_identity,
+                initial_state=observation.state,
+            )
+            observed_identities[
+                (
+                    observed_identity.pid,
+                    observed_identity.pgid,
+                    observed_identity.birth_identity,
+                )
+            ] = observed_identity
         if not self._root_allows_admission():
             return ProcessCleanupScope(
                 identities=root_identities,
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status=("unknown" if observation_diagnostic is not None else "complete"),
+                observed_identities=tuple(observed_identities.values()),
                 coverage_stage=(
                     observation_diagnostic[0] if observation_diagnostic is not None else None
                 ),
@@ -676,6 +701,7 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                observed_identities=tuple(observed_identities.values()),
                 coverage_stage="second_snapshot",
                 coverage_subreason="snapshot_failure",
             )
@@ -688,6 +714,7 @@ class RootBoundProcessCleanupAdmission:
                 tracked_pids=tuple(sorted(tracked_pids)),
                 tracked_pgids=tuple(sorted(tracked_pgids)),
                 coverage_status="unknown",
+                observed_identities=tuple(observed_identities.values()),
                 coverage_stage="second_snapshot",
                 coverage_subreason="snapshot_failure",
             )
@@ -696,6 +723,24 @@ class RootBoundProcessCleanupAdmission:
         confirmed: dict[int, ProcessCleanupIdentity] = {
             identity.pid: identity for identity in root_identities
         }
+        first_observed_pids = {observation.pid for observation in observations}
+        for pid in sorted(second_pid_scope - first_observed_pids):
+            observation = read_process_observation(pid)
+            if observation is None or observation.state == "unknown":
+                continue
+            observed_identity = ProcessCleanupIdentity(
+                pid=observation.pid,
+                pgid=observation.pgid,
+                birth_identity=observation.birth_identity,
+                initial_state=observation.state,
+            )
+            observed_identities[
+                (
+                    observed_identity.pid,
+                    observed_identity.pgid,
+                    observed_identity.birth_identity,
+                )
+            ] = observed_identity
         for observation in observations:
             reobserved = read_process_observation(observation.pid)
             if observation.pid not in second_pid_scope:
@@ -719,6 +764,19 @@ class RootBoundProcessCleanupAdmission:
                     ),
                 )
                 continue
+            reobserved_identity = ProcessCleanupIdentity(
+                pid=reobserved.pid,
+                pgid=reobserved.pgid,
+                birth_identity=reobserved.birth_identity,
+                initial_state=reobserved.state,
+            )
+            observed_identities[
+                (
+                    reobserved_identity.pid,
+                    reobserved_identity.pgid,
+                    reobserved_identity.birth_identity,
+                )
+            ] = reobserved_identity
             if not (
                 reobserved.pid == observation.pid
                 and reobserved.birth_identity == observation.birth_identity
@@ -758,6 +816,9 @@ class RootBoundProcessCleanupAdmission:
             tracked_pids=tuple(sorted(tracked_pids)),
             tracked_pgids=tuple(sorted(tracked_pgids)),
             coverage_status="unknown" if observation_diagnostic is not None else "complete",
+            observed_identities=tuple(
+                observed_identities[key] for key in sorted(observed_identities)
+            ),
             coverage_stage=(
                 observation_diagnostic[0] if observation_diagnostic is not None else None
             ),
@@ -795,6 +856,7 @@ class RootBoundProcessCleanupAdmission:
     def _detection_scope(
         self,
         identities: tuple[ProcessCleanupIdentity, ...],
+        observed_identities: tuple[ProcessCleanupIdentity, ...],
         tracked_pids: set[int],
         tracked_pgids: set[int],
         *,
@@ -818,6 +880,7 @@ class RootBoundProcessCleanupAdmission:
                 if coverage_status == "unknown" or detected_coverage == "unknown"
                 else "complete"
             ),
+            observed_identities=observed_identities,
             coverage_stage=(
                 "first_snapshot"
                 if coverage_status == "unknown" or detected_coverage == "unknown"
@@ -930,6 +993,7 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     tracked_pids: list[int] = []
     tracked_pgids: list[int] = []
     tracked_identities: dict[int, ProcessCleanupIdentity] = {}
+    tracked_observed_identities: dict[tuple[int, int, str], ProcessCleanupIdentity] = {}
     stop_watch = threading.Event()
     watch_lock = threading.Lock()
     admission_publication_state: Literal["open", "draining", "frozen"] = "open"
@@ -1000,6 +1064,10 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             tracked_offending_observations.extend(scope.offending_observations)
             tracked_pids[:] = sorted(set(tracked_pids) | set(scope.tracked_pids))
             tracked_pgids[:] = sorted(set(tracked_pgids) | set(scope.tracked_pgids))
+            for observed in scope.observed_identities:
+                tracked_observed_identities[
+                    (observed.pid, observed.pgid, observed.birth_identity)
+                ] = observed
             for candidate in scope.identities:
                 identity = tracked_identities.get(candidate.pid)
                 if identity is None:
@@ -1127,6 +1195,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 tuple(tracked_pgids),
             )
             identities = tuple(tracked_identities[pid] for pid in sorted(tracked_identities))
+            observed_identities = tuple(
+                tracked_observed_identities[key] for key in sorted(tracked_observed_identities)
+            )
             cleanup_coverage_status = tracked_coverage_status
             cleanup_coverage_stage = tracked_coverage_stage
             cleanup_coverage_subreason = tracked_coverage_subreason
@@ -1150,14 +1221,25 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         # Signal only still-running processes whose birth identity still matches. The returned
         # terminal snapshot is the sole source for the receipt and remaining candidate counts.
         try:
-            cleanup_snapshot = cleanup_birth_bound_processes(
-                identities,
-                tracked_pids=pids,
-                tracked_pgids=pgids,
-                coverage_status=cleanup_coverage_status,
-                coverage_stage=cleanup_coverage_stage,
-                coverage_subreason=cleanup_coverage_subreason,
-            )
+            if observed_identities:
+                cleanup_snapshot = cleanup_birth_bound_processes(
+                    identities,
+                    tracked_pids=pids,
+                    tracked_pgids=pgids,
+                    observed_identities=observed_identities,
+                    coverage_status=cleanup_coverage_status,
+                    coverage_stage=cleanup_coverage_stage,
+                    coverage_subreason=cleanup_coverage_subreason,
+                )
+            else:
+                cleanup_snapshot = cleanup_birth_bound_processes(
+                    identities,
+                    tracked_pids=pids,
+                    tracked_pgids=pgids,
+                    coverage_status=cleanup_coverage_status,
+                    coverage_stage=cleanup_coverage_stage,
+                    coverage_subreason=cleanup_coverage_subreason,
+                )
             terminal_snapshot = replace(
                 cleanup_snapshot,
                 watcher_drain_status=watcher_drain_status,
@@ -1449,11 +1531,12 @@ def observe_process_cleanup_target(
     )
 
 
-def cleanup_birth_bound_processes(  # noqa: C901, PLR0913
+def cleanup_birth_bound_processes(  # noqa: C901, PLR0912, PLR0913
     identities: tuple[ProcessCleanupIdentity, ...],
     *,
     tracked_pids: tuple[int, ...],
     tracked_pgids: tuple[int, ...],
+    observed_identities: tuple[ProcessCleanupIdentity, ...] = (),
     coverage_status: CleanupCoverage = "complete",
     coverage_stage: CleanupCoverageStage | None = None,
     coverage_subreason: CleanupCoverageSubreason | None = None,
@@ -1468,6 +1551,9 @@ def cleanup_birth_bound_processes(  # noqa: C901, PLR0913
     identity_by_pid: Mapping[int, ProcessCleanupIdentity] = MappingProxyType(
         {identity.pid: identity for identity in identities},
     )
+    observed_by_pid: dict[int, list[ProcessCleanupIdentity]] = {}
+    for observed in observed_identities:
+        observed_by_pid.setdefault(observed.pid, []).append(observed)
     coverage_unknown = coverage_status == "unknown" or len(identity_by_pid) != len(identities)
     diagnostic = (
         (coverage_stage, coverage_subreason)
@@ -1536,29 +1622,68 @@ def cleanup_birth_bound_processes(  # noqa: C901, PLR0913
 
     for pid in sorted(set(tracked_pids) - set(identity_by_pid)):
         observation = read_process_observation(pid)
+        historical = tuple(observed_by_pid.get(pid, ()))
+        matching_births = tuple(
+            identity
+            for identity in historical
+            if observation is not None and observation.birth_identity == identity.birth_identity
+        )
+        if observation is not None and historical and not matching_births:
+            # The numeric PID now belongs to a different process. Detection-only history is
+            # comparison evidence and never expands the immutable signal target set.
+            continue
+        expected_identity = next(
+            (
+                identity
+                for identity in matching_births
+                if observation is not None and identity.pgid == observation.pgid
+            ),
+            matching_births[0] if matching_births else historical[0] if historical else None,
+        )
         if observation is not None and observation.state == "unknown":
             coverage_unknown = True
             diagnostic = diagnostic or ("group_member", "observation_unknown")
             private_observations.append(
                 _offending_process_observation(
                     pid=pid,
-                    expected_pgid=observation.pgid,
+                    expected_pgid=(
+                        expected_identity.pgid
+                        if expected_identity is not None
+                        else observation.pgid
+                    ),
                     observation=observation,
                     detection_source="historical_pid_check",
                     admission_phase="admission_closed",
                     observation_state="unknown",
+                    expected_birth_identity=(
+                        expected_identity.birth_identity if expected_identity is not None else None
+                    ),
                 ),
             )
         elif observation is not None and observation.state != "zombie":
             coverage_unknown = True
-            diagnostic = diagnostic or ("group_member", "uncaptured_member")
+            moved_group = bool(
+                expected_identity is not None and observation.pgid != expected_identity.pgid
+            )
+            diagnostic = diagnostic or (
+                "group_member",
+                ("changed_identity_or_group_member" if moved_group else "uncaptured_member"),
+            )
             private_observations.append(
                 _offending_process_observation(
                     pid=pid,
-                    expected_pgid=observation.pgid,
+                    expected_pgid=(
+                        expected_identity.pgid
+                        if expected_identity is not None
+                        else observation.pgid
+                    ),
                     observation=observation,
                     detection_source="historical_pid_check",
                     admission_phase="admission_closed",
+                    observation_state="group_changed" if moved_group else None,
+                    expected_birth_identity=(
+                        expected_identity.birth_identity if expected_identity is not None else None
+                    ),
                 ),
             )
 

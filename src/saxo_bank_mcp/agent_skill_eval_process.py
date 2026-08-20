@@ -107,14 +107,25 @@ class EvalProcessManager:
         except subprocess.TimeoutExpired:
             timed_out = True
             self.timed_out = True
-        snapshot = cleanup_birth_bound_processes(
-            scope.identities,
-            tracked_pids=scope.tracked_pids,
-            tracked_pgids=scope.tracked_pgids,
-            coverage_status=scope.coverage_status,
-            coverage_stage=scope.coverage_stage,
-            coverage_subreason=scope.coverage_subreason,
-        )
+        if scope.observed_identities:
+            snapshot = cleanup_birth_bound_processes(
+                scope.identities,
+                tracked_pids=scope.tracked_pids,
+                tracked_pgids=scope.tracked_pgids,
+                observed_identities=scope.observed_identities,
+                coverage_status=scope.coverage_status,
+                coverage_stage=scope.coverage_stage,
+                coverage_subreason=scope.coverage_subreason,
+            )
+        else:
+            snapshot = cleanup_birth_bound_processes(
+                scope.identities,
+                tracked_pids=scope.tracked_pids,
+                tracked_pgids=scope.tracked_pgids,
+                coverage_status=scope.coverage_status,
+                coverage_stage=scope.coverage_stage,
+                coverage_subreason=scope.coverage_subreason,
+            )
         if scope.offending_observations:
             snapshot = replace(
                 snapshot,

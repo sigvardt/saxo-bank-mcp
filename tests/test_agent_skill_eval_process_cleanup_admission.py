@@ -468,6 +468,12 @@ def test_nested_eval_merge_preserves_repeated_observation_count(
         process_category=None,
         process_identity_sha256="b" * 64,
     )
+    observed_identity = command_runner.ProcessCleanupIdentity(
+        pid=75_001,
+        pgid=75_000,
+        birth_identity="nested-task-birth",
+        initial_state="running",
+    )
 
     class FakeProcess:
         pid = 75_000
@@ -489,6 +495,7 @@ def test_nested_eval_merge_preserves_repeated_observation_count(
     ) -> command_runner.ProcessCleanupScope:
         return command_runner.ProcessCleanupScope(
             identities=(),
+            observed_identities=(observed_identity,),
             tracked_pids=(75_000, 75_001),
             tracked_pgids=(75_000,),
             coverage_status="unknown",
@@ -501,6 +508,7 @@ def test_nested_eval_merge_preserves_repeated_observation_count(
         _identities: tuple[command_runner.ProcessCleanupIdentity, ...],
         **_kwargs: object,
     ) -> command_runner.ProcessCleanupTerminalSnapshot:
+        assert _kwargs["observed_identities"] == (observed_identity,)
         return command_runner.ProcessCleanupTerminalSnapshot(
             targets=(),
             coverage_status="unknown",
