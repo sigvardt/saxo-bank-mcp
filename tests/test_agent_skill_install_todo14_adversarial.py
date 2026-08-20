@@ -372,10 +372,7 @@ def test_failed_command_redirected_sleeper_cleaned(
         "HOME": str(tmp_path),
         "OBSERVED_MARKER": str(observed_marker),
     }
-    root_pid: int | None = None
-    child_seen = False
-    root_checks_after_child = 0
-    original_observation = command_runner.read_process_observation
+    original_capture_scope = command_runner.RootBoundProcessCleanupAdmission.capture_scope
 
     class PassiveWatcher:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -390,19 +387,14 @@ def test_failed_command_redirected_sleeper_cleaned(
         def is_alive(self) -> bool:
             return False
 
-    def observation(pid: int) -> command_runner.ProcessObservation | None:
-        nonlocal child_seen, root_checks_after_child, root_pid
-        result = original_observation(pid)
-        if root_pid is None:
-            root_pid = pid
-        elif pid != root_pid and result is not None and result.state == "running":
-            child_seen = True
-        elif pid == root_pid and child_seen and result is not None and result.state == "running":
-            root_checks_after_child += 1
-            if root_checks_after_child >= 3:  # noqa: PLR2004
-                # Release only after candidate re-observation and the final root check.
-                observed_marker.touch(mode=0o600)
-        return result
+    def capture_scope(
+        admission: command_runner.RootBoundProcessCleanupAdmission,
+    ) -> command_runner.ProcessCleanupScope:
+        scope = original_capture_scope(admission)
+        if any(identity.pid != admission.process.pid for identity in scope.identities):
+            # Release only after the child has passed the complete birth-bound admission gate.
+            observed_marker.touch(mode=0o600)
+        return scope
 
     code = (
         "import os, subprocess, time\n"
@@ -419,7 +411,11 @@ def test_failed_command_redirected_sleeper_cleaned(
         f"raise SystemExit({NONZERO})\n"
     )
     monkeypatch.setattr(command_runner.threading, "Thread", PassiveWatcher)
-    monkeypatch.setattr(command_runner, "read_process_observation", observation)
+    monkeypatch.setattr(
+        command_runner.RootBoundProcessCleanupAdmission,
+        "capture_scope",
+        capture_scope,
+    )
 
     with pytest.raises(CommandFailureError) as err:
         run_command(
