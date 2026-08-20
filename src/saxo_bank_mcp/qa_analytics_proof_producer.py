@@ -1059,6 +1059,7 @@ def _run_installed_matrix_proof_session(
     command = (
         sys.executable,
         "-I",
+        "-B",
         "-m",
         "saxo_bank_mcp.qa_installed_matrix_child",
         "--candidate",

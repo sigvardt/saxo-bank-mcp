@@ -1729,7 +1729,12 @@ def test_producer_only_launcher_accepts_exact_strict_child_envelope(
         nonlocal observed_during
         observed_during = _server_proof_launch_authority()
         assert name == "analytics_installed_matrix_child"
-        assert argv[1:4] == ("-I", "-m", "saxo_bank_mcp.qa_installed_matrix_child")
+        assert argv[1:5] == (
+            "-I",
+            "-B",
+            "-m",
+            "saxo_bank_mcp.qa_installed_matrix_child",
+        )
         assert cwd == Path.cwd().resolve()
         assert env is not None
         assert env["SAXO_MCP_ENVIRONMENT"] == "SIM"
