@@ -117,3 +117,15 @@ returned APPROVE and the sealed `e931ed3` result remains unchanged.
 Documentation closeout updated and read back the one existing active Project, Learning, and Session
 Log at Content counts 59/38/42 without duplicate rows or page-body edits. The branch remains local
 and unpushed, and activation remains 0/54.
+
+Exact `9686678` terminal rule: a deterministic test handshake may wait for actual admission into
+the immutable signal target set, but it must not relax production admission or cleanup semantics.
+That test-only candidate passed its exact 2,991-test suite and all pre-proof gates. During the one
+sealed child execution, an unexpected `.pytest_cache` appeared in the installed plugin cache; the
+post-execution immutable inventory check refused with `proof_installed_inventory_mismatch`.
+
+The candidate-runner cleanup receipt independently reports drained watchers and unknown coverage
+at `group_member/uncaptured_member`; comparison-only observations do not become signal targets and
+remaining counts stay null. A later empty task-process readback and complete runtime cleanup cannot
+turn that unknown receipt into a pass. The sealed attempt produced no authenticated evaluation or
+downstream activation evidence, and 0/54 remains active.

@@ -422,3 +422,23 @@ ran. Independent re-review returned APPROVE and 0/54 remains unchanged.
 Closeout readback: the one existing active Project, Learning, and Session Log were updated in place
 at Content counts 59/38/42 with no duplicate row or body edit. Source `1baca90` is approved, local,
 and unpushed; no exact install or proof has run for it.
+
+Exact-candidate follow-up: the first `1baca90` signed suite had one stale test-handshake failure.
+Test-only source `9686678`, tree `b8035ae`, waits for actual immutable cleanup admission instead of
+a read-count timing proxy; production source is unchanged. The exact candidate passed install,
+verify-only, a signed 2,991/0/0/0 suite, required static/privacy/structural gates, local SIM status,
+and one read-only capability call.
+
+The one sealed proof exited 1 with no retry. The authenticated child-side publication refused at
+producer validation with `proof_installed_inventory_mismatch`; post-exit inventory diagnosis found
+an unexpected forbidden `.pytest_cache` tree in the installed plugin cache, created during sealed
+child execution after the clean structural gate. The outer publication refused separately at
+`proof_candidate_runner_cleanup_failed` with authenticated
+`group_member/uncaptured_member` coverage unknown and null remaining counts. Runtime consumption
+and cleanup completed and later task-process readback was zero, but no authenticated evaluation
+summary or downstream safety fact survived. No proof matrix, reconciliation, account equality, or
+activation ran; 0/54 profiles remain active.
+
+Closeout readback updated the same three existing Knowledge Base rows at Content counts 60/39/43
+with no duplicate or body edit. The final six-path privacy scan passed with zero findings and zero
+scan errors; the branch remains local and unpushed.

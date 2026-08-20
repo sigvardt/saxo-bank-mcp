@@ -1011,3 +1011,44 @@ Session Log in place. Exact-title readback returned one row each at Content coun
 with exact type, unarchived state, Source, Summary, and final Content. No duplicate row or page-body
 edit was created. The branch remains local and unpushed; `e931ed3` remains the latest sealed result,
 and profiles remain 0/54.
+
+## Exact `9686678` terminal validation
+
+The first exact `1baca90` suite reached 2,991 tests with one failure in the redirected-sleeper
+cleanup regression. Local diagnosis showed that the test released its parent before the child had
+entered the immutable birth-bound cleanup set. Test-only source
+`9686678c19245759813c30389433aa406656785c`, tree
+`b8035ae5488d9b6ecee258d286160856148aec2c`, replaces that stale timing proxy with a deterministic
+admission handshake; production cleanup code is unchanged. The isolated regression passed twice,
+the related cleanup/install set passed, and lint, format, type, plugin, skill, catalog, eval,
+privacy, and diff gates passed.
+
+Exact `9686678` then passed one retained-runtime install and verify-only readback with 621 exact
+files, nine skills, one MCP server, and 60 tools. The signed exact-candidate suite passed 2,991
+tests with zero failures, errors, or skips. Required post-suite lint, type, plugin, static, catalog,
+eval, privacy, structural, clean-source, process, and unconsumed-runtime gates passed. Local status
+proved SIM with LIVE reads and writes disabled, and the exactly one read-only capability call
+passed with network activity and no token refresh, order, or subscription.
+
+The exactly one sealed proof exited 1 and was not retried. The authenticated inner publication is
+a producer-validation boundary refusal with reason `proof_installed_inventory_mismatch`; the
+authenticated outer publication refuses with `proof_candidate_runner_cleanup_failed`. Post-exit
+local inventory diagnosis found only an unexpected forbidden `.pytest_cache` tree inside the
+installed plugin cache. Its timestamp and retained node IDs show that it was created during the
+sealed child execution after the clean structural gate. The immutable inventory check therefore
+correctly refused the changed cache and no authenticated evaluation result survived.
+
+The digest-bound candidate-runner cleanup receipt reports drained watchers but unknown coverage at
+`group_member` / `uncaptured_member`; remaining process and process-group counts are null. A
+separate owner-only child sidecar has the same typed uncertainty but is not bound through the final
+inner publication after the inventory refusal. Authenticated runtime consumption and cleanup
+completed, the retained runtime is absent, the proof temporary root is absent, and later local
+observation found zero task processes. These later facts do not repair the signed cleanup or
+inventory refusal. Model, MCP, Saxo, broker-write, mutation, purchase, and disclaimer-response
+facts remain unknown. No numerical proof, fresh SIM matrix, reconciliation, account equality, or
+activation ran; profiles remain quarantined at 0/54.
+
+The existing Project, Learning, and Session Log were updated in place and read back at Content
+counts 60/39/43 with exactly one active row per title and no page-body edits. The final six-path
+documentation/report/progress privacy scan passed with zero findings and zero scan errors. The
+branch remains local and unpushed.

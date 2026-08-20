@@ -2581,3 +2581,22 @@ candidate sequence remains separately gated.
 The existing Knowledge Base Project, Learning, and Session Log were updated and read back in place
 at Content counts 59/38/42 with no duplicates or page-body edits. The branch remains local and
 unpushed.
+
+## Exact test-handshake candidate and terminal inventory boundary
+
+Test-only source `9686678`, tree `b8035ae`, corrects the redirected-sleeper regression so its
+parent exits only after the child is visibly admitted to the immutable birth-bound cleanup set.
+The production cleanup implementation is unchanged. The exact candidate passed install,
+verify-only, a signed 2,991-test suite, required local/static/privacy/structural gates, SIM status,
+and one read-only capability call.
+
+Its one sealed proof nevertheless refused without retry. The authenticated inner result is
+`proof_installed_inventory_mismatch`; retained local inventory evidence identifies only an
+unexpected forbidden `.pytest_cache` tree created in the installed plugin cache during sealed
+child execution. This is the intended immutable-cache boundary: any child mutation invalidates the
+proof even when tracked candidate bytes remain unchanged. The outer result also preserves unknown
+cleanup coverage at `group_member/uncaptured_member` with null remaining counts.
+
+Authenticated runtime cleanup and later zero task processes do not relabel the refusal. No
+authenticated evaluation summary, model/MCP/Saxo aggregate, broker safety negative, numerical
+proof, matrix, account comparison, or activation survived. Profiles remain 0/54.
