@@ -1121,6 +1121,8 @@ def _matrix_command_failure_reason(error: CommandFailureError) -> str:
         return "installed_matrix_child_cleanup_unknown"
     if error.remaining_process_count > 0 or error.remaining_process_group_count > 0:
         return "installed_matrix_child_cleanup_failed"
+    if error.receipt.pid is None and error.receipt.pgid is None:
+        return "installed_matrix_child_start_failed"
     if not error.receipt.cleanup_attempted:
         return "installed_matrix_child_cleanup_unattempted"
     return "installed_matrix_child_command_failed"

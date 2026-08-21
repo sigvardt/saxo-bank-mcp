@@ -1930,6 +1930,25 @@ def test_producer_launcher_distinguishes_matrix_child_start_failure(
         )
 
 
+def test_producer_launcher_classifies_wrapped_matrix_child_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    missing_interpreter = tmp_path / "missing-python"
+    monkeypatch.setattr(producer.sys, "executable", str(missing_interpreter))
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_start_failed",
+    ):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            bundle.candidate_commit,
+            ("market_comparison",),
+        )
+
+
 def test_producer_launcher_distinguishes_invalid_matrix_child_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
