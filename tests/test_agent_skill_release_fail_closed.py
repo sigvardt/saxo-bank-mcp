@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agent_skill_cli_support import ReleaseCommand, run_release
@@ -13,10 +15,76 @@ from test_agent_skill_evidence_support import (
     write_json,
 )
 
+import saxo_bank_mcp.agent_skill_release as release_module
+from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
+from saxo_bank_mcp.agent_skill_matrix import ExecutedMatrixReport, load_verified_matrix_report
+from saxo_bank_mcp.agent_skill_release_models import ReleaseAssembleOptions
+
 
 @pytest.fixture(scope="module")
 def installed_report(tmp_path_factory: pytest.TempPathFactory) -> InstallFixture:
     return build_install_fixture(tmp_path_factory.mktemp("release-installed-report"))
+
+
+def test_release_accepts_exact_reconciled_sim_audit_delta(
+    tmp_path: Path,
+    installed_report: InstallFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence, plan, live = build_release_evidence(
+        tmp_path,
+        installed_report,
+        include_privacy=True,
+    )
+    out = evidence / "release-v1" / "manifest.json"
+    latest = evidence / "latest.json"
+
+    fixture_install, fixture_errors = load_install_report_for_consumers(
+        installed_report.report,
+    )
+    assert fixture_install is not None, fixture_errors
+    production_install = SimpleNamespace(
+        candidate_commit=fixture_install.candidate_commit,
+        execution_mode="installed_verification",
+        expected_tools=fixture_install.expected_tools,
+        global_state_unchanged=True,
+        process_cleanup=SimpleNamespace(complete=True),
+    )
+
+    def load_production_install(_path: Path) -> tuple[SimpleNamespace, tuple[()]]:
+        return production_install, ()
+
+    monkeypatch.setattr(
+        release_module,
+        "load_install_report_for_consumers",
+        load_production_install,
+    )
+    matrix_path = evidence / "task-15-sim" / "manual" / "tool-matrix.json"
+    ExecutedMatrixReport.model_validate_json(matrix_path.read_text(encoding="utf-8"))
+    matrix, matrix_errors = load_verified_matrix_report(matrix_path)
+    assert matrix is not None, matrix_errors
+
+    result = release_module.assemble_release(
+        ReleaseAssembleOptions(
+            repo=installed_report.repo,
+            plan=plan,
+            evidence_root=evidence,
+            release="release-v1",
+            source_commit=installed_report.commit,
+            verify_live_proof=live,
+            out=out,
+            latest=latest,
+            check=False,
+        )
+    )
+
+    assert result == 0, out.read_text(encoding="utf-8") if out.is_file() else str(result)
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["status"] == "passed"
+    assert payload["sim_state_unchanged"] is True
+    latest_payload = json.loads(latest.read_text(encoding="utf-8"))
+    assert latest_payload["manifest"] == "release-v1/manifest.json"
+    assert latest_payload["source_commit"] == installed_report.commit
 
 
 def test_release_rejects_missing_empty_and_stale_evidence(
@@ -98,9 +166,7 @@ def test_release_rejects_missing_privacy_and_keeps_latest(
     tmp_path: Path,
     installed_report: InstallFixture,
 ) -> None:
-    evidence, plan, live = build_release_evidence(
-        tmp_path, installed_report, include_privacy=False
-    )
+    evidence, plan, live = build_release_evidence(tmp_path, installed_report, include_privacy=False)
     out = tmp_path / "manifest.json"
     latest = tmp_path / "latest.json"
     latest.write_text('{"release":"release-v0"}\n', encoding="utf-8")
@@ -168,9 +234,7 @@ def test_release_rejects_missing_install_artifact(
     tmp_path: Path,
     installed_report: InstallFixture,
 ) -> None:
-    evidence, plan, live = build_release_evidence(
-        tmp_path, installed_report, include_privacy=True
-    )
+    evidence, plan, live = build_release_evidence(tmp_path, installed_report, include_privacy=True)
     (evidence / "task-14-installed-cache/manual/install.json").unlink()
     out = tmp_path / "out.json"
     latest = tmp_path / "latest.json"
@@ -196,9 +260,7 @@ def test_release_requires_explicit_task_status(
     tmp_path: Path,
     installed_report: InstallFixture,
 ) -> None:
-    evidence, plan, live = build_release_evidence(
-        tmp_path, installed_report, include_privacy=True
-    )
+    evidence, plan, live = build_release_evidence(tmp_path, installed_report, include_privacy=True)
     claim = evidence / "task-12-fixture" / "DoneClaim.json"
     write_json(claim, {"source_commit": installed_report.commit})
     out = evidence / "release-v1" / "manifest.json"
@@ -225,9 +287,7 @@ def test_release_rejects_publication_paths_outside_evidence_root(
     tmp_path: Path,
     installed_report: InstallFixture,
 ) -> None:
-    evidence, plan, live = build_release_evidence(
-        tmp_path, installed_report, include_privacy=True
-    )
+    evidence, plan, live = build_release_evidence(tmp_path, installed_report, include_privacy=True)
     out = tmp_path / "outside-manifest.json"
     latest = evidence / "latest.json"
 

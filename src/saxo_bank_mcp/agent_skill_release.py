@@ -21,6 +21,7 @@ from saxo_bank_mcp.agent_skill_release_models import (
     ReleaseManifest,
     TaskClaim,
 )
+from saxo_bank_mcp.qa_analytics_sim import brokerage_state_reconciled
 
 CATALOG_TASK_NUMBER = 13
 
@@ -220,18 +221,21 @@ def _manifest(
         public_fingerprint=_public_fingerprint(options.repo),
         counts=inputs.counts,
         task_evidence={
-            key: _relative_path(path, options.evidence_root)
-            for key, path in inputs.tasks.items()
+            key: _relative_path(path, options.evidence_root) for key, path in inputs.tasks.items()
         },
         artifact_digests={
-            _relative_path(path, options.evidence_root): sha256_file(path)
-            for path in artifacts
+            _relative_path(path, options.evidence_root): sha256_file(path) for path in artifacts
         },
         global_state_unchanged=install.global_state_unchanged,
+        # Legacy manifest name: this means no unresolved account-state delta.
+        # The exact two required SIM audit messages are retained and reconciled.
         sim_state_unchanged=_verified_true(
             value=(
                 sim_evals.global_state_unchanged
-                and matrix.before_state_fingerprint == matrix.after_state_fingerprint
+                and brokerage_state_reconciled(
+                    matrix.before_state_fingerprint,
+                    matrix.after_state_fingerprint,
+                )
             ),
             reason="sim_state_changed",
         ),
@@ -258,9 +262,7 @@ def _manifest(
 
 def _privacy_path(root: Path) -> Path | None:
     candidates = sorted(
-        path
-        for path in root.glob("*.json")
-        if "privacy" in path.name or "secret-scan" in path.name
+        path for path in root.glob("*.json") if "privacy" in path.name or "secret-scan" in path.name
     )
     return candidates[-1] if candidates else None
 

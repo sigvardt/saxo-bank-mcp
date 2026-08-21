@@ -8,9 +8,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from saxo_bank_mcp._evidence import JsonValue, write_json
+from saxo_bank_mcp._evidence import write_json
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consumers
+from saxo_bank_mcp.qa_analytics_sim import (
+    BrokerageStateFingerprint,
+    brokerage_state_reconciled,
+)
 
 EXPECTED_TOOL_COUNT = 60
 SCENARIO_MANIFEST = Path(__file__).resolve().parents[2] / "data/saxo/agent_tool_scenarios.json"
@@ -111,8 +115,8 @@ class ExecutedMatrixReport(BaseModel):
     tool_calls: tuple[ToolCallEvidence, ...] = Field(min_length=1)
     preflight: MatrixPreflight
     transport_ledger: MatrixTransportLedger
-    before_state_fingerprint: dict[str, JsonValue]
-    after_state_fingerprint: dict[str, JsonValue]
+    before_state_fingerprint: BrokerageStateFingerprint
+    after_state_fingerprint: BrokerageStateFingerprint
     cleanup: MatrixCleanup
     unexpected_skips: tuple[str, ...]
     lifecycle_calls: tuple[str, ...] = ()
@@ -197,6 +201,10 @@ def verify_matrix_report(*, report_path: Path, require_environment: str, out: Pa
             "candidate_commit": report.candidate_commit,
             "tool_count": report.tool_count,
             "tool_call_count": len(report.tool_calls),
+            "state_reconciled": brokerage_state_reconciled(
+                report.before_state_fingerprint,
+                report.after_state_fingerprint,
+            ),
             "state_unchanged": (report.before_state_fingerprint == report.after_state_fingerprint),
             "cleanup_complete": report.cleanup.complete,
             "errors": [],
@@ -272,18 +280,24 @@ def _matrix_state_errors(report: ExecutedMatrixReport, environment: str) -> list
         errors.append("environment_mismatch")
     if report.missing_tools or report.unexpected_tools or report.unexpected_skips or report.errors:
         errors.append("matrix_report_contains_errors")
-    if (
-        not report.before_state_fingerprint
-        or report.before_state_fingerprint != report.after_state_fingerprint
+    if not brokerage_state_reconciled(
+        report.before_state_fingerprint,
+        report.after_state_fingerprint,
     ):
         errors.append("state_fingerprint_mismatch")
-    required_state_keys = {
-        "open_orders",
-        "positions_money",
+    required_state_components = {
+        "orders",
+        "positions",
         "subscriptions",
-        "preview_write_state",
+        "previews_write_state",
     }
-    if set(report.before_state_fingerprint) < required_state_keys:
+    observed_components = {
+        component.name: component for component in report.before_state_fingerprint.components
+    }
+    if required_state_components - set(observed_components) or any(
+        observed_components[name].observed_state != "available"
+        for name in required_state_components & set(observed_components)
+    ):
         errors.append("state_fingerprint_scope_missing")
     if not report.cleanup.proof:
         errors.append("cleanup_proof_missing")

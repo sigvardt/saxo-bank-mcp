@@ -12,6 +12,7 @@ from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_eval_models import load_scenario_tools
+from saxo_bank_mcp.qa_analytics_sim import BROKERAGE_STATE_COMPONENTS
 
 ROOT: Final = Path(__file__).resolve().parents[1]
 CATALOG_TASK_NUMBER: Final = 13
@@ -118,12 +119,8 @@ def build_release_evidence(
         }
         for name in names
     ]
-    state: dict[str, JsonValue] = {
-        "open_orders": "c" * 64,
-        "positions_money": "d" * 64,
-        "subscriptions": "e" * 64,
-        "preview_write_state": "f" * 64,
-    }
+    state = _brokerage_state_payload(trade_message_count=0)
+    reconciled_state = _brokerage_state_payload(trade_message_count=2)
     write_json(
         task15 / "tool-matrix.json",
         {
@@ -157,7 +154,7 @@ def build_release_evidence(
                 "hosts": ["sim.api.saxo.test"],
             },
             "before_state_fingerprint": state,
-            "after_state_fingerprint": state,
+            "after_state_fingerprint": reconciled_state,
             "cleanup": {
                 "complete": True,
                 "uncleaned_resources": 0,
@@ -236,6 +233,21 @@ def build_release_evidence(
     plan = root / "plan.md"
     plan.write_text("# Fixture plan\n", encoding="utf-8")
     return evidence, plan, live
+
+
+def _brokerage_state_payload(*, trade_message_count: int) -> dict[str, JsonValue]:
+    return {
+        "components": [
+            {
+                "name": name,
+                "observed_state": "available",
+                "count": trade_message_count if name == "trade_messages" else 0,
+                "fingerprint_sha256": hashlib.sha256(name.encode("utf-8")).hexdigest(),
+                "mcp_tool_ids": ["saxo_health"],
+            }
+            for name in BROKERAGE_STATE_COMPONENTS
+        ],
+    }
 
 
 def run_cli(

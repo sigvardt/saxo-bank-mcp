@@ -407,8 +407,8 @@ def _build_executed_report(
             live_events=0,
             hosts=matrix.hosts or ("gateway.saxobank.com",),
         ),
-        before_state_fingerprint=matrix.before_state_fingerprint.model_dump(mode="json"),
-        after_state_fingerprint=matrix.after_state_fingerprint.model_dump(mode="json"),
+        before_state_fingerprint=matrix.before_state_fingerprint,
+        after_state_fingerprint=matrix.after_state_fingerprint,
         cleanup=MatrixCleanup(
             complete=True,
             uncleaned_resources=0,

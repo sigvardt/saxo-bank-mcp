@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 from test_agent_skill_evidence_support import (
@@ -36,6 +37,8 @@ from saxo_bank_mcp.agent_skill_matrix import (
     SCENARIO_MANIFEST,
     MatrixPlanOptions,
     SimFixtureOptions,
+    load_verified_matrix_report,
+    verify_matrix_report,
 )
 from saxo_bank_mcp.agent_skill_matrix_env import prepare_matrix_child_receipt_path
 from saxo_bank_mcp.agent_skill_matrix_producer import (
@@ -45,9 +48,11 @@ from saxo_bank_mcp.agent_skill_matrix_producer import (
 from saxo_bank_mcp.qa_analytics_sim import (
     BROKERAGE_STATE_COMPONENTS,
     CONTROLLED_SIM_CASES,
+    BrokerageStateFingerprint,
     analytics_case_calls,
     analytics_case_contract_sha256,
     analytics_sim_contracts,
+    brokerage_state_reconciled,
 )
 
 INSTALL_QA = ROOT / "scripts/qa_dual_plugin_install.py"
@@ -342,6 +347,7 @@ def _scenario_tool_names() -> list[str]:
 
 def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
     state = _matrix_state_payload("available")
+    reconciled_state = _reconciled_matrix_state_payload("available")
     non_exec = {"saxo_list_live_accounts", "saxo_precheck_live_order"}
     analytics_cases = _analytics_case_payloads()
     return {
@@ -375,7 +381,7 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
         "auth_status_completed": True,
         "session_capabilities_completed": True,
         "before_state_fingerprint": state,
-        "after_state_fingerprint": state,
+        "after_state_fingerprint": reconciled_state,
         "uncleaned_resources": 0,
         "hosts": ["gateway.saxobank.com"],
         "live_events": 0,
@@ -384,7 +390,10 @@ def _passed_matrix_payload(tool_names: list[str]) -> dict[str, JsonValue]:
         "analytics_case_contract_sha256": analytics_case_contract_sha256(),
         "analytics_case_receipts": analytics_cases,
         "analysis_execution_receipts": _analysis_execution_payloads(),
-        "controlled_sim_lifecycle": _controlled_lifecycle_payload(state),
+        "controlled_sim_lifecycle": _controlled_lifecycle_payload(
+            state,
+            reconciled_state,
+        ),
         "mcp_only_account_fixture_state": True,
         "cleanup_complete": True,
         "account_state_unchanged": True,
@@ -442,7 +451,10 @@ def _analysis_execution_payloads() -> list[JsonValue]:
     return receipts
 
 
-def _controlled_lifecycle_payload(state: dict[str, JsonValue]) -> dict[str, JsonValue]:
+def _controlled_lifecycle_payload(
+    state: dict[str, JsonValue],
+    reconciled_state: dict[str, JsonValue],
+) -> dict[str, JsonValue]:
     return {
         "evidence_state": "passed",
         "environment": "SIM",
@@ -453,7 +465,7 @@ def _controlled_lifecycle_payload(state: dict[str, JsonValue]) -> dict[str, Json
                 "reason_code": "passed",
                 "source_request_count": 0 if case_id == "cleanup" else 1,
                 "mcp_call_count": 1,
-                "sim_mutation_call_count": 0,
+                "sim_mutation_call_count": (2 if case_id in {"ghost_portfolio", "cleanup"} else 0),
                 "cleanup_complete": True,
                 "entitlement_state": (
                     "available" if case_id == "options_entitlement" else "not_applicable"
@@ -464,7 +476,7 @@ def _controlled_lifecycle_payload(state: dict[str, JsonValue]) -> dict[str, Json
             for case_id in CONTROLLED_SIM_CASES
         ],
         "before": state,
-        "after": state,
+        "after": reconciled_state,
         "live_events": 0,
         "live_mutation_calls": 0,
         "request_ledger_read_last": True,
@@ -492,6 +504,17 @@ def _matrix_state_payload(observed_state: str) -> dict[str, JsonValue]:
             for name in BROKERAGE_STATE_COMPONENTS
         ],
     }
+
+
+def _reconciled_matrix_state_payload(observed_state: str) -> dict[str, JsonValue]:
+    state = _matrix_state_payload(observed_state)
+    components = state["components"]
+    assert isinstance(components, list)
+    for component in components:
+        assert isinstance(component, dict)
+        if component.get("name") == "trade_messages":
+            component["count"] = 2
+    return state
 
 
 def _analytics_case_payloads() -> list[JsonValue]:
@@ -586,7 +609,7 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     )
     payload = json.loads(out.read_text(encoding="utf-8"))
 
-    assert result == 0
+    assert result == 0, payload
     assert payload["status"] == "passed"
     assert payload["execution_mode"] == "sim_execution"
     assert len(payload["tool_calls"]) == EXPECTED_TOOL_CALLS
@@ -597,7 +620,45 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     assert payload["transport_ledger"]["sim_only"] is True
     assert payload["transport_ledger"]["live_events"] == 0
     assert payload["cleanup"]["uncleaned_resources"] == 0
-    assert payload["before_state_fingerprint"] == payload["after_state_fingerprint"]
+    before = BrokerageStateFingerprint.model_validate_json(
+        json.dumps(payload["before_state_fingerprint"]),
+    )
+    after = BrokerageStateFingerprint.model_validate_json(
+        json.dumps(payload["after_state_fingerprint"]),
+    )
+    assert brokerage_state_reconciled(before, after) is True
+    before_components = {component.name: component for component in before.components}
+    after_components = {component.name: component for component in after.components}
+    assert after_components["trade_messages"].count == before_components["trade_messages"].count + 2
+
+    verification_out = tmp_path / "tool-matrix-verification.json"
+    assert (
+        verify_matrix_report(
+            report_path=out,
+            require_environment="SIM",
+            out=verification_out,
+        )
+        == 0
+    )
+    verification_payload = json.loads(verification_out.read_text(encoding="utf-8"))
+    assert verification_payload["state_reconciled"] is True
+    assert verification_payload["state_unchanged"] is False
+
+    tampered_payload = json.loads(out.read_text(encoding="utf-8"))
+    tampered_after = cast("dict[str, JsonValue]", tampered_payload["after_state_fingerprint"])
+    assert isinstance(tampered_after, dict)
+    tampered_components = cast("list[JsonValue]", tampered_after["components"])
+    assert isinstance(tampered_components, list)
+    for raw_component in tampered_components:
+        component = cast("dict[str, JsonValue]", raw_component)
+        assert isinstance(component, dict)
+        if component.get("name") == "trade_messages":
+            component["count"] = before_components["trade_messages"].count + 1
+    tampered = tmp_path / "tampered-tool-matrix.json"
+    write_json(tampered, tampered_payload)
+    verified, verify_errors = load_verified_matrix_report(tampered, "SIM")
+    assert verified is None
+    assert "state_fingerprint_mismatch" in verify_errors
     assert (out.parent / "probe-receipts" / "sim-tool-matrix.json").is_file()
 
 
