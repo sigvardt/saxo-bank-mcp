@@ -8,9 +8,8 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -67,72 +66,97 @@ def test_run_command_drains_large_stdout_and_stderr_while_child_is_running(
     assert result.receipt.stderr_sha256 == hashlib.sha256(result.stderr.encode()).hexdigest()
 
 
-def test_run_command_stuck_output_drain_preserves_timeout_and_unknown_cleanup(
+def test_run_command_does_not_block_on_descendant_inheriting_output_handles(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reader that cannot drain must not publish zero residue or erase timeout truth."""
+    """An escaped descendant retaining output handles cannot deadlock the caller."""
+    descendant_pid_path = (tmp_path / "descendant.pid").resolve()
+    descendant_code = (
+        "import os,sys,time\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')\n"
+        "print('descendant-ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    parent_code = (
+        "import subprocess,sys,time\n"
+        "subprocess.Popen("
+        f"[sys.executable, '-c', {descendant_code!r}, {str(descendant_pid_path)!r}], "
+        "start_new_session=True)\n"
+        "print('parent-ready', flush=True)\n"
+        "time.sleep(0.2)\n"
+        "raise SystemExit(7)\n"
+    )
+    helper_code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "import saxo_bank_mcp.agent_skill_command_runner as runner\n"
+        "def root_only_scope(admission):\n"
+        "    identities = ((admission.root_identity,) "
+        "if admission.root_identity is not None else ())\n"
+        "    return runner.ProcessCleanupScope(\n"
+        "        identities=identities, tracked_pids=(admission.process.pid,),\n"
+        "        tracked_pgids=(admission.root_pgid,), coverage_status='complete',\n"
+        "        tracked_pid_groups=((admission.process.pid, admission.root_pgid),),\n"
+        "        observed_identities=identities,\n"
+        "    )\n"
+        "runner.RootBoundProcessCleanupAdmission.capture_scope = root_only_scope\n"
+        "try:\n"
+        "    runner.run_command('inherited_output', (sys.executable, '-c', sys.argv[1]), "
+        "cwd=Path(sys.argv[2]), env=dict(__import__('os').environ), timeout_seconds=2)\n"
+        "except runner.CommandFailureError:\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(8)\n"
+    )
+    helper_env = os.environ.copy()
+    helper_env.update(_env(tmp_path))
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    helper_env["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(source_root), os.environ.get("PYTHONPATH")) if value
+    )
 
-    class StuckOutputDrain:
-        join_count = 0
-
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            return
-
-        def start(self) -> None:
-            return
-
-        def join(self, timeout: float | None = None) -> None:
-            _ = timeout
-            self.join_count += 1
-
-        def is_alive(self) -> bool:
-            return self.join_count == 1
-
-    monkeypatch.setattr(command_runner, "_OutputDrainThread", StuckOutputDrain)
-
-    with pytest.raises(command_runner.CommandFailureError) as caught:
-        command_runner.run_command(
-            "stuck_output_drain",
-            (sys.executable, "-c", "import time; time.sleep(60)"),
+    completed: subprocess.CompletedProcess[str] | None = None
+    try:
+        completed = subprocess.run(
+            (sys.executable, "-c", helper_code, parent_code, str(tmp_path)),
             cwd=tmp_path,
-            env=_env(tmp_path),
-            timeout_seconds=0,
+            env=helper_env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
+    finally:
+        if descendant_pid_path.is_file():
+            descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+            with suppress(ProcessLookupError):
+                os.kill(descendant_pid, signal.SIGKILL)
+            cleanup_deadline = time.monotonic() + 2
+            while (
+                command_runner.process_still_running(descendant_pid)
+                and time.monotonic() < cleanup_deadline
+            ):
+                time.sleep(0.01)
+            assert command_runner.process_still_running(descendant_pid) is False
 
-    error = caught.value
-    assert error.receipt.timed_out is True
-    assert error.remaining_process_count is None
-    assert error.remaining_process_group_count is None
-    assert error.cleanup_identity_evidence_status == "write-failed"
-    assert error.cleanup_unknown_reason == "cleanup_receipt_path_missing"
+    assert completed is not None
+    assert completed.returncode == 0
 
 
-def test_run_command_communicate_error_forces_unknown_cleanup(
+def test_run_command_output_spool_read_error_fails_without_changing_cleanup_truth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed pipe reader cannot authenticate complete cleanup or zero residue."""
-    real_popen = command_runner.subprocess.Popen
-    popen_factory = cast("Callable[..., subprocess.Popen[str]]", real_popen)
+    """A spool read failure is a command error, not false cleanup uncertainty."""
 
-    def popen_with_failed_communicate(
-        *args: object,
-        **kwargs: object,
-    ) -> subprocess.Popen[str]:
-        process = popen_factory(*args, **kwargs)
+    def fail_read(_spool: object) -> str:
+        raise OSError("synthetic spool read failure")
 
-        def fail_communicate(*_args: object, **_kwargs: object) -> tuple[str, str]:
-            raise OSError("synthetic communicate failure")
-
-        process.communicate = fail_communicate  # type: ignore[method-assign]
-        return process
-
-    monkeypatch.setattr(command_runner.subprocess, "Popen", popen_with_failed_communicate)
+    monkeypatch.setattr(command_runner, "_read_command_output_spool", fail_read)
 
     with pytest.raises(command_runner.CommandFailureError) as caught:
         command_runner.run_command(
-            "failed_output_drain",
+            "failed_output_spool",
             (sys.executable, "-c", "raise SystemExit(0)"),
             cwd=tmp_path,
             env=_env(tmp_path),
@@ -141,10 +165,10 @@ def test_run_command_communicate_error_forces_unknown_cleanup(
 
     error = caught.value
     assert error.receipt.timed_out is False
-    assert error.remaining_process_count is None
-    assert error.remaining_process_group_count is None
-    assert error.cleanup_identity_evidence_status == "write-failed"
-    assert error.cleanup_unknown_reason == "cleanup_receipt_path_missing"
+    assert error.remaining_process_count == 0
+    assert error.remaining_process_group_count == 0
+    assert error.cleanup_identity_evidence_status == "no-target-observed"
+    assert error.cleanup_unknown_reason is None
 
 
 def test_escaped_session_cleanup_writes_owner_only_identity_receipt(
@@ -2399,6 +2423,11 @@ def test_run_command_second_scope_admits_only_still_bound_child(  # noqa: C901, 
         def communicate(self, timeout: float | None = None) -> tuple[str, str]:
             _ = timeout
             return "", ""
+
+        def wait(self, timeout: float | None = None) -> int:
+            _ = timeout
+            self.returncode = 0
+            return 0
 
     class PassiveWatcher:
         def __init__(self, *_args: object, **_kwargs: object) -> None:

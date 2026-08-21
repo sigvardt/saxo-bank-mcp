@@ -10,12 +10,11 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Thread as _OutputDrainThread
 from types import MappingProxyType
-from typing import Literal, Self, cast
+from typing import BinaryIO, Literal, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -27,6 +26,7 @@ JSON_OBJECT_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, J
 TERM_WAIT_SECONDS = 1.0
 KILL_WAIT_SECONDS = 1.0
 WATCHER_DRAIN_SECONDS = 1.0
+_OUTPUT_READ_CHUNK_BYTES = 1024 * 1024
 _SHA256_PATTERN = r"^[a-f0-9]{64}$"
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
@@ -1036,6 +1036,25 @@ class CommandFailureError(Exception):
         )
 
 
+def _read_command_output_spool(spool: BinaryIO) -> str:
+    """Read one fixed-size snapshot without sharing the writer's file offset."""
+    file_descriptor = spool.fileno()
+    output_size = os.fstat(file_descriptor).st_size
+    chunks: list[bytes] = []
+    offset = 0
+    while offset < output_size:
+        chunk = os.pread(
+            file_descriptor,
+            min(_OUTPUT_READ_CHUNK_BYTES, output_size - offset),
+            offset,
+        )
+        if not chunk:
+            raise OSError("command_output_spool_short_read")
+        chunks.append(chunk)
+        offset += len(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     name: str,
     argv: tuple[str, ...],
@@ -1076,9 +1095,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     stderr = ""
     exit_code = 124
     process_error: OSError | None = None
-    output_drain: _OutputDrainThread | None = None
-    drained_output: list[tuple[str, str]] = []
-    output_drain_errors: list[OSError | subprocess.SubprocessError | ValueError] = []
+    spool_stack = ExitStack()
+    stdout_spool: BinaryIO | None = None
+    stderr_spool: BinaryIO | None = None
     pids: tuple[int, ...] = ()
     pgids: tuple[int, ...] = ()
     terminal_snapshot = ProcessCleanupTerminalSnapshot(targets=(), coverage_status="complete")
@@ -1184,23 +1203,25 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 return
             time.sleep(0.001)
 
-    def _drain_process_output() -> None:
-        if process is None:
-            return
-        try:
-            drained_output.append(process.communicate())
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            output_drain_errors.append(error)
-
     watcher: threading.Thread | None = None
     try:
+        child_environment = preserve_parent_temp_environment(env)
+        spool_directory = child_environment.get("TMPDIR")
+        stdout_spool = spool_stack.enter_context(
+            tempfile.TemporaryFile(mode="w+b", dir=spool_directory),  # noqa: SIM115
+        )
+        stderr_spool = spool_stack.enter_context(
+            tempfile.TemporaryFile(mode="w+b", dir=spool_directory),  # noqa: SIM115
+        )
+        os.fchmod(stdout_spool.fileno(), _OWNER_FILE_MODE)
+        os.fchmod(stderr_spool.fileno(), _OWNER_FILE_MODE)
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=preserve_parent_temp_environment(env),
+            env=child_environment,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_spool,
+            stderr=stderr_spool,
             start_new_session=True,
         )
         root_pid = process.pid
@@ -1208,12 +1229,6 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         admission = open_root_bound_process_cleanup_admission(process, pgid)
         # Immediate snapshot so fast-exit parents still leave tracked members.
         _capture_identities()
-        output_drain = _OutputDrainThread(
-            target=_drain_process_output,
-            name=f"cmd-output-{name}",
-            daemon=True,
-        )
-        output_drain.start()
         watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
         watcher.start()
         deadline = time.monotonic() + timeout_seconds
@@ -1384,25 +1399,12 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 target_observation_unknown=True,
                 offending_observations=cleanup_offending_observations,
             )
-        if output_drain is not None:
-            output_drain.join(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
-            output_drain_failed = output_drain.is_alive() or bool(output_drain_errors)
-            if output_drain.is_alive():
-                if process is not None:
-                    for stream in (process.stdout, process.stderr):
-                        if stream is None:
-                            continue
-                        with suppress(OSError, ValueError):
-                            stream.close()
-                output_drain.join()
-                process_error = process_error or OSError("command_output_drain_timeout")
-            elif output_drain_errors:
-                process_error = process_error or OSError(
-                    type(output_drain_errors[0]).__name__,
-                )
-            elif drained_output:
-                stdout, stderr = drained_output[0]
-            if output_drain_failed:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.wait(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                process_error = process_error or OSError(type(exc).__name__)
                 terminal_snapshot = replace(
                     terminal_snapshot,
                     coverage_status="unknown",
@@ -1412,16 +1414,18 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                     ),
                     target_observation_unknown=True,
                 )
-        elif process is not None:
-            try:
-                stdout, stderr = process.communicate(
-                    timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS,
-                )
-            except subprocess.TimeoutExpired:
-                stdout = stdout or ""
-                stderr = stderr or "communicate_timeout"
-            except OSError as exc:
-                process_error = process_error or exc
+        try:
+            if stdout_spool is not None:
+                stdout = _read_command_output_spool(stdout_spool)
+            if stderr_spool is not None:
+                stderr = _read_command_output_spool(stderr_spool)
+        except (OSError, ValueError) as exc:
+            process_error = process_error or (
+                exc if isinstance(exc, OSError) else OSError(type(exc).__name__)
+            )
+        finally:
+            with suppress(OSError, ValueError):
+                spool_stack.close()
 
     cleanup_identity_evidence = _write_cleanup_receipt()
     remaining_process_count = terminal_snapshot.remaining_process_count
