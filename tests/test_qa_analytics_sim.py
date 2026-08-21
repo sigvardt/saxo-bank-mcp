@@ -376,6 +376,156 @@ def test_controlled_sim_order_body_matches_the_registered_place_contract() -> No
     }
 
 
+def test_controlled_sim_write_refuses_preexisting_orders_before_any_mutation(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _runtime_state()
+    state.before = _observed_lifecycle_state(
+        balance_digest="1" * 64,
+        trade_digest="4" * 64,
+        trade_count=399,
+        order_count=1,
+    )
+    state.analytics_resources.account_selectors.append("sim")
+    state.analytics_resources.controlled_order_limit_price = "99.0"
+    fixtures = matrix_module.MatrixFixtures(
+        stock_uic=211,
+        amount=1,
+        limit_price=50,
+        modified_limit_price=51,
+        option_uics=(30004846, 30004926),
+        stream_uic=21,
+    )
+    primary_request = cast(
+        "dict[str, JsonValue]",
+        dict(analytics_primary_calls())["saxo_backtest_strategy"]["request"],
+    )
+    backtest_call = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_backtest_strategy",
+        kind="success",
+        arguments={
+            "request": {
+                **primary_request,
+                "dataset_id": "ds_11111111111141118111111111111111",
+                "instrument_handle": "ih_22222222222242228222222222222222",
+            },
+        },
+        input_strategy="controlled_sim_fixture",
+    )
+    observed_tools: list[str] = []
+
+    class Recorder:
+        def candidate_commit(self) -> str:
+            return "a" * 40
+
+        def controlled_backtest_source_binding(
+            self,
+            _dataset_id: str,
+            _instrument_handle: str,
+            *,
+            expected_uic: int,
+            expected_asset_type: str,
+        ) -> str:
+            assert (expected_uic, expected_asset_type) == (211, "Stock")
+            return "aa_00000000000040008000000000000072"
+
+        def prepare_controlled_sim_safety(
+            self,
+            _account_selector: str,
+            *,
+            expected_uic: int,
+        ) -> None:
+            raise AssertionError(f"unsafe preparation for {expected_uic=}")
+
+        def clear_controlled_sim_safety(self) -> None:
+            return None
+
+        def record_observed_ghost_lifecycle(
+            self,
+            _evidence: object,
+            *,
+            ledger_provenance_sha256: str,
+        ) -> None:
+            raise AssertionError(f"unexpected proof receipt {ledger_provenance_sha256}")
+
+    async def stable_fingerprint(
+        _client: object,
+        _state: MatrixRuntimeState,
+    ) -> BrokerageStateFingerprint:
+        assert state.before is not None
+        return state.before
+
+    async def observe_tool(
+        _client: object,
+        tool: str,
+        _arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed_tools.append(tool)
+        if tool == "saxo_create_order_preview":
+            payload: dict[str, JsonValue] = {
+                "status": "preview_created",
+                "preview_token": "pv",
+            }
+            result_state = "preview_created"
+        elif tool == "saxo_place_sim_order":
+            payload = {
+                "status": "completed",
+                "safe_cancel_by_instrument": {
+                    "write_preview_arguments": {"request": "cancel"},
+                },
+            }
+            result_state = "completed"
+        elif tool == "saxo_create_write_preview":
+            payload = {
+                "status": "preview_created",
+                "preview_token": "cv",
+            }
+            result_state = "preview_created"
+        elif tool == "saxo_cancel_sim_orders_by_instrument":
+            payload = {"status": "completed"}
+            result_state = "completed"
+        else:
+            assert tool == "saxo_get_safe_request_ledger"
+            payload = {
+                "status": "passed",
+                "scope": "current_mcp_session",
+                "ledger_complete": True,
+                "events_evicted": 0,
+                "events": [],
+            }
+            result_state = "passed"
+        return MatrixToolObservation(
+            payload=payload,
+            result_parsed=True,
+            result_state=result_state,
+            mcp_is_error=False,
+        )
+
+    async def no_wait() -> None:
+        return None
+
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setattr(matrix_module, "mcp_state_fingerprint", stable_fingerprint)
+    monkeypatch.setattr(matrix_module, "call_tool", observe_tool)
+    monkeypatch.setattr(matrix_module, "_wait_for_sim_write_rate_limit", no_wait)
+
+    async def run_controlled_phase() -> matrix_module._ControlledGhostObservation:
+        return await matrix_module._run_controlled_sim_ghost_phase(  # noqa: SLF001
+            cast("MatrixClient", object()),
+            state,
+            backtest_call,
+            fixtures,
+            proof_recorder=Recorder(),  # type: ignore[arg-type]
+        )
+
+    observation = anyio.run(run_controlled_phase)
+
+    assert observation.reason_code == "controlled_ghost_preexisting_orders"
+    assert observation.sim_mutation_call_count == 0
+    assert observed_tools == ["saxo_get_safe_request_ledger"]
+
+
 def test_controlled_limit_price_is_derived_below_one_observed_bid() -> None:
     payload: dict[str, JsonValue] = {
         "status": "passed",
@@ -2512,7 +2662,7 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
     async def execute_every_declared_case(
         client: object,
         call: sim_module.AnalyticsCaseCall,
-        _cache: dict[tuple[str, str], MatrixToolObservation],
+        _cache: dict[tuple[str, str, float | None], MatrixToolObservation],
     ) -> MatrixToolObservation:
         return await result_for_case(
             client,
@@ -2576,7 +2726,7 @@ def test_exact_duplicate_analytics_request_reuses_one_mcp_observation(
         analysis_kind="market_comparison",
         expected_analysis_outcome="persisted",
     )
-    cache: dict[tuple[str, str], MatrixToolObservation] = {}
+    cache: dict[tuple[str, str, float | None], MatrixToolObservation] = {}
 
     first = anyio.run(
         matrix_module._call_analytics_case_once,  # noqa: SLF001
@@ -2593,6 +2743,63 @@ def test_exact_duplicate_analytics_request_reuses_one_mcp_observation(
 
     assert first is second is result
     assert observed == [(call.tool_id, call.arguments)]
+
+
+def test_timeout_and_recovery_with_identical_arguments_make_distinct_mcp_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeouts: list[float | None] = []
+
+    async def execute_each(
+        _client: object,
+        _tool: str,
+        _arguments: dict[str, JsonValue],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> MatrixToolObservation:
+        observed_timeouts.append(timeout_seconds)
+        return MatrixToolObservation(
+            payload={"status": "timed_out" if timeout_seconds is not None else "reconciled"},
+            result_parsed=timeout_seconds is None,
+            result_state="timed_out" if timeout_seconds is not None else "reconciled",
+            mcp_is_error=timeout_seconds is not None,
+            timed_out=timeout_seconds is not None,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", execute_each)
+    arguments: dict[str, JsonValue] = {"action": "check", "job_id": "jb_1"}
+    timed = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_manage_analysis_job",
+        kind="timeout",
+        arguments=arguments,
+        input_strategy="bounded_timeout",
+        timeout_seconds=0.001,
+    )
+    recovery = timed.model_copy(
+        update={
+            "kind": "recovery",
+            "input_strategy": "observe_exact_timed_operation",
+            "reconciles_kind": "timeout",
+            "timeout_seconds": None,
+        },
+    )
+    cache: dict[tuple[str, str, float | None], MatrixToolObservation] = {}
+
+    timed_result = anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        timed,
+        cache,
+    )
+    recovery_result = anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        recovery,
+        cache,
+    )
+
+    assert timed_result is not recovery_result
+    assert observed_timeouts == [0.001, None]
 
 
 def test_analytics_request_cache_never_reuses_different_arguments(
@@ -2615,7 +2822,7 @@ def test_analytics_request_cache_never_reuses_different_arguments(
         )
 
     monkeypatch.setattr(matrix_module, "call_tool", execute_each)
-    cache: dict[tuple[str, str], MatrixToolObservation] = {}
+    cache: dict[tuple[str, str, float | None], MatrixToolObservation] = {}
     first = sim_module.AnalyticsCaseCall(
         tool_id="saxo_analyze_market",
         kind="success",

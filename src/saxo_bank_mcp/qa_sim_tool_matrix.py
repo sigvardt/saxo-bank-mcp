@@ -627,7 +627,7 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
     per_tool: dict[str, dict[str, AnalyticsCaseReceipt]] = {
         tool_id: {} for tool_id in ANALYTICS_TOOL_IDS
     }
-    observed_requests: dict[tuple[str, str], MatrixToolObservation] = {}
+    observed_requests: dict[tuple[str, str, float | None], MatrixToolObservation] = {}
     ghost_observation: _ControlledGhostObservation | None = None
     for case_call in analytics_case_calls():
         if case_call.kind == "success" and case_call.tool_id in {
@@ -763,10 +763,10 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
 async def _call_analytics_case_once(
     client: MatrixClient,
     call: AnalyticsCaseCall,
-    observed_requests: dict[tuple[str, str], MatrixToolObservation],
+    observed_requests: dict[tuple[str, str, float | None], MatrixToolObservation],
 ) -> MatrixToolObservation:
     """Reuse only one exact tool plus canonical-request observation in this phase."""
-    key = (call.tool_id, digest(call.arguments))
+    key = (call.tool_id, digest(call.arguments), call.timeout_seconds)
     observed = observed_requests.get(key)
     if observed is not None:
         return observed
@@ -1235,7 +1235,9 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
             observed_limit_price,
         )
     ):
-        if proof_recorder is None:
+        if not _controlled_sim_orders_clear(state.before):
+            reason = "controlled_ghost_preexisting_orders"
+        elif proof_recorder is None:
             reason = "controlled_ghost_safety_binding_unavailable"
         else:
             try:
@@ -1343,6 +1345,15 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
     _record(state, "saxo_get_safe_request_ledger", ledger, ledger_arguments)
     ledger_complete = _complete_sim_request_ledger(ledger)
     ledger_sha256 = digest(ledger.payload) if ledger_complete else None
+    if reason == "controlled_ghost_preexisting_orders":
+        return _ControlledGhostObservation(
+            reason_code=reason,
+            evidence=None,
+            ledger_fingerprint_sha256=ledger_sha256,
+            receipt_bound=False,
+            mcp_call_count=calls,
+            sim_mutation_call_count=0,
+        )
     before = state.before
     if (
         before is None
@@ -1480,6 +1491,18 @@ def _controlled_sim_order_body(
         "OrderDuration": {"DurationType": "DayOrder"},
         "ExternalReference": _CONTROLLED_GHOST_EXTERNAL_REFERENCE,
     }
+
+
+def _controlled_sim_orders_clear(before: BrokerageStateFingerprint | None) -> bool:
+    """Require one available zero-order readback before any controlled SIM write."""
+    if before is None:
+        return False
+    return any(
+        component.name == "orders"
+        and component.observed_state == "available"
+        and component.count == 0
+        for component in before.components
+    )
 
 
 async def _wait_for_sim_write_rate_limit() -> None:
