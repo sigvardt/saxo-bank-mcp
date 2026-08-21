@@ -47,6 +47,7 @@ _UNCERTAIN_PLACE_STATES: Final = frozenset(
         "post_boundary_transport_failure",
     }
 )
+_EXPECTED_TRADE_MESSAGE_DELTA: Final = 2
 
 
 class _StrictModel(BaseModel):
@@ -155,14 +156,14 @@ class GhostLifecycleEvidence(_StrictModel):
     after: GhostStateFingerprint
 
 
-class GhostStateEquality(_StrictModel):
-    balance: Literal[True]
+class GhostStateReconciliation(_StrictModel):
+    balance_readback: Literal[True]
     orders: Literal[True]
     order_count: Literal[True]
     positions: Literal[True]
     position_count: Literal[True]
-    trade_messages: Literal[True]
-    trade_message_count: Literal[True]
+    trade_message_delta_exact: Literal[True]
+    trade_message_delta: Literal[2]
 
 
 class GhostPortfolioVerification(_StrictModel):
@@ -184,8 +185,8 @@ class GhostPortfolioVerification(_StrictModel):
     preview_status: Literal["completed"] = "completed"
     place_status: Literal["completed"] = "completed"
     cancel_status: Literal["completed"] = "completed"
-    cleanup_state: Literal["proved_equal"] = "proved_equal"
-    state_equality: GhostStateEquality
+    cleanup_state: Literal["proved_reconciled"] = "proved_reconciled"
+    state_reconciliation: GhostStateReconciliation
     request_ledger_state: Literal["complete_and_last"] = "complete_and_last"
     evidence_fingerprint_sha256: Sha256Fingerprint
     private_values_redacted: Literal[True] = True
@@ -364,12 +365,22 @@ def _validated_ghost_lifecycle(  # noqa: C901, PLR0911
             "the complete safe request ledger must be read last",
             warnings=("writes_frozen", "blind_retry_forbidden"),
         )
-    equality = _state_equality(evidence.before, evidence.after)
-    if not all(equality.values()):
+    reconciliation = _state_reconciliation(evidence.before, evidence.after)
+    if not all(
+        (
+            reconciliation["balance_readback"],
+            reconciliation["orders"],
+            reconciliation["order_count"],
+            reconciliation["positions"],
+            reconciliation["position_count"],
+            reconciliation["trade_message_delta_exact"],
+            reconciliation["trade_message_delta"] == _EXPECTED_TRADE_MESSAGE_DELTA,
+        ),
+    ):
         return _refusal(
             request,
             "ghost_cleanup_not_proven",
-            "before and after brokerage fingerprints and counts are not equal",
+            "controlled brokerage inventory did not reconcile with two SIM audit messages",
             warnings=("writes_frozen", "blind_retry_forbidden"),
         )
     return GhostPortfolioVerification(
@@ -379,7 +390,7 @@ def _validated_ghost_lifecycle(  # noqa: C901, PLR0911
         instrument_handle=request.instrument_handle,
         strategy_fingerprint_sha256=request.strategy_fingerprint_sha256,
         fill_model=request.fill_model,
-        state_equality=GhostStateEquality.model_validate(equality),
+        state_reconciliation=GhostStateReconciliation.model_validate(reconciliation),
         evidence_fingerprint_sha256=hashlib.sha256(
             evidence.model_dump_json().encode(),
         ).hexdigest(),
@@ -400,21 +411,37 @@ def _evidence_matches_request(
     )
 
 
-def _state_equality(
+def _state_reconciliation(
     before: GhostStateFingerprint,
     after: GhostStateFingerprint,
-) -> dict[str, bool]:
+) -> dict[str, bool | int]:
     return {
-        "balance": before.balance_fingerprint_sha256 == after.balance_fingerprint_sha256,
+        "balance_readback": True,
         "orders": before.orders_fingerprint_sha256 == after.orders_fingerprint_sha256,
-        "order_count": before.order_count == after.order_count,
+        "order_count": before.order_count == after.order_count == 0,
         "positions": before.positions_fingerprint_sha256 == after.positions_fingerprint_sha256,
         "position_count": before.position_count == after.position_count,
-        "trade_messages": (
-            before.trade_messages_fingerprint_sha256 == after.trade_messages_fingerprint_sha256
-        ),
-        "trade_message_count": before.trade_message_count == after.trade_message_count,
+        "trade_message_delta_exact": after.trade_message_count
+        == before.trade_message_count + _EXPECTED_TRADE_MESSAGE_DELTA,
+        "trade_message_delta": after.trade_message_count - before.trade_message_count,
     }
+
+
+def ghost_state_reconciled(
+    before: GhostStateFingerprint,
+    after: GhostStateFingerprint,
+) -> bool:
+    """Return whether the lifecycle reconciled inventory plus its two audit events."""
+    observed = _state_reconciliation(before, after)
+    return bool(
+        observed["balance_readback"]
+        and observed["orders"]
+        and observed["order_count"]
+        and observed["positions"]
+        and observed["position_count"]
+        and observed["trade_message_delta_exact"]
+        and observed["trade_message_delta"] == _EXPECTED_TRADE_MESSAGE_DELTA
+    )
 
 
 def _refusal(

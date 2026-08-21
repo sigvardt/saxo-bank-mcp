@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from runpy import run_path
@@ -23,7 +25,14 @@ from saxo_bank_mcp.analytics_chart_semantics import core_template_bindings
 from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_proof_profiles import load_proof_profile_catalog
 from saxo_bank_mcp.analytics_source_contracts import load_source_contract_catalog
+from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.auth_status import AuthStatusInputs, SaxoAuthStatus, build_auth_status
+from saxo_bank_mcp.config import SIM_ENDPOINTS, SimAuthSettings
+from saxo_bank_mcp.mcp_token_state import CachedTokenReady
+from saxo_bank_mcp.process_scoped_selectors import (
+    account_selector_for,
+    inject_account_selectors,
+)
 from saxo_bank_mcp.qa_analytics_artifacts import (
     ArtifactParityReceipt,
     ArtifactVisualIntegrityReceipt,
@@ -65,7 +74,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     analytics_sim_contracts,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_helpers import receipt_for
-from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
+from saxo_bank_mcp.qa_sim_tool_matrix_models import FIXTURE_INSTRUMENT, SimToolMatrixReceipt
 from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS, ANALYTICS_TOOL_IDS
 
 EXPECTED_SOURCE_CONTRACT_COUNT: Final = 18
@@ -490,6 +499,23 @@ def _complete_bundle() -> tuple[
             ),
         )
     analysis_execution_receipts = tuple(analysis_execution_receipts_list)
+    brokerage_after = BrokerageStateFingerprint(
+        components=tuple(
+            component.model_copy(
+                update=(
+                    {"fingerprint_sha256": "6" * 64}
+                    if component.name == "balances"
+                    else {
+                        "count": component.count + 2,
+                        "fingerprint_sha256": "7" * 64,
+                    }
+                    if component.name == "trade_messages"
+                    else {}
+                ),
+            )
+            for component in brokerage_state.components
+        ),
+    )
     lifecycle = ControlledSimLifecycleReceipt(
         environment="SIM",
         cases=tuple(
@@ -499,7 +525,7 @@ def _complete_bundle() -> tuple[
                 reason_code="passed",
                 source_request_count=0 if case_id == "cleanup" else 1,
                 mcp_call_count=1,
-                sim_mutation_call_count=0,
+                sim_mutation_call_count=(2 if case_id in {"ghost_portfolio", "cleanup"} else 0),
                 cleanup_complete=True,
                 entitlement_state=(
                     "available" if case_id == "options_entitlement" else "not_applicable"
@@ -509,7 +535,7 @@ def _complete_bundle() -> tuple[
             for case_id in CONTROLLED_SIM_CASES
         ),
         before=brokerage_state,
-        after=brokerage_state,
+        after=brokerage_after,
         live_events=0,
         live_mutation_calls=0,
         request_ledger_read_last=True,
@@ -534,7 +560,7 @@ def _complete_bundle() -> tuple[
         auth_status_completed=True,
         session_capabilities_completed=True,
         before_state_fingerprint=brokerage_state,
-        after_state_fingerprint=brokerage_state,
+        after_state_fingerprint=brokerage_after,
         uncleaned_resources=0,
         hosts=("gateway.saxobank.com",),
         live_events=0,
@@ -2050,6 +2076,121 @@ def test_installed_matrix_child_records_inner_lifespan_cleanup_failure(
     assert shutdown_count == expected_attempts
 
 
+def test_installed_matrix_child_arms_exact_bound_sim_allowlists_and_restores_them(  # noqa: PLR0915
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    child = import_module("saxo_bank_mcp.qa_installed_matrix_child")
+    matrix_module = import_module("saxo_bank_mcp.qa_sim_tool_matrix")
+    selector_module = import_module("saxo_bank_mcp.process_scoped_selectors")
+    safety_state_module = import_module("saxo_bank_mcp.safety_state")
+    token_state_module = import_module("saxo_bank_mcp.mcp_token_state")
+    config_module = import_module("saxo_bank_mcp.config")
+    assert child.__file__ is not None
+    child_path = Path(child.__file__).resolve()
+    candidate = "1" * 40
+    raw_account = "sim"
+    expected_uic = FIXTURE_INSTRUMENT
+    token = SaxoTokenSet(
+        access_token="token",  # noqa: S106
+        refresh_token="refresh",  # noqa: S106
+        code_verifier="verifier",
+        environment="SIM",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    selector = account_selector_for(token, raw_account)
+    injected = inject_account_selectors(
+        {
+            "AccountKey": raw_account,
+            "ClientKey": "client",
+            "AccountId": "private-account-id",
+            "Currency": "DKK",
+            "AccountType": "Normal",
+        },
+        token,
+    )
+    assert isinstance(injected, dict)
+    assert injected["SafeAccountSelector"] == selector
+    settings = SimAuthSettings(
+        app_key="test-app",
+        authorization_url=SIM_ENDPOINTS.authorization_url,
+        token_url=SIM_ENDPOINTS.token_url,
+        rest_base_url=SIM_ENDPOINTS.rest_base_url,
+        redirect_uri="",
+        cache_path=tmp_path / "token-cache.json",
+    )
+
+    def resolve_settings(**_kwargs: object) -> SimAuthSettings:
+        return settings
+
+    def ready_token(*_args: object, **_kwargs: object) -> CachedTokenReady:
+        return CachedTokenReady(token)
+
+    monkeypatch.setattr(config_module, "resolve_sim_auth_settings", resolve_settings)
+    monkeypatch.setattr(
+        token_state_module,
+        "cached_token_for_tool",
+        ready_token,
+    )
+    monkeypatch.delenv("SAXO_MCP_ACCOUNT_ALLOWLIST", raising=False)
+    monkeypatch.setenv("SAXO_MCP_INSTRUMENT_ALLOWLIST", str(expected_uic))
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "SIM")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "0")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_WRITES", "")
+    observed_active = False
+    reset_called = False
+
+    def reset_controlled_state() -> None:
+        nonlocal reset_called
+        reset_called = True
+
+    monkeypatch.setattr(safety_state_module, "reset_safety_state", reset_controlled_state)
+
+    async def inspect_private_session(
+        _fixtures: object,
+        *,
+        proof_recorder: object,
+        matrix_server: object,
+    ) -> NoReturn:
+        _ = matrix_server
+        nonlocal observed_active
+        proof_recorder.prepare_controlled_sim_safety(  # type: ignore[attr-defined]
+            selector,
+            expected_uic=expected_uic,
+        )
+        observed_active = True
+        assert os.environ["SAXO_MCP_ACCOUNT_ALLOWLIST"] == raw_account
+        assert os.environ["SAXO_MCP_INSTRUMENT_ALLOWLIST"] == str(expected_uic)
+        raise RuntimeError("synthetic terminal child failure")
+
+    monkeypatch.setattr(matrix_module, "_run_matrix", inspect_private_session)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(child_path),
+            "--candidate",
+            candidate,
+            "--analysis-kind",
+            "market_comparison",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_path(str(child_path), run_name="__main__")
+
+    captured = capsys.readouterr()
+    assert raised.value.code == MATRIX_CHILD_FAILURE_EXIT_CODE
+    assert observed_active is True, captured.out
+    assert reset_called is True
+    assert "SAXO_MCP_ACCOUNT_ALLOWLIST" not in os.environ
+    assert os.environ["SAXO_MCP_INSTRUMENT_ALLOWLIST"] == str(expected_uic)
+    assert raw_account not in captured.out
+    assert raw_account not in captured.err
+    selector_module.clear_process_scoped_selector_state_for_tests()
+
+
 def test_producer_launcher_authenticates_typed_matrix_child_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2347,6 +2488,44 @@ def test_normal_child_import_exposes_no_ghost_authority_and_declares_envelope() 
     source = inspect.getsource(child.main)
     assert "InstalledMatrixEnvelope" in source
     assert "matrix_receipt_sha256" in source
+
+
+def test_process_active_profiles_bind_only_metrics_emitted_by_the_runtime_executors() -> None:
+    profiles_module = import_module("saxo_bank_mcp.qa_installed_matrix_profiles")
+    definitions = load_metric_definition_catalog()
+    catalog = load_proof_profile_catalog(definitions=definitions)
+    expected_metrics = {
+        "bounded_backtest": ("total_return",),
+        "derivatives_model": ("theoretical_option_value",),
+        "instrument_price_return": ("price_return",),
+        "margin_fire_drill": ("combined_scenario_effect",),
+        "market_comparison": ("price_return",),
+        "portfolio_minimum_variance": ("minimum_variance_objective",),
+        "portfolio_performance": ("time_weighted_return",),
+        "portfolio_risk_parity": ("risk_parity_contribution",),
+        "portfolio_scenario": ("custom_shock_effect",),
+        "position_sizing": ("position_size",),
+        "pretrade_impact": ("estimated_transaction_cost", "maximum_loss"),
+        "scenario_combined": ("combined_scenario_effect",),
+        "scenario_currency": ("currency_shock_effect",),
+        "scenario_custom": ("custom_shock_effect",),
+        "scenario_rate": ("rate_shock_effect",),
+        "scenario_volatility": ("volatility_shock_effect",),
+    }
+    active = profiles_module.process_active_catalog(
+        catalog,
+        definitions=definitions,
+        candidate_commit="1" * 40,
+        allowed_kinds=frozenset(expected_metrics),
+        source_revisions={kind: f"revision-{index}" for index, kind in enumerate(expected_metrics)},
+    )
+    by_kind = {profile.analysis_kind: profile for profile in active.profiles}
+
+    for kind, metric_ids in expected_metrics.items():
+        profile = by_kind[kind]
+        assert tuple(binding.metric_id for binding in profile.metric_definitions) == metric_ids
+        assert profile.activation_state.value == "active"
+        assert profile.source_revision is not None
 
 
 @pytest.mark.parametrize(

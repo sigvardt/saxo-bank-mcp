@@ -398,6 +398,7 @@ class IssuedStoredAnalysisInput:
 
     dataset_id: str
     analysis_kind: str
+    instrument_handles: tuple[str, ...]
     quality_state: QualityState
     coverage_start: datetime
     coverage_end: datetime
@@ -461,12 +462,31 @@ def issue_stored_analysis_input(
     return IssuedStoredAnalysisInput(
         dataset_id=primary.dataset.dataset_id,
         analysis_kind=analysis_kind,
+        instrument_handles=_stored_context_instrument_handles(context),
         quality_state=primary.dataset.quality_state,
         coverage_start=primary.coverage_start,
         coverage_end=primary.coverage_end,
         row_count=primary.dataset.row_count,
         fingerprint_sha256=fingerprint_sha256,
     )
+
+
+def _stored_context_instrument_handles(  # noqa: PLR0911 - closed typed-context dispatch
+    context: BaseModel,
+) -> tuple[str, ...]:
+    if isinstance(context, StoredPositionSizingExecutionContext):
+        return (context.request.instrument_handle,)
+    if isinstance(context, StoredScenarioExecutionContext):
+        return tuple(component.instrument_handle for component in context.request.components)
+    if isinstance(context, StoredOptimizationExecutionContext):
+        return tuple(asset.instrument_handle for asset in context.request.dataset.assets)
+    if isinstance(context, StoredDerivativesExecutionContext):
+        return context.dataset.instrument_handles
+    if isinstance(context, StoredBacktestExecutionContext):
+        return (context.instrument_handle,)
+    if isinstance(context, StoredPretradeExecutionContext):
+        return (context.instrument_handle,)
+    return ()
 
 
 def _derive_stored_execution_context(

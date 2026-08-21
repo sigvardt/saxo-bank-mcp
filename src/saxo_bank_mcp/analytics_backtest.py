@@ -467,7 +467,7 @@ def _assess_ghost_verification(
         != strategy_definition_fingerprint(request.strategy)
         or verification.fill_model != request.strategy.rebalancing.fill_timing
         or verification.environment != "SIM"
-        or verification.cleanup_state != "proved_equal"
+        or verification.cleanup_state != "proved_reconciled"
     ):
         return _refusal(
             request,

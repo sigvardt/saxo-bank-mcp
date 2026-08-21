@@ -8,7 +8,6 @@ import re
 import sys
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anyio
@@ -27,36 +26,27 @@ from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostPortfolioVerification,
     GhostWorkflowRequest,
     _validated_ghost_lifecycle,  # pyright: ignore[reportPrivateUsage]
+    ghost_state_reconciled,
 )
-from saxo_bank_mcp.analytics_metric_definitions import (
-    MetricDefinitionBinding,
-    MetricDefinitionCatalog,
-    load_metric_definition_catalog,
-)
+from saxo_bank_mcp.analytics_metric_definitions import load_metric_definition_catalog
 from saxo_bank_mcp.analytics_models import AnalysisResult, VisibilityMode
 from saxo_bank_mcp.analytics_proof_profiles import (
-    EngineProofBinding,
-    ProfileActivationState,
     ProofProfile,
-    ProofProfileCatalog,
     ProofProfileError,
     ProofRegistry,
-    SourceContractProofBinding,
     load_proof_profile_catalog,
-)
-from saxo_bank_mcp.analytics_source_contracts import (
-    source_contract_catalog_sha256,
-    source_contract_fingerprint,
-    source_contracts_by_id,
 )
 from saxo_bank_mcp.analytics_store import AnalyticsStore
 from saxo_bank_mcp.analytics_strategy_schema import strategy_definition_fingerprint
+from saxo_bank_mcp.config import SimAuthSettingsError, resolve_sim_auth_settings
 from saxo_bank_mcp.fastmcp_logging_safety import (
     FASTMCP_VALIDATION_SAFETY_TRANSFORM,
     SafeFastMCP,
     install_fastmcp_argument_log_filter,
 )
 from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
+from saxo_bank_mcp.mcp_token_state import CachedTokenReady, cached_token_for_tool
+from saxo_bank_mcp.process_scoped_selectors import resolve_bound_account_selector
 from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixEnvelope,
     InstalledMatrixFailureCategory,
@@ -64,6 +54,9 @@ from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixFailurePhase,
     build_installed_matrix_failure_envelope,
     matrix_receipt_sha256,
+)
+from saxo_bank_mcp.qa_installed_matrix_profiles import (
+    process_active_catalog as _process_active_catalog,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix import (
     _run_matrix,  # pyright: ignore[reportPrivateUsage]
@@ -78,6 +71,7 @@ from saxo_bank_mcp.qa_sim_tool_matrix_models import (
     MatrixFixtures,
     SimToolMatrixReceipt,
 )
+from saxo_bank_mcp.safety_state import reset_safety_state
 from saxo_bank_mcp.server_core_tools import SERVICE_NAME
 from saxo_bank_mcp.server_tool_registration import register_saxo_tools
 
@@ -101,102 +95,6 @@ async def _cleanup_child_runtime(
 
 def _analytics_config() -> AnalyticsConfig:
     return load_analytics_config(os.environ)
-
-
-def _process_active_catalog(
-    catalog: ProofProfileCatalog,
-    *,
-    definitions: MetricDefinitionCatalog,
-    candidate_commit: str,
-    allowed_kinds: frozenset[str],
-    source_revisions: dict[str, str],
-) -> ProofProfileCatalog:
-    profiles = list(catalog.profiles)
-    if "bounded_backtest" in allowed_kinds and not any(
-        profile.analysis_kind == "bounded_backtest" for profile in profiles
-    ):
-        metric = definitions.by_id()["total_return"]
-        fields: dict[str, set[str]] = {}
-        for binding in metric.input_bindings:
-            if binding.source_contract_id is not None:
-                fields.setdefault(binding.source_contract_id, set()).update(binding.field_paths)
-        profiles.append(
-            ProofProfile(
-                proof_profile_id="vp_bounded_backtest_runtime_v1",
-                profile_version="1",
-                activation_state=ProfileActivationState.QUARANTINED,
-                quarantine_reason="authenticated_ghost_required",
-                analysis_kind="bounded_backtest",
-                schema_version="1",
-                metric_definitions=(
-                    MetricDefinitionBinding(
-                        metric_id=metric.metric_id,
-                        definition_version=metric.definition_version,
-                    ),
-                ),
-                source_contracts=tuple(
-                    SourceContractProofBinding(
-                        contract_id=contract_id,
-                        contract_sha256=source_contract_fingerprint(
-                            source_contracts_by_id()[contract_id]
-                        ),
-                        field_paths=tuple(sorted(field_paths)),
-                    )
-                    for contract_id, field_paths in sorted(fields.items())
-                ),
-                source_revision=None,
-                engines=(),
-                artifact_template_ids=(),
-                definition_catalog_sha256=definitions.fingerprint_sha256,
-                source_catalog_sha256=source_contract_catalog_sha256(),
-                valid_until=None,
-            ),
-        )
-    active_profiles: list[ProofProfile] = []
-    for profile in profiles:
-        revision = source_revisions.get(profile.analysis_kind)
-        if profile.analysis_kind not in allowed_kinds or revision is None:
-            active_profiles.append(profile)
-            continue
-        active_profiles.append(
-            profile.model_copy(
-                update={
-                    "activation_state": ProfileActivationState.ACTIVE,
-                    "quarantine_reason": None,
-                    "source_revision": revision,
-                    "engines": (
-                        EngineProofBinding(
-                            engine_name="saxo_analytics",
-                            engine_version="task23-installed-proof",
-                            code_commit=candidate_commit,
-                        ),
-                    ),
-                    "valid_until": datetime.now(UTC) + timedelta(hours=1),
-                },
-            ),
-        )
-    return catalog.model_copy(
-        update={
-            "production_analysis_kinds": tuple(
-                dict.fromkeys(
-                    (*catalog.production_analysis_kinds, *(p.analysis_kind for p in profiles)),
-                ),
-            ),
-            "production_metric_ids": tuple(
-                dict.fromkeys(
-                    (
-                        *catalog.production_metric_ids,
-                        *(
-                            binding.metric_id
-                            for profile in profiles
-                            for binding in profile.metric_definitions
-                        ),
-                    ),
-                ),
-            ),
-            "profiles": tuple(active_profiles),
-        },
-    )
 
 
 async def _run_child_matrix(  # noqa: C901
@@ -234,8 +132,11 @@ async def _run_child_matrix(  # noqa: C901
                 tuple[str, str],
                 tuple[GhostLifecycleEvidence, str],
             ] = {}
+            self._controlled_safety_binding: tuple[str, int] | None = None
+            self._controlled_safety_prior: dict[str, str | None] | None = None
 
         def clear(self) -> None:
+            self.clear_controlled_sim_safety()
             self._active = False
             self._source_revisions.clear()
             self._backtest_lifecycles.clear()
@@ -307,6 +208,64 @@ async def _run_child_matrix(  # noqa: C901
             }:
                 raise ValueError("controlled ghost fixture source binding mismatch")
             return material.account_scope
+
+        def prepare_controlled_sim_safety(
+            self,
+            account_selector: str,
+            *,
+            expected_uic: int,
+        ) -> None:
+            """Bind one observed selector into child-local SIM safety, without a new read."""
+            self._require_active()
+            if (
+                os.environ.get("SAXO_MCP_ENVIRONMENT", "").strip().upper() != "SIM"
+                or os.environ.get("SAXO_MCP_ENABLE_LIVE_READS", "").strip() not in {"", "0"}
+                or os.environ.get("SAXO_MCP_ENABLE_LIVE_WRITES", "").strip()
+                or expected_uic != FIXTURE_INSTRUMENT
+            ):
+                raise ValueError("controlled SIM safety environment mismatch")
+            current_binding = (account_selector, expected_uic)
+            if self._controlled_safety_binding is not None:
+                if self._controlled_safety_binding != current_binding:
+                    raise ValueError("controlled SIM safety binding changed")
+                return
+            prior_account = os.environ.get("SAXO_MCP_ACCOUNT_ALLOWLIST")
+            prior_instrument = os.environ.get("SAXO_MCP_INSTRUMENT_ALLOWLIST")
+            if (prior_account or "").strip() or (prior_instrument or "").strip() not in {
+                "",
+                str(expected_uic),
+            }:
+                raise ValueError("controlled SIM safety caller allowlist refused")
+            try:
+                settings = resolve_sim_auth_settings(require_redirect=False)
+            except SimAuthSettingsError as error:
+                raise ValueError("controlled SIM auth unavailable") from error
+            cached = cached_token_for_tool("saxo_create_order_preview", settings.cache_path)
+            if not isinstance(cached, CachedTokenReady):
+                raise TypeError("controlled SIM token unavailable")
+            binding = resolve_bound_account_selector(cached.token, account_selector)
+            if binding is None or not binding.account_key.strip():
+                raise ValueError("controlled SIM account selector unavailable")
+            self._controlled_safety_prior = {
+                "SAXO_MCP_ACCOUNT_ALLOWLIST": prior_account,
+                "SAXO_MCP_INSTRUMENT_ALLOWLIST": prior_instrument,
+            }
+            self._controlled_safety_binding = current_binding
+            os.environ["SAXO_MCP_ACCOUNT_ALLOWLIST"] = binding.account_key
+            os.environ["SAXO_MCP_INSTRUMENT_ALLOWLIST"] = str(expected_uic)
+
+        def clear_controlled_sim_safety(self) -> None:
+            prior = self._controlled_safety_prior
+            self._controlled_safety_binding = None
+            self._controlled_safety_prior = None
+            if prior is None:
+                return
+            reset_safety_state()
+            for key, value in prior.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
         def record_observed_ghost_lifecycle(
             self,
@@ -381,7 +340,7 @@ async def _run_child_matrix(  # noqa: C901
                 or evidence.strategy_fingerprint_sha256 != strategy_fingerprint
                 or evidence.fill_model != parameters.strategy.rebalancing.fill_timing
                 or evidence.environment != "SIM"
-                or evidence.before != evidence.after
+                or not ghost_state_reconciled(evidence.before, evidence.after)
                 or not evidence.request_ledger_complete
                 or not evidence.request_ledger_read_last
                 or evidence.disclaimer_present

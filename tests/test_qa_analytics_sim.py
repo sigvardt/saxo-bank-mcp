@@ -63,10 +63,12 @@ from saxo_bank_mcp.qa_sim_tool_matrix import (
 from saxo_bank_mcp.qa_sim_tool_matrix_helpers import (
     MatrixClient,
     MatrixToolObservation,
+    fixture_read_calls,
     receipt_for,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_models import (
     MatrixRuntimeState,
+    MatrixScenarioReceipt,
     PreflightFlags,
     SimToolMatrixReceipt,
 )
@@ -95,6 +97,60 @@ def _state(digest: str = "a" * 64) -> BrokerageStateFingerprint:
     )
 
 
+def _reconciled_after(state: BrokerageStateFingerprint) -> BrokerageStateFingerprint:
+    return BrokerageStateFingerprint(
+        components=tuple(
+            component.model_copy(
+                update=(
+                    {"fingerprint_sha256": "b" * 64}
+                    if component.name == "balances"
+                    else {
+                        "count": component.count + 2,
+                        "fingerprint_sha256": "c" * 64,
+                    }
+                    if component.name == "trade_messages"
+                    else {}
+                ),
+            )
+            for component in state.components
+        ),
+    )
+
+
+def _observed_lifecycle_state(
+    *,
+    balance_digest: str,
+    trade_digest: str,
+    trade_count: int,
+    order_count: int = 0,
+    position_digest: str = "3" * 64,
+) -> BrokerageStateFingerprint:
+    digests = {
+        "balances": balance_digest,
+        "positions": position_digest,
+        "orders": "2" * 64,
+        "trade_messages": trade_digest,
+        "subscriptions": "5" * 64,
+        "previews_write_state": "6" * 64,
+        "jobs": "7" * 64,
+        "caches": "8" * 64,
+        "temporary_files": "9" * 64,
+    }
+    counts = {"positions": 8, "orders": order_count, "trade_messages": trade_count}
+    return BrokerageStateFingerprint(
+        components=tuple(
+            BrokerageStateComponent(
+                name=name,
+                count=counts.get(name, 0),
+                fingerprint_sha256=digests[name],
+                observed_state="available",
+                mcp_tool_ids=("saxo_health",),
+            )
+            for name in BROKERAGE_STATE_COMPONENTS
+        ),
+    )
+
+
 def _lifecycle_cases() -> tuple[ControlledSimCaseReceipt, ...]:
     return tuple(
         ControlledSimCaseReceipt(
@@ -103,7 +159,7 @@ def _lifecycle_cases() -> tuple[ControlledSimCaseReceipt, ...]:
             reason_code="passed",
             source_request_count=0 if case_id == "cleanup" else 1,
             mcp_call_count=1,
-            sim_mutation_call_count=0,
+            sim_mutation_call_count=2 if case_id in {"ghost_portfolio", "cleanup"} else 0,
             cleanup_complete=True,
             entitlement_state=(
                 "available" if case_id == "options_entitlement" else "not_applicable"
@@ -121,7 +177,7 @@ def _lifecycle_receipt(
         environment="SIM",
         cases=_lifecycle_cases(),
         before=state,
-        after=state,
+        after=_reconciled_after(state),
         live_events=0,
         live_mutation_calls=0,
         request_ledger_read_last=True,
@@ -288,6 +344,100 @@ def test_controlled_ghost_source_strategy_parses_at_the_json_boundary() -> None:
     parsed = parse_strategy_definition(strategy)
 
     assert parsed.evaluation_split.kind == "holdout"
+
+
+def test_controlled_sim_order_body_matches_the_registered_place_contract() -> None:
+    fixtures = matrix_module.MatrixFixtures(
+        stock_uic=211,
+        amount=1,
+        limit_price=50,
+        modified_limit_price=51,
+        option_uics=(30004846, 30004926),
+        stream_uic=21,
+    )
+
+    body = matrix_module._controlled_sim_order_body(  # noqa: SLF001
+        "sim",
+        fixtures,
+        observed_limit_price="99.00",
+    )
+
+    assert body == {
+        "AccountKey": "sim",
+        "Uic": 211,
+        "AssetType": "Stock",
+        "Amount": 1,
+        "BuySell": "Buy",
+        "ManualOrder": False,
+        "OrderType": "Limit",
+        "OrderPrice": 99.0,
+        "OrderDuration": {"DurationType": "DayOrder"},
+        "ExternalReference": "task24-controlled-ghost",
+    }
+
+
+def test_controlled_limit_price_is_derived_below_one_observed_bid() -> None:
+    payload: dict[str, JsonValue] = {
+        "status": "passed",
+        "response": {
+            "Quote": {
+                "Bid": 100.0,
+                "Ask": 100.2,
+            },
+        },
+    }
+
+    assert matrix_module._observed_controlled_limit_price(payload) == "99.0"  # noqa: SLF001
+    assert (
+        matrix_module._observed_controlled_limit_price(  # noqa: SLF001
+            {"status": "passed", "response": {"Quote": {"Bid": 0, "Ask": 1}}},
+        )
+        is None
+    )
+    assert (
+        matrix_module._observed_controlled_limit_price(  # noqa: SLF001
+            {"status": "passed", "response": {"Quote": {"Bid": "NaN", "Ask": 1}}},
+        )
+        is None
+    )
+    assert (
+        matrix_module._observed_controlled_limit_price(  # noqa: SLF001
+            {
+                "status": "passed",
+                "response": [
+                    {"Quote": {"Bid": 100, "Ask": 101}},
+                    {"Quote": {"Bid": 200, "Ask": 201}},
+                ],
+            },
+        )
+        is None
+    )
+    assert (
+        matrix_module._observed_controlled_limit_price(  # noqa: SLF001
+            {"status": "passed", "response": {"PriceInfo": {"Bid": 100, "Ask": 101}}},
+        )
+        is None
+    )
+
+
+def test_fixture_preflight_reads_current_stock_price_through_registered_mcp() -> None:
+    fixtures = matrix_module.MatrixFixtures(
+        stock_uic=211,
+        amount=1,
+        limit_price=50,
+        modified_limit_price=51,
+        option_uics=(30004846, 30004926),
+        stream_uic=21,
+    )
+
+    assert fixture_read_calls(fixtures)[-1] == (
+        "saxo_call_registered_endpoint",
+        {
+            "method": "GET",
+            "path": "/trade/v1/infoprices",
+            "params": {"Amount": "1", "AssetType": "Stock", "Uic": "211"},
+        },
+    )
 
 
 def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
@@ -603,6 +753,280 @@ def test_analysis_runtime_indexes_only_typed_server_issued_handles() -> None:
     }
     assert resources.source_contract_ids == {"transactions_v1"}
     assert untyped_dataset_id in resources.dataset_ids
+
+
+def test_degraded_sync_indexes_each_typed_dataset_by_its_own_quality() -> None:
+    resources = AnalyticsRuntimeResources()
+    complete_dataset_id = "ds_11111111111141118111111111111111"
+    partial_dataset_id = "ds_22222222222242228222222222222222"
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_sync_research_data" and item.kind == "success"
+    )
+
+    matrix_module._remember_analytics_handles(  # noqa: SLF001
+        resources,
+        call,
+        MatrixToolObservation(
+            payload={
+                "status": "degraded",
+                "result": {
+                    "datasets": [
+                        {
+                            "dataset_id": complete_dataset_id,
+                            "data_kind": "account_analytics",
+                            "quality_state": "complete",
+                            "eligible_analysis_kinds": ["position_sizing"],
+                        },
+                        {
+                            "dataset_id": partial_dataset_id,
+                            "data_kind": "quote",
+                            "quality_state": "partial",
+                            "eligible_analysis_kinds": ["pretrade_impact"],
+                        },
+                    ],
+                },
+            },
+            result_parsed=True,
+            result_state="degraded",
+            mcp_is_error=False,
+        ),
+    )
+
+    assert resources.dataset_ids_by_analysis_kind == {
+        "account_analytics": [complete_dataset_id],
+        "position_sizing": [complete_dataset_id],
+    }
+    assert resources.degraded_dataset_ids_by_analysis_kind == {
+        "quote": [partial_dataset_id],
+        "pretrade_impact": [partial_dataset_id],
+    }
+
+
+def test_market_capture_keeps_quote_when_option_chain_capture_refuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=["ih_11111111111141118111111111111111"],
+        option_expiries=["2026-09-18"],
+    )
+    state = _runtime_state()
+    state.analytics_resources = resources
+    quote_dataset_id = "ds_22222222222242228222222222222222"
+    sync_items: list[list[JsonValue]] = []
+
+    async def capture(
+        _client: object,
+        tool: str,
+        arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        if tool == "saxo_get_research_dataset":
+            return MatrixToolObservation(
+                payload={
+                    "status": "passed",
+                    "result": {
+                        "rows": [
+                            {
+                                "row_kind": "quote",
+                                "bid_value": 99,
+                                "ask_value": 101,
+                            },
+                        ],
+                    },
+                },
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
+        request = cast("dict[str, JsonValue]", arguments["request"])
+        items = cast("list[JsonValue]", request["items"])
+        sync_items.append(items)
+        item = cast("dict[str, JsonValue]", items[0])
+        if item["data_kind"] == "quote":
+            return MatrixToolObservation(
+                payload={
+                    "status": "passed",
+                    "result": {
+                        "datasets": [
+                            {
+                                "dataset_id": quote_dataset_id,
+                                "data_kind": "quote",
+                                "quality_state": "complete",
+                            },
+                        ],
+                    },
+                },
+                result_parsed=True,
+                result_state="passed",
+                mcp_is_error=False,
+            )
+        return MatrixToolObservation(
+            payload={"status": "refused", "reason_code": "source_http_error"},
+            result_parsed=True,
+            result_state="refused",
+            mcp_is_error=True,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", capture)
+
+    anyio.run(
+        matrix_module._prepare_server_owned_analysis_inputs,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        state,
+    )
+
+    assert [cast("dict[str, JsonValue]", items[0])["data_kind"] for items in sync_items[:2]] == [
+        "quote",
+        "option_chain",
+    ]
+    assert all(len(items) == 1 for items in sync_items[:2])
+    assert resources.dataset_ids_by_analysis_kind["quote"] == [quote_dataset_id]
+    assert resources.pretrade_proposal_price == "100"
+
+
+def test_scenario_arguments_use_every_server_issued_context_instrument() -> None:
+    first_handle = "ih_11111111111141118111111111111111"
+    second_handle = "ih_22222222222242228222222222222222"
+    dataset_id = "ds_33333333333343338333333333333333"
+    resources = AnalyticsRuntimeResources(
+        analysis_input_dataset_ids_by_analysis_kind={"scenario_custom": [dataset_id]},
+        analysis_input_instrument_handles_by_analysis_kind={
+            "scenario_custom": [first_handle, second_handle],
+        },
+    )
+    call = next(item for item in analytics_case_calls() if item.analysis_kind == "scenario_custom")
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", materialized["request"])
+    shocks = cast("list[JsonValue]", request["shocks"])
+
+    assert request["dataset_id"] == dataset_id
+    assert [cast("dict[str, JsonValue]", shock)["instrument_handle"] for shock in shocks] == [
+        first_handle,
+        second_handle,
+    ]
+    assert all(
+        cast("dict[str, JsonValue]", shock)["price_shock_ratio"] == "-0.1" for shock in shocks
+    )
+
+
+@pytest.mark.parametrize("analysis_kind", ["margin_fire_drill", "scenario_currency"])
+def test_linear_context_uses_zero_component_shocks_for_non_price_scenarios(
+    analysis_kind: str,
+) -> None:
+    instrument_handle = "ih_11111111111141118111111111111111"
+    dataset_id = "ds_22222222222242228222222222222222"
+    resources = AnalyticsRuntimeResources(
+        analysis_input_dataset_ids_by_analysis_kind={"scenario_custom": [dataset_id]},
+        analysis_input_instrument_handles_by_analysis_kind={
+            "scenario_custom": [instrument_handle],
+        },
+    )
+    call = next(item for item in analytics_case_calls() if item.analysis_kind == analysis_kind)
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", materialized["request"])
+    shock = cast("dict[str, JsonValue]", cast("list[JsonValue]", request["shocks"])[0])
+
+    assert shock == {
+        "instrument_handle": instrument_handle,
+        "price_shock_ratio": "0",
+    }
+
+
+@pytest.mark.parametrize("analysis_kind", ["scenario_rate", "scenario_volatility"])
+def test_non_linear_scenarios_are_declared_as_honest_current_source_refusals(
+    analysis_kind: str,
+) -> None:
+    call = next(item for item in analytics_case_calls() if item.analysis_kind == analysis_kind)
+
+    assert call.expected_analysis_outcome == "refused"
+
+
+def test_render_success_uses_html_when_pixel_qa_cannot_be_prevalidated() -> None:
+    analysis_id = "an_11111111111141118111111111111111"
+    resources = AnalyticsRuntimeResources(analysis_ids=[analysis_id])
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_render_analysis" and item.kind == "success"
+    )
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+
+    assert materialized == {
+        "analysis_id": analysis_id,
+        "template_id": "relative_performance",
+        "output_format": "html",
+    }
+
+
+def test_degradation_analysis_uses_primary_typed_context_for_a_valid_refusal() -> None:
+    dataset_id = "ds_11111111111141118111111111111111"
+    instrument_handle = "ih_22222222222242228222222222222222"
+    resources = AnalyticsRuntimeResources(
+        instrument_handles=[instrument_handle],
+        analysis_input_dataset_ids_by_analysis_kind={"scenario_custom": [dataset_id]},
+        analysis_input_instrument_handles_by_analysis_kind={
+            "scenario_custom": [instrument_handle],
+        },
+    )
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_run_scenario" and item.kind == "degradation"
+    )
+
+    materialized = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", materialized["request"])
+
+    assert request["dataset_id"] == dataset_id
+    assert request["caller_accepted_numeric_shocks"] is False
+
+
+def test_base_instrument_result_prepares_pretrade_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis_id = "an_11111111111141118111111111111111"
+    prepared = 0
+
+    async def prepare(_client: object, _state: MatrixRuntimeState) -> None:
+        nonlocal prepared
+        prepared += 1
+
+    monkeypatch.setattr(matrix_module, "_prepare_server_owned_pretrade_input", prepare)
+    state = _runtime_state()
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_analyze_instruments"
+        and item.kind == "success"
+        and item.analysis_kind is None
+    )
+    result = MatrixToolObservation(
+        payload={
+            "status": "verified",
+            "analysis_kind": "instrument_price_return",
+            "analysis_id": analysis_id,
+        },
+        result_parsed=True,
+        result_state="verified",
+        mcp_is_error=False,
+    )
+    receipt = analytics_case_receipt(call, ("verified",), result)
+
+    anyio.run(
+        matrix_module._remember_analysis_case_outputs,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        state,
+        call,
+        result,
+        receipt,
+    )
+
+    assert prepared == 1
 
 
 def test_analytics_cleanup_consumes_issued_token_and_verifies_empty_storage(
@@ -1436,6 +1860,7 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         receipt_for(tool, {"status": "completed"}, {}) for tool in sorted(ALL_LOGICAL_TOOL_IDS)
     )
     state = _state()
+    lifecycle_receipt = _lifecycle_receipt(state)
     case_evidence = _analytics_case_evidence()
     receipt = SimToolMatrixReceipt(
         status="passed",
@@ -1448,8 +1873,8 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         account_allowlist_resolved=True,
         auth_status_completed=True,
         session_capabilities_completed=True,
-        before_state_fingerprint=state,
-        after_state_fingerprint=state,
+        before_state_fingerprint=lifecycle_receipt.before,
+        after_state_fingerprint=lifecycle_receipt.after,
         uncleaned_resources=0,
         hosts=("gateway.saxobank.com",),
         live_events=0,
@@ -1458,7 +1883,7 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
         analytics_case_contract_sha256=analytics_case_contract_sha256(),
         analytics_case_receipts=case_evidence,
         analysis_execution_receipts=_analysis_execution_receipts(),
-        controlled_sim_lifecycle=_lifecycle_receipt(state),
+        controlled_sim_lifecycle=lifecycle_receipt,
         mcp_only_account_fixture_state=True,
         cleanup_complete=True,
         account_state_unchanged=True,
@@ -1521,7 +1946,7 @@ def test_controlled_lifecycle_requires_sim_zero_live_cleanup_and_state_equality(
         environment="SIM",
         cases=_lifecycle_cases(),
         before=before,
-        after=before,
+        after=_reconciled_after(before),
         live_events=0,
         live_mutation_calls=0,
         request_ledger_read_last=True,
@@ -1552,6 +1977,115 @@ def test_controlled_lifecycle_requires_sim_zero_live_cleanup_and_state_equality(
             ControlledSimLifecycleReceipt.model_validate(
                 {**receipt.model_dump(mode="json"), **update},
             )
+
+
+def test_controlled_lifecycle_reconciles_material_state_with_two_expected_audit_events() -> None:
+    before = _observed_lifecycle_state(
+        balance_digest="1" * 64,
+        trade_digest="4" * 64,
+        trade_count=399,
+    )
+    after = _observed_lifecycle_state(
+        balance_digest="a" * 64,
+        trade_digest="b" * 64,
+        trade_count=401,
+    )
+
+    assert sim_module.brokerage_state_reconciled(before, after) is True
+    receipt = ControlledSimLifecycleReceipt(
+        environment="SIM",
+        cases=_lifecycle_cases(),
+        before=before,
+        after=after,
+        live_events=0,
+        live_mutation_calls=0,
+        request_ledger_read_last=True,
+        request_ledger_complete=True,
+        request_ledger_fingerprint_sha256="9" * 64,
+        cleanup_complete=True,
+        unchanged_account_state=True,
+        redacted_publication=True,
+        private_values_published=False,
+        purchase_occurred=False,
+        disclaimer_response_made=False,
+    )
+
+    assert receipt.evidence_state == "passed"
+    storage_active = BrokerageStateFingerprint(
+        components=tuple(
+            component.model_copy(
+                update={"count": 1, "fingerprint_sha256": "d" * 64}
+                if component.name == "jobs"
+                else {},
+            )
+            for component in after.components
+        ),
+    )
+    assert sim_module.brokerage_ghost_state_reconciled(before, storage_active) is True
+    assert sim_module.brokerage_state_reconciled(before, storage_active) is False
+    assert (
+        sim_module.brokerage_state_reconciled(
+            before,
+            _observed_lifecycle_state(
+                balance_digest="a" * 64,
+                trade_digest="b" * 64,
+                trade_count=401,
+                order_count=1,
+            ),
+        )
+        is False
+    )
+    assert (
+        sim_module.brokerage_state_reconciled(
+            before,
+            _observed_lifecycle_state(
+                balance_digest="a" * 64,
+                trade_digest="b" * 64,
+                trade_count=401,
+                position_digest="c" * 64,
+            ),
+        )
+        is False
+    )
+
+
+def test_reconciled_matrix_receipt_accepts_only_one_cleanup_pending_success() -> None:
+    reconciled = MatrixScenarioReceipt(
+        tool="saxo_place_sim_order",
+        status="reconciled",
+        result_parsed=True,
+        result_state="completed_unverified",
+        mcp_is_error=True,
+        request_digest="1" * 64,
+        response_digest="2" * 64,
+    )
+
+    assert reconciled.status == "reconciled"
+    with pytest.raises(ValidationError):
+        MatrixScenarioReceipt(
+            tool="saxo_place_sim_order",
+            status="reconciled",
+            result_parsed=True,
+            result_state="failed",
+            mcp_is_error=True,
+            request_digest="1" * 64,
+            response_digest="2" * 64,
+        )
+
+
+def test_controlled_sim_waits_past_the_process_write_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+
+    async def observe_sleep(seconds: float) -> None:
+        observed.append(seconds)
+
+    monkeypatch.setattr(matrix_module.anyio, "sleep", observe_sleep)
+    anyio.run(matrix_module._wait_for_sim_write_rate_limit)  # noqa: SLF001
+
+    assert len(observed) == 1
+    assert observed[0] > 1.0
 
 
 def test_controlled_lifecycle_pass_requires_last_complete_request_ledger() -> None:
@@ -1593,7 +2127,7 @@ def test_controlled_options_entitlement_can_reduce_without_fabricating_success()
         environment="SIM",
         cases=tuple(cases),
         before=state,
-        after=state,
+        after=_reconciled_after(state),
         live_events=0,
         live_mutation_calls=0,
         request_ledger_read_last=True,
@@ -1974,6 +2508,24 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
         )
 
     monkeypatch.setattr(matrix_module, "call_tool", result_for_case)
+
+    async def execute_every_declared_case(
+        client: object,
+        call: sim_module.AnalyticsCaseCall,
+        _cache: dict[tuple[str, str], MatrixToolObservation],
+    ) -> MatrixToolObservation:
+        return await result_for_case(
+            client,
+            call.tool_id,
+            cast("dict[str, object]", call.arguments),
+            timeout_seconds=call.timeout_seconds,
+        )
+
+    monkeypatch.setattr(
+        matrix_module,
+        "_call_analytics_case_once",
+        execute_every_declared_case,
+    )
     state = _runtime_state()
     anyio.run(
         matrix_module.run_analytics_case_phase,
@@ -1986,6 +2538,114 @@ def test_analytics_phase_executes_and_checks_every_applicable_fastmcp_case(  # n
     assert set(state.receipts) == set(ANALYTICS_TOOL_IDS)
     assert state.analytics_resources.cleanup_verified is True
     assert state.errors == []
+
+
+def test_exact_duplicate_analytics_request_reuses_one_mcp_observation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert "_call_analytics_case_once" in inspect.getsource(
+        matrix_module.run_analytics_case_phase,
+    )
+    observed: list[tuple[str, dict[str, JsonValue]]] = []
+    result = MatrixToolObservation(
+        payload={
+            "status": "verified",
+            "analysis_kind": "market_comparison",
+            "analysis_id": "an_11111111111141118111111111111111",
+        },
+        result_parsed=True,
+        result_state="verified",
+        mcp_is_error=False,
+    )
+
+    async def execute_once(
+        _client: object,
+        tool: str,
+        arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed.append((tool, arguments))
+        return result
+
+    monkeypatch.setattr(matrix_module, "call_tool", execute_once)
+    call = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_analyze_market",
+        kind="success",
+        arguments={"request": {"analysis_kind": "market_comparison"}},
+        input_strategy="exact_duplicate",
+        analysis_kind="market_comparison",
+        expected_analysis_outcome="persisted",
+    )
+    cache: dict[tuple[str, str], MatrixToolObservation] = {}
+
+    first = anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        call,
+        cache,
+    )
+    second = anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        call.model_copy(update={"input_strategy": "exact_kind_receipt"}),
+        cache,
+    )
+
+    assert first is second is result
+    assert observed == [(call.tool_id, call.arguments)]
+
+
+def test_analytics_request_cache_never_reuses_different_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[dict[str, JsonValue]] = []
+
+    async def execute_each(
+        _client: object,
+        _tool: str,
+        arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        observed.append(arguments)
+        return MatrixToolObservation(
+            payload={"status": "verified"},
+            result_parsed=True,
+            result_state="verified",
+            mcp_is_error=False,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", execute_each)
+    cache: dict[tuple[str, str], MatrixToolObservation] = {}
+    first = sim_module.AnalyticsCaseCall(
+        tool_id="saxo_analyze_market",
+        kind="success",
+        arguments={"request": {"analysis_kind": "market_comparison", "window": 20}},
+        input_strategy="first",
+        analysis_kind="market_comparison",
+        expected_analysis_outcome="persisted",
+    )
+    second = first.model_copy(
+        update={
+            "arguments": {
+                "request": {"analysis_kind": "market_comparison", "window": 21},
+            },
+        },
+    )
+
+    anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        first,
+        cache,
+    )
+    anyio.run(
+        matrix_module._call_analytics_case_once,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        second,
+        cache,
+    )
+
+    assert observed == [first.arguments, second.arguments]
 
 
 def test_state_fingerprint_uses_only_logical_mcp_tool_results(

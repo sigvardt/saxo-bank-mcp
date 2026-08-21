@@ -219,6 +219,7 @@ class AnalysisInputDatasetSummary(_StrictModel):
     dataset_id: DatasetId
     data_kind: Literal["analysis_input"] = "analysis_input"
     analysis_kind: AnalysisInputKind
+    instrument_handles: tuple[InstrumentHandle, ...] = ()
     quality_state: QualityState
     coverage_start: datetime
     coverage_end: datetime

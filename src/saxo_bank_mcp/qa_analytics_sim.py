@@ -64,6 +64,7 @@ CONTROLLED_SIM_CASES: Final[tuple[str, ...]] = (
     "options_entitlement",
     "cleanup",
 )
+CONTROLLED_SIM_MUTATION_CALL_COUNT: Final = 2
 _DEGRADATION_TOOLS: Final = frozenset(
     {
         "saxo_resolve_research_universe",
@@ -165,8 +166,6 @@ _PERSISTED_ANALYSIS_KINDS: Final = frozenset(
         "scenario_combined",
         "scenario_currency",
         "scenario_custom",
-        "scenario_rate",
-        "scenario_volatility",
     },
 )
 
@@ -464,6 +463,9 @@ class AnalyticsRuntimeResources:
     degraded_analysis_input_dataset_ids_by_analysis_kind: dict[str, list[str]] = field(
         default_factory=dict,
     )
+    analysis_input_instrument_handles_by_analysis_kind: dict[str, list[str]] = field(
+        default_factory=dict,
+    )
     analysis_input_refusals_by_analysis_kind: dict[str, str] = field(default_factory=dict)
     analysis_ids: list[str] = field(default_factory=list)
     degraded_analysis_ids: list[str] = field(default_factory=list)
@@ -481,6 +483,7 @@ class AnalyticsRuntimeResources:
     option_entitlement_state: Literal["available", "denied", "unknown"] = "unknown"
     option_expiries: list[str] = field(default_factory=list)
     pretrade_proposal_price: str | None = None
+    controlled_order_limit_price: str | None = None
 
     def remember_timeout(
         self,
@@ -541,6 +544,69 @@ class BrokerageStateFingerprint(_StrictReceipt):
         return self
 
 
+def _brokerage_components(
+    state: BrokerageStateFingerprint,
+) -> dict[str, BrokerageStateComponent]:
+    return {component.name: component for component in state.components}
+
+
+def brokerage_inventory_reconciled(
+    before: BrokerageStateFingerprint,
+    after: BrokerageStateFingerprint,
+) -> bool:
+    """Prove that the controlled SIM lifecycle left no order or position change."""
+    prior = _brokerage_components(before)
+    current = _brokerage_components(after)
+    if any(
+        component.observed_state != "available"
+        for component in (*before.components, *after.components)
+    ):
+        return False
+    return bool(
+        prior["orders"].count == 0
+        and current["orders"].count == 0
+        and prior["orders"].fingerprint_sha256 == current["orders"].fingerprint_sha256
+        and prior["positions"].count == current["positions"].count
+        and prior["positions"].fingerprint_sha256 == current["positions"].fingerprint_sha256
+    )
+
+
+def brokerage_ghost_state_reconciled(
+    before: BrokerageStateFingerprint,
+    after: BrokerageStateFingerprint,
+) -> bool:
+    """Prove broker inventory cleanup plus the exact two expected SIM audit messages."""
+    if not brokerage_inventory_reconciled(before, after):
+        return False
+    prior = _brokerage_components(before)
+    current = _brokerage_components(after)
+    return bool(
+        prior["balances"].count == current["balances"].count
+        and current["trade_messages"].count
+        == prior["trade_messages"].count + CONTROLLED_SIM_MUTATION_CALL_COUNT
+    )
+
+
+def brokerage_state_reconciled(
+    before: BrokerageStateFingerprint,
+    after: BrokerageStateFingerprint,
+) -> bool:
+    """Add exact task-owned local cleanup to the reconciled broker lifecycle."""
+    prior = _brokerage_components(before)
+    current = _brokerage_components(after)
+    exact_local_components = (
+        "subscriptions",
+        "previews_write_state",
+        "jobs",
+        "caches",
+        "temporary_files",
+    )
+    return bool(
+        brokerage_ghost_state_reconciled(before, after)
+        and all(prior[name] == current[name] for name in exact_local_components)
+    )
+
+
 class ControlledSimCaseReceipt(_StrictReceipt):
     case_id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     state: Literal["passed", "degraded", "refused"]
@@ -596,7 +662,7 @@ class ControlledSimLifecycleReceipt(_StrictReceipt):
     disclaimer_response_made: bool
 
     @model_validator(mode="after")
-    def _validate_pass(self) -> Self:  # noqa: C901
+    def _validate_pass(self) -> Self:  # noqa: C901, PLR0912
         if tuple(case.case_id for case in self.cases) != CONTROLLED_SIM_CASES:
             raise ValueError("controlled SIM lifecycle cases must appear exactly once")
         reduced_cases = tuple(case for case in self.cases if case.state != "passed")
@@ -608,12 +674,22 @@ class ControlledSimLifecycleReceipt(_StrictReceipt):
             case.state == "refused" for case in self.cases
         ):
             raise ValueError("refused controlled SIM lifecycle requires a refused case")
+        cases_by_id = {case.case_id: case for case in self.cases}
+        if self.evidence_state == "passed" and (
+            cases_by_id["ghost_portfolio"].sim_mutation_call_count
+            != CONTROLLED_SIM_MUTATION_CALL_COUNT
+            or cases_by_id["cleanup"].sim_mutation_call_count != CONTROLLED_SIM_MUTATION_CALL_COUNT
+        ):
+            raise ValueError("passed controlled SIM lifecycle requires one place and one cancel")
         if self.live_events != 0 or self.live_mutation_calls != 0:
             raise ValueError("controlled analytics proof observed LIVE activity")
         if not self.cleanup_complete:
             raise ValueError("controlled analytics cleanup is incomplete")
-        if self.before != self.after or not self.unchanged_account_state:
-            raise ValueError("controlled analytics brokerage state changed")
+        if (
+            not brokerage_state_reconciled(self.before, self.after)
+            or not self.unchanged_account_state
+        ):
+            raise ValueError("controlled analytics brokerage state did not reconcile")
         if self.evidence_state == "passed" and any(
             component.observed_state != "available" for component in self.before.components
         ):
@@ -1158,6 +1234,7 @@ def _degradation_schema_arguments(  # noqa: C901, PLR0912 - exact bounded catalo
         request["analysis_kind"] = "tax_lot_export"
     elif tool_id == "saxo_size_position":
         request["maximum_loss"] = "2"
+        request["risk_budget_confirmed"] = False
     elif tool_id == "saxo_run_scenario":
         request["caller_accepted_numeric_shocks"] = False
     elif tool_id == "saxo_optimize_portfolio":

@@ -7,7 +7,7 @@ import re
 import tempfile
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
@@ -49,6 +49,9 @@ from saxo_bank_mcp.qa_analytics_sim import (
     analytics_case_contract_sha256,
     analytics_sim_contracts,
     assert_analytics_case_coverage,
+    brokerage_ghost_state_reconciled,
+    brokerage_inventory_reconciled,
+    brokerage_state_reconciled,
     isolated_analytics_state,
     live_mutation_calls_in,
 )
@@ -88,7 +91,9 @@ from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.trading_write_registry import trading_write_specs
 
 _SHA256_HEX_LENGTH = 64
-_MINIMUM_FIXTURE_READ_RESULTS = 2
+_MINIMUM_FIXTURE_READ_RESULTS = 4
+_CONTROLLED_GHOST_EXTERNAL_REFERENCE: Final = "task24-controlled-ghost"
+_SIM_WRITE_RATE_LIMIT_WAIT_SECONDS: Final = 1.05
 _SAFE_HANDLE = re.compile(r"^(?P<kind>ih|ds|an|ar|jb|dp)_[0-9a-f]{32}$")
 _ACTIVE_JOB_STATES: Final = frozenset({"job_queued", "job_running"})
 _SAFE_OBSERVED_REASON_CODES: Final = frozenset(
@@ -231,6 +236,15 @@ class _InstalledProofRecorder(Protocol):
         expected_uic: int,
         expected_asset_type: str,
     ) -> str: ...
+
+    def prepare_controlled_sim_safety(
+        self,
+        account_selector: str,
+        *,
+        expected_uic: int,
+    ) -> None: ...
+
+    def clear_controlled_sim_safety(self) -> None: ...
 
     def record_observed_ghost_lifecycle(
         self,
@@ -379,9 +393,13 @@ async def _run_mcp_account_and_fixture_preflight(
             state.analytics_resources.option_expiries,
             list(_observed_option_expiries(fixture_results[1].payload)),
         )
+        state.analytics_resources.controlled_order_limit_price = _observed_controlled_limit_price(
+            fixture_results[-1].payload
+        )
     fixtures_ok = fixture_values_match(fixtures) and all(
         result.result_parsed and result.result_state == "passed" for result in fixture_results
     )
+    fixtures_ok = fixtures_ok and state.analytics_resources.controlled_order_limit_price is not None
     if not account_ok:
         state.errors.append("account_allowlist_unresolved")
     if not fixtures_ok:
@@ -609,6 +627,7 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
     per_tool: dict[str, dict[str, AnalyticsCaseReceipt]] = {
         tool_id: {} for tool_id in ANALYTICS_TOOL_IDS
     }
+    observed_requests: dict[tuple[str, str], MatrixToolObservation] = {}
     ghost_observation: _ControlledGhostObservation | None = None
     for case_call in analytics_case_calls():
         if case_call.kind == "success" and case_call.tool_id in {
@@ -637,11 +656,10 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
                 controlled_fixtures,
                 proof_recorder=proof_recorder,
             )
-        result = await call_tool(
+        result = await _call_analytics_case_once(
             client,
-            observed_call.tool_id,
-            observed_call.arguments,
-            timeout_seconds=observed_call.timeout_seconds,
+            observed_call,
+            observed_requests,
         )
         if observed_call.analysis_kind is not None:
             result = await _settle_analysis_observation(
@@ -740,6 +758,26 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
         )
         for contract in analytics_sim_contracts()
     )
+
+
+async def _call_analytics_case_once(
+    client: MatrixClient,
+    call: AnalyticsCaseCall,
+    observed_requests: dict[tuple[str, str], MatrixToolObservation],
+) -> MatrixToolObservation:
+    """Reuse only one exact tool plus canonical-request observation in this phase."""
+    key = (call.tool_id, digest(call.arguments))
+    observed = observed_requests.get(key)
+    if observed is not None:
+        return observed
+    observed = await call_tool(
+        client,
+        call.tool_id,
+        call.arguments,
+        timeout_seconds=call.timeout_seconds,
+    )
+    observed_requests[key] = observed
+    return observed
 
 
 async def _settle_analysis_observation(
@@ -854,22 +892,23 @@ async def _prepare_server_owned_analysis_inputs(
                     "expiries": list(resources.option_expiries),
                 },
             )
-        market_capture = await call_tool(
-            client,
-            "saxo_sync_research_data",
-            {"request": {"items": market_items}},
-        )
-        _observe_auxiliary(state, market_capture)
-        _remember_analytics_handles(
-            resources,
-            AnalyticsCaseCall(
-                tool_id="saxo_sync_research_data",
-                kind="success",
-                arguments={},
-                input_strategy="sync_issued_instrument",
-            ),
-            market_capture,
-        )
+        for market_item in market_items:
+            market_capture = await call_tool(
+                client,
+                "saxo_sync_research_data",
+                {"request": {"items": [market_item]}},
+            )
+            _observe_auxiliary(state, market_capture)
+            _remember_analytics_handles(
+                resources,
+                AnalyticsCaseCall(
+                    tool_id="saxo_sync_research_data",
+                    kind="success",
+                    arguments={},
+                    input_strategy="sync_issued_instrument",
+                ),
+                market_capture,
+            )
         quote_dataset_ids = resources.dataset_ids_by_analysis_kind.get("quote", [])
         if quote_dataset_ids:
             quote_read = await call_tool(
@@ -1173,26 +1212,48 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
     disclaimer_present = False
     place_attempted = False
     cancel_attempted = False
+    place_observation: MatrixToolObservation | None = None
+    place_arguments: dict[str, JsonValue] = {}
+    cancel_observation: MatrixToolObservation | None = None
+    cancel_arguments: dict[str, JsonValue] = {}
     selector = (
         state.analytics_resources.account_selectors[0]
         if len(state.analytics_resources.account_selectors) == 1
         else None
     )
+    observed_limit_price = state.analytics_resources.controlled_order_limit_price
+    controlled_safety_prepared = False
     if all(
         value is not None
-        for value in (candidate, account_alias, dataset_id, instrument_handle, strategy, selector)
+        for value in (
+            candidate,
+            account_alias,
+            dataset_id,
+            instrument_handle,
+            strategy,
+            selector,
+            observed_limit_price,
+        )
     ):
+        if proof_recorder is None:
+            reason = "controlled_ghost_safety_binding_unavailable"
+        else:
+            try:
+                proof_recorder.prepare_controlled_sim_safety(
+                    cast("str", selector),
+                    expected_uic=fixtures.stock_uic,
+                )
+            except (OSError, TypeError, ValueError):
+                reason = "controlled_ghost_safety_binding_unavailable"
+            else:
+                controlled_safety_prepared = True
+    if controlled_safety_prepared:
         preview_arguments: dict[str, JsonValue] = {
-            "order_body": {
-                "AccountKey": cast("str", selector),
-                "Uic": fixtures.stock_uic,
-                "AssetType": FIXTURE_ASSET_TYPE,
-                "Amount": fixtures.amount,
-                "BuySell": "Buy",
-                "OrderType": "Limit",
-                "OrderPrice": fixtures.limit_price,
-                "OrderDuration": {"DurationType": "DayOrder"},
-            },
+            "order_body": _controlled_sim_order_body(
+                cast("str", selector),
+                fixtures,
+                observed_limit_price=cast("str", observed_limit_price),
+            ),
         }
         preview = await call_tool(client, "saxo_create_order_preview", preview_arguments)
         calls += 1
@@ -1206,11 +1267,11 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         elif preview_state != "completed" or not isinstance(preview_token, str):
             reason = "controlled_ghost_preview_unavailable"
         else:
-            place_arguments: dict[str, JsonValue] = {"preview_token": preview_token}
+            place_arguments = {"preview_token": preview_token}
             place = await call_tool(client, "saxo_place_sim_order", place_arguments)
+            place_observation = place
             calls += 1
             place_attempted = True
-            _record(state, "saxo_place_sim_order", place, place_arguments)
             state.lifecycle_seen.add("saxo_place_sim_order")
             place_state = (
                 place.result_state
@@ -1250,27 +1311,30 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
                 )
                 cancel_token = cancel_preview.payload.get("preview_token")
                 if cancel_preview_state == "completed" and isinstance(cancel_token, str):
-                    cancel_arguments: dict[str, JsonValue] = {"preview_token": cancel_token}
+                    await _wait_for_sim_write_rate_limit()
+                    cancel_arguments = {"preview_token": cancel_token}
                     cancel = await call_tool(
                         client,
                         "saxo_cancel_sim_orders_by_instrument",
                         cancel_arguments,
                     )
+                    cancel_observation = cancel
                     calls += 1
                     cancel_attempted = True
-                    _record(
-                        state,
-                        "saxo_cancel_sim_orders_by_instrument",
-                        cancel,
-                        cancel_arguments,
-                    )
                     state.lifecycle_seen.add("saxo_cancel_sim_orders_by_instrument")
-                    cancel_state = "completed" if cancel.result_state == "completed" else "failed"
+                    cancel_state = (
+                        cancel.result_state
+                        if cancel.result_state in {"completed", "completed_unverified"}
+                        else "failed"
+                    )
                 else:
                     reason = "controlled_ghost_cancel_preview_failed"
             else:
                 reason = "controlled_ghost_cancel_scope_unavailable"
 
+    if controlled_safety_prepared and proof_recorder is not None:
+        proof_recorder.clear_controlled_sim_safety()
+        controlled_safety_prepared = False
     after = await mcp_state_fingerprint(client, state)
     state.after = after
     ledger_arguments: dict[str, JsonValue] = {}
@@ -1288,6 +1352,8 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         or instrument_handle is None
         or strategy is None
     ):
+        if controlled_safety_prepared and proof_recorder is not None:
+            proof_recorder.clear_controlled_sim_safety()
         return _ControlledGhostObservation(
             reason_code=reason,
             evidence=None,
@@ -1298,10 +1364,29 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         )
     before_ghost = _ghost_state_fingerprint(before)
     after_ghost = _ghost_state_fingerprint(after)
-    state_equal = before_ghost == after_ghost
+    state_reconciled = brokerage_ghost_state_reconciled(before, after)
+    inventory_reconciled = brokerage_inventory_reconciled(before, after)
     reconciled_place = place_state in {"completed", "completed_unverified"}
-    if reconciled_place and cancel_state == "completed" and state_equal:
+    reconciled_cancel = cancel_state in {"completed", "completed_unverified"}
+    if reconciled_place and reconciled_cancel and state_reconciled:
         place_state = "completed"
+        cancel_state = "completed"
+    if place_observation is not None:
+        _record(
+            state,
+            "saxo_place_sim_order",
+            place_observation,
+            place_arguments,
+            status="reconciled" if place_state == "completed" else "failed",
+        )
+    if cancel_observation is not None:
+        _record(
+            state,
+            "saxo_cancel_sim_orders_by_instrument",
+            cancel_observation,
+            cancel_arguments,
+            status="reconciled" if cancel_state == "completed" else "failed",
+        )
     evidence = GhostLifecycleEvidence(
         candidate_commit=candidate,
         dataset_id=dataset_id,
@@ -1332,7 +1417,7 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         live_mutation_count=live_mutation_calls_in(ledger.payload),
         non_sim_event_count=_non_sim_ledger_event_count(ledger.payload),
         disclaimer_present=disclaimer_present,
-        purchase_occurred=not state_equal,
+        purchase_occurred=not inventory_reconciled,
         before=before_ghost,
         after=after_ghost,
     )
@@ -1342,7 +1427,7 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         and place_state == "completed"
         and cancel_preview_state == "completed"
         and cancel_state == "completed"
-        and state_equal
+        and state_reconciled
         and not disclaimer_present
     ):
         if proof_recorder is None:
@@ -1360,10 +1445,12 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
                 reason = "passed"
     elif not ledger_complete:
         reason = "controlled_ghost_request_ledger_incomplete"
-    elif not state_equal:
+    elif not state_reconciled:
         reason = "controlled_ghost_cleanup_not_equal"
     elif place_state != "completed":
         reason = "controlled_ghost_place_not_reconciled"
+    if controlled_safety_prepared and proof_recorder is not None:
+        proof_recorder.clear_controlled_sim_safety()
     return _ControlledGhostObservation(
         reason_code=reason,
         evidence=evidence,
@@ -1372,6 +1459,85 @@ async def _run_controlled_sim_ghost_phase(  # noqa: C901, PLR0912, PLR0915
         mcp_call_count=calls,
         sim_mutation_call_count=int(place_attempted) + int(cancel_attempted),
     )
+
+
+def _controlled_sim_order_body(
+    account_selector: str,
+    fixtures: MatrixFixtures,
+    *,
+    observed_limit_price: str,
+) -> dict[str, JsonValue]:
+    """Build the exact registered SIM place body from one process-scoped selector."""
+    return {
+        "AccountKey": account_selector,
+        "Uic": fixtures.stock_uic,
+        "AssetType": FIXTURE_ASSET_TYPE,
+        "Amount": fixtures.amount,
+        "BuySell": "Buy",
+        "ManualOrder": False,
+        "OrderType": "Limit",
+        "OrderPrice": float(Decimal(observed_limit_price)),
+        "OrderDuration": {"DurationType": "DayOrder"},
+        "ExternalReference": _CONTROLLED_GHOST_EXTERNAL_REFERENCE,
+    }
+
+
+async def _wait_for_sim_write_rate_limit() -> None:
+    """Keep the controlled cancel beyond the process-local one-write-per-second guard."""
+    await anyio.sleep(_SIM_WRITE_RATE_LIMIT_WAIT_SECONDS)
+
+
+def _observed_controlled_limit_price(payload: JsonValue) -> str | None:  # noqa: C901
+    """Derive one tick-shaped resting bid one percent below one observed SIM quote."""
+    source = payload
+    response = source.get("response") if isinstance(source, dict) else None
+    if isinstance(response, str):
+        try:
+            source = cast("JsonValue", json.loads(response))
+        except json.JSONDecodeError:
+            return None
+    pairs: list[tuple[Decimal, Decimal]] = []
+
+    def visit(value: JsonValue) -> None:
+        if isinstance(value, list):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, dict):
+            return
+        quote = value.get("Quote")
+        if isinstance(quote, dict):
+            bid = quote.get("Bid")
+            ask = quote.get("Ask")
+            if (
+                isinstance(bid, (int, float, str))
+                and not isinstance(bid, bool)
+                and isinstance(ask, (int, float, str))
+                and not isinstance(ask, bool)
+            ):
+                try:
+                    parsed_bid = Decimal(str(bid))
+                    parsed_ask = Decimal(str(ask))
+                except InvalidOperation:
+                    pass
+                else:
+                    if (
+                        parsed_bid.is_finite()
+                        and parsed_ask.is_finite()
+                        and parsed_bid > 0
+                        and parsed_ask >= parsed_bid
+                    ):
+                        pairs.append((parsed_bid, parsed_ask))
+        for item in value.values():
+            visit(item)
+
+    visit(source)
+    if len(pairs) != 1:
+        return None
+    bid, _ask = pairs[0]
+    quantum = Decimal(1).scaleb(cast("int", bid.as_tuple().exponent))
+    resting = (bid * Decimal("0.99")).quantize(quantum, rounding=ROUND_DOWN)
+    return format(resting, "f") if resting > 0 and resting < bid else None
 
 
 def _ghost_state_fingerprint(state: BrokerageStateFingerprint) -> GhostStateFingerprint:
@@ -1485,7 +1651,7 @@ def _controlled_sim_lifecycle_receipt(
     options_ok = (
         passed("saxo_model_derivatives") and resources.option_entitlement_state == "available"
     )
-    cleanup_ok = resources.cleanup_verified and before == after
+    cleanup_ok = resources.cleanup_verified and brokerage_state_reconciled(before, after)
     if not cleanup_ok:
         state.errors.append("controlled_sim_cleanup_unverified")
         return None
@@ -1874,15 +2040,16 @@ async def _remember_analysis_case_outputs(
 ) -> None:
     """Index one result before deriving any context that depends on its issued handle."""
     _remember_analytics_handles(state.analytics_resources, observed_call, result)
+    returned_kind = _first_string_field(result.payload, "analysis_kind")
     if (
         case_receipt.state == "passed"
         and observed_call.kind == "success"
-        and observed_call.analysis_kind == "instrument_price_return"
+        and returned_kind == "instrument_price_return"
     ):
         await _prepare_server_owned_pretrade_input(client, state)
 
 
-def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adapters
+def _materialize_analysis_arguments(  # noqa: C901, PLR0912, PLR0915 - bounded adapters
     case_call: AnalyticsCaseCall,
     resources: AnalyticsRuntimeResources,
 ) -> dict[str, JsonValue]:
@@ -1918,8 +2085,17 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
         else resources.analysis_input_dataset_ids_by_analysis_kind
     )
     dataset_ids = analysis_inputs.get(route, routed.get(route, []))
-    if degraded and not dataset_ids and route == "price_bars":
-        dataset_ids = resources.dataset_ids_by_analysis_kind.get(route, [])
+    if degraded and not dataset_ids:
+        degraded_route = "price_bars" if route == "bounded_backtest" else route
+        dataset_ids = resources.degraded_dataset_ids_by_analysis_kind.get(
+            degraded_route,
+            [],
+        )
+    if degraded and not dataset_ids:
+        dataset_ids = resources.analysis_input_dataset_ids_by_analysis_kind.get(
+            route,
+            resources.dataset_ids_by_analysis_kind.get(route, []),
+        )
     dataset_id = dataset_ids[0] if dataset_ids else None
     if dataset_id is None:
         return {}
@@ -1963,6 +2139,27 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adap
             request["maximum_turnover"] = "0"
         elif case_call.tool_id == "saxo_backtest_strategy":
             request["starting_equity"] = 500.0
+    if case_call.tool_id == "saxo_run_scenario":
+        context_handles = resources.analysis_input_instrument_handles_by_analysis_kind.get(
+            route,
+            [],
+        )
+        if context_handles:
+            requested_kind = request.get("analysis_kind")
+            ratio = (
+                "0"
+                if requested_kind in {"margin_fire_drill", "scenario_currency"}
+                else "-0.2"
+                if degraded
+                else "-0.1"
+            )
+            request["shocks"] = [
+                {
+                    "instrument_handle": handle,
+                    "price_shock_ratio": ratio,
+                }
+                for handle in context_handles
+            ]
     return arguments
 
 
@@ -2001,7 +2198,7 @@ def _materialize_analysis_consumer_arguments(
         return {
             "analysis_id": analysis_id,
             "template_id": "relative_performance",
-            "output_format": "png" if not degraded else "html",
+            "output_format": "html",
         }
     if case_call.tool_id == "saxo_export_analysis":
         return {
@@ -2079,18 +2276,8 @@ def _remember_typed_resources(  # noqa: C901
     degraded: bool,
 ) -> None:
     """Index only server-issued handles that name their exact stored input kind."""
-    dataset_routes = (
-        resources.degraded_dataset_ids_by_analysis_kind
-        if degraded
-        else resources.dataset_ids_by_analysis_kind
-    )
     analysis_routes = (
         resources.degraded_analysis_ids_by_kind if degraded else resources.analysis_ids_by_kind
-    )
-    analysis_input_routes = (
-        resources.degraded_analysis_input_dataset_ids_by_analysis_kind
-        if degraded
-        else resources.analysis_input_dataset_ids_by_analysis_kind
     )
 
     def visit(value: JsonValue) -> None:  # noqa: C901, PLR0912
@@ -2107,11 +2294,41 @@ def _remember_typed_resources(  # noqa: C901
         if isinstance(contract_id, str):
             resources.source_contract_ids.add(contract_id)
         if isinstance(dataset_id, str):
+            quality_state = value.get("quality_state")
+            dataset_degraded = (
+                quality_state != "complete"
+                if quality_state in {"complete", "partial", "stale", "missing", "invalid"}
+                else degraded
+            )
+            dataset_routes = (
+                resources.degraded_dataset_ids_by_analysis_kind
+                if dataset_degraded
+                else resources.dataset_ids_by_analysis_kind
+            )
+            analysis_input_routes = (
+                resources.degraded_analysis_input_dataset_ids_by_analysis_kind
+                if dataset_degraded
+                else resources.analysis_input_dataset_ids_by_analysis_kind
+            )
             if data_kind == "analysis_input" and isinstance(analysis_kind, str):
                 _extend_unique(
                     analysis_input_routes.setdefault(analysis_kind, []),
                     [dataset_id],
                 )
+                instrument_handles = value.get("instrument_handles")
+                if isinstance(instrument_handles, list):
+                    safe_handles = [
+                        handle
+                        for handle in instrument_handles
+                        if isinstance(handle, str) and _SAFE_HANDLE.fullmatch(handle)
+                    ]
+                    _extend_unique(
+                        resources.analysis_input_instrument_handles_by_analysis_kind.setdefault(
+                            analysis_kind,
+                            [],
+                        ),
+                        safe_handles,
+                    )
                 for exact_kind in _ANALYSIS_INPUT_ALIASES.get(
                     analysis_kind,
                     (analysis_kind,),
@@ -2508,7 +2725,7 @@ def _record(
     result: MatrixToolObservation,
     arguments: dict[str, JsonValue],
     *,
-    status: Literal["completed", "expected_refusal", "failed"] = "completed",
+    status: Literal["completed", "expected_refusal", "reconciled", "failed"] = "completed",
 ) -> MatrixScenarioReceipt:
     try:
         receipt = receipt_for(tool, result, arguments, status=status)
@@ -2539,7 +2756,7 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
     after = state.after or _unavailable_state_fingerprint()
     if state.before is None or state.after is None:
         state.errors.append("state_fingerprint_missing")
-    if before != after:
+    if not brokerage_state_reconciled(before, after):
         state.errors.append("state_fingerprint_mismatch")
         state.uncleaned = max(state.uncleaned, 1)
     if not state.analytics_resources.cleanup_verified:
@@ -2560,7 +2777,7 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
     analytics_count = len(set(state.receipts) & set(ANALYTICS_TOOL_IDS))
     if analytics_count != len(ANALYTICS_TOOL_IDS):
         state.errors.append("analytics_tool_coverage_incomplete")
-    unchanged = before == after
+    unchanged = brokerage_state_reconciled(before, after)
     cleanup_complete = (
         state.uncleaned == 0 and unchanged and state.analytics_resources.cleanup_verified
     )

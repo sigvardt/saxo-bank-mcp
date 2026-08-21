@@ -15,6 +15,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     BrokerageStateFingerprint,
     ControlledSimLifecycleReceipt,
     analytics_case_evidence_errors,
+    brokerage_state_reconciled,
 )
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS, EXPECTED_TOOL_COUNT
 
@@ -38,7 +39,7 @@ class MatrixScenarioReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool: str
-    status: Literal["completed", "expected_refusal", "failed"]
+    status: Literal["completed", "expected_refusal", "reconciled", "failed"]
     mcp_call_observed: Literal[True] = True
     result_parsed: bool
     result_state: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
@@ -78,6 +79,12 @@ class MatrixScenarioReceipt(BaseModel):
             not self.result_parsed or self.result_state not in refusal_states
         ):
             raise ValueError("expected-refusal matrix receipt lacks a parsed refusal")
+        if self.status == "reconciled" and (
+            not self.result_parsed
+            or self.result_state not in {"completed", "completed_unverified"}
+            or (self.result_state == "completed" and self.mcp_is_error)
+        ):
+            raise ValueError("reconciled matrix receipt lacks a cleanup-proved result")
         return self
 
 
@@ -135,7 +142,10 @@ class SimToolMatrixReceipt(BaseModel):
             or not self.account_allowlist_resolved
             or not self.auth_status_completed
             or not self.session_capabilities_completed
-            or self.before_state_fingerprint != self.after_state_fingerprint
+            or not brokerage_state_reconciled(
+                self.before_state_fingerprint,
+                self.after_state_fingerprint,
+            )
             or not self.mcp_only_account_fixture_state
             or not self.cleanup_complete
             or not self.account_state_unchanged

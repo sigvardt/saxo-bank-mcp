@@ -19,8 +19,8 @@ from saxo_bank_mcp.analytics_ghost_portfolio import (
     GhostLifecycleEvidence,
     GhostPortfolioVerification,
     GhostSessionPreconditions,
-    GhostStateEquality,
     GhostStateFingerprint,
+    GhostStateReconciliation,
     GhostWorkflowPlan,
     GhostWorkflowRequest,
     prepare_ghost_workflow,
@@ -168,7 +168,12 @@ def _preconditions(**updates: object) -> GhostSessionPreconditions:
     return GhostSessionPreconditions.model_validate(values)
 
 
-def _state(marker: str, *, orders: int = 0) -> GhostStateFingerprint:
+def _state(
+    marker: str,
+    *,
+    orders: int = 0,
+    trade_message_count: int = 0,
+) -> GhostStateFingerprint:
     return GhostStateFingerprint(
         balance_fingerprint_sha256=marker * 64,
         orders_fingerprint_sha256=("2" if marker == "1" else marker) * 64,
@@ -176,7 +181,7 @@ def _state(marker: str, *, orders: int = 0) -> GhostStateFingerprint:
         trade_messages_fingerprint_sha256=("4" if marker == "1" else marker) * 64,
         order_count=orders,
         position_count=0,
-        trade_message_count=0,
+        trade_message_count=trade_message_count,
     )
 
 
@@ -212,7 +217,7 @@ def _evidence(**updates: object) -> GhostLifecycleEvidence:
         "disclaimer_present": False,
         "purchase_occurred": False,
         "before": before,
-        "after": before,
+        "after": _state("1", trade_message_count=2),
     }
     values.update(updates)
     return GhostLifecycleEvidence.model_validate(values)
@@ -233,14 +238,14 @@ def _caller_constructed_verification(
         instrument_handle=instrument_handle,
         strategy_fingerprint_sha256=strategy_fingerprint_sha256,
         fill_model="next_bar_open",
-        state_equality=GhostStateEquality(
-            balance=True,
+        state_reconciliation=GhostStateReconciliation(
+            balance_readback=True,
             orders=True,
             order_count=True,
             positions=True,
             position_count=True,
-            trade_messages=True,
-            trade_message_count=True,
+            trade_message_delta_exact=True,
+            trade_message_delta=2,
         ),
         evidence_fingerprint_sha256="8" * 64,
     )

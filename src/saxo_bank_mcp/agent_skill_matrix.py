@@ -56,7 +56,7 @@ class ToolCallEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool: str = Field(min_length=1)
-    status: Literal["completed", "expected_refusal"]
+    status: Literal["completed", "expected_refusal", "reconciled"]
     mcp_call_observed: Literal[True]
     result_parsed: Literal[True]
     skipped: Literal[False]

@@ -1295,6 +1295,7 @@ def _route_server_analysis_input(
                 {
                     "dataset_id": issued.dataset_id,
                     "analysis_kind": issued.analysis_kind,
+                    "instrument_handles": issued.instrument_handles,
                     "quality_state": issued.quality_state,
                     "coverage_start": issued.coverage_start,
                     "coverage_end": issued.coverage_end,

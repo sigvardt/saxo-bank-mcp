@@ -90,7 +90,7 @@ def receipt_for(
     result: MatrixToolObservation | Mapping[str, JsonValue],
     arguments: Mapping[str, JsonValue],
     *,
-    status: Literal["completed", "expected_refusal", "failed"] = "completed",
+    status: Literal["completed", "expected_refusal", "reconciled", "failed"] = "completed",
 ) -> MatrixScenarioReceipt:
     observation = _observation(result)
     mapping = observation.payload
@@ -248,6 +248,18 @@ def fixture_read_calls(fixtures: MatrixFixtures) -> tuple[tuple[str, dict[str, J
                 "method": "GET",
                 "path": "/ref/v1/instruments/details",
                 "params": {"Uics": str(fixtures.stream_uic), "AssetTypes": "FxSpot"},
+            },
+        ),
+        (
+            "saxo_call_registered_endpoint",
+            {
+                "method": "GET",
+                "path": "/trade/v1/infoprices",
+                "params": {
+                    "Amount": format(fixtures.amount, "g"),
+                    "AssetType": FIXTURE_ASSET_TYPE,
+                    "Uic": str(fixtures.stock_uic),
+                },
             },
         ),
     )
