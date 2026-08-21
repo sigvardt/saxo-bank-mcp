@@ -289,6 +289,32 @@ def _runtime_state() -> MatrixRuntimeState:
     )
 
 
+def _complete_runtime_state_for_finalize() -> MatrixRuntimeState:
+    receipts = tuple(
+        receipt_for(tool, {"status": "completed"}, {}) for tool in sorted(ALL_LOGICAL_TOOL_IDS)
+    )
+    before = _state()
+    lifecycle = _lifecycle_receipt(before)
+    state = _runtime_state()
+    state.receipts = {receipt.tool: receipt for receipt in receipts}
+    state.analytics_case_receipts = list(_analytics_case_evidence())
+    state.lifecycle_seen.update(matrix_module.LIFECYCLE_TOOLS)
+    state.registered_ops.extend(spec.operation_id for spec in matrix_module.trading_write_specs())
+    state.preflight = PreflightFlags(
+        fixtures_ok=True,
+        account_ok=True,
+        auth_ok=True,
+        session_ok=True,
+        disclaimer_refusal_ok=True,
+    )
+    state.before = lifecycle.before
+    state.after = lifecycle.after
+    state.analysis_execution_receipts = list(_analysis_execution_receipts())
+    state.controlled_sim_lifecycle = lifecycle
+    state.analytics_resources.cleanup_verified = True
+    return state
+
+
 def test_analytics_sim_contracts_cover_21_tools_and_all_applicable_cases_once() -> None:
     contracts = analytics_sim_contracts()
 
@@ -2128,6 +2154,37 @@ def test_passed_matrix_receipt_requires_exact_safe_60_tool_state() -> None:
                 "tool_receipts": (failed, *receipts[1:]),
             },
         )
+
+
+def test_finalize_reports_exact_failed_analytics_case_instead_of_pydantic_collapse() -> None:
+    state = _complete_runtime_state_for_finalize()
+    tool_index = next(
+        index
+        for index, evidence in enumerate(state.analytics_case_receipts)
+        if evidence.tool_id == "saxo_backtest_strategy"
+    )
+    evidence = state.analytics_case_receipts[tool_index]
+    cases = list(evidence.cases)
+    case_index = next(index for index, case in enumerate(cases) if case.kind == "success")
+    cases[case_index] = cases[case_index].model_copy(update={"state": "failed"})
+    state.analytics_case_receipts[tool_index] = evidence.model_copy(update={"cases": tuple(cases)})
+
+    receipt = matrix_module._finalize(state)  # noqa: SLF001
+
+    assert receipt.status == "failed"
+    assert receipt.reason == "analytics_case_failed:saxo_backtest_strategy:success"
+    assert receipt.errors[0] == receipt.reason
+
+
+def test_finalize_reports_incomplete_analysis_execution_coverage() -> None:
+    state = _complete_runtime_state_for_finalize()
+    state.analysis_execution_receipts.pop()
+
+    receipt = matrix_module._finalize(state)  # noqa: SLF001
+
+    assert receipt.status == "failed"
+    assert receipt.reason == "analysis_execution_coverage_incomplete"
+    assert receipt.errors[0] == receipt.reason
 
 
 def test_controlled_lifecycle_requires_sim_zero_live_cleanup_and_state_equality() -> None:

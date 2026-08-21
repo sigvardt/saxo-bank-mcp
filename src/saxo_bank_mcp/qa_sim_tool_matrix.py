@@ -36,6 +36,7 @@ from saxo_bank_mcp.order_mutation_models import (
     PRODUCTION_ORDER_TOOL_NAMES,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
+    ANALYSIS_KIND_IDS,
     BROKERAGE_STATE_COMPONENTS,
     AnalyticsCaseCall,
     AnalyticsCaseReceipt,
@@ -47,6 +48,7 @@ from saxo_bank_mcp.qa_analytics_sim import (
     ControlledSimLifecycleReceipt,
     analytics_case_calls,
     analytics_case_contract_sha256,
+    analytics_case_evidence_errors,
     analytics_sim_contracts,
     assert_analytics_case_coverage,
     brokerage_ghost_state_reconciled,
@@ -2799,6 +2801,29 @@ def _observe_auxiliary(state: MatrixRuntimeState, result: MatrixToolObservation)
     state.live_mutation_calls += live_mutation_calls_in(result.payload)
 
 
+def _append_matrix_completion_errors(state: MatrixRuntimeState) -> None:
+    """Make every strict pass-only evidence gap explicit before publication."""
+    state.errors.extend(analytics_case_evidence_errors(state.analytics_case_receipts))
+    failed_execution = next(
+        (receipt for receipt in state.analysis_execution_receipts if receipt.state == "failed"),
+        None,
+    )
+    if failed_execution is not None:
+        state.errors.append(
+            "analysis_execution_failed:"
+            f"{failed_execution.tool_id}:{failed_execution.analysis_kind}",
+        )
+    observed_analysis_kinds = tuple(
+        receipt.analysis_kind
+        for receipt in state.analysis_execution_receipts
+        if receipt.kind == "success" and receipt.result_parsed and receipt.analysis_kind is not None
+    )
+    if len(observed_analysis_kinds) != len(set(observed_analysis_kinds)):
+        state.errors.append("analysis_execution_duplicate_kind")
+    if observed_analysis_kinds != ANALYSIS_KIND_IDS:
+        state.errors.append("analysis_execution_coverage_incomplete")
+
+
 def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
     expected, _ = manifest_tools(SCENARIO_MANIFEST)
     missing = sorted(expected - set(state.receipts))
@@ -2833,6 +2858,7 @@ def _finalize(state: MatrixRuntimeState) -> SimToolMatrixReceipt:  # noqa: C901
     analytics_count = len(set(state.receipts) & set(ANALYTICS_TOOL_IDS))
     if analytics_count != len(ANALYTICS_TOOL_IDS):
         state.errors.append("analytics_tool_coverage_incomplete")
+    _append_matrix_completion_errors(state)
     unchanged = brokerage_state_reconciled(before, after)
     cleanup_complete = (
         state.uncleaned == 0 and unchanged and state.analytics_resources.cleanup_verified

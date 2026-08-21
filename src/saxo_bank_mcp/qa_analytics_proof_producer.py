@@ -84,6 +84,8 @@ from saxo_bank_mcp.qa_analytics_proof_failure import (
     verify_child_failure_envelope,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
+    ANALYSIS_KIND_IDS,
+    ANALYTICS_CASE_KINDS,
     AnalyticsCaseReceipt,
     PostSendTimeoutReceipt,
     analytics_case_calls,
@@ -95,7 +97,7 @@ from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixFailureEnvelope,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
-from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
+from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS, ANALYTICS_TOOL_IDS
 from saxo_bank_mcp.token_cache import TokenCacheWriteLease
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -1211,6 +1213,8 @@ _SAFE_MATRIX_FAILURE_REASONS = frozenset(
         "analytics_tool_contract_coverage_mismatch",
         "analytics_tool_contracts_not_unique",
         "analytics_tool_coverage_incomplete",
+        "analysis_execution_coverage_incomplete",
+        "analysis_execution_duplicate_kind",
         "controlled_sim_cleanup_unverified",
         "controlled_sim_lifecycle_unverified",
         "disclaimer_safe_refusal_missing",
@@ -1234,6 +1238,30 @@ _SAFE_MATRIX_FAILURE_PREFIXES = frozenset(
         "tool_result_state_mismatch",
     },
 )
+_MATRIX_DETAIL_PART_COUNT = 3
+
+
+def _safe_detailed_matrix_reason(reason: str) -> str | None:
+    """Retain only catalog-bound diagnostic segments from one private reason."""
+    parts = reason.split(":")
+    prefix = parts[0]
+    if prefix in {"analytics_case_failed", "analytics_case_state_mismatch"}:
+        if (
+            len(parts) == _MATRIX_DETAIL_PART_COUNT
+            and parts[1] in ANALYTICS_TOOL_IDS
+            and parts[2] in ANALYTICS_CASE_KINDS
+        ):
+            return "_".join(parts)
+        return prefix
+    if prefix == "analysis_execution_failed":
+        if (
+            len(parts) == _MATRIX_DETAIL_PART_COUNT
+            and parts[1] in ANALYTICS_TOOL_IDS
+            and parts[2] in ANALYSIS_KIND_IDS
+        ):
+            return "_".join(parts)
+        return prefix
+    return None
 
 
 def _matrix_failure_reason(matrix: SimToolMatrixReceipt) -> str:
@@ -1244,6 +1272,8 @@ def _matrix_failure_reason(matrix: SimToolMatrixReceipt) -> str:
     prefix, separator, detail = reason.partition(":")
     if separator and prefix == "tool_result_state_mismatch" and detail in ALL_LOGICAL_TOOL_IDS:
         return f"installed_sim_matrix_{prefix}_{detail}"
+    if detailed := _safe_detailed_matrix_reason(reason):
+        return f"installed_sim_matrix_{detailed}"
     if separator and prefix in _SAFE_MATRIX_FAILURE_PREFIXES:
         return f"installed_sim_matrix_{prefix}"
     return "installed_sim_matrix_failed"

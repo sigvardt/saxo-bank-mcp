@@ -1855,6 +1855,22 @@ def test_producer_launcher_returns_authenticated_failed_matrix_for_progress(
             "tool_result_state_mismatch:saxo_analyze_market/private_detail",
             "installed_sim_matrix_tool_result_state_mismatch",
         ),
+        (
+            "analytics_case_failed:saxo_backtest_strategy:success",
+            "installed_sim_matrix_analytics_case_failed_saxo_backtest_strategy_success",
+        ),
+        (
+            "analytics_case_failed:not_a_registered_tool:success",
+            "installed_sim_matrix_analytics_case_failed",
+        ),
+        (
+            "analytics_case_failed:saxo_backtest_strategy:private_detail",
+            "installed_sim_matrix_analytics_case_failed",
+        ),
+        (
+            "analysis_execution_coverage_incomplete",
+            "installed_sim_matrix_analysis_execution_coverage_incomplete",
+        ),
         ("opaque_internal_detail", "installed_sim_matrix_failed"),
         ("", "installed_sim_matrix_failed"),
     ],
