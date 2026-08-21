@@ -282,7 +282,7 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     observed_reason_code: str | None = Field(
         default=None,
-        pattern=r"^[a-z][a-z0-9_]{0,127}$",
+        pattern=r"^[a-z][a-z_]{0,127}$",
     )
     mcp_call_observed: Literal[True]
     result_parsed: bool

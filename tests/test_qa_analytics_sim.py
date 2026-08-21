@@ -1148,7 +1148,7 @@ def test_failed_analysis_receipt_retains_only_a_safe_observed_reason_code() -> N
         MatrixToolObservation(
             payload={
                 "status": "refused",
-                "reason_code": "private account 123456",
+                "reason_code": "account_123456",
             },
             result_parsed=True,
             result_state="refused",

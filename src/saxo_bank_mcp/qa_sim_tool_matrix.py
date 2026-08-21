@@ -1662,7 +1662,7 @@ def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
 def _observed_reason_code(payload: dict[str, JsonValue]) -> str | None:
     """Retain one source-controlled reason token without private text or values."""
     value = payload.get("reason_code")
-    if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value):
+    if isinstance(value, str) and re.fullmatch(r"[a-z][a-z_]{0,127}", value):
         return value
     return None
 
