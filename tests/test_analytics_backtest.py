@@ -309,17 +309,14 @@ def test_rebalance_interval_changes_only_scheduled_decisions() -> None:
     _, daily = _private(_request(strategy=_strategy(interval_bars=1)))
     _, every_three = _private(_request(strategy=_strategy(interval_bars=3)))
 
-    scheduled_decisions = {
-        _START + timedelta(days=1 + (3 * index)) for index in range(3)
-    }
+    scheduled_decisions = {_START + timedelta(days=1 + (3 * index)) for index in range(3)}
     assert all(fill.decision_at in scheduled_decisions for fill in every_three.fills)
     assert daily.fills != every_three.fills
 
 
 def test_unscheduled_half_weight_position_drifts_as_buy_and_hold() -> None:
     bars = tuple(
-        _bar(index, close)
-        for index, close in enumerate((100.0, 100.0, 200.0, 100.0, 100.0, 100.0))
+        _bar(index, close) for index, close in enumerate((100.0, 100.0, 200.0, 100.0, 100.0, 100.0))
     )
     request = _request(
         dataset=_dataset(bars=bars),
@@ -430,9 +427,7 @@ def test_active_short_zero_equity_close_refuses_before_later_recovery() -> None:
     except ArithmeticError as error:
         reference_error = error
 
-    production_reason = (
-        result.reason_code if isinstance(result, ResearchRefusal) else None
-    )
+    production_reason = result.reason_code if isinstance(result, ResearchRefusal) else None
     assert (production_reason, reference_error is not None) == (
         "backtest_measure_undefined",
         True,
@@ -684,6 +679,14 @@ def test_strategy_catalog_rejects_code_sql_paths_and_network_callbacks(
 
     with pytest.raises(StrategySchemaError, match="approved declarative strategy catalog"):
         parse_strategy_definition(payload)
+
+
+def test_strategy_parser_accepts_json_boundary_datetime_strings() -> None:
+    payload = _strategy().model_dump(mode="json")
+
+    parsed = parse_strategy_definition(payload)
+
+    assert parsed == _strategy()
 
 
 def test_same_bar_close_fill_model_is_rejected() -> None:

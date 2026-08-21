@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from itertools import pairwise
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.analytics_models import IsoCurrencyCode, UtcDateTime
 
@@ -49,10 +49,7 @@ class IndicatorSpec(_StrictModel):
     def validate_window(self) -> Self:
         if self.kind == "close" and self.window != 1:
             raise ValueError("close indicator window must equal one")
-        if (
-            self.kind == "simple_moving_average"
-            and self.window < _MINIMUM_MOVING_AVERAGE_WINDOW
-        ):
+        if self.kind == "simple_moving_average" and self.window < _MINIMUM_MOVING_AVERAGE_WINDOW:
             raise ValueError("simple moving average window must be at least two")
         return self
 
@@ -206,8 +203,14 @@ class StrategyDefinition(_StrictModel):
 def parse_strategy_definition(payload: Mapping[str, object]) -> StrategyDefinition:
     """Parse only the approved catalog and return a value-free refusal on any deviation."""
     try:
-        return StrategyDefinition.model_validate(payload)
-    except ValidationError:
+        encoded = json.dumps(
+            payload,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return StrategyDefinition.model_validate_json(encoded, strict=True)
+    except (TypeError, ValueError):
         raise StrategySchemaError(
             "strategy payload is outside the approved declarative strategy catalog",
         ) from None

@@ -19,6 +19,7 @@ import saxo_bank_mcp.qa_sim_tool_matrix as matrix_module
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.analytics_models import AnalysisId, DatasetId, JobId
 from saxo_bank_mcp.analytics_store import StorageScope
+from saxo_bank_mcp.analytics_strategy_schema import parse_strategy_definition
 from saxo_bank_mcp.analytics_sync import SyncResearchRequest
 from saxo_bank_mcp.mcp_analytics_tools import (
     StoredBacktestToolRequest,
@@ -273,6 +274,22 @@ def test_analytics_success_contracts_cover_every_tool_with_session_issued_inputs
     assert tuple(observed) == ANALYTICS_TOOL_IDS
 
 
+def test_controlled_ghost_source_strategy_parses_at_the_json_boundary() -> None:
+    arguments = dict(analytics_primary_calls())["saxo_backtest_strategy"]
+    request = arguments["request"]
+    assert isinstance(request, dict)
+    strategy = request["strategy"]
+    assert isinstance(strategy, dict)
+    split = strategy["evaluation_split"]
+    assert isinstance(split, dict)
+    assert isinstance(split["train_end_at"], str)
+    assert isinstance(split["holdout_start_at"], str)
+
+    parsed = parse_strategy_definition(strategy)
+
+    assert parsed.evaluation_split.kind == "holdout"
+
+
 def test_case_plan_uses_distinct_inputs_and_exact_reconciliation() -> None:
     calls = analytics_case_calls()
     by_case = {(call.tool_id, call.kind): call for call in calls if call.analysis_kind is None}
@@ -380,10 +397,13 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
         assert selected == dataset_id
 
     pretrade_resources = AnalyticsRuntimeResources()
-    assert materialize_analytics_case_arguments(
-        calls[("saxo_propose_trade_from_analysis", "success")],
-        pretrade_resources,
-    ) == dict(analytics_primary_calls())["saxo_propose_trade_from_analysis"]
+    assert (
+        materialize_analytics_case_arguments(
+            calls[("saxo_propose_trade_from_analysis", "success")],
+            pretrade_resources,
+        )
+        == dict(analytics_primary_calls())["saxo_propose_trade_from_analysis"]
+    )
     pretrade_resources.instrument_handles.append("ih_22222222222242228222222222222222")
     pretrade_resources.analysis_ids_by_kind["instrument_price_return"] = [
         "an_33333333333343338333333333333333"
