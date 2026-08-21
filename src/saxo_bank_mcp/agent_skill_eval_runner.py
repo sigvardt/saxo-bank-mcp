@@ -59,6 +59,43 @@ from saxo_bank_mcp.server_eval_tool_filter import EvalToolFilterError
 CREDENTIAL_MODE_NONE: Final = "none"
 CREDENTIAL_MODE_EPHEMERAL: Final = "ephemeral-owner-only-copy"
 ALLOWED_CREDENTIAL_MODES: Final = frozenset({CREDENTIAL_MODE_NONE, CREDENTIAL_MODE_EPHEMERAL})
+CODEX_NATIVE_FINAL_RECEIPT_INSTRUCTIONS: Final = {
+    "research-to-precheck": (
+        " Final receipt: `analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; stop before broker write`."
+    ),
+    "artifact-delivery": (
+        " Final receipt: `analysis_id: <returned or fixture id>; "
+        "state: <verified|degraded|refused>; owner-only; quality warnings`."
+    ),
+    "market-comparison": (
+        " Final market receipt must use this exact label order: "
+        "`analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; bounded universe; quality warnings`. "
+        "Return only that receipt line in the final answer."
+    ),
+    "options": (
+        " Final options receipt must use this exact label order: "
+        "`analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; capability limitation; "
+        "Saxo Greeks: <summary>`. "
+        "Return only that receipt line in the final answer. "
+        "Do not add a contrast sentence about the model's role."
+    ),
+    "scenario": (
+        " Final scenario receipt must contain this exact ordered text: "
+        "explicit numeric shocks -0.10 0.05."
+    ),
+    "optimization": (
+        " Final optimization receipt must use this exact label order: "
+        "`analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; target deltas: <summary>; "
+        "feasibility: <summary>; residuals: <summary>; stability: <summary>; "
+        "mathematical proposal: <summary>`. "
+        "Return only that receipt line in the final answer. "
+        "Do not add a contrast sentence about what kind of math it is."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -810,31 +847,7 @@ def _codex_native_fixture_bound_case(
     )
     if optional_phrases:
         fixture_protocol += f" Include at least one of: {optional_phrases}."
-    if case.id == "research-to-precheck":
-        fixture_protocol += (
-            " Final receipt: `analysis_id: <result analysis_id or fixture analysis_id>; "
-            "state: <verified|degraded|refused>; stop before broker write`."
-        )
-    if case.id == "artifact-delivery":
-        fixture_protocol += (
-            " Final receipt: `analysis_id: <returned or fixture id>; "
-            "state: <verified|degraded|refused>; owner-only; quality warnings`."
-        )
-    if case.id == "scenario":
-        fixture_protocol += (
-            " Final scenario receipt must contain this exact ordered text: "
-            "explicit numeric shocks -0.10 0.05."
-        )
-    if case.id == "optimization":
-        fixture_protocol += (
-            " Final optimization receipt must use this exact label order: "
-            "`analysis_id: <result analysis_id or fixture analysis_id>; "
-            "state: <verified|degraded|refused>; target deltas: <summary>; "
-            "feasibility: <summary>; residuals: <summary>; stability: <summary>; "
-            "mathematical proposal: <summary>`. "
-            "Return only that receipt line in the final answer. "
-            "Do not add a contrast sentence about what kind of math it is."
-        )
+    fixture_protocol += CODEX_NATIVE_FINAL_RECEIPT_INSTRUCTIONS.get(case.id, "")
     prompts = dict(case.harness_prompts)
     prompts["codex"] = prompts["codex"] + fixture_protocol
     return case.model_copy(update={"harness_prompts": prompts})

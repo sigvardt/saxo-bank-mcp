@@ -1147,6 +1147,67 @@ def test_codex_native_optimization_prompt_requires_exact_receipt_without_method_
     assert assertion_evidence.forbidden_absent == (True, True, True)
 
 
+def test_codex_native_market_comparison_prompt_requires_exact_final_receipt() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-analytics")
+        if candidate.id == "market-comparison"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    exact_receipt = "analysis_id: an_fixture; state: refused; bounded universe; quality warnings"
+    assert (
+        "Final market receipt must use this exact label order: "
+        "`analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; bounded universe; quality warnings`."
+    ) in prompt
+    assert "Return only that receipt line in the final answer." in prompt
+    assert "Final market receipt" not in case.harness_prompts["claude"]
+    assertion_evidence = eval_execution.transcript_assertion_evidence(case, exact_receipt)
+    assert assertion_evidence.passed is True
+    assert assertion_evidence.required_all == (True, True, True)
+    assert assertion_evidence.forbidden_absent == (True, True, True)
+
+
+def test_codex_native_options_prompt_requires_exact_receipt_without_role_contrast() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-analytics")
+        if candidate.id == "options"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    exact_receipt = (
+        "analysis_id: an_fixture; state: refused; capability limitation; Saxo Greeks: unavailable"
+    )
+    assert (
+        "Final options receipt must use this exact label order: "
+        "`analysis_id: <result analysis_id or fixture analysis_id>; "
+        "state: <verified|degraded|refused>; capability limitation; "
+        "Saxo Greeks: <summary>`."
+    ) in prompt
+    assert "Do not add a contrast sentence about the model's role." in prompt
+    assert "Return only that receipt line in the final answer." in prompt
+    assert "replacement math" not in prompt.lower()
+    assert "Final options receipt" not in case.harness_prompts["claude"]
+    assertion_evidence = eval_execution.transcript_assertion_evidence(case, exact_receipt)
+    assert assertion_evidence.passed is True
+    assert assertion_evidence.required_all == (True, True, True)
+    assert assertion_evidence.forbidden_absent == (True, True, True)
+
+
 def test_codex_native_safety_execution_prompt_binds_exact_case_id() -> None:
     case = next(
         candidate
