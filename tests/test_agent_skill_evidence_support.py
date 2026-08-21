@@ -12,6 +12,7 @@ from typing import Final
 
 from saxo_bank_mcp._evidence import JsonValue
 from saxo_bank_mcp.agent_skill_eval_models import load_scenario_tools
+from saxo_bank_mcp.agent_skill_matrix import MATRIX_RECONCILIATION_PROOF
 from saxo_bank_mcp.qa_analytics_sim import BROKERAGE_STATE_COMPONENTS
 
 ROOT: Final = Path(__file__).resolve().parents[1]
@@ -158,12 +159,7 @@ def build_release_evidence(
             "cleanup": {
                 "complete": True,
                 "uncleaned_resources": 0,
-                "proof": [
-                    "open_orders_equal",
-                    "positions_money_equal",
-                    "subscriptions_equal",
-                    "preview_write_state_equal",
-                ],
+                "proof": list(MATRIX_RECONCILIATION_PROOF),
             },
             "unexpected_skips": [],
             "lifecycle_calls": [

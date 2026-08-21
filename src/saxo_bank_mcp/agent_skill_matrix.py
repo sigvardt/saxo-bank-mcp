@@ -42,6 +42,17 @@ LIFECYCLE_TOOLS = (
     "saxo_create_streaming_price_subscription",
     "saxo_cleanup_streaming_subscriptions",
 )
+MATRIX_RECONCILIATION_PROOF = (
+    "orders_zero_and_fingerprint_equal",
+    "positions_count_and_fingerprint_equal",
+    "balances_count_equal",
+    "controlled_sim_trade_messages_plus_two",
+    "subscriptions_equal",
+    "previews_write_state_equal",
+    "jobs_equal",
+    "caches_equal",
+    "temporary_files_equal",
+)
 
 
 class ScenarioEntry(BaseModel):
@@ -299,8 +310,8 @@ def _matrix_state_errors(report: ExecutedMatrixReport, environment: str) -> list
         for name in required_state_components & set(observed_components)
     ):
         errors.append("state_fingerprint_scope_missing")
-    if not report.cleanup.proof:
-        errors.append("cleanup_proof_missing")
+    if report.cleanup.proof != MATRIX_RECONCILIATION_PROOF:
+        errors.append("cleanup_proof_mismatch")
     if report.transport_ledger.live_events != 0 or not report.transport_ledger.sim_only:
         errors.append("transport_ledger_not_sim_only")
     return errors

@@ -561,6 +561,83 @@ def _analytics_case_payloads() -> list[JsonValue]:
     ]
 
 
+def _assert_reconciled_matrix_report(
+    payload: dict[str, JsonValue],
+    report_path: Path,
+    tmp_path: Path,
+) -> None:
+    expected_cleanup_proof = (
+        "orders_zero_and_fingerprint_equal",
+        "positions_count_and_fingerprint_equal",
+        "balances_count_equal",
+        "controlled_sim_trade_messages_plus_two",
+        "subscriptions_equal",
+        "previews_write_state_equal",
+        "jobs_equal",
+        "caches_equal",
+        "temporary_files_equal",
+    )
+    cleanup = cast("dict[str, JsonValue]", payload["cleanup"])
+    assert tuple(cast("list[str]", cleanup["proof"])) == expected_cleanup_proof
+    before = BrokerageStateFingerprint.model_validate_json(
+        json.dumps(payload["before_state_fingerprint"]),
+    )
+    after = BrokerageStateFingerprint.model_validate_json(
+        json.dumps(payload["after_state_fingerprint"]),
+    )
+    assert brokerage_state_reconciled(before, after) is True
+    before_components = {component.name: component for component in before.components}
+    after_components = {component.name: component for component in after.components}
+    assert after_components["trade_messages"].count == before_components["trade_messages"].count + 2
+
+    verification_out = tmp_path / "tool-matrix-verification.json"
+    assert (
+        verify_matrix_report(
+            report_path=report_path,
+            require_environment="SIM",
+            out=verification_out,
+        )
+        == 0
+    )
+    verification_payload = json.loads(verification_out.read_text(encoding="utf-8"))
+    assert verification_payload["state_reconciled"] is True
+    assert verification_payload["state_unchanged"] is False
+    _assert_matrix_reconciliation_tampering_rejected(
+        report_path,
+        tmp_path,
+        before_trade_message_count=before_components["trade_messages"].count,
+    )
+
+
+def _assert_matrix_reconciliation_tampering_rejected(
+    report_path: Path,
+    tmp_path: Path,
+    *,
+    before_trade_message_count: int,
+) -> None:
+    tampered_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    tampered_after = cast("dict[str, JsonValue]", tampered_payload["after_state_fingerprint"])
+    tampered_components = cast("list[JsonValue]", tampered_after["components"])
+    for raw_component in tampered_components:
+        component = cast("dict[str, JsonValue]", raw_component)
+        if component.get("name") == "trade_messages":
+            component["count"] = before_trade_message_count + 1
+    tampered = tmp_path / "tampered-tool-matrix.json"
+    write_json(tampered, tampered_payload)
+    verified, verify_errors = load_verified_matrix_report(tampered, "SIM")
+    assert verified is None
+    assert "state_fingerprint_mismatch" in verify_errors
+
+    tampered_proof_payload = json.loads(report_path.read_text(encoding="utf-8"))
+    tampered_cleanup = cast("dict[str, JsonValue]", tampered_proof_payload["cleanup"])
+    tampered_cleanup["proof"] = ["positions_money_equal"]
+    tampered_proof = tmp_path / "tampered-cleanup-proof.json"
+    write_json(tampered_proof, tampered_proof_payload)
+    verified_proof, proof_errors = load_verified_matrix_report(tampered_proof, "SIM")
+    assert verified_proof is None
+    assert "cleanup_proof_mismatch" in proof_errors
+
+
 def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     tmp_path: Path,
     installed_report: InstallFixture,
@@ -620,45 +697,7 @@ def test_matrix_normal_mode_requires_sim_tool_matrix_receipt(
     assert payload["transport_ledger"]["sim_only"] is True
     assert payload["transport_ledger"]["live_events"] == 0
     assert payload["cleanup"]["uncleaned_resources"] == 0
-    before = BrokerageStateFingerprint.model_validate_json(
-        json.dumps(payload["before_state_fingerprint"]),
-    )
-    after = BrokerageStateFingerprint.model_validate_json(
-        json.dumps(payload["after_state_fingerprint"]),
-    )
-    assert brokerage_state_reconciled(before, after) is True
-    before_components = {component.name: component for component in before.components}
-    after_components = {component.name: component for component in after.components}
-    assert after_components["trade_messages"].count == before_components["trade_messages"].count + 2
-
-    verification_out = tmp_path / "tool-matrix-verification.json"
-    assert (
-        verify_matrix_report(
-            report_path=out,
-            require_environment="SIM",
-            out=verification_out,
-        )
-        == 0
-    )
-    verification_payload = json.loads(verification_out.read_text(encoding="utf-8"))
-    assert verification_payload["state_reconciled"] is True
-    assert verification_payload["state_unchanged"] is False
-
-    tampered_payload = json.loads(out.read_text(encoding="utf-8"))
-    tampered_after = cast("dict[str, JsonValue]", tampered_payload["after_state_fingerprint"])
-    assert isinstance(tampered_after, dict)
-    tampered_components = cast("list[JsonValue]", tampered_after["components"])
-    assert isinstance(tampered_components, list)
-    for raw_component in tampered_components:
-        component = cast("dict[str, JsonValue]", raw_component)
-        assert isinstance(component, dict)
-        if component.get("name") == "trade_messages":
-            component["count"] = before_components["trade_messages"].count + 1
-    tampered = tmp_path / "tampered-tool-matrix.json"
-    write_json(tampered, tampered_payload)
-    verified, verify_errors = load_verified_matrix_report(tampered, "SIM")
-    assert verified is None
-    assert "state_fingerprint_mismatch" in verify_errors
+    _assert_reconciled_matrix_report(payload, out, tmp_path)
     assert (out.parent / "probe-receipts" / "sim-tool-matrix.json").is_file()
 
 

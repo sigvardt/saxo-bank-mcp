@@ -22,6 +22,7 @@ from saxo_bank_mcp.agent_skill_install_qa import load_install_report_for_consume
 from saxo_bank_mcp.agent_skill_matrix import (
     EXPECTED_TOOL_COUNT,
     LIFECYCLE_TOOLS,
+    MATRIX_RECONCILIATION_PROOF,
     ExecutedMatrixReport,
     MatrixCleanup,
     MatrixPlanOptions,
@@ -412,12 +413,7 @@ def _build_executed_report(
         cleanup=MatrixCleanup(
             complete=True,
             uncleaned_resources=0,
-            proof=(
-                "open_orders_equal",
-                "positions_money_equal",
-                "subscriptions_equal",
-                "preview_write_state_equal",
-            ),
+            proof=MATRIX_RECONCILIATION_PROOF,
         ),
         unexpected_skips=(),
         lifecycle_calls=matrix.lifecycle_calls,
