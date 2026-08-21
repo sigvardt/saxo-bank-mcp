@@ -25,6 +25,7 @@ ROOT_ADMISSION_POLL_COUNT = 5
 POST_AND_FINAL_SNAPSHOT_COUNT = 2
 EXPECTED_DEDUPED_OBSERVATION_COUNT = 2
 DUPLICATE_OCCURRENCE_COUNT = 2
+LARGE_PIPE_PAYLOAD_SIZE = 2 * 1024 * 1024
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -34,6 +35,34 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "TMPDIR": str(tmp_path),
         "PRIVATE_SENTINEL": "DO_NOT_PUBLISH",
     }
+
+
+def test_run_command_drains_large_stdout_and_stderr_while_child_is_running(
+    tmp_path: Path,
+) -> None:
+    """A child larger than both pipe buffers must exit before the watchdog."""
+    child_code = (
+        "import sys\n"
+        f"sys.stdout.write('o' * {LARGE_PIPE_PAYLOAD_SIZE})\n"
+        "sys.stdout.flush()\n"
+        f"sys.stderr.write('e' * {LARGE_PIPE_PAYLOAD_SIZE})\n"
+        "sys.stderr.flush()\n"
+    )
+
+    result = command_runner.run_command(
+        "large_pipe_payload",
+        (sys.executable, "-c", child_code),
+        cwd=tmp_path,
+        env=_env(tmp_path),
+        timeout_seconds=2,
+    )
+
+    assert result.receipt.exit_code == 0
+    assert result.receipt.timed_out is False
+    assert result.stdout == "o" * LARGE_PIPE_PAYLOAD_SIZE
+    assert result.stderr == "e" * LARGE_PIPE_PAYLOAD_SIZE
+    assert result.receipt.stdout_sha256 == hashlib.sha256(result.stdout.encode()).hexdigest()
+    assert result.receipt.stderr_sha256 == hashlib.sha256(result.stderr.encode()).hexdigest()
 
 
 def test_escaped_session_cleanup_writes_owner_only_identity_receipt(

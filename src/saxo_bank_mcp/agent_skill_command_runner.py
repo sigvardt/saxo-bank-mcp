@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Thread as _OutputDrainThread
 from types import MappingProxyType
 from typing import Literal, Self, cast
 
@@ -1075,6 +1076,9 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     stderr = ""
     exit_code = 124
     process_error: OSError | None = None
+    output_drain: _OutputDrainThread | None = None
+    drained_output: list[tuple[str, str]] = []
+    output_drain_errors: list[OSError | subprocess.SubprocessError | ValueError] = []
     pids: tuple[int, ...] = ()
     pgids: tuple[int, ...] = ()
     terminal_snapshot = ProcessCleanupTerminalSnapshot(targets=(), coverage_status="complete")
@@ -1180,6 +1184,14 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 return
             time.sleep(0.001)
 
+    def _drain_process_output() -> None:
+        if process is None:
+            return
+        try:
+            drained_output.append(process.communicate())
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            output_drain_errors.append(error)
+
     watcher: threading.Thread | None = None
     try:
         process = subprocess.Popen(
@@ -1196,6 +1208,12 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
         admission = open_root_bound_process_cleanup_admission(process, pgid)
         # Immediate snapshot so fast-exit parents still leave tracked members.
         _capture_identities()
+        output_drain = _OutputDrainThread(
+            target=_drain_process_output,
+            name=f"cmd-output-{name}",
+            daemon=True,
+        )
+        output_drain.start()
         watcher = threading.Thread(target=_watch, name=f"cmd-watch-{name}", daemon=True)
         watcher.start()
         deadline = time.monotonic() + timeout_seconds
@@ -1366,7 +1384,17 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 target_observation_unknown=True,
                 offending_observations=cleanup_offending_observations,
             )
-        if process is not None:
+        if output_drain is not None:
+            output_drain.join(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
+            if output_drain.is_alive():
+                process_error = process_error or OSError("command_output_drain_timeout")
+            elif output_drain_errors:
+                process_error = process_error or OSError(
+                    type(output_drain_errors[0]).__name__,
+                )
+            elif drained_output:
+                stdout, stderr = drained_output[0]
+        elif process is not None:
             try:
                 stdout, stderr = process.communicate(
                     timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS,
