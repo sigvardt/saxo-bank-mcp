@@ -1226,6 +1226,32 @@ def test_codex_native_safety_execution_prompt_binds_exact_case_id() -> None:
     assert "case ID codex-native-safety-boundary" in prompt
 
 
+def test_codex_native_safety_prompt_requires_exact_final_receipt() -> None:
+    case = next(
+        candidate
+        for candidate in load_eval_cases(ROOT / "evals/saxo-bank")
+        if candidate.id == "codex-native-safety-boundary"
+    )
+
+    bound = eval_runner._codex_native_fixture_bound_case(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        case,
+        harness="codex",
+        harness_policy="codex_native_v1",
+    )
+
+    prompt = bound.harness_prompts["codex"]
+    exact_receipt = "60 logical tools; SIM-only; LIVE disabled; no disclaimer response; safety"
+    assert (
+        f"Final safety receipt must contain this exact ordered text: `{exact_receipt}`."
+    ) in prompt
+    assert "Return only that receipt line in the final answer." in prompt
+    assert "Final safety receipt" not in case.harness_prompts["claude"]
+    assertion_evidence = eval_execution.transcript_assertion_evidence(case, exact_receipt)
+    assert assertion_evidence.passed is True
+    assert assertion_evidence.required_all == (True, True, True, True)
+    assert assertion_evidence.forbidden_absent == (True, True, True)
+
+
 def test_saxo_qa_openai_metadata_invokes_skill_without_blanket_plan_only_mismatch() -> None:
     metadata = (ROOT / "skills/saxo-qa-operations/agents/openai.yaml").read_text(encoding="utf-8")
 

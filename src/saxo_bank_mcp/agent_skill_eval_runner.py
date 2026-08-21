@@ -86,6 +86,11 @@ CODEX_NATIVE_FINAL_RECEIPT_INSTRUCTIONS: Final = {
         " Final scenario receipt must contain this exact ordered text: "
         "explicit numeric shocks -0.10 0.05."
     ),
+    "codex-native-safety-boundary": (
+        " Final safety receipt must contain this exact ordered text: "
+        "`60 logical tools; SIM-only; LIVE disabled; no disclaimer response; safety`. "
+        "Return only that receipt line in the final answer."
+    ),
     "optimization": (
         " Final optimization receipt must use this exact label order: "
         "`analysis_id: <result analysis_id or fixture analysis_id>; "
@@ -816,6 +821,11 @@ def _codex_native_fixture_bound_case(
     )
     case = case.model_copy(update={"harness_prompts": prompts})
     if case.expected_skill != "saxo-analytics":
+        final_receipt = CODEX_NATIVE_FINAL_RECEIPT_INSTRUCTIONS.get(case.id)
+        if final_receipt:
+            prompts = dict(case.harness_prompts)
+            prompts["codex"] = prompts["codex"] + final_receipt
+            case = case.model_copy(update={"harness_prompts": prompts})
         return case
     fixtures = dict(analytics_primary_calls())
     if any(tool_id not in fixtures for tool_id in case.required_logical_tools):
