@@ -8,7 +8,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -63,6 +65,86 @@ def test_run_command_drains_large_stdout_and_stderr_while_child_is_running(
     assert result.stderr == "e" * LARGE_PIPE_PAYLOAD_SIZE
     assert result.receipt.stdout_sha256 == hashlib.sha256(result.stdout.encode()).hexdigest()
     assert result.receipt.stderr_sha256 == hashlib.sha256(result.stderr.encode()).hexdigest()
+
+
+def test_run_command_stuck_output_drain_preserves_timeout_and_unknown_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader that cannot drain must not publish zero residue or erase timeout truth."""
+
+    class StuckOutputDrain:
+        join_count = 0
+
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+        def join(self, timeout: float | None = None) -> None:
+            _ = timeout
+            self.join_count += 1
+
+        def is_alive(self) -> bool:
+            return self.join_count == 1
+
+    monkeypatch.setattr(command_runner, "_OutputDrainThread", StuckOutputDrain)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "stuck_output_drain",
+            (sys.executable, "-c", "import time; time.sleep(60)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=0,
+        )
+
+    error = caught.value
+    assert error.receipt.timed_out is True
+    assert error.remaining_process_count is None
+    assert error.remaining_process_group_count is None
+    assert error.cleanup_identity_evidence_status == "write-failed"
+    assert error.cleanup_unknown_reason == "cleanup_receipt_path_missing"
+
+
+def test_run_command_communicate_error_forces_unknown_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pipe reader cannot authenticate complete cleanup or zero residue."""
+    real_popen = command_runner.subprocess.Popen
+    popen_factory = cast("Callable[..., subprocess.Popen[str]]", real_popen)
+
+    def popen_with_failed_communicate(
+        *args: object,
+        **kwargs: object,
+    ) -> subprocess.Popen[str]:
+        process = popen_factory(*args, **kwargs)
+
+        def fail_communicate(*_args: object, **_kwargs: object) -> tuple[str, str]:
+            raise OSError("synthetic communicate failure")
+
+        process.communicate = fail_communicate  # type: ignore[method-assign]
+        return process
+
+    monkeypatch.setattr(command_runner.subprocess, "Popen", popen_with_failed_communicate)
+
+    with pytest.raises(command_runner.CommandFailureError) as caught:
+        command_runner.run_command(
+            "failed_output_drain",
+            (sys.executable, "-c", "raise SystemExit(0)"),
+            cwd=tmp_path,
+            env=_env(tmp_path),
+            timeout_seconds=5,
+        )
+
+    error = caught.value
+    assert error.receipt.timed_out is False
+    assert error.remaining_process_count is None
+    assert error.remaining_process_group_count is None
+    assert error.cleanup_identity_evidence_status == "write-failed"
+    assert error.cleanup_unknown_reason == "cleanup_receipt_path_missing"
 
 
 def test_escaped_session_cleanup_writes_owner_only_identity_receipt(

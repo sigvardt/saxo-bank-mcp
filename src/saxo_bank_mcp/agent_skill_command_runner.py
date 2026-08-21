@@ -1386,7 +1386,15 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             )
         if output_drain is not None:
             output_drain.join(timeout=KILL_WAIT_SECONDS + TERM_WAIT_SECONDS)
+            output_drain_failed = output_drain.is_alive() or bool(output_drain_errors)
             if output_drain.is_alive():
+                if process is not None:
+                    for stream in (process.stdout, process.stderr):
+                        if stream is None:
+                            continue
+                        with suppress(OSError, ValueError):
+                            stream.close()
+                output_drain.join()
                 process_error = process_error or OSError("command_output_drain_timeout")
             elif output_drain_errors:
                 process_error = process_error or OSError(
@@ -1394,6 +1402,16 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 )
             elif drained_output:
                 stdout, stderr = drained_output[0]
+            if output_drain_failed:
+                terminal_snapshot = replace(
+                    terminal_snapshot,
+                    coverage_status="unknown",
+                    coverage_stage=(terminal_snapshot.coverage_stage or "target_observation"),
+                    coverage_subreason=(
+                        terminal_snapshot.coverage_subreason or "observation_unknown"
+                    ),
+                    target_observation_unknown=True,
+                )
         elif process is not None:
             try:
                 stdout, stderr = process.communicate(
@@ -1408,33 +1426,6 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
     cleanup_identity_evidence = _write_cleanup_receipt()
     remaining_process_count = terminal_snapshot.remaining_process_count
     remaining_process_group_count = terminal_snapshot.remaining_process_group_count
-
-    if process_error is not None:
-        safe_error = type(process_error).__name__
-        receipt = _receipt(
-            name,
-            argv,
-            cwd,
-            root_pid,
-            pgid,
-            124,
-            "",
-            safe_error,
-            timed_out=False,
-            cleanup_attempted=True,
-        )
-        raise CommandFailureError(
-            receipt=receipt,
-            stdout="",
-            stderr=safe_error,
-            remaining_process_count=remaining_process_count,
-            remaining_process_group_count=remaining_process_group_count,
-            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
-            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
-            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
-            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
-            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
-        ) from process_error
 
     if timed_out:
         exit_code = 124
@@ -1462,6 +1453,33 @@ def run_command(  # noqa: C901, PLR0912, PLR0913, PLR0915
             cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
             cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
         )
+
+    if process_error is not None:
+        safe_error = type(process_error).__name__
+        receipt = _receipt(
+            name,
+            argv,
+            cwd,
+            root_pid,
+            pgid,
+            124,
+            "",
+            safe_error,
+            timed_out=False,
+            cleanup_attempted=True,
+        )
+        raise CommandFailureError(
+            receipt=receipt,
+            stdout="",
+            stderr=safe_error,
+            remaining_process_count=remaining_process_count,
+            remaining_process_group_count=remaining_process_group_count,
+            cleanup_identity_receipt_sha256=cleanup_identity_evidence.receipt_sha256,
+            cleanup_identity_evidence_status=cleanup_identity_evidence.evidence_status,
+            cleanup_unknown_reason=cleanup_identity_evidence.unknown_reason,
+            cleanup_coverage_stage=cleanup_identity_evidence.cleanup_coverage_stage,
+            cleanup_coverage_subreason=cleanup_identity_evidence.cleanup_coverage_subreason,
+        ) from process_error
 
     if process is not None:
         exit_code = int(process.returncode if process.returncode is not None else 124)
