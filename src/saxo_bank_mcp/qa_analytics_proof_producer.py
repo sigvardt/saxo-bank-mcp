@@ -1078,8 +1078,12 @@ def _run_installed_matrix_proof_session(
             env=environment,
             timeout_seconds=_MATRIX_CHILD_TIMEOUT_SECONDS,
         )
-    except (CommandFailureError, OSError, ValueError) as error:
-        raise ProofProducerError("installed_matrix_child_result_invalid") from error
+    except CommandFailureError as error:
+        raise ProofProducerError(_matrix_command_failure_reason(error)) from error
+    except OSError as error:
+        raise ProofProducerError("installed_matrix_child_start_failed") from error
+    except ValueError as error:
+        raise ProofProducerError("installed_matrix_child_command_contract_invalid") from error
     receipt = result.receipt
     if (
         receipt.name != _MATRIX_CHILD_COMMAND_NAME
@@ -1096,30 +1100,75 @@ def _run_installed_matrix_proof_session(
         or receipt.stderr_sha256 != hashlib.sha256(result.stderr.encode()).hexdigest()
         or result.stderr != ""
     ):
-        raise ProofProducerError("installed_matrix_child_result_invalid")
+        raise ProofProducerError("installed_matrix_child_command_receipt_invalid")
     try:
         envelope = InstalledMatrixEnvelope.model_validate_json(result.stdout, strict=True)
     except ValidationError as error:
-        raise ProofProducerError("installed_matrix_child_result_invalid") from error
+        raise ProofProducerError("installed_matrix_child_envelope_invalid") from error
     if envelope.candidate_commit != candidate_commit or envelope.analysis_kinds != analysis_kinds:
-        raise ProofProducerError("installed_matrix_child_result_invalid")
-    matrix = envelope.matrix
+        raise ProofProducerError("installed_matrix_child_binding_invalid")
+    return envelope.matrix
+
+
+def _matrix_command_failure_reason(error: CommandFailureError) -> str:
+    """Keep child execution and cleanup uncertainty distinct without raw output."""
     if (
-        matrix.status != "passed"
-        or matrix.environment != "SIM"
-        or not matrix.redacted_publication
-        or matrix.live_events != 0
-        or matrix.live_mutation_calls != 0
-        or not matrix.cleanup_complete
-        or not matrix.account_state_unchanged
-        or matrix.before_state_fingerprint != matrix.after_state_fingerprint
-        or matrix.uncleaned_resources != 0
-        or matrix.errors
-        or matrix.purchase_occurred
-        or matrix.disclaimer_response_made
+        error.cleanup_identity_evidence_status in {"observation-unknown", "write-failed"}
+        or error.cleanup_unknown_reason is not None
+        or error.remaining_process_count is None
+        or error.remaining_process_group_count is None
     ):
-        raise ProofProducerError("installed_matrix_child_result_invalid")
-    return matrix
+        return "installed_matrix_child_cleanup_unknown"
+    if error.remaining_process_count > 0 or error.remaining_process_group_count > 0:
+        return "installed_matrix_child_cleanup_failed"
+    if not error.receipt.cleanup_attempted:
+        return "installed_matrix_child_cleanup_unattempted"
+    return "installed_matrix_child_command_failed"
+
+
+_SAFE_MATRIX_FAILURE_REASONS = frozenset(
+    {
+        "account_allowlist_unresolved",
+        "analytics_cleanup_incomplete",
+        "analytics_cleanup_unverified",
+        "analytics_job_cleanup_incomplete",
+        "analytics_tool_contract_coverage_mismatch",
+        "analytics_tool_contracts_not_unique",
+        "analytics_tool_coverage_incomplete",
+        "controlled_sim_cleanup_unverified",
+        "controlled_sim_lifecycle_unverified",
+        "disclaimer_safe_refusal_missing",
+        "fixture_reference_invalid",
+        "live_mutation_call",
+        "live_transport_or_ledger_event",
+        "registered_trading_write_coverage_incomplete",
+        "sim_session_auth_required",
+        "state_fingerprint_mismatch",
+        "state_fingerprint_missing",
+    },
+)
+_SAFE_MATRIX_FAILURE_PREFIXES = frozenset(
+    {
+        "analytics_degradation_case_missing",
+        "analytics_required_cases_missing",
+        "analytics_success_applicability_mismatch",
+        "analytics_timeout_recovery_missing",
+        "lifecycle_incomplete",
+        "missing_tool_receipt",
+        "tool_result_state_mismatch",
+    },
+)
+
+
+def _matrix_failure_reason(matrix: SimToolMatrixReceipt) -> str:
+    """Map the private matrix reason to one fixed public-safe failure class."""
+    reason = matrix.reason
+    if reason in _SAFE_MATRIX_FAILURE_REASONS:
+        return f"installed_sim_matrix_{reason}"
+    prefix, separator, _detail = reason.partition(":")
+    if separator and prefix in _SAFE_MATRIX_FAILURE_PREFIXES:
+        return f"installed_sim_matrix_{prefix}"
+    return "installed_sim_matrix_failed"
 
 
 def _execute_installed_proof_bundle(  # noqa: C901
@@ -1171,7 +1220,7 @@ def _execute_installed_proof_bundle(  # noqa: C901
     if progress is not None:
         progress.record_matrix(matrix)
     if matrix.status != "passed":
-        raise ProofProducerError("installed_sim_matrix_not_passed")
+        raise ProofProducerError(_matrix_failure_reason(matrix))
     if progress is not None:
         progress.complete_phase("sim_matrix")
         progress.begin_phase("bundle_validation")

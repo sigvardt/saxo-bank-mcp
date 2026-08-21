@@ -14,7 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import saxo_bank_mcp.qa_analytics_evidence as evidence_module
-from saxo_bank_mcp.agent_skill_command_runner import CommandResult
+from saxo_bank_mcp.agent_skill_command_runner import CommandFailureError, CommandResult
 from saxo_bank_mcp.agent_skill_eval_models import EvalRunReport
 from saxo_bank_mcp.agent_skill_install_models import CommandReceipt
 from saxo_bank_mcp.analytics_chart_semantics import core_template_bindings
@@ -1753,6 +1753,212 @@ def test_producer_only_launcher_accepts_exact_strict_child_envelope(
     assert _server_proof_launch_authority() == ()
 
 
+def test_producer_launcher_returns_authenticated_failed_matrix_for_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    candidate = bundle.candidate_commit
+    kinds = ("market_comparison", "bounded_backtest")
+    matrix = bundle.sim_tool_matrix.model_copy(
+        update={
+            "status": "failed",
+            "reason": "fixture_reference_invalid",
+            "errors": ("fixture_reference_invalid",),
+        },
+    )
+    stdout = _installed_matrix_envelope_json(
+        matrix,
+        candidate_commit=candidate,
+        analysis_kinds=kinds,
+    )
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        _ = env, timeout_seconds
+        return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
+
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+
+    result = producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
+
+    assert result == matrix
+
+
+@pytest.mark.parametrize(
+    ("matrix_reason", "expected"),
+    [
+        ("fixture_reference_invalid", "installed_sim_matrix_fixture_reference_invalid"),
+        (
+            "tool_result_state_mismatch:saxo_analyze_market",
+            "installed_sim_matrix_tool_result_state_mismatch",
+        ),
+        ("opaque_internal_detail", "installed_sim_matrix_failed"),
+        ("", "installed_sim_matrix_failed"),
+    ],
+)
+def test_matrix_failure_reason_is_fixed_and_privacy_safe(
+    matrix_reason: str,
+    expected: str,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+    matrix = bundle.sim_tool_matrix.model_copy(
+        update={"status": "failed", "reason": matrix_reason, "errors": (matrix_reason,)},
+    )
+
+    assert producer._matrix_failure_reason(matrix) == expected  # noqa: SLF001
+
+
+def test_producer_launcher_distinguishes_matrix_child_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+
+    def failed_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> NoReturn:
+        _ = env, timeout_seconds
+        raise CommandFailureError(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=321,
+                pgid=321,
+                exit_code=2,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=0,
+            remaining_process_group_count=0,
+        )
+
+    monkeypatch.setattr(producer, "run_command", failed_run_command)
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_command_failed",
+    ):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            bundle.candidate_commit,
+            ("market_comparison",),
+        )
+
+
+def test_producer_launcher_prioritizes_matrix_child_cleanup_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+
+    def failed_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> NoReturn:
+        _ = env, timeout_seconds
+        raise CommandFailureError(
+            receipt=CommandReceipt(
+                name=name,
+                argv=argv,
+                cwd=str(cwd),
+                pid=321,
+                pgid=321,
+                exit_code=0,
+                stdout_sha256=hashlib.sha256(b"").hexdigest(),
+                stderr_sha256=hashlib.sha256(b"").hexdigest(),
+                timed_out=False,
+                cleanup_attempted=True,
+            ),
+            remaining_process_count=None,
+            remaining_process_group_count=None,
+            cleanup_identity_receipt_sha256="a" * 64,
+            cleanup_identity_evidence_status="observation-unknown",
+            cleanup_unknown_reason="coverage_unknown",
+            cleanup_coverage_stage="group_member",
+            cleanup_coverage_subreason="uncaptured_member",
+        )
+
+    monkeypatch.setattr(producer, "run_command", failed_run_command)
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_cleanup_unknown",
+    ):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            bundle.candidate_commit,
+            ("market_comparison",),
+        )
+
+
+def test_producer_launcher_distinguishes_matrix_child_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+
+    def failed_run_command(*_args: object, **_kwargs: object) -> NoReturn:
+        raise OSError("synthetic start failure")
+
+    monkeypatch.setattr(producer, "run_command", failed_run_command)
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_start_failed",
+    ):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            bundle.candidate_commit,
+            ("market_comparison",),
+        )
+
+
+def test_producer_launcher_distinguishes_invalid_matrix_child_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
+    _catalog, _contracts, bundle = _complete_bundle()
+
+    def fake_run_command(
+        name: str,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None,
+        timeout_seconds: int,
+    ) -> CommandResult:
+        _ = env, timeout_seconds
+        return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout="{}")
+
+    monkeypatch.setattr(producer, "run_command", fake_run_command)
+
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_envelope_invalid",
+    ):
+        producer._run_installed_matrix_proof_session(  # noqa: SLF001
+            bundle.candidate_commit,
+            ("market_comparison",),
+        )
+
+
 def test_normal_child_import_exposes_no_ghost_authority_and_declares_envelope() -> None:
     child = import_module("saxo_bank_mcp.qa_installed_matrix_child")
 
@@ -1766,27 +1972,26 @@ def test_normal_child_import_exposes_no_ghost_authority_and_declares_envelope() 
 
 
 @pytest.mark.parametrize(
-    "mutation",
+    ("mutation", "expected_reason"),
     [
-        "raw_matrix",
-        "wrong_candidate",
-        "changed_kinds",
-        "reordered_kinds",
-        "mismatched_digest",
-        "extra_field",
-        "failed_matrix",
+        ("raw_matrix", "installed_matrix_child_envelope_invalid"),
+        ("wrong_candidate", "installed_matrix_child_binding_invalid"),
+        ("changed_kinds", "installed_matrix_child_binding_invalid"),
+        ("reordered_kinds", "installed_matrix_child_binding_invalid"),
+        ("mismatched_digest", "installed_matrix_child_envelope_invalid"),
+        ("extra_field", "installed_matrix_child_envelope_invalid"),
     ],
 )
 def test_producer_launcher_refuses_unbound_or_fabricated_child_output(
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
+    expected_reason: str,
 ) -> None:
     producer = import_module("saxo_bank_mcp.qa_analytics_proof_producer")
     _catalog, _contracts, bundle = _complete_bundle()
     candidate = bundle.candidate_commit
     kinds = ("market_comparison", "bounded_backtest")
     matrix = bundle.sim_tool_matrix
-    envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
     payload = json.loads(
         _installed_matrix_envelope_json(
             matrix,
@@ -1807,12 +2012,6 @@ def test_producer_launcher_refuses_unbound_or_fabricated_child_output(
             payload["matrix_sha256"] = "f" * 64
         elif mutation == "extra_field":
             payload["caller_trust"] = True
-        elif mutation == "failed_matrix":
-            failed = matrix.model_copy(
-                update={"status": "failed", "reason": "matrix_failed", "errors": ("failed",)},
-            )
-            payload["matrix"] = failed.model_dump(mode="json")
-            payload["matrix_sha256"] = envelope_module.matrix_receipt_sha256(failed)
         stdout = json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
     def fake_run_command(
@@ -1827,7 +2026,7 @@ def test_producer_launcher_refuses_unbound_or_fabricated_child_output(
         return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
 
     monkeypatch.setattr(producer, "run_command", fake_run_command)
-    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+    with pytest.raises(producer.ProofProducerError, match=expected_reason):
         producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
 
 
@@ -1873,7 +2072,10 @@ def test_producer_launcher_strictly_refuses_coercible_nested_safety_fields(
         return _matrix_command_result(name=name, argv=argv, cwd=cwd, stdout=stdout)
 
     monkeypatch.setattr(producer, "run_command", fake_run_command)
-    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_envelope_invalid",
+    ):
         producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
 
 
@@ -1928,7 +2130,10 @@ def test_producer_launcher_refuses_command_receipt_mismatch(
         )
 
     monkeypatch.setattr(producer, "run_command", fake_run_command)
-    with pytest.raises(producer.ProofProducerError, match="installed_matrix_child_result_invalid"):
+    with pytest.raises(
+        producer.ProofProducerError,
+        match="installed_matrix_child_command_receipt_invalid",
+    ):
         producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
 
 

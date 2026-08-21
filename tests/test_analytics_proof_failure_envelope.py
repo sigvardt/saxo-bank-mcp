@@ -2943,6 +2943,28 @@ def test_arbitrary_safe_looking_reason_is_redacted() -> None:
     assert sensitive_looking_reason not in child.model_dump_json()
 
 
+def test_fixed_matrix_failure_reason_survives_authenticated_publication() -> None:
+    reason = "installed_sim_matrix_fixture_reference_invalid"
+    child = _failure(_progress(), reason=reason)
+    verified = _verify(child.model_dump_json())
+    publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
+    publication = publication_module.build_codex_native_proof_publication(
+        candidate_commit=CANDIDATE,
+        analysis_kind_count=54,
+        evidence_receipt_count=54,
+        contract_sha256=CONTRACT_SHA256,
+        result_kind="verified_child_failure",
+        result=verified,
+    )
+    parsed = publication_module.verify_codex_native_proof_publication(
+        publication.model_dump_json(),
+    )
+
+    assert child.reason == reason
+    assert verified.reason == reason
+    assert parsed.result.reason == reason
+
+
 def test_nonzero_command_retains_ephemeral_output_and_cleanup_counts(tmp_path: Path) -> None:
     stdout = '{"receipt_kind":"test_failure"}'
 
