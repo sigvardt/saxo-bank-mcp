@@ -2947,6 +2947,7 @@ def test_arbitrary_safe_looking_reason_is_redacted() -> None:
     "reason",
     [
         "installed_sim_matrix_fixture_reference_invalid",
+        "installed_sim_matrix_tool_result_state_mismatch_saxo_analyze_market",
         "installed_matrix_child_matrix_execution_runtime_error",
     ],
 )

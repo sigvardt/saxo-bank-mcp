@@ -1845,6 +1845,14 @@ def test_producer_launcher_returns_authenticated_failed_matrix_for_progress(
         ("fixture_reference_invalid", "installed_sim_matrix_fixture_reference_invalid"),
         (
             "tool_result_state_mismatch:saxo_analyze_market",
+            "installed_sim_matrix_tool_result_state_mismatch_saxo_analyze_market",
+        ),
+        (
+            "tool_result_state_mismatch:not_a_registered_tool",
+            "installed_sim_matrix_tool_result_state_mismatch",
+        ),
+        (
+            "tool_result_state_mismatch:saxo_analyze_market/private_detail",
             "installed_sim_matrix_tool_result_state_mismatch",
         ),
         ("opaque_internal_detail", "installed_sim_matrix_failed"),

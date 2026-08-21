@@ -95,6 +95,7 @@ from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixFailureEnvelope,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
+from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 from saxo_bank_mcp.token_cache import TokenCacheWriteLease
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -1240,7 +1241,9 @@ def _matrix_failure_reason(matrix: SimToolMatrixReceipt) -> str:
     reason = matrix.reason
     if reason in _SAFE_MATRIX_FAILURE_REASONS:
         return f"installed_sim_matrix_{reason}"
-    prefix, separator, _detail = reason.partition(":")
+    prefix, separator, detail = reason.partition(":")
+    if separator and prefix == "tool_result_state_mismatch" and detail in ALL_LOGICAL_TOOL_IDS:
+        return f"installed_sim_matrix_{prefix}_{detail}"
     if separator and prefix in _SAFE_MATRIX_FAILURE_PREFIXES:
         return f"installed_sim_matrix_{prefix}"
     return "installed_sim_matrix_failed"
