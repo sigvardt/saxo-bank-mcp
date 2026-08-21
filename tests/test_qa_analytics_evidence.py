@@ -1687,6 +1687,7 @@ def _installed_matrix_failure_envelope_json(
     analysis_kinds: tuple[str, ...],
     failure_phase: str = "matrix_execution",
     failure_category: str = "runtime_error",
+    failure_detail: str | None = None,
 ) -> str:
     envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
     envelope = envelope_module.build_installed_matrix_failure_envelope(
@@ -1694,6 +1695,7 @@ def _installed_matrix_failure_envelope_json(
         analysis_kinds=analysis_kinds,
         failure_phase=failure_phase,
         failure_category=failure_category,
+        failure_detail=failure_detail,
     )
     return envelope.model_dump_json()
 
@@ -1921,7 +1923,98 @@ def test_installed_matrix_child_emits_strict_failure_envelope_without_raw_error(
     assert envelope.analysis_kinds == kinds
     assert envelope.failure_phase == "matrix_execution"
     assert envelope.failure_category == "runtime_error"
+    assert envelope.failure_detail == "unknown"
     assert "private" not in captured.out
+
+
+def test_installed_matrix_child_classifies_pydantic_validation_model_without_values(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    child = import_module("saxo_bank_mcp.qa_installed_matrix_child")
+    assert child.__file__ is not None
+    child_path = Path(child.__file__).resolve()
+    candidate = "1" * 40
+    kinds = ("market_comparison",)
+
+    def fail_run(*_args: object, **_kwargs: object) -> NoReturn:
+        _catalog, _contracts, bundle = _complete_bundle()
+        payload = bundle.sim_tool_matrix.model_dump(mode="json")
+        payload["errors"] = ["private dynamic value"]
+        child.SimToolMatrixReceipt.model_validate_json(
+            json.dumps(payload),
+            strict=True,
+        )
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(child.anyio, "run", fail_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(child_path),
+            "--candidate",
+            candidate,
+            "--analysis-kind",
+            kinds[0],
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        run_path(str(child_path), run_name="__main__")
+
+    captured = capsys.readouterr()
+    envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
+    envelope = envelope_module.InstalledMatrixFailureEnvelope.model_validate_json(
+        captured.out,
+        strict=True,
+    )
+    assert raised.value.code == MATRIX_CHILD_FAILURE_EXIT_CODE
+    assert captured.err == ""
+    assert envelope.failure_category == "validation_error"
+    assert envelope.failure_detail == "pydantic_sim_tool_matrix_pass_incomplete"
+    assert "Field required" not in captured.out
+    assert "private dynamic value" not in captured.out
+
+
+def test_installed_matrix_failure_detail_is_digest_bound_and_legacy_readable() -> None:
+    envelope_module = import_module("saxo_bank_mcp.qa_installed_matrix_envelope")
+    candidate = "1" * 40
+    kinds = ("market_comparison",)
+    current = envelope_module.build_installed_matrix_failure_envelope(
+        candidate_commit=candidate,
+        analysis_kinds=kinds,
+        failure_phase="matrix_execution",
+        failure_category="validation_error",
+        failure_detail="pydantic_sim_tool_matrix_pass_incomplete",
+    )
+    tampered = current.model_dump(mode="json")
+    tampered["failure_detail"] = "origin_finalize"
+    with pytest.raises(ValueError, match="installed matrix failure digest mismatch"):
+        envelope_module.InstalledMatrixFailureEnvelope.model_validate_json(
+            json.dumps(tampered),
+            strict=True,
+        )
+
+    legacy_digest = envelope_module.installed_matrix_failure_sha256(
+        candidate_commit=candidate,
+        analysis_kinds=kinds,
+        failure_phase="matrix_execution",
+        failure_category="validation_error",
+        failure_detail=None,
+    )
+    legacy = envelope_module.InstalledMatrixFailureEnvelope.model_validate(
+        {
+            "schema_version": "1",
+            "receipt_kind": "installed_matrix_child_failure",
+            "candidate_commit": candidate,
+            "analysis_kinds": kinds,
+            "failure_phase": "matrix_execution",
+            "failure_category": "validation_error",
+            "envelope_sha256": legacy_digest,
+        },
+    )
+    assert legacy.failure_detail is None
 
 
 def test_installed_matrix_child_records_inner_lifespan_cleanup_failure(
@@ -1967,6 +2060,9 @@ def test_producer_launcher_authenticates_typed_matrix_child_failure(
     stdout = _installed_matrix_failure_envelope_json(
         candidate_commit=candidate,
         analysis_kinds=kinds,
+        failure_phase="matrix_execution",
+        failure_category="validation_error",
+        failure_detail="pydantic_sim_tool_matrix_pass_incomplete",
     )
 
     def failed_run_command(
@@ -2000,7 +2096,10 @@ def test_producer_launcher_authenticates_typed_matrix_child_failure(
     monkeypatch.setattr(producer, "run_command", failed_run_command)
     with pytest.raises(
         producer.ProofProducerError,
-        match="installed_matrix_child_matrix_execution_runtime_error",
+        match=(
+            "installed_matrix_child_matrix_execution_validation_error_"
+            "pydantic_sim_tool_matrix_pass_incomplete"
+        ),
     ):
         producer._run_installed_matrix_proof_session(candidate, kinds)  # noqa: SLF001
 

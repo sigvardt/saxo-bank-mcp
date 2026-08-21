@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import anyio
+from pydantic import ValidationError
 
 import saxo_bank_mcp.mcp_analytics_tools as tools_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
@@ -59,6 +60,7 @@ from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWAR
 from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixEnvelope,
     InstalledMatrixFailureCategory,
+    InstalledMatrixFailureDetail,
     InstalledMatrixFailurePhase,
     build_installed_matrix_failure_envelope,
     matrix_receipt_sha256,
@@ -463,6 +465,63 @@ def _failure_category(error: Exception) -> InstalledMatrixFailureCategory:
     return "unexpected_error"
 
 
+_PYDANTIC_FAILURE_DETAILS: dict[str, InstalledMatrixFailureDetail] = {
+    "AnalyticsCaseReceipt": "pydantic_analytics_case_receipt",
+    "ControlledSimCaseReceipt": "pydantic_controlled_sim_case_receipt",
+    "ControlledSimLifecycleReceipt": "pydantic_controlled_sim_lifecycle_receipt",
+    "GhostLifecycleEvidence": "pydantic_ghost_lifecycle_evidence",
+    "GhostWorkflowRequest": "pydantic_ghost_workflow_request",
+    "MatrixScenarioReceipt": "pydantic_matrix_scenario_receipt",
+    "ProofProfile": "pydantic_proof_profile",
+    "ProofProfileCatalog": "pydantic_proof_profile_catalog",
+    "SimToolMatrixReceipt": "pydantic_sim_tool_matrix_receipt",
+    "StoredBacktestExecutionContext": "pydantic_stored_backtest_execution_context",
+    "StrategyDefinition": "pydantic_strategy_definition",
+}
+_PYDANTIC_ISSUE_DETAILS: dict[tuple[str, str], InstalledMatrixFailureDetail] = {
+    (
+        "SimToolMatrixReceipt",
+        "Value error, passed SIM matrix lacks complete safe 60-tool evidence",
+    ): "pydantic_sim_tool_matrix_pass_incomplete",
+}
+_ORIGIN_FAILURE_DETAILS: dict[str, InstalledMatrixFailureDetail] = {
+    "_controlled_sim_lifecycle_receipt": "origin_controlled_sim_lifecycle_receipt",
+    "_finalize": "origin_finalize",
+    "_run_controlled_sim_ghost_phase": "origin_controlled_sim_ghost_phase",
+    "_run_matrix": "origin_run_matrix",
+    "controlled_backtest_source_binding": "origin_installed_matrix_session",
+    "execute_backtest": "origin_installed_matrix_session",
+    "proof_registry": "origin_installed_matrix_session",
+    "record_observed_ghost_lifecycle": "origin_installed_matrix_session",
+}
+
+
+def _failure_detail(error: Exception) -> InstalledMatrixFailureDetail:
+    """Classify one source-controlled origin without retaining exception text or values."""
+    if isinstance(error, ValidationError):
+        for issue in error.errors(
+            include_context=False,
+            include_input=False,
+            include_url=False,
+        ):
+            detail = _PYDANTIC_ISSUE_DETAILS.get((error.title, issue["msg"]))
+            if detail is not None:
+                return detail
+        detail = _PYDANTIC_FAILURE_DETAILS.get(error.title)
+        if detail is not None:
+            return detail
+    traceback = error.__traceback__
+    observed_names: list[str] = []
+    while traceback is not None:
+        observed_names.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    for name in reversed(observed_names):
+        detail = _ORIGIN_FAILURE_DETAILS.get(name)
+        if detail is not None:
+            return detail
+    return "unknown"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Emit one strict redacted matrix receipt and no authority-bearing object."""
     parser = argparse.ArgumentParser(add_help=False)
@@ -505,6 +564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 analysis_kinds=analysis_kinds,
                 failure_phase=failure_phase,
                 failure_category=_failure_category(error),
+                failure_detail=_failure_detail(error),
             )
             sys.stdout.write(failure.model_dump_json())
         return 2

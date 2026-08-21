@@ -1195,7 +1195,10 @@ def _authenticated_matrix_child_failure_reason(
         return "installed_matrix_child_command_failed"
     if envelope.candidate_commit != candidate_commit or envelope.analysis_kinds != analysis_kinds:
         return "installed_matrix_child_command_failed"
-    return f"installed_matrix_child_{envelope.failure_phase}_{envelope.failure_category}"
+    reason = f"installed_matrix_child_{envelope.failure_phase}_{envelope.failure_category}"
+    if envelope.failure_detail not in {None, "unknown"}:
+        reason = f"{reason}_{envelope.failure_detail}"
+    return reason
 
 
 _SAFE_MATRIX_FAILURE_REASONS = frozenset(
