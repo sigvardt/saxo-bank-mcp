@@ -1985,6 +1985,46 @@ def test_tool_availability_probe_accepts_only_an_observed_source_refusal() -> No
     assert bound.source_precondition_evidence_sha256 == "b" * 64
 
 
+def test_case_evidence_accepts_an_authenticated_source_precondition_refusal() -> None:
+    evidence = list(_analytics_case_evidence())
+    tool_index = next(
+        index for index, item in enumerate(evidence) if item.tool_id == "saxo_analyze_portfolio"
+    )
+    tool_evidence = evidence[tool_index]
+    cases = list(tool_evidence.cases)
+    case_index = next(index for index, item in enumerate(cases) if item.kind == "success")
+    cases[case_index] = AnalyticsCaseReceipt.model_validate(
+        {
+            **cases[case_index].model_dump(mode="python"),
+            "state": "refused",
+            "reason_code": "source_precondition_refused",
+            "result_state": "refused",
+            "mcp_is_error": True,
+            "source_precondition_refused": True,
+            "source_precondition_evidence_sha256": "a" * 64,
+        },
+    )
+    evidence[tool_index] = tool_evidence.model_copy(update={"cases": tuple(cases)})
+
+    assert sim_module.analytics_case_evidence_errors(tuple(evidence)) == ()
+
+
+def test_case_evidence_still_rejects_an_ordinary_success_state_mismatch() -> None:
+    evidence = list(_analytics_case_evidence())
+    tool_index = next(
+        index for index, item in enumerate(evidence) if item.tool_id == "saxo_analyze_portfolio"
+    )
+    tool_evidence = evidence[tool_index]
+    cases = list(tool_evidence.cases)
+    case_index = next(index for index, item in enumerate(cases) if item.kind == "success")
+    cases[case_index] = cases[case_index].model_copy(update={"result_state": "refused"})
+    evidence[tool_index] = tool_evidence.model_copy(update={"cases": tuple(cases)})
+
+    assert sim_module.analytics_case_evidence_errors(tuple(evidence)) == (
+        "analytics_case_state_mismatch:saxo_analyze_portfolio:success",
+    )
+
+
 def test_controlled_context_coverage_requires_typed_input_or_observed_refusal() -> None:
     exact_contexts = {
         "portfolio_performance",
@@ -2174,6 +2214,37 @@ def test_finalize_reports_exact_failed_analytics_case_instead_of_pydantic_collap
     assert receipt.status == "failed"
     assert receipt.reason == "analytics_case_failed:saxo_backtest_strategy:success"
     assert receipt.errors[0] == receipt.reason
+
+
+def test_finalize_accepts_an_authenticated_source_precondition_refusal() -> None:
+    state = _complete_runtime_state_for_finalize()
+    tool_index = next(
+        index
+        for index, evidence in enumerate(state.analytics_case_receipts)
+        if evidence.tool_id == "saxo_analyze_portfolio"
+    )
+    evidence = state.analytics_case_receipts[tool_index]
+    cases = list(evidence.cases)
+    case_index = next(index for index, case in enumerate(cases) if case.kind == "success")
+    cases[case_index] = AnalyticsCaseReceipt.model_validate(
+        {
+            **cases[case_index].model_dump(mode="python"),
+            "state": "refused",
+            "reason_code": "source_precondition_refused",
+            "result_state": "refused",
+            "mcp_is_error": True,
+            "source_precondition_refused": True,
+            "source_precondition_evidence_sha256": "a" * 64,
+        },
+    )
+    state.analytics_case_receipts[tool_index] = evidence.model_copy(
+        update={"cases": tuple(cases)},
+    )
+
+    receipt = matrix_module._finalize(state)  # noqa: SLF001
+
+    assert receipt.status == "passed"
+    assert receipt.errors == ()
 
 
 def test_finalize_reports_incomplete_analysis_execution_coverage() -> None:

@@ -851,6 +851,13 @@ def analytics_case_evidence_errors(
                     f"analytics_case_failed:{contract.tool_id}:{case_contract.kind}",
                 )
                 continue
+            source_precondition_refusal = (
+                case_contract.kind == "success"
+                and case_receipt.state == "refused"
+                and case_receipt.source_precondition_refused
+            )
+            if source_precondition_refusal:
+                continue
             if case_receipt.result_state not in case_contract.expected_states:
                 errors.append(
                     f"analytics_case_state_mismatch:{contract.tool_id}:{case_contract.kind}",
