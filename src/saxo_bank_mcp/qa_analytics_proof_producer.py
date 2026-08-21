@@ -84,11 +84,11 @@ from saxo_bank_mcp.qa_analytics_proof_failure import (
     verify_child_failure_envelope,
 )
 from saxo_bank_mcp.qa_analytics_sim import (
-    ANALYSIS_KIND_IDS,
-    ANALYTICS_CASE_KINDS,
+    ANALYSIS_KIND_TOOL_IDS,
     AnalyticsCaseReceipt,
     PostSendTimeoutReceipt,
     analytics_case_calls,
+    analytics_sim_contracts,
 )
 from saxo_bank_mcp.qa_auth_probes import call_saxo_auth_status, call_tool_payload
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
@@ -97,7 +97,7 @@ from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixFailureEnvelope,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
-from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS, ANALYTICS_TOOL_IDS
+from saxo_bank_mcp.server_tool_ids import ALL_LOGICAL_TOOL_IDS
 from saxo_bank_mcp.token_cache import TokenCacheWriteLease
 
 _COMMIT_PATTERN = re.compile(r"^[a-f0-9]{40}$")
@@ -1239,6 +1239,14 @@ _SAFE_MATRIX_FAILURE_PREFIXES = frozenset(
     },
 )
 _MATRIX_DETAIL_PART_COUNT = 3
+_ANALYTICS_CASE_TOOL_KIND_PAIRS = frozenset(
+    (contract.tool_id, case.kind)
+    for contract in analytics_sim_contracts()
+    for case in contract.cases
+)
+_ANALYSIS_TOOL_KIND_PAIRS = frozenset(
+    (tool_id, analysis_kind) for analysis_kind, tool_id in ANALYSIS_KIND_TOOL_IDS
+)
 
 
 def _safe_detailed_matrix_reason(reason: str) -> str | None:
@@ -1248,16 +1256,14 @@ def _safe_detailed_matrix_reason(reason: str) -> str | None:
     if prefix in {"analytics_case_failed", "analytics_case_state_mismatch"}:
         if (
             len(parts) == _MATRIX_DETAIL_PART_COUNT
-            and parts[1] in ANALYTICS_TOOL_IDS
-            and parts[2] in ANALYTICS_CASE_KINDS
+            and (parts[1], parts[2]) in _ANALYTICS_CASE_TOOL_KIND_PAIRS
         ):
             return "_".join(parts)
         return prefix
     if prefix == "analysis_execution_failed":
         if (
             len(parts) == _MATRIX_DETAIL_PART_COUNT
-            and parts[1] in ANALYTICS_TOOL_IDS
-            and parts[2] in ANALYSIS_KIND_IDS
+            and (parts[1], parts[2]) in _ANALYSIS_TOOL_KIND_PAIRS
         ):
             return "_".join(parts)
         return prefix
