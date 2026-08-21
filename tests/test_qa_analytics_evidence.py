@@ -11,6 +11,7 @@ from pathlib import Path
 from runpy import run_path
 from typing import Final, Literal, NoReturn, cast
 
+import anyio
 import pytest
 from pydantic import ValidationError
 
@@ -1921,6 +1922,39 @@ def test_installed_matrix_child_emits_strict_failure_envelope_without_raw_error(
     assert envelope.failure_phase == "matrix_execution"
     assert envelope.failure_category == "runtime_error"
     assert "private" not in captured.out
+
+
+def test_installed_matrix_child_records_inner_lifespan_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child = import_module("saxo_bank_mcp.qa_installed_matrix_child")
+    phases: list[str] = []
+    expected_attempts = 2
+    clear_count = 0
+    shutdown_count = 0
+
+    def clear_session() -> None:
+        nonlocal clear_count
+        clear_count += 1
+
+    async def fail_first_shutdown() -> None:
+        nonlocal shutdown_count
+        shutdown_count += 1
+        if shutdown_count == 1:
+            raise RuntimeError("private first-cleanup failure")
+
+    monkeypatch.setattr(child.tools_module, "shutdown_analytics_runtime", fail_first_shutdown)
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError, match="private first-cleanup failure"):
+            await child._cleanup_child_runtime(clear_session, phases.append)  # noqa: SLF001
+        await child._cleanup_child_runtime(clear_session, phases.append)  # noqa: SLF001
+
+    anyio.run(exercise)
+
+    assert phases == ["cleanup"]
+    assert clear_count == expected_attempts
+    assert shutdown_count == expected_attempts
 
 
 def test_producer_launcher_authenticates_typed_matrix_child_failure(

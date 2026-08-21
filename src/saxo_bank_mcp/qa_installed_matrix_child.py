@@ -84,6 +84,19 @@ _ANALYSIS_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 _SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 
 
+async def _cleanup_child_runtime(
+    clear_session: Callable[[], None],
+    record_phase: Callable[[InstalledMatrixFailurePhase], None],
+) -> None:
+    """Classify either child runtime cleanup attempt before re-raising safely."""
+    try:
+        clear_session()
+        await tools_module.shutdown_analytics_runtime()
+    except Exception:
+        record_phase("cleanup")
+        raise
+
+
 def _analytics_config() -> AnalyticsConfig:
     return load_analytics_config(os.environ)
 
@@ -402,8 +415,7 @@ async def _run_child_matrix(  # noqa: C901
             try:
                 yield {"analytics_runtime_owned": True}
             finally:
-                session.clear()
-                await tools_module.shutdown_analytics_runtime()
+                await _cleanup_child_runtime(session.clear, record_phase)
 
         record_phase("server_setup")
         install_fastmcp_argument_log_filter()
@@ -431,10 +443,9 @@ async def _run_child_matrix(  # noqa: C901
         )
     finally:
         try:
-            session.clear()
             tools_state["_current_process_proof_registry"] = prior_registry
             tools_state["_execute_current_proof_backtest"] = prior_backtest
-            await tools_module.shutdown_analytics_runtime()
+            await _cleanup_child_runtime(session.clear, record_phase)
         except Exception:
             record_phase("cleanup")
             raise
