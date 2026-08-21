@@ -466,6 +466,9 @@ class AnalyticsRuntimeResources:
     analysis_input_instrument_handles_by_analysis_kind: dict[str, list[str]] = field(
         default_factory=dict,
     )
+    analysis_input_coverage_by_dataset_id: dict[str, tuple[str, str]] = field(
+        default_factory=dict,
+    )
     analysis_input_refusals_by_analysis_kind: dict[str, str] = field(default_factory=dict)
     analysis_ids: list[str] = field(default_factory=list)
     degraded_analysis_ids: list[str] = field(default_factory=list)

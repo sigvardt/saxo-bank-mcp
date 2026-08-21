@@ -716,6 +716,46 @@ def test_analysis_successes_require_their_exact_server_issued_input_kind() -> No
     assert materialized_pretrade["proposal_price"] == "100"
 
 
+def test_backtest_materialization_binds_holdout_to_observed_input_coverage() -> None:
+    dataset_id = "ds_88888888888848888888888888888888"
+    instrument_handle = "ih_22222222222242228222222222222222"
+    resources = AnalyticsRuntimeResources(instrument_handles=[instrument_handle])
+    matrix_module._remember_typed_resources(  # noqa: SLF001
+        resources,
+        {
+            "result": {
+                "dataset_id": dataset_id,
+                "data_kind": "analysis_input",
+                "analysis_kind": "bounded_backtest",
+                "instrument_handles": [instrument_handle],
+                "quality_state": "complete",
+                "coverage_start": "2026-01-05T14:30:00Z",
+                "coverage_end": "2026-01-05T15:30:00Z",
+            },
+        },
+        degraded=False,
+    )
+    call = next(
+        item
+        for item in analytics_case_calls()
+        if item.tool_id == "saxo_backtest_strategy"
+        and item.kind == "success"
+        and item.analysis_kind is None
+    )
+
+    arguments = materialize_analytics_case_arguments(call, resources)
+    request = cast("dict[str, JsonValue]", arguments["request"])
+    strategy = cast("dict[str, JsonValue]", request["strategy"])
+    split = cast("dict[str, JsonValue]", strategy["evaluation_split"])
+
+    assert request["dataset_id"] == dataset_id
+    assert split == {
+        "kind": "holdout",
+        "train_end_at": "2026-01-05T14:30:00Z",
+        "holdout_start_at": "2026-01-05T15:30:00Z",
+    }
+
+
 def test_missing_analysis_handles_still_exercise_downstream_refusal_contracts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

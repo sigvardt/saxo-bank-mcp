@@ -6,7 +6,7 @@ import json
 import re
 import tempfile
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
@@ -2143,6 +2143,12 @@ def _materialize_analysis_arguments(  # noqa: C901, PLR0912, PLR0915 - bounded a
         if instrument_handle is None:
             return {}
         request["instrument_handle"] = instrument_handle
+    if case_call.tool_id == "saxo_backtest_strategy":
+        coverage = resources.analysis_input_coverage_by_dataset_id.get(dataset_id)
+        strategy = request.get("strategy")
+        split = strategy.get("evaluation_split") if isinstance(strategy, dict) else None
+        if coverage is not None and isinstance(split, dict) and split.get("kind") == "holdout":
+            split["train_end_at"], split["holdout_start_at"] = coverage
     if case_call.analysis_kind is not None:
         request["analysis_kind"] = case_call.analysis_kind
         if case_call.tool_id == "saxo_optimize_portfolio":
@@ -2338,6 +2344,9 @@ def _remember_typed_resources(  # noqa: C901
                     analysis_input_routes.setdefault(analysis_kind, []),
                     [dataset_id],
                 )
+                coverage = _observed_utc_coverage(value)
+                if coverage is not None:
+                    resources.analysis_input_coverage_by_dataset_id[dataset_id] = coverage
                 instrument_handles = value.get("instrument_handles")
                 if isinstance(instrument_handles, list):
                     safe_handles = [
@@ -2396,6 +2405,30 @@ def _remember_typed_resources(  # noqa: C901
             visit(item)
 
     visit(payload)
+
+
+def _observed_utc_coverage(value: dict[str, JsonValue]) -> tuple[str, str] | None:
+    """Return one canonical increasing UTC interval from a server-issued summary."""
+
+    def parse(raw: JsonValue | None) -> datetime | None:
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(UTC)
+
+    start = parse(value.get("coverage_start"))
+    end = parse(value.get("coverage_end"))
+    if start is None or end is None or start >= end:
+        return None
+    return (
+        start.isoformat().replace("+00:00", "Z"),
+        end.isoformat().replace("+00:00", "Z"),
+    )
 
 
 def _collect_safe_handles(value: JsonValue, found: dict[str, list[str]]) -> None:
