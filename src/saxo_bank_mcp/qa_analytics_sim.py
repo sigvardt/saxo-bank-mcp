@@ -65,6 +65,18 @@ CONTROLLED_SIM_CASES: Final[tuple[str, ...]] = (
     "cleanup",
 )
 CONTROLLED_SIM_MUTATION_CALL_COUNT: Final = 2
+ANALYTICS_SOURCE_PRECONDITION_TOOL_ROUTES: Final[tuple[tuple[str, str], ...]] = (
+    ("saxo_analyze_portfolio", "portfolio_performance"),
+    ("saxo_size_position", "position_sizing"),
+    ("saxo_run_scenario", "scenario_custom"),
+    ("saxo_optimize_portfolio", "portfolio_minimum_variance"),
+    ("saxo_model_derivatives", "derivatives_model"),
+    ("saxo_backtest_strategy", "bounded_backtest"),
+    ("saxo_propose_trade_from_analysis", "pretrade_impact"),
+)
+_ANALYTICS_SOURCE_PRECONDITION_TOOLS: Final = frozenset(
+    tool_id for tool_id, _route in ANALYTICS_SOURCE_PRECONDITION_TOOL_ROUTES
+)
 _DEGRADATION_TOOLS: Final = frozenset(
     {
         "saxo_resolve_research_universe",
@@ -853,6 +865,7 @@ def analytics_case_evidence_errors(
                 continue
             source_precondition_refusal = (
                 case_contract.kind == "success"
+                and contract.tool_id in _ANALYTICS_SOURCE_PRECONDITION_TOOLS
                 and case_receipt.state == "refused"
                 and case_receipt.source_precondition_refused
             )

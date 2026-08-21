@@ -37,6 +37,7 @@ from saxo_bank_mcp.order_mutation_models import (
 )
 from saxo_bank_mcp.qa_analytics_sim import (
     ANALYSIS_KIND_IDS,
+    ANALYTICS_SOURCE_PRECONDITION_TOOL_ROUTES,
     BROKERAGE_STATE_COMPONENTS,
     AnalyticsCaseCall,
     AnalyticsCaseReceipt,
@@ -1059,15 +1060,7 @@ def _bind_observed_source_precondition(
         return case_call
     route = _ANALYSIS_INPUT_ROUTE_BY_KIND.get(
         case_call.analysis_kind or "",
-        {
-            "saxo_analyze_portfolio": "portfolio_performance",
-            "saxo_size_position": "position_sizing",
-            "saxo_run_scenario": "scenario_custom",
-            "saxo_optimize_portfolio": "portfolio_minimum_variance",
-            "saxo_model_derivatives": "derivatives_model",
-            "saxo_backtest_strategy": "bounded_backtest",
-            "saxo_propose_trade_from_analysis": "pretrade_impact",
-        }.get(case_call.tool_id, ""),
+        dict(ANALYTICS_SOURCE_PRECONDITION_TOOL_ROUTES).get(case_call.tool_id, ""),
     )
     exact_kind = case_call.analysis_kind or route
     evidence_sha256 = resources.analysis_input_refusals_by_analysis_kind.get(

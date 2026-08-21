@@ -2025,6 +2025,34 @@ def test_case_evidence_still_rejects_an_ordinary_success_state_mismatch() -> Non
     )
 
 
+def test_case_evidence_rejects_source_refusal_for_an_unrouted_tool() -> None:
+    evidence = list(_analytics_case_evidence())
+    tool_index = next(
+        index
+        for index, item in enumerate(evidence)
+        if item.tool_id == "saxo_analytics_capabilities"
+    )
+    tool_evidence = evidence[tool_index]
+    cases = list(tool_evidence.cases)
+    case_index = next(index for index, item in enumerate(cases) if item.kind == "success")
+    cases[case_index] = AnalyticsCaseReceipt.model_validate(
+        {
+            **cases[case_index].model_dump(mode="python"),
+            "state": "refused",
+            "reason_code": "source_precondition_refused",
+            "result_state": "refused",
+            "mcp_is_error": True,
+            "source_precondition_refused": True,
+            "source_precondition_evidence_sha256": "a" * 64,
+        },
+    )
+    evidence[tool_index] = tool_evidence.model_copy(update={"cases": tuple(cases)})
+
+    assert sim_module.analytics_case_evidence_errors(tuple(evidence)) == (
+        "analytics_case_state_mismatch:saxo_analytics_capabilities:success",
+    )
+
+
 def test_controlled_context_coverage_requires_typed_input_or_observed_refusal() -> None:
     exact_contexts = {
         "portfolio_performance",
