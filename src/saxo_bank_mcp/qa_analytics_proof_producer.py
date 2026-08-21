@@ -90,7 +90,10 @@ from saxo_bank_mcp.qa_analytics_sim import (
 )
 from saxo_bank_mcp.qa_auth_probes import call_saxo_auth_status, call_tool_payload
 from saxo_bank_mcp.qa_codex_native_policy import HarnessPolicy
-from saxo_bank_mcp.qa_installed_matrix_envelope import InstalledMatrixEnvelope
+from saxo_bank_mcp.qa_installed_matrix_envelope import (
+    InstalledMatrixEnvelope,
+    InstalledMatrixFailureEnvelope,
+)
 from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 from saxo_bank_mcp.token_cache import TokenCacheWriteLease
 
@@ -106,6 +109,7 @@ _PROCESS_AUTHORITY = object()
 _JUNIT_PROOF_PROPERTY = "saxo_analytics_proof_receipt_v1"
 _MATRIX_CHILD_COMMAND_NAME = "analytics_installed_matrix_child"
 _MATRIX_CHILD_TIMEOUT_SECONDS = 1800
+_MATRIX_CHILD_FAILURE_EXIT_CODE = 2
 _OWNER_FILE_MODE = 0o600
 _OWNER_DIRECTORY_MODE = 0o700
 _NATIVE_PROOF_PROJECT_ENVIRONMENT = "SAXO_ANALYTICS_PROOF_PROJECT_ENVIRONMENT"
@@ -1079,7 +1083,15 @@ def _run_installed_matrix_proof_session(
             timeout_seconds=_MATRIX_CHILD_TIMEOUT_SECONDS,
         )
     except CommandFailureError as error:
-        raise ProofProducerError(_matrix_command_failure_reason(error)) from error
+        raise ProofProducerError(
+            _matrix_child_command_error_reason(
+                error,
+                candidate_commit=candidate_commit,
+                analysis_kinds=analysis_kinds,
+                command=command,
+                cwd=cwd,
+            ),
+        ) from error
     except OSError as error:
         raise ProofProducerError("installed_matrix_child_start_failed") from error
     except ValueError as error:
@@ -1126,6 +1138,64 @@ def _matrix_command_failure_reason(error: CommandFailureError) -> str:
     if not error.receipt.cleanup_attempted:
         return "installed_matrix_child_cleanup_unattempted"
     return "installed_matrix_child_command_failed"
+
+
+def _matrix_child_command_error_reason(
+    error: CommandFailureError,
+    *,
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+    command: tuple[str, ...],
+    cwd: Path,
+) -> str:
+    reason = _matrix_command_failure_reason(error)
+    if reason != "installed_matrix_child_command_failed":
+        return reason
+    return _authenticated_matrix_child_failure_reason(
+        error,
+        candidate_commit=candidate_commit,
+        analysis_kinds=analysis_kinds,
+        command=command,
+        cwd=cwd,
+    )
+
+
+def _authenticated_matrix_child_failure_reason(
+    error: CommandFailureError,
+    *,
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+    command: tuple[str, ...],
+    cwd: Path,
+) -> str:
+    """Authenticate one child-emitted failure class without retaining raw output."""
+    receipt = error.receipt
+    if (
+        receipt.name != _MATRIX_CHILD_COMMAND_NAME
+        or receipt.argv != command
+        or receipt.cwd != str(cwd)
+        or receipt.pid is None
+        or receipt.pid <= 0
+        or receipt.pgid is None
+        or receipt.pgid <= 0
+        or receipt.exit_code != _MATRIX_CHILD_FAILURE_EXIT_CODE
+        or receipt.timed_out
+        or not receipt.cleanup_attempted
+        or receipt.stdout_sha256 != hashlib.sha256(error.stdout.encode()).hexdigest()
+        or receipt.stderr_sha256 != hashlib.sha256(error.stderr.encode()).hexdigest()
+        or error.stderr != ""
+    ):
+        return "installed_matrix_child_command_failed"
+    try:
+        envelope = InstalledMatrixFailureEnvelope.model_validate_json(
+            error.stdout,
+            strict=True,
+        )
+    except ValidationError:
+        return "installed_matrix_child_command_failed"
+    if envelope.candidate_commit != candidate_commit or envelope.analysis_kinds != analysis_kinds:
+        return "installed_matrix_child_command_failed"
+    return f"installed_matrix_child_{envelope.failure_phase}_{envelope.failure_category}"
 
 
 _SAFE_MATRIX_FAILURE_REASONS = frozenset(

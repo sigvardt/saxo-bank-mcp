@@ -13,6 +13,22 @@ from saxo_bank_mcp.qa_sim_tool_matrix_models import SimToolMatrixReceipt
 
 _ANALYSIS_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
+InstalledMatrixFailurePhase = Literal[
+    "input_validation",
+    "runtime_setup",
+    "server_setup",
+    "matrix_execution",
+    "cleanup",
+    "envelope_validation",
+]
+InstalledMatrixFailureCategory = Literal[
+    "io_error",
+    "runtime_error",
+    "type_error",
+    "validation_error",
+    "unexpected_error",
+]
+
 
 def matrix_receipt_sha256(matrix: SimToolMatrixReceipt) -> str:
     """Hash one strict matrix receipt using its canonical JSON representation."""
@@ -51,3 +67,86 @@ class InstalledMatrixEnvelope(BaseModel):
         if self.matrix_sha256 != matrix_receipt_sha256(self.matrix):
             raise ValueError("installed matrix digest mismatch")
         return self
+
+
+def installed_matrix_failure_sha256(
+    *,
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+    failure_phase: InstalledMatrixFailurePhase,
+    failure_category: InstalledMatrixFailureCategory,
+) -> str:
+    """Hash one path-free installed-child failure description."""
+    material = {
+        "analysis_kinds": list(analysis_kinds),
+        "candidate_commit": candidate_commit,
+        "failure_category": failure_category,
+        "failure_phase": failure_phase,
+        "receipt_kind": "installed_matrix_child_failure",
+        "schema_version": "1",
+    }
+    payload = json.dumps(
+        material,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+class InstalledMatrixFailureEnvelope(BaseModel):
+    """Bind one privacy-safe child failure class to the exact matrix request."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        hide_input_in_errors=True,
+    )
+
+    schema_version: Literal["1"] = "1"
+    receipt_kind: Literal["installed_matrix_child_failure"] = "installed_matrix_child_failure"
+    candidate_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    analysis_kinds: tuple[str, ...] = Field(min_length=1)
+    failure_phase: InstalledMatrixFailurePhase
+    failure_category: InstalledMatrixFailureCategory
+    envelope_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_binding(self) -> Self:
+        if any(_ANALYSIS_KIND_PATTERN.fullmatch(kind) is None for kind in self.analysis_kinds):
+            raise ValueError("installed matrix analysis kind is invalid")
+        if len(self.analysis_kinds) != len(set(self.analysis_kinds)):
+            raise ValueError("installed matrix analysis kinds must be unique")
+        expected = installed_matrix_failure_sha256(
+            candidate_commit=self.candidate_commit,
+            analysis_kinds=self.analysis_kinds,
+            failure_phase=self.failure_phase,
+            failure_category=self.failure_category,
+        )
+        if self.envelope_sha256 != expected:
+            raise ValueError("installed matrix failure digest mismatch")
+        return self
+
+
+def build_installed_matrix_failure_envelope(
+    *,
+    candidate_commit: str,
+    analysis_kinds: tuple[str, ...],
+    failure_phase: InstalledMatrixFailurePhase,
+    failure_category: InstalledMatrixFailureCategory,
+) -> InstalledMatrixFailureEnvelope:
+    """Build one canonical strict installed-child failure envelope."""
+    return InstalledMatrixFailureEnvelope(
+        candidate_commit=candidate_commit,
+        analysis_kinds=analysis_kinds,
+        failure_phase=failure_phase,
+        failure_category=failure_category,
+        envelope_sha256=installed_matrix_failure_sha256(
+            candidate_commit=candidate_commit,
+            analysis_kinds=analysis_kinds,
+            failure_phase=failure_phase,
+            failure_category=failure_category,
+        ),
+    )

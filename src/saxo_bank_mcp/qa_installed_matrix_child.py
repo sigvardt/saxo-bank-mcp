@@ -6,7 +6,7 @@ import argparse
 import os
 import re
 import sys
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -58,6 +58,9 @@ from saxo_bank_mcp.fastmcp_logging_safety import (
 from saxo_bank_mcp.mcp_request_ledger_tools import SAFE_REQUEST_LEDGER_MIDDLEWARE
 from saxo_bank_mcp.qa_installed_matrix_envelope import (
     InstalledMatrixEnvelope,
+    InstalledMatrixFailureCategory,
+    InstalledMatrixFailurePhase,
+    build_installed_matrix_failure_envelope,
     matrix_receipt_sha256,
 )
 from saxo_bank_mcp.qa_sim_tool_matrix import (
@@ -184,8 +187,10 @@ def _process_active_catalog(
 async def _run_child_matrix(  # noqa: C901
     candidate_commit: str,
     analysis_kinds: Sequence[str],
+    record_phase: Callable[[InstalledMatrixFailurePhase], None],
 ) -> SimToolMatrixReceipt:
     """Own all live ghost authority inside this process and return only a strict receipt."""
+    record_phase("input_validation")
     if _COMMIT_PATTERN.fullmatch(candidate_commit) is None:
         raise ValueError("process proof candidate is invalid")
     if (
@@ -198,6 +203,7 @@ async def _run_child_matrix(  # noqa: C901
         raise ValueError("installed matrix child requires SIM")
     if os.environ.get("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", "").strip():
         raise ValueError("installed matrix child refuses LIVE authority")
+    record_phase("runtime_setup")
     kinds = frozenset((*analysis_kinds, "bounded_backtest"))
     session_seal = object()
 
@@ -399,6 +405,7 @@ async def _run_child_matrix(  # noqa: C901
                 session.clear()
                 await tools_module.shutdown_analytics_runtime()
 
+        record_phase("server_setup")
         install_fastmcp_argument_log_filter()
         proof_server = SafeFastMCP(
             SERVICE_NAME,
@@ -416,16 +423,33 @@ async def _run_child_matrix(  # noqa: C901
             option_uics=MULTILEG_FIXTURE_UICS,
             stream_uic=FIXTURE_STREAM_UIC,
         )
+        record_phase("matrix_execution")
         return await _run_matrix(  # pyright: ignore[reportPrivateUsage]
             fixtures,
             proof_recorder=session,
             matrix_server=proof_server,
         )
     finally:
-        session.clear()
-        tools_state["_current_process_proof_registry"] = prior_registry
-        tools_state["_execute_current_proof_backtest"] = prior_backtest
-        await tools_module.shutdown_analytics_runtime()
+        try:
+            session.clear()
+            tools_state["_current_process_proof_registry"] = prior_registry
+            tools_state["_execute_current_proof_backtest"] = prior_backtest
+            await tools_module.shutdown_analytics_runtime()
+        except Exception:
+            record_phase("cleanup")
+            raise
+
+
+def _failure_category(error: Exception) -> InstalledMatrixFailureCategory:
+    if isinstance(error, OSError):
+        return "io_error"
+    if isinstance(error, RuntimeError):
+        return "runtime_error"
+    if isinstance(error, TypeError):
+        return "type_error"
+    if isinstance(error, ValueError):
+        return "validation_error"
+    return "unexpected_error"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -433,20 +457,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--analysis-kind", action="append", default=[])
+    failure_phase: InstalledMatrixFailurePhase = "matrix_execution"
+    candidate_commit = ""
+    analysis_kinds: tuple[str, ...] = ()
+
+    def record_phase(phase: InstalledMatrixFailurePhase) -> None:
+        nonlocal failure_phase
+        failure_phase = phase
+
     try:
         arguments = parser.parse_args(argv)
+        candidate_commit = str(arguments.candidate)
+        analysis_kinds = tuple(str(kind) for kind in arguments.analysis_kind)
         receipt = anyio.run(
             _run_child_matrix,
-            str(arguments.candidate),
-            tuple(str(kind) for kind in arguments.analysis_kind),
+            candidate_commit,
+            analysis_kinds,
+            record_phase,
         )
+        record_phase("envelope_validation")
         envelope = InstalledMatrixEnvelope(
-            candidate_commit=str(arguments.candidate),
-            analysis_kinds=tuple(str(kind) for kind in arguments.analysis_kind),
+            candidate_commit=candidate_commit,
+            analysis_kinds=analysis_kinds,
             matrix_sha256=matrix_receipt_sha256(receipt),
             matrix=receipt,
         )
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except Exception as error:  # noqa: BLE001 - terminal child boundary normalizes all failures
+        if (
+            _COMMIT_PATTERN.fullmatch(candidate_commit) is not None
+            and analysis_kinds
+            and all(_ANALYSIS_KIND_PATTERN.fullmatch(kind) is not None for kind in analysis_kinds)
+            and len(analysis_kinds) == len(set(analysis_kinds))
+        ):
+            failure = build_installed_matrix_failure_envelope(
+                candidate_commit=candidate_commit,
+                analysis_kinds=analysis_kinds,
+                failure_phase=failure_phase,
+                failure_category=_failure_category(error),
+            )
+            sys.stdout.write(failure.model_dump_json())
         return 2
     sys.stdout.write(envelope.model_dump_json())
     return 0

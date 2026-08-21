@@ -2943,8 +2943,14 @@ def test_arbitrary_safe_looking_reason_is_redacted() -> None:
     assert sensitive_looking_reason not in child.model_dump_json()
 
 
-def test_fixed_matrix_failure_reason_survives_authenticated_publication() -> None:
-    reason = "installed_sim_matrix_fixture_reference_invalid"
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "installed_sim_matrix_fixture_reference_invalid",
+        "installed_matrix_child_matrix_execution_runtime_error",
+    ],
+)
+def test_fixed_matrix_failure_reason_survives_authenticated_publication(reason: str) -> None:
     child = _failure(_progress(), reason=reason)
     verified = _verify(child.model_dump_json())
     publication_module = import_module("saxo_bank_mcp.qa_analytics_proof_publication")
