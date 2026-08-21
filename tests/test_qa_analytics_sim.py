@@ -916,7 +916,7 @@ def test_matrix_resolves_the_exact_controlled_stock_fixture_query() -> None:
     )
 
     assert primary == {
-        "query": "Apple",
+        "query": "AAPL",
         "asset_types": ["Stock"],
         "exchanges": ["NASDAQ"],
     }
@@ -1122,6 +1122,119 @@ def test_server_observed_input_refusal_binds_an_honest_terminal_refusal() -> Non
     assert receipt.state == "refused"
     assert receipt.source_precondition_refused is True
     assert receipt.source_precondition_evidence_sha256 == "a" * 64
+
+
+def test_failed_analysis_receipt_retains_only_a_safe_observed_reason_code() -> None:
+    call = next(
+        item for item in analytics_case_calls() if item.analysis_kind == "instrument_price_return"
+    )
+
+    safe = analytics_case_receipt(
+        call,
+        ("verified",),
+        MatrixToolObservation(
+            payload={
+                "status": "refused",
+                "reason_code": "verified_coverage_unavailable",
+            },
+            result_parsed=True,
+            result_state="refused",
+            mcp_is_error=False,
+        ),
+    )
+    unsafe = analytics_case_receipt(
+        call,
+        ("verified",),
+        MatrixToolObservation(
+            payload={
+                "status": "refused",
+                "reason_code": "private account 123456",
+            },
+            result_parsed=True,
+            result_state="refused",
+            mcp_is_error=False,
+        ),
+    )
+
+    assert safe.observed_reason_code == "verified_coverage_unavailable"
+    assert unsafe.observed_reason_code is None
+
+
+def test_pretrade_context_uses_the_just_observed_instrument_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis_id = "an_33333333333343338333333333333333"
+    typed_input = "ds_44444444444444448444444444444444"
+    calls: list[dict[str, JsonValue]] = []
+
+    async def route_pretrade(
+        _client: object,
+        tool: str,
+        arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        assert tool == "saxo_sync_research_data"
+        calls.append(arguments)
+        return MatrixToolObservation(
+            payload={
+                "status": "passed",
+                "result": {
+                    "datasets": [
+                        {
+                            "dataset_id": typed_input,
+                            "data_kind": "analysis_input",
+                            "analysis_kind": "pretrade_impact",
+                        },
+                    ],
+                },
+            },
+            result_parsed=True,
+            result_state="passed",
+            mcp_is_error=False,
+        )
+
+    monkeypatch.setattr(matrix_module, "call_tool", route_pretrade)
+    resources = AnalyticsRuntimeResources(
+        dataset_ids_by_analysis_kind={
+            "price_bars": ["ds_11111111111141118111111111111111"],
+            "quote": ["ds_22222222222242228222222222222222"],
+        },
+    )
+    state = _runtime_state()
+    state.analytics_resources = resources
+    call = next(
+        item for item in analytics_case_calls() if item.analysis_kind == "instrument_price_return"
+    )
+    result = MatrixToolObservation(
+        payload={
+            "status": "verified",
+            "analysis_kind": "instrument_price_return",
+            "analysis_id": analysis_id,
+        },
+        result_parsed=True,
+        result_state="verified",
+        mcp_is_error=False,
+    )
+
+    anyio.run(
+        matrix_module._remember_analysis_case_outputs,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        state,
+        call,
+        result,
+    )
+
+    item = cast(
+        "dict[str, JsonValue]",
+        cast(
+            "list[JsonValue]",
+            cast("dict[str, JsonValue]", calls[0]["request"])["items"],
+        )[0],
+    )
+    assert item["origin_analysis_id"] == analysis_id
+    assert resources.analysis_input_dataset_ids_by_analysis_kind["pretrade_impact"] == [
+        typed_input,
+    ]
 
 
 def test_tool_availability_probe_accepts_only_an_observed_source_refusal() -> None:

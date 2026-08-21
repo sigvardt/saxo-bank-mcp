@@ -597,13 +597,12 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
             state.analysis_execution_receipts.append(case_receipt)
         else:
             per_tool[observed_call.tool_id][observed_call.kind] = case_receipt
-        _remember_analytics_handles(state.analytics_resources, observed_call, result)
-        if (
-            observed_call.tool_id == "saxo_analyze_instruments"
-            and observed_call.kind == "success"
-            and case_receipt.state == "passed"
-        ):
-            await _prepare_server_owned_pretrade_input(client, state)
+        await _remember_analysis_case_outputs(
+            client,
+            state,
+            observed_call,
+            result,
+        )
         if (
             observed_call.tool_id == "saxo_sync_research_data"
             and observed_call.kind == "success"
@@ -1616,10 +1615,12 @@ def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
     source_precondition_evidence_sha256 = (
         case_call.source_precondition_evidence_sha256 if source_precondition_refused else None
     )
+    observed_reason_code = _observed_reason_code(result.payload)
     evidence_material: dict[str, JsonValue] = {
         "tool_id": case_call.tool_id,
         "kind": case_call.kind,
         "result_state": result.result_state,
+        "observed_reason_code": observed_reason_code,
         "request_sha256": digest(case_call.arguments),
         "response_sha256": digest(result.payload),
         "reconciles_request_sha256": reconciles_request_sha256,
@@ -1638,6 +1639,7 @@ def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
         source_precondition_evidence_sha256=source_precondition_evidence_sha256,
         state=case_state,
         reason_code="observed" if case_state != "failed" else "unexpected_case_result",
+        observed_reason_code=observed_reason_code,
         mcp_call_observed=True,
         result_parsed=result.result_parsed,
         result_state=result.result_state,
@@ -1655,6 +1657,14 @@ def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
             digest(result.payload) if case_state == "reconciled" else None
         ),
     )
+
+
+def _observed_reason_code(payload: dict[str, JsonValue]) -> str | None:
+    """Retain one source-controlled reason token without private text or values."""
+    value = payload.get("reason_code")
+    if isinstance(value, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", value):
+        return value
+    return None
 
 
 def _analysis_kind_from_case_call(case_call: AnalyticsCaseCall) -> str | None:
@@ -1677,7 +1687,7 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
         return {}
     if case_call.tool_id == "saxo_resolve_research_universe":
         return {
-            "query": "Apple" if case_call.kind == "success" else "controlled fixture",
+            "query": "AAPL" if case_call.kind == "success" else "controlled fixture",
             **({"asset_types": ["Stock"]} if case_call.kind == "success" else {}),
             **({"exchanges": ["NASDAQ"]} if case_call.kind == "success" else {}),
         }
@@ -1769,6 +1779,18 @@ def materialize_analytics_case_arguments(  # noqa: C901, PLR0911, PLR0912 - boun
     if case_call.tool_id == "saxo_list_analytics_storage":
         return {"scope": {}}
     return {}
+
+
+async def _remember_analysis_case_outputs(
+    client: MatrixClient,
+    state: MatrixRuntimeState,
+    observed_call: AnalyticsCaseCall,
+    result: MatrixToolObservation,
+) -> None:
+    """Index one result before deriving any context that depends on its issued handle."""
+    _remember_analytics_handles(state.analytics_resources, observed_call, result)
+    if observed_call.kind == "success" and observed_call.analysis_kind == "instrument_price_return":
+        await _prepare_server_owned_pretrade_input(client, state)
 
 
 def _materialize_analysis_arguments(  # noqa: C901, PLR0912 - bounded typed adapters

@@ -280,6 +280,10 @@ class AnalyticsCaseReceipt(_StrictReceipt):
     )
     state: AnalyticsCaseState
     reason_code: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
+    observed_reason_code: str | None = Field(
+        default=None,
+        pattern=r"^[a-z][a-z0-9_]{0,127}$",
+    )
     mcp_call_observed: Literal[True]
     result_parsed: bool
     result_state: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
@@ -870,7 +874,7 @@ def analytics_primary_calls() -> tuple[tuple[str, dict[str, JsonValue]], ...]:
     calls: dict[str, dict[str, JsonValue]] = {
         "saxo_analytics_capabilities": {},
         "saxo_resolve_research_universe": {
-            "query": "Apple",
+            "query": "AAPL",
             "asset_types": ["Stock"],
             "exchanges": ["NASDAQ"],
         },
