@@ -91,6 +91,89 @@ _SHA256_HEX_LENGTH = 64
 _MINIMUM_FIXTURE_READ_RESULTS = 2
 _SAFE_HANDLE = re.compile(r"^(?P<kind>ih|ds|an|ar|jb|dp)_[0-9a-f]{32}$")
 _ACTIVE_JOB_STATES: Final = frozenset({"job_queued", "job_running"})
+_SAFE_OBSERVED_REASON_CODES: Final = frozenset(
+    {
+        "analysis_input_account_scope_mismatch",
+        "analysis_input_kind_unsupported",
+        "analysis_input_source_scope_invalid",
+        "analysis_input_source_scope_mismatch",
+        "analysis_parameter_binding_failed",
+        "analysis_source_context_invalid",
+        "analysis_source_context_unavailable",
+        "analysis_source_contracts_incomplete",
+        "analysis_source_field_invalid",
+        "analysis_source_field_missing",
+        "analysis_source_rows_invalid",
+        "analysis_source_scope_ambiguous",
+        "analytics_contract_mismatch",
+        "analytics_measure_undefined",
+        "analytics_request_invalid",
+        "backtest_chart_scope_ambiguous",
+        "backtest_reference_scope_mismatch",
+        "backtest_sim_proof_unavailable",
+        "derivatives_expiry_unavailable",
+        "derivatives_quote_scope_mismatch",
+        "derivatives_reference_price_unavailable",
+        "derivatives_source_scope_ambiguous",
+        "explicit_derivatives_assumptions_required",
+        "explicit_pretrade_inputs_required",
+        "future_source_observation",
+        "historical_replay_observations_unbound",
+        "instrument_dataset_scope_mismatch",
+        "market_comparison_result_invalid",
+        "missing_proof_profile",
+        "multi_dataset_proof_binding_unavailable",
+        "multi_instrument_executor_unavailable",
+        "optimization_cost_scope_incomplete",
+        "optimization_minimum_asset_count_unavailable",
+        "optimization_minimum_sample_count_unavailable",
+        "optimization_price_history_incomplete",
+        "portfolio_boundary_valuations_unavailable",
+        "portfolio_flow_boundary_valuations_unavailable",
+        "portfolio_performance_reconciliation_unavailable",
+        "position_sizing_asset_constraints_unavailable",
+        "position_sizing_currency_mismatch",
+        "position_sizing_instrument_scope_mismatch",
+        "position_sizing_source_scope_ambiguous",
+        "pretrade_context_ambiguous",
+        "pretrade_context_unavailable",
+        "pretrade_cost_reconciliation_unavailable",
+        "pretrade_cost_scope_ambiguous",
+        "pretrade_currency_mismatch",
+        "pretrade_origin_account_scope_mismatch",
+        "pretrade_origin_analysis_required",
+        "pretrade_origin_lineage_mismatch",
+        "pretrade_origin_scope_ambiguous",
+        "pretrade_quote_unavailable",
+        "pretrade_verified_basis_unavailable",
+        "private_result_required",
+        "proof_engine_executor_unavailable",
+        "proof_expired",
+        "proof_metric_executor_unavailable",
+        "proof_source_contract_missing",
+        "proposal_context_mismatch",
+        "saxo_greek_reconciliation_unavailable",
+        "scenario_exposure_scope_incomplete",
+        "scenario_kind_unsupported",
+        "scenario_metric_binding_unavailable",
+        "scenario_shock_map_incomplete",
+        "source_binding_ambiguous",
+        "source_binding_invalid",
+        "source_contract_missing",
+        "stored_backtest_context_mismatch",
+        "stored_derivatives_context_mismatch",
+        "stored_execution_context_invalid",
+        "stored_optimization_context_mismatch",
+        "stored_portfolio_context_mismatch",
+        "stored_price_dataset_invalid",
+        "stored_scenario_context_mismatch",
+        "stored_sizing_context_mismatch",
+        "supporting_dataset_not_proof_bound",
+        "supporting_dataset_scope_invalid",
+        "twr_boundary_valuations_unavailable",
+        "verified_coverage_unavailable",
+    }
+)
 _TERMINAL_JOB_STATES: Final = frozenset(
     {
         "job_completed",
@@ -602,6 +685,7 @@ async def run_analytics_case_phase(  # noqa: C901, PLR0912
             state,
             observed_call,
             result,
+            case_receipt,
         )
         if (
             observed_call.tool_id == "saxo_sync_research_data"
@@ -1662,7 +1746,7 @@ def analytics_case_receipt(  # noqa: C901, PLR0912, PLR0913
 def _observed_reason_code(payload: dict[str, JsonValue]) -> str | None:
     """Retain one source-controlled reason token without private text or values."""
     value = payload.get("reason_code")
-    if isinstance(value, str) and re.fullmatch(r"[a-z][a-z_]{0,127}", value):
+    if isinstance(value, str) and value in _SAFE_OBSERVED_REASON_CODES:
         return value
     return None
 
@@ -1786,10 +1870,15 @@ async def _remember_analysis_case_outputs(
     state: MatrixRuntimeState,
     observed_call: AnalyticsCaseCall,
     result: MatrixToolObservation,
+    case_receipt: AnalyticsCaseReceipt,
 ) -> None:
     """Index one result before deriving any context that depends on its issued handle."""
     _remember_analytics_handles(state.analytics_resources, observed_call, result)
-    if observed_call.kind == "success" and observed_call.analysis_kind == "instrument_price_return":
+    if (
+        case_receipt.state == "passed"
+        and observed_call.kind == "success"
+        and observed_call.analysis_kind == "instrument_price_return"
+    ):
         await _prepare_server_owned_pretrade_input(client, state)
 
 

@@ -1142,22 +1142,27 @@ def test_failed_analysis_receipt_retains_only_a_safe_observed_reason_code() -> N
             mcp_is_error=False,
         ),
     )
-    unsafe = analytics_case_receipt(
-        call,
-        ("verified",),
-        MatrixToolObservation(
-            payload={
-                "status": "refused",
-                "reason_code": "account_123456",
-            },
-            result_parsed=True,
-            result_state="refused",
-            mcp_is_error=False,
-        ),
-    )
-
     assert safe.observed_reason_code == "verified_coverage_unavailable"
-    assert unsafe.observed_reason_code is None
+    for unsafe_reason in (
+        "account_123456",
+        "private_account_name",
+        "joakim_sigvardt",
+        "client_secret",
+    ):
+        unsafe = analytics_case_receipt(
+            call,
+            ("verified",),
+            MatrixToolObservation(
+                payload={
+                    "status": "refused",
+                    "reason_code": unsafe_reason,
+                },
+                result_parsed=True,
+                result_state="refused",
+                mcp_is_error=False,
+            ),
+        )
+        assert unsafe.observed_reason_code is None
 
 
 def test_pretrade_context_uses_the_just_observed_instrument_analysis(
@@ -1215,6 +1220,14 @@ def test_pretrade_context_uses_the_just_observed_instrument_analysis(
         result_state="verified",
         mcp_is_error=False,
     )
+    receipt = analytics_case_receipt(
+        call,
+        ("verified",),
+        result,
+        returned_analysis_kind="instrument_price_return",
+        analysis_id=analysis_id,
+        persisted_result_authenticated=True,
+    )
 
     anyio.run(
         matrix_module._remember_analysis_case_outputs,  # noqa: SLF001
@@ -1222,6 +1235,7 @@ def test_pretrade_context_uses_the_just_observed_instrument_analysis(
         state,
         call,
         result,
+        receipt,
     )
 
     item = cast(
@@ -1235,6 +1249,70 @@ def test_pretrade_context_uses_the_just_observed_instrument_analysis(
     assert resources.analysis_input_dataset_ids_by_analysis_kind["pretrade_impact"] == [
         typed_input,
     ]
+
+
+def test_failed_replay_does_not_seed_pretrade_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis_id = "an_33333333333343338333333333333333"
+    calls: list[dict[str, JsonValue]] = []
+
+    async def reject_pretrade(
+        _client: object,
+        _tool: str,
+        arguments: dict[str, JsonValue],
+        **_kwargs: object,
+    ) -> MatrixToolObservation:
+        calls.append(arguments)
+        raise AssertionError("failed replay must not seed pretrade context")
+
+    monkeypatch.setattr(matrix_module, "call_tool", reject_pretrade)
+    state = _runtime_state()
+    state.analytics_resources = AnalyticsRuntimeResources(
+        dataset_ids_by_analysis_kind={
+            "price_bars": ["ds_11111111111141118111111111111111"],
+            "quote": ["ds_22222222222242228222222222222222"],
+        },
+    )
+    call = next(
+        item for item in analytics_case_calls() if item.analysis_kind == "instrument_price_return"
+    )
+    result = MatrixToolObservation(
+        payload={
+            "status": "verified",
+            "analysis_kind": "instrument_price_return",
+            "analysis_id": analysis_id,
+        },
+        result_parsed=True,
+        result_state="verified",
+        mcp_is_error=False,
+    )
+    failed_receipt = analytics_case_receipt(
+        call,
+        ("verified",),
+        result,
+        returned_analysis_kind="instrument_price_return",
+        analysis_id=analysis_id,
+        persisted_result_authenticated=False,
+    )
+    assert failed_receipt.state == "failed"
+
+    anyio.run(
+        matrix_module._remember_analysis_case_outputs,  # noqa: SLF001
+        cast("MatrixClient", object()),
+        state,
+        call,
+        result,
+        failed_receipt,
+    )
+
+    assert calls == []
+    assert state.analytics_resources.analysis_ids_by_kind["instrument_price_return"] == [
+        analysis_id,
+    ]
+    assert "pretrade_impact" not in (
+        state.analytics_resources.analysis_input_dataset_ids_by_analysis_kind
+    )
 
 
 def test_tool_availability_probe_accepts_only_an_observed_source_refusal() -> None:
