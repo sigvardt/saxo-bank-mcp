@@ -1052,3 +1052,39 @@ The existing Project, Learning, and Session Log were updated in place and read b
 counts 60/39/43 with exactly one active row per title and no page-body edits. The final six-path
 documentation/report/progress privacy scan passed with zero findings and zero scan errors. The
 branch remains local and unpushed.
+
+## Exact `c0ef8c7` successful Task 24 validation
+
+Final source `c0ef8c725f9d5bd8e565f446d026384c8ce22839`, tree
+`3528b15a0a60af1748bf49bc549fdbf40a685168`, binds authenticated analytics
+source-precondition refusals to the seven exact tool/contract routes shared by the executor and
+verifier. Unrouted tools cannot use that compatibility path. Independent review returned APPROVE,
+and the exhaustive routed/unrouted 60-tool probe plus focused, adjacent, lint, format, type,
+plugin, nine-skill static, catalog, eval-manifest, and source-privacy gates passed.
+
+The exact clean candidate passed its retained-runtime install with 623/623 files, nine skills, one
+MCP server, and 60 tools; verify-only passed; and the signed full suite passed 3,084 tests with zero
+failures, errors, or skips. The final structural readback proved the bound runtime present and
+unconsumed before proof. Local status proved SIM with LIVE reads and writes disabled, and exactly
+one read-only capability call passed with network activity, no token refresh, and no order or
+subscription.
+
+The exactly one sealed `codex_native_v1` proof passed without retry. Strict authenticated
+publication is `verified_result` / `validated`: 54 analysis kinds, 54 evidence receipts, and 54
+executed receipts; the fresh exact 60-tool SIM matrix, numerical checks, controlled SIM lifecycle,
+reconciliation, cleanup, and account-equality gates all passed. `broker_write_made=false` and
+`disclaimer_response_made=false`. Runtime consumption and cleanup authenticated complete, the
+runtime and proof temp are absent, and later observation found zero task processes or open evidence
+files.
+
+All 54 profiles are therefore active in the authenticated process-local Task 24 release manifest.
+This is not a LIVE, persistent broker-side, trade, purchase, order, subscription, or remote
+configuration mutation. The branch remains local and unpushed. The terminal public proof-artifact
+scan covered ten paths with zero findings and zero scan errors; owner-only install and suite
+custody receipts retain expected private path bindings and remain mode 0600 rather than public
+artifacts.
+
+The existing active Knowledge Base Project, Learning, and Session Log were updated in place and
+read back exactly once each at Content counts 61, 40, and 44. Their title, type, unarchived state,
+Source, Summary, and terminal Content agree; Project and Session retain their final `Resume:`
+boundary. No duplicate row or page-body edit was created.

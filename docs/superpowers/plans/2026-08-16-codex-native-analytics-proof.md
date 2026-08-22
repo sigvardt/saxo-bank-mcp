@@ -442,3 +442,28 @@ activation ran; 0/54 profiles remain active.
 Closeout readback updated the same three existing Knowledge Base rows at Content counts 60/39/43
 with no duplicate or body edit. The final six-path privacy scan passed with zero findings and zero
 scan errors; the branch remains local and unpushed.
+
+## Terminal completion: `c0ef8c7`
+
+- [x] Freeze exact source `c0ef8c725f9d5bd8e565f446d026384c8ce22839`, tree
+  `3528b15a0a60af1748bf49bc549fdbf40a685168`, after independent APPROVE review.
+- [x] Pass retained-runtime install and verify-only with 623 exact files, nine skills, one MCP, and
+  60 tools.
+- [x] Pass the signed exact-candidate suite: 3,084 tests, zero failures/errors/skips.
+- [x] Pass lint, type, plugin, skill-static, catalog, eval-manifest, privacy, structural,
+  clean-source, process, mode, and unconsumed-runtime gates.
+- [x] Prove SIM/LIVE-off status and pass exactly one read-only capability call without refresh,
+  order, or subscription.
+- [x] Run exactly one sealed `codex_native_v1` proof and authenticate `verified_result` /
+  `validated` with 54 analysis kinds, 54 evidence receipts, and 54 executed receipts.
+- [x] Pass the numerical proof, fresh exact 60-tool SIM matrix, controlled lifecycle,
+  reconciliation, cleanup, account-equality, and activation gates.
+- [x] Authenticate runtime cleanup, absent proof temp/runtime, zero task processes, and privacy-safe
+  public evidence.
+
+The completed activation is process-local to the authenticated Task 24 release manifest: 54/54
+active. `broker_write_made=false`; no LIVE, trade, purchase, order, subscription, persistent remote
+activation, push, or retry occurred.
+
+- [x] Update and read back the one existing active Knowledge Base Project, Learning, and Session
+  Log in place at Content counts 61/40/44; create no duplicate or page-body content.

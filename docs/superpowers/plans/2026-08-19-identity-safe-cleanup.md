@@ -129,3 +129,15 @@ at `group_member/uncaptured_member`; comparison-only observations do not become 
 remaining counts stay null. A later empty task-process readback and complete runtime cleanup cannot
 turn that unknown receipt into a pass. The sealed attempt produced no authenticated evaluation or
 downstream activation evidence, and 0/54 remains active.
+
+## Terminal validated cleanup result
+
+Exact candidate `c0ef8c725f9d5bd8e565f446d026384c8ce22839` passed the single sealed native
+proof with authenticated candidate-runner cleanup `complete`. Runtime consumption and cleanup are
+digest-bound and complete; the retained runtime and proof temp are absent; later observation found
+zero task processes and zero open evidence files. No unknown cleanup coverage or nullable residue
+count survived the terminal publication.
+
+The validated result contains 54/54 executed receipts and process-local activation after the full
+SIM matrix, reconciliation, account-equality, and cleanup gates. Broker writes remained false, no
+LIVE/trade/purchase/order/subscription action occurred, and nothing was pushed.

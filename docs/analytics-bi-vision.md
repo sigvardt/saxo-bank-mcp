@@ -2600,3 +2600,17 @@ cleanup coverage at `group_member/uncaptured_member` with null remaining counts.
 Authenticated runtime cleanup and later zero task processes do not relabel the refusal. No
 authenticated evaluation summary, model/MCP/Saxo aggregate, broker safety negative, numerical
 proof, matrix, account comparison, or activation survived. Profiles remain 0/54.
+
+## Task 24 completion: exact `c0ef8c7`
+
+The terminal candidate `c0ef8c725f9d5bd8e565f446d026384c8ce22839`, tree
+`3528b15a0a60af1748bf49bc549fdbf40a685168`, passed independent review, exact install and
+verify-only, a signed 3,084-test suite, all required static/privacy/structural gates, SIM-only auth,
+and the one read-only capability call. Its single sealed native proof authenticated a validated
+54-kind/54-receipt/54-executed result together with the fresh 60-tool SIM matrix, numerical proof,
+controlled lifecycle, reconciliation, cleanup, and account-equality checks.
+
+The release boundary now activates 54/54 profiles in the process-local Task 24 manifest. No LIVE
+read or write, broker mutation, order, subscription, trade, purchase, or persistent remote
+activation occurred. Runtime and proof-temp cleanup authenticated complete, public proof evidence
+is privacy-clean, and the local branch remains unpushed.
