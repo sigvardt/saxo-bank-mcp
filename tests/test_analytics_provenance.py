@@ -852,9 +852,8 @@ def test_artifact_runtime_environment_and_host_trust_are_not_caller_switches(
     finally:
         store.close()
 
-    assert isinstance(delivery, render_module.ArtifactResourceLink)
-    assert delivery.owner_only is True
-    assert delivery.reason_code == "inline_private_not_enabled"
+    assert isinstance(delivery, render_module.InlineArtifact)
+    assert "Visibility: inline_private" in delivery.visible_stamps
     assert any(line == "Environment: LIVE" for line in delivery.visible_stamps)
 
 

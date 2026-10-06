@@ -78,6 +78,7 @@ from saxo_bank_mcp.analytics_proof_profiles import (
     ProofProfileCatalog,
     ProofRegistry,
     SourceContractProofBinding,
+    load_proof_profile_catalog,
 )
 from saxo_bank_mcp.analytics_provenance import replay_analysis
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
@@ -246,6 +247,7 @@ def _seed_chart_instrument(config: AnalyticsConfig) -> str:
                     {
                         "AssetType": "Stock",
                         "Description": "Synthetic instrument",
+                        "CurrencyCode": "USD",
                         "ExchangeId": None,
                         "Identifier": 1,
                         "Symbol": None,
@@ -766,6 +768,7 @@ def test_zero_current_exposure_remains_a_valid_zero_shock_scenario_input(
         "reason_code",
         None,
     )
+    assert response.result is not None
     assert response.result.metrics[0].value == 0
 
 
@@ -819,6 +822,7 @@ def test_repeated_position_rows_are_aggregated_into_one_scenario_component(
         "reason_code",
         None,
     )
+    assert response.result is not None
     assert response.result.metrics[0].value == pytest.approx(-3)
 
 
@@ -1082,6 +1086,10 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def _capture_profile(_kind: str) -> SimpleNamespace:
+    return SimpleNamespace(source_revision_scope="capture")
+
+
 def _state_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("SAXO_MCP_ANALYTICS_STORE_QUOTA_GIB", "1")
@@ -1147,7 +1155,7 @@ def test_installed_process_proof_overlay_is_unavailable_on_normal_import(
 ) -> None:
     _state_env(monkeypatch, tmp_path)
     definitions = load_metric_definition_catalog()
-    checked = tools_module.load_proof_profile_catalog(definitions=definitions)
+    checked = load_proof_profile_catalog(definitions=definitions)
     checked_profile = next(
         profile for profile in checked.profiles if profile.analysis_kind == "market_comparison"
     )
@@ -1289,16 +1297,27 @@ async def test_parent_process_cannot_activate_backtest_ghost_proof(
         ),
     )
     assert isinstance(direct, tools_module.RefusedAnalysisToolResponse)
-    assert direct.reason_code in {"backtest_sim_proof_unavailable", "missing_proof_profile"}
+    assert direct.reason_code in {
+        "backtest_sim_proof_unavailable",
+        "missing_proof_profile",
+        "release_unverified",
+    }
 
 
 @pytest.mark.anyio
-async def test_server_account_analytics_capture_routes_every_required_source_family(
+async def test_server_account_analytics_capture_routes_every_required_source_family(  # noqa: C901, PLR0915 - explicit capture-family fixtures
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """The MCP route composes current account, history, cost, and exposure captures."""
+    from saxo_bank_mcp.analytics_provider import SourceRequestBudget  # noqa: PLC0415
+    from saxo_bank_mcp.analytics_sync import (  # noqa: PLC0415
+        CostCaptureChoice,
+        InstrumentDetailsDatasetSummary,
+    )
+
     _state_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
     fingerprint = IngestionFingerprints(
         raw_pages_sha256="1" * 64,
         normalized_rows_sha256="2" * 64,
@@ -1309,9 +1328,16 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
     handle = instrument_handle_for_saxo_identity("Stock", 1)
     snapshot_id = new_safe_handle(HandleKind.DATASET_ID)
     quote_id = new_safe_handle(HandleKind.DATASET_ID)
+    cost_horizon = 30
     calls: list[str] = []
 
+    def consume(kwargs: Mapping[str, object], *contracts: str) -> None:
+        budget = cast("SourceRequestBudget", kwargs["request_budget"])
+        for contract in contracts:
+            budget.consume(contract)
+
     async def capture_snapshot(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        consume(_kwargs, "balances_v1", "positions_v1", "orders_v1")
         calls.append("snapshot")
         return SimpleNamespace(
             account_alias=_ACCOUNT_ALIAS,
@@ -1327,8 +1353,12 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
             warnings=(),
         )
 
-    async def capture_history(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        calls.append("history")
+    async def capture_history(kind: str, kwargs: Mapping[str, object]) -> SimpleNamespace:
+        consume(
+            kwargs,
+            {"bookings": "bookings_v1", "closed_positions": "closed_positions_history_v1"}[kind],
+        )
+        calls.append(kind)
         return SimpleNamespace(
             datasets=tuple(
                 SimpleNamespace(
@@ -1343,13 +1373,42 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
                     row_count=0,
                     warnings=(),
                 )
-                for kind in ("transactions", "bookings", "closed_positions")
+                for kind in (kind,)
             ),
-            source_request_count=3,
+            source_request_count=1,
+        )
+
+    async def capture_bookings(*_args: object, **kwargs: object) -> SimpleNamespace:
+        return await capture_history("bookings", kwargs)
+
+    async def capture_closed_positions(*_args: object, **kwargs: object) -> SimpleNamespace:
+        return await capture_history("closed_positions", kwargs)
+
+    async def capture_details(*_args: object, **kwargs: object) -> SyncResult:
+        consume(kwargs, "reference_instrument_details_v1")
+        calls.append("details")
+        return SyncResult(
+            status=SyncStatus.COMPLETE,
+            source_request_count=1,
+            datasets=(
+                InstrumentDetailsDatasetSummary(
+                    dataset_id=new_safe_handle(HandleKind.DATASET_ID),
+                    instrument_handle=handle,
+                    quality_state=QualityState.COMPLETE,
+                    coverage_start=_NOW,
+                    coverage_end=_NOW,
+                    row_count=1,
+                    warnings=(),
+                    fingerprints=fingerprint,
+                ),
+            ),
         )
 
     async def capture_costs(*_args: object, **_kwargs: object) -> SimpleNamespace:
         assert _kwargs["reference_prices"] == {handle: 50.0}
+        assert _kwargs["reference_amounts"] == {handle: 12.0}
+        assert _kwargs["holding_period_days"] == cost_horizon
+        consume(_kwargs, "costs_v1")
         calls.append("costs")
         return SimpleNamespace(
             datasets=(
@@ -1369,6 +1428,7 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
         )
 
     async def capture_quote(*_args: object, **_kwargs: object) -> SyncResult:
+        consume(_kwargs, "info_price_v1")
         calls.append("quote")
         return SyncResult(
             status=SyncStatus.COMPLETE,
@@ -1416,6 +1476,15 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
         **_kwargs: object,
     ) -> tuple[tuple[SimpleNamespace, ...], int]:
         calls.append("supplemental")
+        assert _kwargs["from_date"] is None
+        assert _kwargs["to_date"] is None
+        contracts = (
+            "performance_timeseries_v4",
+            "exposure_instruments_v1",
+            "corporate_action_events_v2",
+            "corporate_action_holdings_v2",
+        )
+        consume(_kwargs, *contracts)
         return (
             tuple(
                 SimpleNamespace(
@@ -1432,13 +1501,9 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
                     row_count=1,
                     warnings=(),
                 )
-                for contract_id in (
-                    "performance_summary_v4",
-                    "performance_timeseries_v4",
-                    "exposure_instruments_v1",
-                )
+                for contract_id in contracts
             ),
-            3,
+            4,
         )
 
     def server_scope(_selector: str) -> object:
@@ -1446,7 +1511,9 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
 
     monkeypatch.setattr(tools_module, "_server_account_scope", server_scope)
     monkeypatch.setattr(tools_module, "capture_portfolio_snapshot", capture_snapshot)
-    monkeypatch.setattr(tools_module, "sync_account_history", capture_history)
+    monkeypatch.setattr(tools_module, "sync_bookings", capture_bookings)
+    monkeypatch.setattr(tools_module, "sync_closed_positions", capture_closed_positions)
+    monkeypatch.setattr(tools_module, "capture_instrument_details", capture_details)
     monkeypatch.setattr(tools_module, "capture_quote", capture_quote, raising=False)
     monkeypatch.setattr(tools_module, "get_dataset", read_quote)
     monkeypatch.setattr(tools_module, "sync_cost_sources", capture_costs)
@@ -1461,24 +1528,41 @@ async def test_server_account_analytics_capture_routes_every_required_source_fam
                 "portfolio_minimum_variance",
                 "derivatives_model",
                 "pretrade_impact",
+                "trading_mirror",
+                "income_calendar",
+                "corporate_action_center",
             ),
             instrument_handles=(handle,),
+            cost_choices=(
+                CostCaptureChoice(
+                    instrument_handle=handle, amount=12.0, holding_period_days=cost_horizon
+                ),
+            ),
         ),
         provider=SaxoAnalyticsProvider(),
         config=tools_module._analytics_config(),  # noqa: SLF001
     )
 
-    assert calls == ["snapshot", "history", "quote", "quote_read", "costs", "supplemental"]
-    assert result.source_request_count == sum((3, 3, 1, 1, 3))
+    assert calls == [
+        "snapshot",
+        "bookings",
+        "closed_positions",
+        "details",
+        "quote",
+        "quote_read",
+        "costs",
+        "supplemental",
+    ]
+    assert result.source_request_count == sum((3, 2, 1, 1, 1, 4))
     assert any(getattr(item, "data_kind", None) == "quote" for item in result.datasets)
     assert {getattr(item, "contract_id", None) for item in result.datasets} >= {
         "costs_v1",
         "exposure_instruments_v1",
-        "performance_summary_v4",
         "performance_timeseries_v4",
-        "transactions_v1",
         "bookings_v1",
         "closed_positions_history_v1",
+        "corporate_action_events_v2",
+        "corporate_action_holdings_v2",
     }
 
 
@@ -1946,8 +2030,8 @@ def test_private_delivery_is_derived_from_server_environment(
     assert sim.status == "refused"
     assert sim.reason_code == "analytics_object_not_found"
     assert live.status == "refused"
-    assert live.reason_code == "inline_private_not_enabled"
-    assert live.next_tool == "saxo_export_analysis"
+    assert live.reason_code == "analytics_object_not_found"
+    assert live.next_tool == "saxo_sync_research_data"
 
 
 def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
@@ -1972,6 +2056,7 @@ def test_analysis_authenticates_stored_handle_and_honors_frozen_proof_state(
         def profile(self, analysis_kind: str) -> object:
             assert analysis_kind == "position_sizing"
             return SimpleNamespace(
+                source_revision_scope="capture",
                 activation_state=SimpleNamespace(value="quarantined"),
                 quarantine_reason="implementation_pending",
             )
@@ -2040,6 +2125,7 @@ async def test_active_proof_market_adapter_persists_replays_renders_and_explains
     assert executor.call_count == 1
     assert isinstance(calculated, tools_module.VerifiedAnalysisToolResponse)
     assert calculated.status == "verified"
+    assert calculated.result is not None
     assert calculated.analysis_id == calculated.result.analysis_id
     assert calculated.result.metrics[0].metric_id == "price_return"
     assert calculated.result.metrics[0].value == pytest.approx(0.1)
@@ -2142,6 +2228,7 @@ async def test_active_proof_instrument_adapter_uses_domain_engine_and_replays(
     )
     assert executor.call_count == 1
     assert isinstance(instrument, tools_module.VerifiedAnalysisToolResponse)
+    assert instrument.result is not None
     assert instrument.result.metrics[0].metric_id == "price_return"
     assert instrument.result.metrics[0].value == pytest.approx(0.1)
     assert (
@@ -3248,7 +3335,7 @@ def test_trade_proposal_binds_instrument_and_authenticates_analysis_dataset(
         return _Store()
 
     def proof_registry(_config: AnalyticsConfig, **_kwargs: object) -> object:
-        return object()
+        return SimpleNamespace(profile=_capture_profile)
 
     monkeypatch.setattr(
         tools_module,
@@ -3328,7 +3415,7 @@ def test_bound_pretrade_context_dispatches_proposal_without_broker_authority(
         return _Store()
 
     def proof_registry(_config: AnalyticsConfig, **_kwargs: object) -> object:
-        return object()
+        return SimpleNamespace(profile=_capture_profile)
 
     monkeypatch.setattr(
         tools_module,

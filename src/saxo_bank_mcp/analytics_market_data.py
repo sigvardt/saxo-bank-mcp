@@ -17,6 +17,7 @@ _INSTRUMENT_HANDLE_ADAPTER: Final[TypeAdapter[InstrumentHandle]] = TypeAdapter(
     InstrumentHandle,
 )
 _MAX_PRICE_TYPE_LENGTH: Final = 64
+_ISO_CURRENCY_LENGTH: Final = 3
 
 
 class MarketDataError(RuntimeError):
@@ -112,7 +113,10 @@ class NormalizedOptionReference(_StrictModel):
     expiry: date
     strike_value: float = Field(allow_inf_nan=False)
     put_call: Literal["call", "put"]
-    currency: None = None
+    currency: str | None = None
+    asset_type: Literal["StockOption", "FuturesOption", "StockIndexOption"] | None = None
+    underlying_identifier: int | None = Field(default=None, ge=0)
+    underlying_asset_type: str | None = None
     fingerprint_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -278,16 +282,15 @@ def normalize_option_chain(
         raise MarketDataValidationError("option root ID is invalid")
     if isinstance(expiry, datetime) or type(expiry) is not date:
         raise MarketDataValidationError("option expiry is invalid")
-    if row.get("OptionRootId") != expected_root_id:
+    if type(row.get("OptionRootId")) is not int or row.get("OptionRootId") != expected_root_id:
         raise MarketDataValidationError("option root ID does not match its request")
-    available_expiries = _option_expiries(row.get("ExpiryDates"))
-    if expiry not in available_expiries:
-        raise MarketDataValidationError("requested option expiry is unavailable")
+    documented = row.get("OptionSpace") is not None
+    option_values = _option_values_for_expiry(row, expiry, documented=documented)
     warnings: set[str] = set()
     options: list[NormalizedOptionReference] = []
     identifiers: set[int] = set()
-    for value in _specific_option_values(row.get("SpecificOptions")):
-        option = _normalized_option_reference(value, expiry)
+    for value in option_values:
+        option = _normalized_option_reference(value, expiry, root=row, documented=documented)
         if option is None:
             warnings.add("option_reference_incomplete")
             continue
@@ -296,10 +299,10 @@ def normalize_option_chain(
         identifiers.add(option.source_identifier)
         options.append(option)
     options.sort(key=lambda item: (item.strike_value, item.put_call, item.source_identifier))
-    if options:
+    if any(option.currency is None for option in options):
         warnings.add("option_currency_missing")
     fingerprint = _fingerprint(
-        [option.model_dump(mode="json") for option in options],
+        [option_reference_payload(option) for option in options],
     )
     return NormalizedOptionChain(
         option_root_id=expected_root_id,
@@ -310,6 +313,23 @@ def normalize_option_chain(
     )
 
 
+def _option_values_for_expiry(
+    row: Mapping[str, object], expiry: date, *, documented: bool
+) -> tuple[Mapping[str, object], ...]:
+    if documented:
+        entries = _specific_option_values(row.get("OptionSpace"))
+        matching = tuple(
+            entry for entry in entries if _option_expiry(entry.get("Expiry")) == expiry
+        )
+        if len(matching) != 1:
+            raise MarketDataValidationError("requested option expiry is unavailable or ambiguous")
+        return _specific_option_values(matching[0].get("SpecificOptions"))
+    available_expiries = _option_expiries(row.get("ExpiryDates"))
+    if expiry not in available_expiries:
+        raise MarketDataValidationError("requested option expiry is unavailable")
+    return _specific_option_values(row.get("SpecificOptions"))
+
+
 def _option_expiries(value: object) -> tuple[date, ...]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         raise MarketDataValidationError("option expiry list is invalid")
@@ -318,9 +338,24 @@ def _option_expiries(value: object) -> tuple[date, ...]:
         raise MarketDataValidationError("option expiry list is invalid")
     text_values = cast("Sequence[str]", raw_values)
     try:
-        return tuple(date.fromisoformat(item) for item in text_values)
+        return tuple(_option_expiry(item) for item in text_values)
     except ValueError as error:
         raise MarketDataValidationError("option expiry list is invalid") from error
+
+
+def _option_expiry(value: object) -> date:
+    if not isinstance(value, str):
+        raise MarketDataValidationError("option expiry is invalid")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise MarketDataValidationError("option expiry is invalid") from error
+        if parsed.hour or parsed.minute or parsed.second or parsed.microsecond:
+            raise MarketDataValidationError("option expiry must retain date precision") from None
+        return parsed.date()
 
 
 def _specific_option_values(value: object) -> tuple[Mapping[str, object], ...]:
@@ -337,9 +372,12 @@ def _specific_option_values(value: object) -> tuple[Mapping[str, object], ...]:
 def _normalized_option_reference(
     value: Mapping[str, object],
     expiry: date,
+    *,
+    root: Mapping[str, object],
+    documented: bool,
 ) -> NormalizedOptionReference | None:
     source_identifier = value.get("Uic")
-    strike_value = value.get("Strike")
+    strike_value = value.get("StrikePrice") if documented else value.get("Strike")
     put_call_value = value.get("PutCall")
     if source_identifier is None or strike_value is None or put_call_value is None:
         return None
@@ -352,21 +390,84 @@ def _normalized_option_reference(
     if normalized_put_call not in {"call", "put"}:
         raise MarketDataValidationError("specific option put-call value is invalid")
     put_call = cast("Literal['call', 'put']", normalized_put_call)
-    fingerprint = _fingerprint(
-        {
-            "expiry": expiry.isoformat(),
-            "put_call": put_call,
-            "source_identifier": source_identifier,
-            "strike_value": strike,
-        },
-    )
-    return NormalizedOptionReference(
+    asset_type = root.get("AssetType") if documented else None
+    underlying_identifier = value.get("UnderlyingUic") if documented else None
+    underlying_asset_type = root.get("UnderlyingAssetType") if documented else None
+    currency = root.get("CurrencyCode") if documented else None
+    if asset_type is not None and asset_type not in {
+        "StockOption",
+        "FuturesOption",
+        "StockIndexOption",
+    }:
+        raise MarketDataValidationError("option asset type is invalid")
+    if underlying_identifier is not None and (
+        type(underlying_identifier) is not int or underlying_identifier < 0
+    ):
+        raise MarketDataValidationError("option underlying identifier is invalid")
+    if underlying_asset_type is not None and (
+        not isinstance(underlying_asset_type, str) or not underlying_asset_type.strip()
+    ):
+        raise MarketDataValidationError("option underlying asset type is invalid")
+    if currency is not None and (
+        not isinstance(currency, str)
+        or len(currency) != _ISO_CURRENCY_LENGTH
+        or not currency.isascii()
+        or not currency.isalpha()
+        or not currency.isupper()
+    ):
+        raise MarketDataValidationError("option currency is invalid")
+    if documented and (
+        asset_type is None or underlying_identifier is None or underlying_asset_type is None
+    ):
+        return None
+    option = NormalizedOptionReference(
         source_identifier=source_identifier,
         expiry=expiry,
         strike_value=strike,
         put_call=put_call,
-        fingerprint_sha256=fingerprint,
+        currency=currency,
+        asset_type=cast(
+            "Literal['StockOption', 'FuturesOption', 'StockIndexOption'] | None", asset_type
+        ),
+        underlying_identifier=underlying_identifier,
+        underlying_asset_type=underlying_asset_type,
+        fingerprint_sha256="0" * 64,
     )
+    return option.model_copy(update={"fingerprint_sha256": option_reference_fingerprint(option)})
+
+
+def option_reference_payload(option: NormalizedOptionReference) -> dict[str, object]:
+    """Preserve the serialization of historical references without typed identities."""
+    payload = option.model_dump(mode="json")
+    for field in ("asset_type", "underlying_identifier", "underlying_asset_type"):
+        if payload[field] is None:
+            del payload[field]
+    return payload
+
+
+def option_reference_fingerprint(option: NormalizedOptionReference) -> str:
+    """Bind the observed dimensions while retaining historical reference hashes."""
+    values: dict[str, object] = {
+        "expiry": option.expiry.isoformat(),
+        "put_call": option.put_call,
+        "source_identifier": option.source_identifier,
+        "strike_value": option.strike_value,
+    }
+    if (
+        option.currency is not None
+        or option.asset_type is not None
+        or option.underlying_identifier is not None
+        or option.underlying_asset_type is not None
+    ):
+        values.update(
+            {
+                "asset_type": option.asset_type,
+                "currency": option.currency,
+                "underlying_identifier": option.underlying_identifier,
+                "underlying_asset_type": option.underlying_asset_type,
+            }
+        )
+    return _fingerprint(values)
 
 
 def _validate_instrument_handle(value: str) -> str:
@@ -484,4 +585,6 @@ __all__ = (
     "normalize_option_chain",
     "normalize_price_series",
     "normalize_quote",
+    "option_reference_fingerprint",
+    "option_reference_payload",
 )

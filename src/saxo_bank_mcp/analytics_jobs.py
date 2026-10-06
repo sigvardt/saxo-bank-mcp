@@ -32,6 +32,7 @@ from pydantic import (
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_models import (
     AnalysisId,
+    AnalysisResult,
     ArtifactId,
     DatasetId,
     HandleKind,
@@ -150,6 +151,7 @@ class JobRequest(_StrictModel):
     parameters: tuple[JobParameter, ...] = Field(default=(), max_length=_MAX_PARAMETERS)
     total_work_units: int = Field(ge=1, le=5_000_000)
     restart_interrupted: bool = False
+    recipe_request_json: str | None = Field(default=None, min_length=2, max_length=100_000)
 
     @model_validator(mode="after")
     def _normalize_request(self) -> Self:
@@ -302,7 +304,7 @@ type ProgressReporter = Callable[[int], Awaitable[None]]
 class JobExecutionContext:
     """Trusted in-process execution context; paths never enter a public result."""
 
-    __slots__ = ("_reporter", "_workspace", "total_work_units")
+    __slots__ = ("_committer", "_reporter", "_workspace", "total_work_units")
 
     def __init__(
         self,
@@ -310,11 +312,13 @@ class JobExecutionContext:
         workspace: Path,
         total_work_units: int,
         reporter: ProgressReporter,
+        committer: Callable[[AnalysisResult], Awaitable[JobConclusion]] | None = None,
     ) -> None:
         """Bind one private workspace and its manager-owned progress reporter."""
         self._workspace = workspace
         self.total_work_units = total_work_units
         self._reporter = reporter
+        self._committer = committer
 
     @property
     def workspace(self) -> Path:
@@ -324,6 +328,12 @@ class JobExecutionContext:
     async def report_progress(self, completed_units: int) -> None:
         """Persist safe work counts without accepting a partial conclusion."""
         await self._reporter(completed_units)
+
+    async def commit_analysis(self, result: AnalysisResult) -> JobConclusion:
+        """Publish a complete result and its job receipt at one manager-owned checkpoint."""
+        if self._committer is None:
+            raise JobStateError("analytics job has no result commit checkpoint")
+        return await self._committer(result)
 
 
 class JobHandler(Protocol):
@@ -553,6 +563,7 @@ class AnalyticsJobManager:
                 workspace=workspace,
                 total_work_units=request.total_work_units,
                 reporter=lambda completed: self._record_progress(job_id, completed),
+                committer=lambda result: self._commit_analysis(job_id, result),
             )
             conclusion = await handler(request, context)
             validated_conclusion = JobConclusion.model_validate(conclusion)
@@ -615,6 +626,37 @@ class AnalyticsJobManager:
                 raise JobStateError("job progress must be monotone and bounded")
             persisted = row.persisted.model_copy(update={"completed_units": completed_units})
             self._write_row(row, state="running", persisted=persisted)
+
+    async def _commit_analysis(self, job_id: str, result: AnalysisResult) -> JobConclusion:
+        """Serialize cancellation against one transaction containing the result and receipt."""
+        async with self._lock:
+            self._require_open()
+            row = self._require_row(job_id)
+            if row.state != "running" or job_id in self._stop_intents:
+                raise JobStateError("analytics job result commit was stopped")
+            if _utc_now() >= row.persisted.expires_at:
+                raise JobExpiredError("analytics job expired before result commit")
+            validated = AnalysisResult.model_validate(result)
+            conclusion = JobConclusion(analysis_id=validated.analysis_id, artifact_ids=())
+            persisted = row.persisted.model_copy(
+                update={
+                    "completed_units": row.persisted.total_units,
+                    "status_code": "job_completed",
+                    "artifact_ids": (),
+                }
+            )
+            _cleanup_workspace(self._workspace_root, job_id)
+            # There is no await between the stop-intent check and transaction completion.
+            # Both rows become visible together; a late cancel reads the completed receipt.
+            with self._store.transaction():
+                self._store.put_analysis(validated)
+                self._write_row(
+                    row,
+                    state="completed",
+                    persisted=persisted,
+                    analysis_id=validated.analysis_id,
+                )
+            return conclusion
 
     def _insert_row(
         self,

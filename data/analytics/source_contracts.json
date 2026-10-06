@@ -386,7 +386,8 @@
         "Identifier",
         "AssetType"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "reference_instrument_details_v1",
@@ -447,6 +448,160 @@
           ],
           "required": false,
           "value_type": "object"
+        },
+        {
+          "enum_values": [],
+          "name": "ContractSize",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "LotSize",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "MinimumTradeSize",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "AmountDecimals",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "ExpiryDate",
+          "nullable": true,
+          "required": false,
+          "value_type": "date"
+        },
+        {
+          "enum_values": [],
+          "name": "ExpiryDateTime",
+          "nullable": true,
+          "required": false,
+          "value_type": "timestamp"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceToContractFactor",
+          "nullable": true,
+          "required": false,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "TradingStatus",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Symbol",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "PriceCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RelatedOptionRoots",
+          "nullable": true,
+          "required": false,
+          "value_type": "array",
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "integer"
+          }
+        },
+        {
+          "enum_values": [],
+          "name": "RelatedOptionRootsEnhanced",
+          "nullable": true,
+          "required": false,
+          "value_type": "array",
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "object",
+            "object_mode": "closed",
+            "properties": [
+              {
+                "enum_values": [],
+                "name": "AssetType",
+                "nullable": false,
+                "required": true,
+                "value_type": "string"
+              },
+              {
+                "enum_values": [],
+                "name": "OptionRootId",
+                "nullable": false,
+                "required": true,
+                "value_type": "integer"
+              },
+              {
+                "enum_values": [],
+                "name": "OptionType",
+                "nullable": true,
+                "required": false,
+                "value_type": "string"
+              }
+            ]
+          }
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingAssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "RelatedInstruments",
+          "nullable": true,
+          "required": false,
+          "value_type": "array",
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "object",
+            "object_mode": "closed",
+            "properties": [
+              {
+                "enum_values": [],
+                "name": "AssetType",
+                "nullable": false,
+                "required": true,
+                "value_type": "string"
+              },
+              {
+                "enum_values": [],
+                "name": "Uic",
+                "nullable": false,
+                "required": true,
+                "value_type": "integer"
+              }
+            ]
+          }
         }
       ],
       "method": "GET",
@@ -535,7 +690,8 @@
         "Uic",
         "AssetType"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "options_chain_reference_v1",
@@ -559,8 +715,8 @@
             "value_type": "date"
           },
           "name": "ExpiryDates",
-          "nullable": false,
-          "required": true,
+          "nullable": true,
+          "required": false,
           "value_type": "array"
         },
         {
@@ -598,6 +754,103 @@
           "nullable": true,
           "required": false,
           "value_type": "array"
+        },
+        {
+          "enum_values": [
+            "StockOption",
+            "FuturesOption",
+            "StockIndexOption"
+          ],
+          "name": "AssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "CurrencyCode",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "UnderlyingAssetType",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "OptionSpace",
+          "nullable": true,
+          "required": false,
+          "value_type": "array",
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "object",
+            "object_mode": "closed",
+            "properties": [
+              {
+                "enum_values": [],
+                "name": "Expiry",
+                "nullable": false,
+                "required": true,
+                "value_type": "date"
+              },
+              {
+                "enum_values": [],
+                "name": "SpecificOptions",
+                "nullable": true,
+                "required": false,
+                "value_type": "array",
+                "items": {
+                  "enum_values": [],
+                  "nullable": false,
+                  "value_type": "object",
+                  "object_mode": "closed",
+                  "properties": [
+                    {
+                      "enum_values": [],
+                      "name": "PutCall",
+                      "nullable": true,
+                      "required": false,
+                      "value_type": "string"
+                    },
+                    {
+                      "enum_values": [],
+                      "name": "StrikePrice",
+                      "nullable": true,
+                      "required": false,
+                      "value_type": "number"
+                    },
+                    {
+                      "enum_values": [],
+                      "name": "Uic",
+                      "nullable": true,
+                      "required": false,
+                      "value_type": "integer"
+                    },
+                    {
+                      "enum_values": [],
+                      "name": "UnderlyingUic",
+                      "nullable": true,
+                      "required": false,
+                      "value_type": "integer"
+                    },
+                    {
+                      "enum_values": [],
+                      "name": "TradingStatus",
+                      "nullable": true,
+                      "required": false,
+                      "value_type": "string"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
         }
       ],
       "method": "GET",
@@ -628,7 +881,8 @@
       "stable_key_fields": [
         "OptionRootId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "info_price_v1",
@@ -825,6 +1079,30 @@
           "nullable": true,
           "required": false,
           "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "DisplayAndFormat",
+          "nullable": true,
+          "required": false,
+          "value_type": "object",
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Symbol",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Currency",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ]
         }
       ],
       "method": "GET",
@@ -861,7 +1139,8 @@
         "Uic",
         "AssetType"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "info_prices_list_v1",
@@ -987,7 +1266,8 @@
         "Uic",
         "AssetType"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "performance_summary_v4",
@@ -1154,7 +1434,8 @@
       "schema_version": "1",
       "source_kind": "performance",
       "stable_key_fields": [],
-      "stable_key_policy": "unkeyed_snapshot"
+      "stable_key_policy": "unkeyed_snapshot",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "performance_timeseries_v4",
@@ -1424,7 +1705,8 @@
       "schema_version": "1",
       "source_kind": "performance",
       "stable_key_fields": [],
-      "stable_key_policy": "unkeyed_snapshot"
+      "stable_key_policy": "unkeyed_snapshot",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "balances_v1",
@@ -1942,7 +2224,8 @@
       "schema_version": "1",
       "source_kind": "balances",
       "stable_key_fields": [],
-      "stable_key_policy": "unkeyed_snapshot"
+      "stable_key_policy": "unkeyed_snapshot",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "positions_v1",
@@ -2389,7 +2672,8 @@
       "stable_key_fields": [
         "PositionId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "orders_v1",
@@ -2508,7 +2792,8 @@
       "stable_key_fields": [
         "OrderId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "transactions_v1",
@@ -2669,7 +2954,8 @@
       "stable_key_fields": [
         "TransactionId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "bookings_v1",
@@ -3087,7 +3373,8 @@
       "stable_key_fields": [
         "BkAmountId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "closed_positions_history_v1",
@@ -3390,6 +3677,13 @@
           "nullable": true,
           "required": false,
           "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "InstrumentCurrency",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
         }
       ],
       "method": "GET",
@@ -3478,7 +3772,8 @@
       "stable_key_fields": [
         "ClosePositionId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "exposure_instruments_v1",
@@ -3659,7 +3954,8 @@
         "Uic",
         "AssetType"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "costs_v1",
@@ -3928,7 +4224,8 @@
       "schema_version": "1",
       "source_kind": "costs",
       "stable_key_fields": [],
-      "stable_key_policy": "unkeyed_snapshot"
+      "stable_key_policy": "unkeyed_snapshot",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "corporate_action_events_v2",
@@ -3946,31 +4243,154 @@
           "value_type": "string"
         },
         {
-          "enum_values": [
-            "CashDividend",
-            "Merger",
-            "RightsIssue",
-            "StockDividend",
-            "StockSplit"
-          ],
-          "name": "EventType",
-          "nullable": false,
-          "required": true,
+          "enum_values": [],
+          "name": "Uic",
+          "nullable": true,
+          "required": false,
+          "value_type": "integer"
+        },
+        {
+          "enum_values": [],
+          "name": "AssetType",
+          "nullable": true,
+          "required": false,
           "value_type": "string"
         },
         {
           "enum_values": [],
-          "name": "ExDate",
+          "name": "EventType",
           "nullable": true,
           "required": false,
-          "value_type": "date"
+          "value_type": "object",
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Code",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Name",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            },
+            {
+              "enum_values": [],
+              "name": "Description",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ]
         },
         {
           "enum_values": [],
-          "name": "PayDate",
+          "name": "Ex",
           "nullable": true,
           "required": false,
-          "value_type": "date"
+          "value_type": "object",
+          "object_mode": "closed",
+          "properties": [
+            {
+              "enum_values": [],
+              "name": "Date",
+              "nullable": true,
+              "required": false,
+              "value_type": "date"
+            },
+            {
+              "enum_values": [],
+              "name": "Status",
+              "nullable": true,
+              "required": false,
+              "value_type": "string"
+            }
+          ]
+        },
+        {
+          "enum_values": [],
+          "name": "EventState",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "EventStatus",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
+        },
+        {
+          "enum_values": [],
+          "name": "Options",
+          "nullable": true,
+          "required": false,
+          "value_type": "array",
+          "items": {
+            "enum_values": [],
+            "nullable": false,
+            "value_type": "object",
+            "object_mode": "closed",
+            "properties": [
+              {
+                "enum_values": [],
+                "name": "OptionId",
+                "nullable": true,
+                "required": false,
+                "value_type": "string"
+              },
+              {
+                "enum_values": [],
+                "name": "Payment",
+                "nullable": true,
+                "required": false,
+                "value_type": "object",
+                "object_mode": "closed",
+                "properties": [
+                  {
+                    "enum_values": [],
+                    "name": "Date",
+                    "nullable": true,
+                    "required": false,
+                    "value_type": "date"
+                  },
+                  {
+                    "enum_values": [],
+                    "name": "Status",
+                    "nullable": true,
+                    "required": false,
+                    "value_type": "string"
+                  }
+                ]
+              },
+              {
+                "enum_values": [],
+                "name": "IsDefault",
+                "nullable": true,
+                "required": false,
+                "value_type": "boolean"
+              },
+              {
+                "enum_values": [],
+                "name": "GrossRate",
+                "nullable": true,
+                "required": false,
+                "value_type": "number"
+              },
+              {
+                "enum_values": [],
+                "name": "NetRate",
+                "nullable": true,
+                "required": false,
+                "value_type": "number"
+              }
+            ]
+          }
         }
       ],
       "method": "GET",
@@ -4075,7 +4495,8 @@
       "stable_key_fields": [
         "EventId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     },
     {
       "contract_id": "corporate_action_holdings_v2",
@@ -4093,17 +4514,31 @@
         },
         {
           "enum_values": [],
-          "name": "Uic",
+          "name": "AccountId",
           "nullable": false,
           "required": true,
-          "value_type": "integer"
+          "value_type": "string"
         },
         {
           "enum_values": [],
           "name": "Amount",
+          "nullable": false,
+          "required": true,
+          "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "ElectedAmount",
           "nullable": true,
           "required": false,
           "value_type": "number"
+        },
+        {
+          "enum_values": [],
+          "name": "ElectionStatus",
+          "nullable": true,
+          "required": false,
+          "value_type": "string"
         }
       ],
       "method": "GET",
@@ -4192,9 +4627,10 @@
       "source_kind": "corporate_actions",
       "stable_key_fields": [
         "EventId",
-        "Uic"
+        "AccountId"
       ],
-      "stable_key_policy": "required_unique"
+      "stable_key_policy": "required_unique",
+      "unmodeled_field_policy": "ignore"
     }
   ],
   "schema_version": "1"

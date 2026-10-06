@@ -200,6 +200,12 @@ def test_installed_identity_seals_runtime_dependencies_and_source_wheel_projecti
         "scripts/generate_analytics_source_matrix_candidate.py",
         "scripts/run_analytics_source_matrix.py",
     } <= set(manifest["source_files"])
+    release_path = "data/analytics/production_release.json"
+    release_resource = "saxo_bank_mcp/_analytics_production/production_release.json"
+    assert manifest["source_files"][release_path] == hashlib.sha256(
+        (build_root / release_path).read_bytes()
+    ).hexdigest()
+    assert manifest["installed_files"][release_resource] == manifest["source_files"][release_path]
 
     foreign_wheel = tmp_path / "foreign.whl"
     _mutated_wheel(wheel, foreign_wheel)

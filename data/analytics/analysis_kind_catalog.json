@@ -1,8 +1,8 @@
 {
   "schema_version": "1",
   "catalog_version": "2026.07.30.1",
-  "source_contract_catalog_sha256": "88988d8d181ea86a7b683a28bc30cdee14573381da88a85302a8caf940648750",
-  "metric_definition_catalog_sha256": "bb423affe37f7e4fdad77d56615a57a0358b159cc83404a2f8d11405b920e6c4",
+  "source_contract_catalog_sha256": "1aaed15896fab2b06d793b414754e8a6e994423389024b19a601291a72df8f97",
+  "metric_definition_catalog_sha256": "59c0fdd1143a97fa3c799f5f9624d2694588604ae1af809dd3b02bcca289b15d",
   "source_contract_ids": [
     "chart_v3",
     "reference_instruments_v1",

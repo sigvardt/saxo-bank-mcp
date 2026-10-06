@@ -387,6 +387,7 @@ class SourceSchemaDriftError(SourceProviderError):
         self.null_required_fields = comparison.null_required_fields
         self.required_type_mismatches = comparison.required_type_mismatches
         self.additive_fields = comparison.additive_fields
+        self.optional_type_mismatches = comparison.optional_type_mismatches
         self.unknown_enum_fields = tuple(sorted(comparison.unknown_enum_values))
         self.quarantined_analysis_kinds = comparison.quarantined_analysis_kinds
 

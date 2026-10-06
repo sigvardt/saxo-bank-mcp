@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -466,6 +467,7 @@ type ProofCheck = Literal[
     "independent_reference",
     "saxo_reconciliation",
     "sim_end_to_end",
+    "installed_end_to_end",
 ]
 
 
@@ -574,7 +576,7 @@ class _EvidenceAwareModel(_StrictAnalyticsModel):
         if self.visibility.value not in _PUBLIC_VISIBILITY_MODES:
             return self
         payload = self.model_dump(mode="json")
-        if payload.get("metrics"):
+        if payload.get("metrics") or payload.get("tables"):
             raise PydanticCustomError(
                 "analytics_public_numeric_claim",
                 _NUMERIC_EVIDENCE_MESSAGE,
@@ -718,16 +720,35 @@ class ActiveProofReceipt(_StrictAnalyticsModel):
                 "active proof receipt requires the exact Task 3 proof checks",
             )
         supplied_checks = cast("list[object] | tuple[object, ...]", value)
+        offline_checks = (_REQUIRED_PROOF_CHECKS - {"sim_end_to_end"}) | {"installed_end_to_end"}
         if (
             len(supplied_checks) != len(_REQUIRED_PROOF_CHECKS)
-            or any(check not in _REQUIRED_PROOF_CHECKS for check in supplied_checks)
-            or any(check not in supplied_checks for check in _REQUIRED_PROOF_CHECKS)
+            or not all(isinstance(check, str) for check in supplied_checks)
+            or frozenset(supplied_checks)
+            not in (
+                _REQUIRED_PROOF_CHECKS,
+                offline_checks,
+            )
         ):
             raise PydanticCustomError(
                 "analytics_proof_checks",
                 "active proof receipt requires the exact Task 3 proof checks",
             )
         return tuple(supplied_checks)
+
+
+class AnalysisDependency(_StrictAnalyticsModel):
+    """Exact immutable prior result used by another calculation."""
+
+    analysis_id: AnalysisId
+    result_sha256: Sha256Fingerprint
+
+
+class InputDatasetDependency(_StrictAnalyticsModel):
+    """Original input capture, independently checked beyond its composite copy."""
+
+    dataset_id: DatasetId
+    fingerprint_sha256: Sha256Fingerprint
 
 
 class AnalysisProvenance(_StrictAnalyticsModel):
@@ -746,9 +767,21 @@ class AnalysisProvenance(_StrictAnalyticsModel):
     analysis_engine_sha256: Sha256Fingerprint
     analysis_seed_sha256: Sha256Fingerprint
     random_seed: int | None = Field(default=None, ge=0, lt=2**64)
+    analysis_dependencies: tuple[AnalysisDependency, ...] = Field(default=(), max_length=100)
+    input_dataset_dependencies: tuple[InputDatasetDependency, ...] = Field(
+        default=(), max_length=100
+    )
 
     @model_validator(mode="after")
     def _validate_proof_lists(self) -> Self:
+        for identifiers in (
+            tuple(item.analysis_id for item in self.analysis_dependencies),
+            tuple(item.dataset_id for item in self.input_dataset_dependencies),
+        ):
+            if len(set(identifiers)) != len(identifiers):
+                raise PydanticCustomError(
+                    "analytics_duplicate_dependency", "dependency identifiers must be unique"
+                )
         proof_profile_ids = tuple(receipt.proof_profile_id for receipt in self.proof_receipts)
         if len(set(proof_profile_ids)) != len(proof_profile_ids):
             raise PydanticCustomError(
@@ -808,6 +841,10 @@ class AnalysisParameterBinding(_StrictAnalyticsModel):
     reporting_currency: IsoCurrencyCode
     metric_currency_bindings: tuple[MetricCurrencyBinding, ...] = Field(max_length=206)
     model_parameters: tuple[NamedModelParameter, ...] = Field(max_length=64)
+    analysis_dependencies: tuple[AnalysisDependency, ...] = Field(default=(), max_length=100)
+    input_dataset_dependencies: tuple[InputDatasetDependency, ...] = Field(
+        default=(), max_length=100
+    )
 
     @model_validator(mode="after")
     def _validate_material_parameters(self) -> Self:
@@ -882,15 +919,59 @@ class PortfolioAnalysisRequest(_AnalysisRequestBase):
     portfolio_snapshot_id: PortfolioSnapshotId
 
 
+class RecipeAnalysisRequest(_AnalysisRequestBase):
+    """The complete typed caller choices and immutable input handles used by a recipe."""
+
+    request_kind: Literal["recipe"]
+    input_dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=100)
+    recipe_arguments_json: str = Field(min_length=2, max_length=100_000)
+
+
 type AnalysisRequest = Annotated[
-    MarketAnalysisRequest | InstrumentAnalysisRequest | PortfolioAnalysisRequest,
+    MarketAnalysisRequest
+    | InstrumentAnalysisRequest
+    | PortfolioAnalysisRequest
+    | RecipeAnalysisRequest,
     Field(discriminator="request_kind"),
 ]
 
 
+class AnalysisCell(_StrictAnalyticsModel):
+    """One bounded scalar in an owner-only analytical table."""
+
+    field: ContractName
+    value: str | float | int | bool | None
+    unit: NonEmptyText | None = None
+    currency: IsoCurrencyCode | None = None
+
+    @field_validator("value")
+    @classmethod
+    def _finite_cell(cls, value: str | float | bool | None) -> str | float | int | bool | None:  # noqa: FBT001
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("analytical table values must be finite")
+        return value
+
+
+class AnalysisRow(_StrictAnalyticsModel):
+    """A dimensioned row containing no raw account or broker identifiers."""
+
+    label: NonEmptyText
+    instrument_handle: InstrumentHandle | None = None
+    at: UtcDateTime | None = None
+    cells: tuple[AnalysisCell, ...] = Field(min_length=1, max_length=64)
+
+
+class AnalysisTable(_StrictAnalyticsModel):
+    """A source-bound table or series preserved by replay and export."""
+
+    table_id: ContractName
+    title: NonEmptyText
+    rows: tuple[AnalysisRow, ...] = Field(max_length=50_000)
+
+
 class AnalysisResult(_EvidenceAwareModel):
     schema_version: Literal["1"] = _SCHEMA_VERSION
-    status: Literal[AnalysisStatus.VERIFIED] = AnalysisStatus.VERIFIED
+    status: Literal[AnalysisStatus.VERIFIED, AnalysisStatus.DEGRADED] = AnalysisStatus.VERIFIED
     tool_name: ContractName
     analysis_id: AnalysisId
     analysis_kind: ContractName
@@ -898,7 +979,9 @@ class AnalysisResult(_EvidenceAwareModel):
     account_scope: SafeAccountScope
     as_of: UtcDateTime
     valid_until: UtcDateTime
-    metrics: tuple[MetricValue, ...] = Field(min_length=1)
+    metrics: tuple[MetricValue, ...] = ()
+    tables: tuple[AnalysisTable, ...] = Field(default=(), max_length=32)
+    unavailable_fields: tuple[ContractName, ...] = Field(default=(), max_length=256)
     warnings: tuple[AnalysisWarning, ...]
     data_quality: DataQuality
     provenance: AnalysisProvenance
@@ -956,6 +1039,18 @@ class AnalysisResult(_EvidenceAwareModel):
             )
 
     def _validate_verified_values(self) -> None:
+        if not self.metrics and not any(table.rows for table in self.tables):
+            raise PydanticCustomError(
+                "analytics_empty_result",
+                "analytical results require metrics or substantive rows",
+            )
+        if self.status is AnalysisStatus.DEGRADED:
+            if not self.warnings and not self.unavailable_fields:
+                raise PydanticCustomError(
+                    "analytics_degraded_reason",
+                    "degraded results require explicit limitations",
+                )
+            return
         if self.data_quality.state is not QualityState.COMPLETE:
             raise PydanticCustomError(
                 "analytics_verified_quality",
@@ -1150,7 +1245,7 @@ def validate_public_evidence(result: AnalysisOutput) -> None:
         "dict[str, PublicEvidenceValue]",
         result.model_dump(mode="json"),
     )
-    if payload.get("metrics"):
+    if payload.get("metrics") or payload.get("tables"):
         raise AnalyticsPrivacyError(
             "material_numeric_claim",
             _NUMERIC_EVIDENCE_MESSAGE,

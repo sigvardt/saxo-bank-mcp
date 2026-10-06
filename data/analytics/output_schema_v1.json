@@ -58,6 +58,81 @@
       "title": "AnalysisCalendar",
       "type": "string"
     },
+    "AnalysisCell": {
+      "additionalProperties": false,
+      "description": "One bounded scalar in an owner-only analytical table.",
+      "properties": {
+        "currency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IsoCurrencyCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "field": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NonEmptyText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "field",
+        "value"
+      ],
+      "title": "AnalysisCell",
+      "type": "object"
+    },
+    "AnalysisDependency": {
+      "additionalProperties": false,
+      "description": "Exact immutable prior result used by another calculation.",
+      "properties": {
+        "analysis_id": {
+          "$ref": "#/$defs/AnalysisId"
+        },
+        "result_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        }
+      },
+      "required": [
+        "analysis_id",
+        "result_sha256"
+      ],
+      "title": "AnalysisDependency",
+      "type": "object"
+    },
     "AnalysisId": {
       "pattern": "^an_[0-9a-f]{32}$",
       "type": "string"
@@ -65,6 +140,15 @@
     "AnalysisParameterBinding": {
       "additionalProperties": false,
       "properties": {
+        "analysis_dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AnalysisDependency"
+          },
+          "maxItems": 100,
+          "title": "Analysis Dependencies",
+          "type": "array"
+        },
         "as_of": {
           "$ref": "#/$defs/UtcDateTime"
         },
@@ -110,6 +194,15 @@
             }
           ]
         },
+        "input_dataset_dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/InputDatasetDependency"
+          },
+          "maxItems": 100,
+          "title": "Input Dataset Dependencies",
+          "type": "array"
+        },
         "metric_currency_bindings": {
           "items": {
             "$ref": "#/$defs/MetricCurrencyBinding"
@@ -153,6 +246,15 @@
     "AnalysisProvenance": {
       "additionalProperties": false,
       "properties": {
+        "analysis_dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AnalysisDependency"
+          },
+          "maxItems": 100,
+          "title": "Analysis Dependencies",
+          "type": "array"
+        },
         "analysis_engine_sha256": {
           "$ref": "#/$defs/Sha256Fingerprint"
         },
@@ -176,6 +278,15 @@
         },
         "engine_version": {
           "$ref": "#/$defs/EngineVersion"
+        },
+        "input_dataset_dependencies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/InputDatasetDependency"
+          },
+          "maxItems": 100,
+          "title": "Input Dataset Dependencies",
+          "type": "array"
         },
         "proof_receipts": {
           "items": {
@@ -245,7 +356,8 @@
         "mapping": {
           "instrument": "#/$defs/InstrumentAnalysisRequest",
           "market": "#/$defs/MarketAnalysisRequest",
-          "portfolio": "#/$defs/PortfolioAnalysisRequest"
+          "portfolio": "#/$defs/PortfolioAnalysisRequest",
+          "recipe": "#/$defs/RecipeAnalysisRequest"
         },
         "propertyName": "request_kind"
       },
@@ -258,6 +370,9 @@
         },
         {
           "$ref": "#/$defs/PortfolioAnalysisRequest"
+        },
+        {
+          "$ref": "#/$defs/RecipeAnalysisRequest"
         }
       ]
     },
@@ -304,10 +419,10 @@
           "type": "boolean"
         },
         "metrics": {
+          "default": [],
           "items": {
             "$ref": "#/$defs/MetricValue"
           },
-          "minItems": 1,
           "title": "Metrics",
           "type": "array"
         },
@@ -339,13 +454,34 @@
           "type": "string"
         },
         "status": {
-          "const": "verified",
           "default": "verified",
+          "enum": [
+            "verified",
+            "degraded"
+          ],
           "title": "Status",
           "type": "string"
         },
+        "tables": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AnalysisTable"
+          },
+          "maxItems": 32,
+          "title": "Tables",
+          "type": "array"
+        },
         "tool_name": {
           "$ref": "#/$defs/ContractName"
+        },
+        "unavailable_fields": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContractName"
+          },
+          "maxItems": 256,
+          "title": "Unavailable Fields",
+          "type": "array"
         },
         "valid_until": {
           "$ref": "#/$defs/UtcDateTime"
@@ -377,7 +513,6 @@
         "account_scope",
         "as_of",
         "valid_until",
-        "metrics",
         "warnings",
         "data_quality",
         "provenance",
@@ -391,6 +526,79 @@
         "next_actions"
       ],
       "title": "AnalysisResult",
+      "type": "object"
+    },
+    "AnalysisRow": {
+      "additionalProperties": false,
+      "description": "A dimensioned row containing no raw account or broker identifiers.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcDateTime"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cells": {
+          "items": {
+            "$ref": "#/$defs/AnalysisCell"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Cells",
+          "type": "array"
+        },
+        "instrument_handle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstrumentHandle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "label": {
+          "$ref": "#/$defs/NonEmptyText"
+        }
+      },
+      "required": [
+        "label",
+        "cells"
+      ],
+      "title": "AnalysisRow",
+      "type": "object"
+    },
+    "AnalysisTable": {
+      "additionalProperties": false,
+      "description": "A source-bound table or series preserved by replay and export.",
+      "properties": {
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/AnalysisRow"
+          },
+          "maxItems": 50000,
+          "title": "Rows",
+          "type": "array"
+        },
+        "table_id": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "title": {
+          "$ref": "#/$defs/NonEmptyText"
+        }
+      },
+      "required": [
+        "table_id",
+        "title",
+        "rows"
+      ],
+      "title": "AnalysisTable",
       "type": "object"
     },
     "AnalysisWarning": {
@@ -816,6 +1024,24 @@
       ],
       "title": "FxSource",
       "type": "string"
+    },
+    "InputDatasetDependency": {
+      "additionalProperties": false,
+      "description": "Original input capture, independently checked beyond its composite copy.",
+      "properties": {
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "fingerprint_sha256": {
+          "$ref": "#/$defs/Sha256Fingerprint"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "fingerprint_sha256"
+      ],
+      "title": "InputDatasetDependency",
+      "type": "object"
     },
     "InstrumentAnalysisRequest": {
       "additionalProperties": false,
@@ -1345,7 +1571,8 @@
         "property",
         "independent_reference",
         "saxo_reconciliation",
-        "sim_end_to_end"
+        "sim_end_to_end",
+        "installed_end_to_end"
       ],
       "type": "string"
     },
@@ -1415,6 +1642,51 @@
       ],
       "title": "QualityState",
       "type": "string"
+    },
+    "RecipeAnalysisRequest": {
+      "additionalProperties": false,
+      "description": "The complete typed caller choices and immutable input handles used by a recipe.",
+      "properties": {
+        "analysis_kind": {
+          "$ref": "#/$defs/ContractName"
+        },
+        "dataset_id": {
+          "$ref": "#/$defs/DatasetId"
+        },
+        "input_dataset_ids": {
+          "items": {
+            "$ref": "#/$defs/DatasetId"
+          },
+          "maxItems": 100,
+          "minItems": 1,
+          "title": "Input Dataset Ids",
+          "type": "array"
+        },
+        "parameters": {
+          "$ref": "#/$defs/AnalysisParameterBinding"
+        },
+        "recipe_arguments_json": {
+          "maxLength": 100000,
+          "minLength": 2,
+          "title": "Recipe Arguments Json",
+          "type": "string"
+        },
+        "request_kind": {
+          "const": "recipe",
+          "title": "Request Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "analysis_kind",
+        "dataset_id",
+        "parameters",
+        "request_kind",
+        "input_dataset_ids",
+        "recipe_arguments_json"
+      ],
+      "title": "RecipeAnalysisRequest",
+      "type": "object"
     },
     "SafeAccountScope": {
       "anyOf": [

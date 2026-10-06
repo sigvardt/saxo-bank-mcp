@@ -118,6 +118,7 @@ _ACCOUNT_AGGREGATE_LINEAGE_CONTRACT_IDS: Final = frozenset(
         "info_price_v1",
         "options_chain_reference_v1",
         "reference_instruments_v1",
+        "reference_instrument_details_v1",
     },
 )
 _SOURCE_KINDS: Final = frozenset(
@@ -1970,11 +1971,13 @@ class AnalyticsStore:
         contract_name: str,
         instrument_handle: str,
     ) -> tuple[AuthenticatedSourceMaterial, ...]:
-        """Authenticate stored source pages bound to one exact safe instrument handle."""
+        """Authenticate current-contract source pages for one exact safe instrument handle."""
         if _SAFE_NAME_PATTERN.fullmatch(contract_name) is None:
             raise StoreValidationError("source contract name is invalid")
         _validate_handle(instrument_handle, "ih")
         self._require_open()
+        contract = source_contracts_by_id().get(contract_name)
+        contract_sha256 = source_contract_fingerprint(contract) if contract is not None else None
         with self._read_connection() as connection:
             page_rows = cast(
                 "list[tuple[object, ...]]",
@@ -1984,9 +1987,10 @@ class AnalyticsStore:
                     FROM source_pages AS p
                     JOIN source_contracts AS c ON c.contract_id = p.contract_id
                     WHERE c.contract_name = ? AND p.instrument_handle = ?
+                      AND (? IS NULL OR c.contract_sha256 = ?)
                     ORDER BY epoch_us(p.source_timestamp) DESC, p.page_id
                     """,
-                    (contract_name, instrument_handle),
+                    (contract_name, instrument_handle, contract_sha256, contract_sha256),
                 ).fetchall(),
             )
             page_ids = tuple(_require_str(row[0]) for row in page_rows)
@@ -2442,36 +2446,37 @@ class AnalyticsStore:
                     result_json,
                 ),
             )
-            connection.executemany(
-                """
-                INSERT INTO metrics (
-                    analysis_id,
-                    metric_id,
-                    value,
-                    unit,
-                    unit_class,
-                    currency,
-                    metric_class,
-                    source_timestamp,
-                    proof_profile_id
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        result.analysis_id,
-                        metric.metric_id,
-                        metric.value,
-                        metric.unit,
-                        metric.unit_class.value,
-                        metric.currency,
-                        metric.metric_class.value,
-                        metric.source_timestamp,
-                        metric.proof_profile_id,
+            if result.metrics:
+                connection.executemany(
+                    """
+                    INSERT INTO metrics (
+                        analysis_id,
+                        metric_id,
+                        value,
+                        unit,
+                        unit_class,
+                        currency,
+                        metric_class,
+                        source_timestamp,
+                        proof_profile_id
                     )
-                    for metric in result.metrics
-                ],
-            )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            result.analysis_id,
+                            metric.metric_id,
+                            metric.value,
+                            metric.unit,
+                            metric.unit_class.value,
+                            metric.currency,
+                            metric.metric_class.value,
+                            metric.source_timestamp,
+                            metric.proof_profile_id,
+                        )
+                        for metric in result.metrics
+                    ],
+                )
             connection.executemany(
                 """
                 INSERT INTO proof_receipts (
@@ -3642,7 +3647,7 @@ def _require_artifact_analysis_binding(
     if (
         _require_str(row[0]) != binding.dataset_id
         or _require_str(row[1]) != binding.analysis_kind
-        or _require_str(row[2]) != "verified"
+        or _require_str(row[2]) not in {"verified", "degraded"}
         or _require_str(row[3]) != binding.source_revision
         or _require_str(row[4]) != binding.result_fingerprint_sha256
         or _fingerprint(result_json) != binding.result_fingerprint_sha256

@@ -1,8 +1,8 @@
 {
   "schema_version": "1",
   "catalog_version": "2026-08-01.1",
-  "definition_catalog_sha256": "bb423affe37f7e4fdad77d56615a57a0358b159cc83404a2f8d11405b920e6c4",
-  "source_catalog_sha256": "88988d8d181ea86a7b683a28bc30cdee14573381da88a85302a8caf940648750",
+  "definition_catalog_sha256": "59c0fdd1143a97fa3c799f5f9624d2694588604ae1af809dd3b02bcca289b15d",
+  "source_catalog_sha256": "1aaed15896fab2b06d793b414754e8a6e994423389024b19a601291a72df8f97",
   "production_analysis_kinds": [
     "cash_and_settlement",
     "corporate_action_center",
@@ -61,40 +61,120 @@
   ],
   "source_contract_sha256s": {
     "chart_v3": "bfbe3aade89a27d80722eb42246007040baee06e5ea045e4185f0f40ebfcf4ce",
-    "reference_instruments_v1": "6dcfb5708de111e573918afd4f2c384a927b6b4c371342f067f74862c12d7e83",
-    "reference_instrument_details_v1": "de4ed595d8a425af7dacd4ef3ed385d7133f079bc4ab45f5deb15190dda24583",
-    "options_chain_reference_v1": "f6b783ceffc019792df2e18037ec08566b589679583b5d62e684fba52cfd2a1e",
-    "info_price_v1": "4ed03f6347ee212aab1b113522fefa9830329f368c4f2c38c51ad80fa71f007e",
-    "info_prices_list_v1": "11361483cdf653fb640bc0263ae21adc6e4116d5f5e815bc64686b719740b8e2",
-    "performance_summary_v4": "df0ad6948f6b7ec36e43c00d121f196f88482a03d20e582344ef9aedeb34fdea",
-    "performance_timeseries_v4": "59a712fc0009c67b0b401717cf48e5016fe84e58ae7d2983ee4d57a8faf06dc6",
-    "balances_v1": "dbe3853ecc1dd8e49346fbf52d5cec2df61161ec7844840958008a007e9d2c7d",
-    "positions_v1": "6c4e6ec851d6ec0be676dedb960429eae938d185b886b175034937f7b321ddca",
-    "orders_v1": "b9c0d424635b7b3cbb341883663fb2ac69da17cbdd793111c0470bd7ceb097af",
-    "transactions_v1": "987ead400d61152c94987a81cad56ea48412252de9b5a33e35970410b4e11f20",
-    "bookings_v1": "5fa1a727c58f1df79e4f1c1f50c7ec8a39fc054923be10efecb979cc5fa2476a",
-    "closed_positions_history_v1": "c8ab7a226039fd2969747d59502f6af1c80806519cd423b63035a750c05ae3d9",
-    "exposure_instruments_v1": "5cd3d6d83d77caaa207ec76edf373334de9a029cf26353c1fb7315425f514efe",
-    "costs_v1": "90fbf26c918521a01472e583f04fe3fba96ba1d6ccc01b6d315a2ce33c956fb8",
-    "corporate_action_events_v2": "605e5e1c0fd324bf1022bfd4d51a84c5c5fbe7302a7c034309367a4e4b3f1e46",
-    "corporate_action_holdings_v2": "a1a493c1d9c930243542ee8d81855fe33fb00e0403ebbf77320426949f1f2de2"
+    "reference_instruments_v1": "df1b72ca682760755aa283c7dfc34708c842d1601aabfa8484f4083a273e4162",
+    "reference_instrument_details_v1": "399241d7f90d51898bb4200d156dc3c4f9085ef357303617fe685a76878c22c6",
+    "options_chain_reference_v1": "45ce89a4b4aed142d3f3688b2e7d111c14abf17f28675ffb63b5e34549826c1d",
+    "info_price_v1": "adaebbd0db04b2c0860886d46a457977fae666d891d86d070a1282ec8fe9ff73",
+    "info_prices_list_v1": "ff66cb2bed78ff8ad1dacc3c3cf31eb00acd05c5ab159a4b85912045e2af91b0",
+    "performance_summary_v4": "f20b6af85d3cdfeb924fd83b986b6d219f7822384986f5af228a1fa13d9ea751",
+    "performance_timeseries_v4": "95e984d3ef338351bebc2ba16a1d1d7bfcdefa65f12cf649a48a596254fe13d9",
+    "balances_v1": "802b86a938827069de1737e4f22ce0a8d898e117246efd52f230a9058cc17a85",
+    "positions_v1": "6b5ebe878ebccb70f446b4e93579f7ef5c05a09a48fad0880414c1cf2277663c",
+    "orders_v1": "cba12a2a87f1af5d11e853fcc22caffec7fc9dff9f4094d687ca6e58d8ed7164",
+    "transactions_v1": "93b9f52edce99d694136b567f7ae406eb684bef1f8468f0f2940d28090f914ff",
+    "bookings_v1": "0fae6abf621985ee2047dfd3bd0723d82d690f3cc660c673f851f6a6508e0a12",
+    "closed_positions_history_v1": "dc85f8cf1b5a56a1c05b69eadf1ea84cafc466048d328fdfde1901dc07efc070",
+    "exposure_instruments_v1": "fd665c7cedc77e13be5e0f2927c297c22f6f6672020eba05bcb772f335f323e8",
+    "costs_v1": "4e05f900736c020e586b663efd0a664a5c48aabdd7a69304cc443d753296c8e9",
+    "corporate_action_events_v2": "f9762fb8daeaea785642f31eee2cf2f35d6edccce84d77513b29fc536fd58add",
+    "corporate_action_holdings_v2": "64afd77cedd05038a96d38b14bf1b6376cd2b778250af0b245013b4ec2eb3863"
   },
   "artifact_bindings": [
-    {"analysis_kind": "instrument_price_volume", "template_ids": ["price_volume_indicator"]},
-    {"analysis_kind": "market_comparison", "template_ids": ["relative_performance"]},
-    {"analysis_kind": "portfolio_performance", "template_ids": ["equity_curve_drawdown", "monthly_return_heatmap", "portfolio_tearsheet", "portfolio_briefing"]},
-    {"analysis_kind": "portfolio_exposure", "template_ids": ["allocation_exposure"]},
-    {"analysis_kind": "portfolio_attribution", "template_ids": ["contribution_waterfall"]},
-    {"analysis_kind": "portfolio_risk", "template_ids": ["risk_contribution", "correlation_heatmap_cluster_map"]},
-    {"analysis_kind": "portfolio_scenario", "template_ids": ["scenario_waterfall"]},
-    {"analysis_kind": "portfolio_minimum_variance", "template_ids": ["efficient_frontier"]},
-    {"analysis_kind": "option_payoff", "template_ids": ["options_payoff_greeks"]},
-    {"analysis_kind": "iv_surface", "template_ids": ["iv_smile_surface"]},
-    {"analysis_kind": "cost_xray", "template_ids": ["cost_waterfall"]},
-    {"analysis_kind": "trading_mirror", "template_ids": ["trade_distribution_behavior_dashboard", "trading_mirror"]},
-    {"analysis_kind": "pretrade_impact", "template_ids": ["pretrade_impact_card"]},
-    {"analysis_kind": "execution_quality", "template_ids": ["execution_report_card"]},
-    {"analysis_kind": "session_cockpit", "template_ids": ["session_cockpit"]}
+    {
+      "analysis_kind": "instrument_price_volume",
+      "template_ids": [
+        "price_volume_indicator"
+      ]
+    },
+    {
+      "analysis_kind": "market_comparison",
+      "template_ids": [
+        "relative_performance"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_performance",
+      "template_ids": [
+        "equity_curve_drawdown",
+        "monthly_return_heatmap",
+        "portfolio_tearsheet",
+        "portfolio_briefing"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_exposure",
+      "template_ids": [
+        "allocation_exposure"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_attribution",
+      "template_ids": [
+        "contribution_waterfall"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_risk",
+      "template_ids": [
+        "risk_contribution",
+        "correlation_heatmap_cluster_map"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_scenario",
+      "template_ids": [
+        "scenario_waterfall"
+      ]
+    },
+    {
+      "analysis_kind": "portfolio_minimum_variance",
+      "template_ids": [
+        "efficient_frontier"
+      ]
+    },
+    {
+      "analysis_kind": "option_payoff",
+      "template_ids": [
+        "options_payoff_greeks"
+      ]
+    },
+    {
+      "analysis_kind": "iv_surface",
+      "template_ids": [
+        "iv_smile_surface"
+      ]
+    },
+    {
+      "analysis_kind": "cost_xray",
+      "template_ids": [
+        "cost_waterfall"
+      ]
+    },
+    {
+      "analysis_kind": "trading_mirror",
+      "template_ids": [
+        "trade_distribution_behavior_dashboard",
+        "trading_mirror"
+      ]
+    },
+    {
+      "analysis_kind": "pretrade_impact",
+      "template_ids": [
+        "pretrade_impact_card"
+      ]
+    },
+    {
+      "analysis_kind": "execution_quality",
+      "template_ids": [
+        "execution_report_card"
+      ]
+    },
+    {
+      "analysis_kind": "session_cockpit",
+      "template_ids": [
+        "session_cockpit"
+      ]
+    }
   ],
   "engine": {
     "engine_name": "saxo_analytics",

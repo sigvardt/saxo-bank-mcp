@@ -1,6 +1,6 @@
 ---
 name: saxo-reads
-description: Guide safe Saxo Bank MCP registered reads, readback, pagination, redaction, LIVE read gates, fingerprint-only balance reads, and plan-only read planning. Use when a user asks to list or call registered Saxo GET/read endpoints, summarize accounts/positions/orders/balances/history/reports/messages/prices/charts/reference data, follow returned paging links or tokens, reconcile after uncertain Saxo outcomes, or prove that a read plan makes zero calls.
+description: Guide safe Saxo Bank MCP registered reads, account balance summaries, readback, pagination, redaction, LIVE read gates, and plan-only read planning. Use when a user asks to list or call registered Saxo GET/read endpoints, summarize accounts/positions/orders/balances/history/reports/messages/prices/charts/reference data, follow returned paging links or tokens, reconcile after uncertain Saxo outcomes, or prove that a read plan makes zero calls.
 ---
 
 # Saxo reads
@@ -35,7 +35,7 @@ If a PLAN-ONLY request includes an absolute URL, treat the URL and all nearby se
 1. Separate liveness, local auth, and session proof. Use `saxo_health` only for MCP liveness. Use `saxo_auth_status` for local auth/cache state. Use `saxo_get_session_capabilities` or another network read for session proof.
 2. List before calling. Use `saxo_list_registered_endpoints` before any `saxo_call_registered_endpoint` execution. Treat the list result as registry metadata only.
 3. Confirm the method and relative path are registered, implemented, and GET/read. Refuse absolute URLs, unsafe methods, write-class paths, and unregistered paths before any network call.
-4. Choose `response_mode=fingerprint_only` for balance-class operations: `get.port.v1.balances`, `get.port.v1.balances.me`, and `get.port.v1.balances.marginoverview`. Do this even when the user asks for a summary. Report only the fingerprint, scope, status, and alias-safe conclusion for balances.
+4. Use the normal `redacted_body` response for the owner's account and balance summaries. Monetary values are allowed in the authenticated owner's conversation; no additional mode or permission switch is required. Choose `response_mode=fingerprint_only` when only change detection or value-free evidence is needed.
 5. Execute only with `saxo_call_registered_endpoint` for registered GET/read endpoints.
 6. Report status, path template, operation ID, environment, response visibility, paging cursor or next link, fingerprint scope, and what the read does not prove.
 
@@ -68,9 +68,9 @@ Use `saxo_call_registered_endpoint` only with operations returned by `saxo_list_
 
 ## Account privacy
 
-Map account numbers, account references, and visible account values to stable aliases such as `selected LIVE account`, `primary SIM account`, or `account alias 1`.
+Map account numbers and account references to stable aliases such as `selected LIVE account`, `primary SIM account`, or `account alias 1`.
 
-Use account numbers or process-scoped references only as internal tool selectors. Do not echo `DisplayName`, raw account identifiers, technical account keys, client keys, tokens, headers, raw URLs that contain account data, balances, or raw broker payloads when an alias or sanitized assertion suffices.
+Use account numbers or process-scoped references only as internal tool selectors. Do not echo `DisplayName`, raw account identifiers, technical account keys, client keys, tokens, headers, raw URLs that contain account data, or raw broker payloads when an alias or summary suffices. Show requested monetary values in the authenticated owner's conversation with their currency and any source-quality warnings.
 
 Store evidence as hashes, fingerprints, counts, statuses, operation IDs, path templates, and sanitized assertions. Do not store raw account values.
 

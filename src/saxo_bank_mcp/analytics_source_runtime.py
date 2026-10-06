@@ -357,6 +357,7 @@ def _source_candidate_files(repository_root: Path) -> dict[str, str]:
         repository_root / "uv.lock",
         repository_root / "data" / "analytics" / "metric_definitions.json",
         repository_root / "data" / "analytics" / "proof_profiles.json",
+        repository_root / "data" / "analytics" / "production_release.json",
         repository_root / "data" / "analytics" / "source_contracts.json",
         repository_root / "data" / "analytics" / "vision_coverage_requirements.json",
         repository_root / "data" / "saxo" / "openapi_inventory.json",

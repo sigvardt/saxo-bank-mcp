@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
@@ -17,9 +17,12 @@ from analytics_legacy_alias_support import migrate_v2_store_with_unbound_alias
 from pydantic import SecretStr, ValidationError
 
 from saxo_bank_mcp.analytics_account_data import (
+    AccountAnalysisKind,
     AccountScope,
     AccountSyncResult,
     AccountSyncValidationError,
+    account_analysis_history_kinds,
+    account_analysis_source_contracts,
     new_account_alias,
     sync_account_analysis_sources,
     sync_account_history,
@@ -29,7 +32,7 @@ from saxo_bank_mcp.analytics_account_data import (
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_models import HandleKind, VisibilityMode, new_safe_handle
-from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider, SourceRequestBudget
 from saxo_bank_mcp.analytics_store import AnalyticsStore
 from saxo_bank_mcp.endpoint_registry import EndpointOperation
 
@@ -1078,7 +1081,7 @@ async def test_cost_sources_preserve_fee_tax_and_missing_fx_time_privately(
             "HoldingPeriodInDays": 1,
             "Instrument": "Synthetic instrument",
             "Price": 50.0,
-            "Uic": 1,
+            "Uic": 1001,
         },
     )
     executor = _PayloadExecutor((cost_payload,))
@@ -1132,7 +1135,6 @@ async def test_account_analysis_sources_capture_exact_performance_and_exposure_l
     handle = _seed_instrument(config)
     executor = _PayloadExecutor(
         (
-            {"AccountValue": 1000.0, "AccumulatedProfitLoss": 10.0},
             {
                 "Balance": {
                     "AccountValue": [
@@ -1168,16 +1170,311 @@ async def test_account_analysis_sources_capture_exact_performance_and_exposure_l
         clock=lambda: _CAPTURED_AT,
     )
 
-    assert request_count == 3
+    assert request_count == 2
     assert {item.contract_id for item in summaries} == {
         "exposure_instruments_v1",
-        "performance_summary_v4",
         "performance_timeseries_v4",
     }
     assert all(item.account_alias == scope.alias for item in summaries)
     assert all(item.quality_state.value == "complete" for item in summaries)
     assert [call[0] for call in executor.calls] == [
-        "get.hist.v4.performance.summary",
         "get.hist.v4.performance.timeseries",
         "get.port.v1.exposure.instruments",
     ]
+
+
+@pytest.mark.anyio
+async def test_live_account_capture_uses_exact_recipe_closure_and_observed_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    config = _config(tmp_path)
+    scope = _scope()
+    executor = _PayloadExecutor(
+        (
+            {
+                "TimeWeighted": {
+                    "Accumulated": [
+                        {"Date": "2026-07-01", "Value": 0.0},
+                        {"Date": "2026-07-31", "Value": 0.02},
+                    ]
+                },
+                "Balance": {
+                    "AccountValue": [
+                        {"Date": "2026-07-01", "Value": 1000.0},
+                        {"Date": "2026-07-31", "Value": 1020.0},
+                    ]
+                },
+            },
+        )
+    )
+    summaries, count = await sync_account_analysis_sources(
+        scope,
+        ("portfolio_risk", "monte_carlo", "goal_model"),
+        (),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        from_date=_START.date(),
+        to_date=_END.date(),
+        clock=lambda: _CAPTURED_AT,
+    )
+    assert count == 1
+    assert summaries[0].contract_id == "performance_timeseries_v4"
+    assert summaries[0].coverage_start == _START
+    assert summaries[0].coverage_end == datetime(2026, 7, 31, tzinfo=UTC)
+    _, _, params = executor.calls[0]
+    assert params == {
+        "AccountKey": scope.account_key.get_secret_value(),
+        "ClientKey": scope.client_key.get_secret_value(),
+        "FromDate": "2026-07-01",
+        "ToDate": "2026-07-31",
+    }
+    store = AnalyticsStore.open(config)
+    try:
+        material = store.get_authenticated_dataset_material(summaries[0].dataset_id)
+        assert material.account_scope == scope.alias
+        assert material.pages[0].contract_name == "performance_timeseries_v4"
+        assert material.coverage_start == _START
+    finally:
+        store.close()
+    assert scope.account_key.get_secret_value() not in str(summaries)
+    empty = _PayloadExecutor(())
+    assert await sync_account_analysis_sources(
+        scope,
+        ("portfolio_overview", "cash_and_settlement"),
+        (),
+        provider=SaxoAnalyticsProvider(request_executor=empty),
+        config=config,
+        clock=lambda: _CAPTURED_AT,
+    ) == ((), 0)
+    assert not empty.calls
+
+
+@pytest.mark.anyio
+async def test_corporate_action_capture_is_account_scoped_and_date_fields_are_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    config = _config(tmp_path)
+    scope = _scope()
+    executor = _PayloadExecutor(
+        (
+            {
+                "Data": [
+                    {
+                        "EventId": "private-event",
+                        "EventType": {"Code": "DVCA", "Name": "Cash Dividend"},
+                        "Ex": {"Date": "2026-07-15"},
+                    }
+                ]
+            },
+            {"Data": [{"EventId": "private-event", "AccountId": "private-account", "Amount": 4.0}]},
+        )
+    )
+    summaries, count = await sync_account_analysis_sources(
+        scope,
+        ("corporate_action_center",),
+        (),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        from_date=_START.date(),
+        to_date=_END.date(),
+        clock=lambda: _CAPTURED_AT,
+    )
+    assert count == 2
+    assert [summary.contract_id for summary in summaries] == [
+        "corporate_action_events_v2",
+        "corporate_action_holdings_v2",
+    ]
+    event_params = executor.calls[0][2]
+    holding_params = executor.calls[1][2]
+    assert (
+        event_params["AccountKey"]
+        == holding_params["AccountKey"]
+        == scope.account_key.get_secret_value()
+    )
+    assert (
+        event_params["ClientKey"]
+        == holding_params["ClientKey"]
+        == scope.client_key.get_secret_value()
+    )
+    assert event_params["FromExDate"] == "2026-07-01"
+    assert event_params["ToExDate"] == "2026-07-31"
+    assert "FromDate" not in event_params
+    assert "FromExDate" not in holding_params
+    assert event_params["IncludeSubAccounts"] == holding_params["IncludeSubAccounts"] == "false"
+    assert "private-event" not in str(summaries)
+
+
+@pytest.mark.anyio
+async def test_account_source_invalid_scope_dates_or_remaining_budget_stop_before_transport(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    scope = _scope()
+    executor = _PayloadExecutor(())
+    provider = SaxoAnalyticsProvider(request_executor=executor)
+    with pytest.raises(AccountSyncValidationError, match="kind is invalid"):
+        await sync_account_analysis_sources(
+            scope,
+            cast("Sequence[AccountAnalysisKind]", ("guessed_kind",)),
+            (),
+            provider=provider,
+            config=config,
+        )
+    with pytest.raises(AccountSyncValidationError, match="both boundaries"):
+        await sync_account_analysis_sources(
+            scope,
+            ("portfolio_risk",),
+            (),
+            provider=provider,
+            config=config,
+            from_date=_START.date(),
+        )
+    with pytest.raises(AccountSyncValidationError, match="capture cutoff"):
+        await sync_account_analysis_sources(
+            scope,
+            ("portfolio_risk",),
+            (),
+            provider=provider,
+            config=config,
+            from_date=_START.date(),
+            to_date=date(2027, 1, 1),
+            clock=lambda: _CAPTURED_AT,
+        )
+    with pytest.raises(AccountSyncValidationError, match="resolved instrument"):
+        await sync_account_analysis_sources(
+            scope,
+            ("scenario_combined",),
+            (),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+        )
+    with pytest.raises(AccountSyncValidationError, match="source request limit"):
+        await sync_account_analysis_sources(
+            scope,
+            ("corporate_action_center",),
+            (),
+            provider=provider,
+            config=config,
+            clock=lambda: _CAPTURED_AT,
+            request_budget=SourceRequestBudget(
+                config.limits.sync_instruments, config.limits.sync_instruments - 1
+            ),
+        )
+    assert not executor.calls
+
+
+@pytest.mark.anyio
+async def test_cost_capture_binds_explicit_quantity_and_holding_horizon(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    handle = _seed_instrument(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "HoldingPeriodInDays": 30,
+                "AccountCurrency": "DKK",
+                "AccountID": "private-account",
+                "Amount": 12.0,
+                "AssetType": "Stock",
+                "CostCalculationAssumptions": [],
+                "Instrument": "Fixture instrument",
+                "Price": 50.0,
+                "Uic": 1001,
+                "Cost": {
+                    "Long": {
+                        "Currency": "DKK",
+                        "TotalCost": 3.0,
+                        "TradingCost": {"Commissions": [{"Value": 2.0}], "Spread": {"Value": 1.0}},
+                    }
+                },
+            },
+        )
+    )
+    result = await sync_cost_sources(
+        _scope(),
+        (handle,),
+        provider=SaxoAnalyticsProvider(request_executor=executor),
+        config=config,
+        reference_prices={handle: 50.0},
+        reference_amounts={handle: 12.0},
+        holding_period_days=30,
+        clock=lambda: _CAPTURED_AT,
+    )
+    assert result.source_request_count == 1
+    assert float(executor.calls[0][2]["Amount"]) == 12.0
+    assert executor.calls[0][2]["HoldingPeriodInDays"] == "30"
+    assert float(executor.calls[0][2]["Price"]) == 50.0
+    assert "cost_quantity_assumed_one" not in result.datasets[0].warnings
+    for amounts, horizon in (
+        ({handle: -1.0}, 1),
+        ({handle: float("nan")}, 1),
+        ({"ih_00000000000040008000000000000000": 1.0}, 1),
+        ({handle: 12.0}, -1),
+    ):
+        empty = _PayloadExecutor(())
+        with pytest.raises(AccountSyncValidationError):
+            await sync_cost_sources(
+                _scope(),
+                (handle,),
+                provider=SaxoAnalyticsProvider(request_executor=empty),
+                config=config,
+                reference_amounts=amounts,
+                holding_period_days=horizon,
+            )
+        assert not empty.calls
+
+
+def test_history_capture_selection_follows_recipe_sources() -> None:
+    assert account_analysis_history_kinds(("portfolio_performance",)) == ()
+    assert account_analysis_history_kinds(("income_calendar", "cost_xray")) == ("bookings",)
+    assert account_analysis_history_kinds(("tax_lot_export",)) == ("closed_positions",)
+    assert "costs_v1" in account_analysis_source_contracts(("pretrade_impact",))
+
+
+@pytest.mark.anyio
+async def test_cost_reply_for_another_quantity_is_refused_before_persistence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    handle = _seed_instrument(config)
+    executor = _PayloadExecutor(
+        (
+            {
+                "AccountCurrency": "DKK",
+                "AccountID": "private-account",
+                "Amount": 1.0,
+                "AssetType": "Stock",
+                "CostCalculationAssumptions": [],
+                "HoldingPeriodInDays": 30,
+                "Instrument": "Fixture",
+                "Price": 50.0,
+                "Uic": 1001,
+                "Cost": {
+                    "Long": {
+                        "Currency": "DKK",
+                        "TotalCost": 3.0,
+                        "TradingCost": {"Commissions": [{"Value": 2.0}], "Spread": {"Value": 1.0}},
+                    }
+                },
+            },
+        )
+    )
+    with pytest.raises(AccountSyncValidationError, match="calculation basis does not match"):
+        await sync_cost_sources(
+            _scope(),
+            (handle,),
+            provider=SaxoAnalyticsProvider(request_executor=executor),
+            config=config,
+            reference_prices={handle: 50.0},
+            reference_amounts={handle: 12.0},
+            holding_period_days=30,
+            clock=lambda: _CAPTURED_AT,
+        )
+    connection = duckdb.connect(str(config.paths.store_path), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM source_pages").fetchone() == (0,)
+    finally:
+        connection.close()

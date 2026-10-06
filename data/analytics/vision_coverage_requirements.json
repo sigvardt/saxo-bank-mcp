@@ -567,16 +567,16 @@
       "contract_id": "corporate_action_events_v2",
       "field_paths": [
         "EventId",
-        "EventType",
-        "ExDate",
-        "PayDate"
+        "EventType.Code",
+        "Ex.Date",
+        "Options.Payment.Date"
       ]
     },
     {
       "contract_id": "corporate_action_holdings_v2",
       "field_paths": [
         "EventId",
-        "Uic",
+        "AccountId",
         "Amount"
       ]
     }

@@ -26,6 +26,14 @@ uv run python -m saxo_bank_mcp --transport stdio
 uv run saxo-bank-mcp --transport http --host 127.0.0.1 --port 8000
 ```
 
+## Analytics
+
+Stock, portfolio, derivatives, optimisation and historical simulation use authenticated saved
+Saxo inputs. LIVE private computation needs no special reporting mode. Availability comes from
+the installed release receipt; upstream data entitlement and model limitations remain explicit.
+See [analytics principles and verification](docs/analytics.md) and the
+[agent analytics workflow](skills/saxo-analytics/SKILL.md).
+
 ## SIM Auth
 
 SIM is the default environment. Keep credentials in the local credential file or
@@ -108,9 +116,10 @@ status, and a summary of non-GET calls for the current MCP session. It never
 stores headers, bodies, tokens, account identifiers, instrument identifiers, or
 balances. Only allowlisted Saxo query parameter names are visible; other names
 and every value are redacted. Ledger overflow disables negative proof. Balance
-operations require
-`response_mode=fingerprint_only`; body mode is denied before networking, and
-the fingerprint covers a modeled set of validated account cash-state fields.
+reads return amounts through the normal `redacted_body` response, with credentials
+and technical account identifiers redacted. Use `response_mode=fingerprint_only`
+for change detection or public evidence; its fingerprint covers a modeled set of
+validated account cash-state fields without returning amounts.
 
 Create a fail-closed LIVE proof of a single read-only precheck with:
 

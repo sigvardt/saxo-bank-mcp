@@ -157,9 +157,7 @@ class OptimizationDataset(_StrictModel):
 
     @model_validator(mode="after")
     def validate_dataset(self) -> Self:
-        if not (
-            self.estimation_start_at < self.estimation_end_at <= self.as_of
-        ):
+        if not (self.estimation_start_at < self.estimation_end_at <= self.as_of):
             raise ValueError("optimizer estimation window must end at or before cutoff")
         if any(asset.account_alias != self.account_alias for asset in self.assets):
             raise ValueError("optimizer asset account alias must match the dataset account alias")
@@ -365,7 +363,13 @@ class _AdapterSolution:
 
 
 class _OptimizerAdapter(Protocol):
-    def solve(self, request: OptimizationRequest, covariance: FloatMatrix) -> _AdapterSolution:
+    def solve(
+        self,
+        request: OptimizationRequest,
+        covariance: FloatMatrix,
+        *,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> _AdapterSolution:
         """Solve one exact persisted covariance problem or raise a bounded failure."""
         raise NotImplementedError
 
@@ -390,7 +394,13 @@ class _OptimizationFailureError(ValueError):
 class ScipyOptimizerAdapter:
     """Typed deterministic adapter around SciPy's bounded SLSQP solver."""
 
-    def solve(self, request: OptimizationRequest, covariance: FloatMatrix) -> _AdapterSolution:
+    def solve(
+        self,
+        request: OptimizationRequest,
+        covariance: FloatMatrix,
+        *,
+        cancellation_check: Callable[[], None] | None = None,
+    ) -> _AdapterSolution:
         assets = request.dataset.assets
         minimum_trade_indexes = tuple(
             index
@@ -407,11 +417,15 @@ class ScipyOptimizerAdapter:
         )
         candidates: list[_AdapterSolution] = []
         for branch in branches:
+            if cancellation_check is not None:
+                cancellation_check()
             bounds = _branch_bounds(request, minimum_trade_indexes, branch)
             if bounds is None:
                 continue
             lower, upper = bounds
-            candidate = self._solve_continuous(request, covariance, lower, upper)
+            candidate = self._solve_continuous(
+                request, covariance, lower, upper, cancellation_check=cancellation_check
+            )
             if candidate is not None:
                 candidates.append(candidate)
         if not candidates:
@@ -434,13 +448,22 @@ class ScipyOptimizerAdapter:
         covariance: FloatMatrix,
         lower: FloatVector,
         upper: FloatVector,
+        *,
+        cancellation_check: Callable[[], None] | None = None,
     ) -> _AdapterSolution | None:
         if float(np.sum(lower)) > 1.0 or float(np.sum(upper)) < 1.0:
             return None
         objective, gradient = _objective_functions(request, covariance)
         constraints = _scipy_constraints(request)
         best: _AdapterSolution | None = None
+
+        def cancel_iteration(_weights: FloatVector) -> None:
+            if cancellation_check is not None:
+                cancellation_check()
+
         for start in _candidate_starts(request, lower, upper):
+            if cancellation_check is not None:
+                cancellation_check()
             result = cast(
                 "_ScipyMinimizeResult",
                 minimize(
@@ -448,6 +471,7 @@ class ScipyOptimizerAdapter:
                     start,
                     method=request.solver_settings.method,
                     jac=gradient,
+                    callback=cancel_iteration if cancellation_check is not None else None,
                     bounds=Bounds(
                         lower,  # pyright: ignore[reportArgumentType]
                         upper,  # pyright: ignore[reportArgumentType]
@@ -508,11 +532,13 @@ class ScipyOptimizerAdapter:
 _SCIPY_ADAPTER: Final[_OptimizerAdapter] = ScipyOptimizerAdapter()
 
 
-def optimize_portfolio(  # noqa: C901, PLR0911
+def optimize_portfolio(  # noqa: C901, PLR0911, PLR0912
     request: OptimizationRequest,
     *,
     visibility: VisibilityMode,
     trusted_local_host: bool,
+    cancellation_check: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> PortfolioOptimizationResult | ResearchRefusal:
     """Solve the caller-selected typed portfolio problem without creating trade authority."""
     private_delivery = require_delivery_boundary(
@@ -556,10 +582,20 @@ def optimize_portfolio(  # noqa: C901, PLR0911
         )
     try:
         covariance, condition_number = _validated_covariance(request.dataset.covariance_matrix)
-        solution = _SCIPY_ADAPTER.solve(request, covariance)
-        perturbation_solutions = tuple(
-            _solve_perturbation(request, perturbation) for perturbation in request.perturbations
-        )
+        if cancellation_check is not None:
+            cancellation_check()
+        solution = _SCIPY_ADAPTER.solve(request, covariance, cancellation_check=cancellation_check)
+        total_phases = 1 + len(request.perturbations)
+        if progress is not None:
+            progress(1, total_phases)
+        perturbation_results: list[_AdapterSolution] = []
+        for index, perturbation in enumerate(request.perturbations, 2):
+            perturbation_results.append(
+                _solve_perturbation(request, perturbation, cancellation_check=cancellation_check)
+            )
+            if progress is not None:
+                progress(index, total_phases)
+        perturbation_solutions = tuple(perturbation_results)
         stability = max(
             float(np.max(np.abs(item.weights - solution.weights)))
             for item in perturbation_solutions
@@ -584,10 +620,7 @@ def optimize_portfolio(  # noqa: C901, PLR0911
         warnings.add("optimizer_concentrated_weights")
     if values.diagnostics.condition_number > request.condition_number_warning_threshold:
         warnings.add("optimizer_condition_number_high")
-    if (
-        values.diagnostics.maximum_perturbation_weight_change
-        > request.stability_warning_threshold
-    ):
+    if values.diagnostics.maximum_perturbation_weight_change > request.stability_warning_threshold:
         warnings.add("optimizer_stability_warning")
     return PortfolioOptimizationResult(
         status=ResearchStatus.REDUCED if warnings else ResearchStatus.COMPLETE,
@@ -725,9 +758,7 @@ def _repair_budget(
         repaired += np.where(eligible, np.sign(difference) * allocation * share, 0.0)
         repaired = np.clip(repaired, lower, upper)
     return (
-        repaired
-        if abs(float(np.sum(repaired)) - 1.0) <= _BUDGET_REPAIR_FINAL_TOLERANCE
-        else None
+        repaired if abs(float(np.sum(repaired)) - 1.0) <= _BUDGET_REPAIR_FINAL_TOLERANCE else None
     )
 
 
@@ -745,9 +776,7 @@ def _objective_functions(
 
         return minimum_variance, minimum_variance_gradient
     eligible_indexes = tuple(
-        index
-        for index, asset in enumerate(request.dataset.assets)
-        if not asset.excluded
+        index for index, asset in enumerate(request.dataset.assets) if not asset.excluded
     )
     target = 1.0 / len(eligible_indexes)
 
@@ -778,12 +807,10 @@ def _objective_functions(
             component_derivative += weights * covariance[:, column]
             variance_derivative = 2.0 * marginal[column]
             contribution_derivative = (
-                component_derivative * variance
-                - component * variance_derivative
+                component_derivative * variance - component * variance_derivative
             ) / (variance * variance)
             gradient[column] = 2.0 * sum(
-                float(contributions[index] - target)
-                * float(contribution_derivative[index])
+                float(contributions[index] - target) * float(contribution_derivative[index])
                 for index in eligible_indexes
             )
         return gradient
@@ -926,8 +953,7 @@ def _constraint_metrics(
     turnover_value = 0.5 * float(np.sum(np.abs(delta)))
     cost_value = float(
         np.sum(
-            np.abs(delta)
-            * np.asarray([float(asset.transaction_cost_rate) for asset in assets]),
+            np.abs(delta) * np.asarray([float(asset.transaction_cost_rate) for asset in assets]),
         ),
     )
     margin_value = float(
@@ -1037,11 +1063,7 @@ def _kkt_diagnostics(  # noqa: C901, PLR0912, PLR0915
     equality = np.asarray(equality_gradients, dtype=np.float64)
     inequality = np.asarray(inequality_gradients, dtype=np.float64)
     _, singular_values, right_vectors = np.linalg.svd(equality, full_matrices=True)
-    rank_tolerance = (
-        max(equality.shape)
-        * np.finfo(np.float64).eps
-        * float(singular_values[0])
-    )
+    rank_tolerance = max(equality.shape) * np.finfo(np.float64).eps * float(singular_values[0])
     rank = int(np.count_nonzero(singular_values > rank_tolerance))
     null_space = np.asarray(right_vectors[rank:].T, dtype=np.float64)
     multipliers = np.zeros(len(inequality_gradients), dtype=np.float64)
@@ -1074,11 +1096,14 @@ def _kkt_diagnostics(  # noqa: C901, PLR0912, PLR0915
     complementarity = 0.0
     if inequality_gradients:
         complementarity = max(
-            (abs(float(multiplier * slack)) for multiplier, slack in zip(
-                multipliers,
-                inequality_slacks,
-                strict=True,
-            )),
+            (
+                abs(float(multiplier * slack))
+                for multiplier, slack in zip(
+                    multipliers,
+                    inequality_slacks,
+                    strict=True,
+                )
+            ),
             default=0.0,
         )
     return max(stationarity, complementarity), complementarity
@@ -1117,10 +1142,12 @@ def _group_rows(
 def _solve_perturbation(
     request: OptimizationRequest,
     perturbation: CovariancePerturbation,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> _AdapterSolution:
     try:
         covariance, _ = _validated_covariance(perturbation.covariance_matrix)
-        return _SCIPY_ADAPTER.solve(request, covariance)
+        return _SCIPY_ADAPTER.solve(request, covariance, cancellation_check=cancellation_check)
     except _OptimizationFailureError as exc:
         raise _OptimizationFailureError(
             "optimizer_stability_undefined",
@@ -1147,9 +1174,7 @@ def _private_values(
             target_weight=target,
             current_to_target_delta=delta,
             normalized_risk_contribution=(
-                None
-                if risk_contributions is None
-                else _decimal(risk_contributions[index])
+                None if risk_contributions is None else _decimal(risk_contributions[index])
             ),
         )
         for index, (asset, current, target, delta) in enumerate(
@@ -1246,9 +1271,7 @@ def _decimal_variance(
         context.prec = 50
         value = sum(
             (
-                weights[row]
-                * covariance[row][column]
-                * weights[column]
+                weights[row] * covariance[row][column] * weights[column]
                 for row in range(len(weights))
                 for column in range(len(weights))
             ),
@@ -1282,9 +1305,7 @@ def _refusal(
         reason_code=reason_code,
         reason=reason,
         dataset_ids=(request.dataset.dataset_id,),
-        instrument_handles=tuple(
-            asset.instrument_handle for asset in request.dataset.assets
-        ),
+        instrument_handles=tuple(asset.instrument_handle for asset in request.dataset.assets),
         source_scope=None,
     )
 

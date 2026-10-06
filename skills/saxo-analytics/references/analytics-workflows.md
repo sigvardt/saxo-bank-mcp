@@ -47,7 +47,7 @@ current 60-tool FastMCP catalog.
 - Optimization: require the caller's objective, bounds, and risk tolerance. Report deltas and
   stability diagnostics, not a recommendation.
 - Backtest: accept declarative strategy input only. State survivorship, source, split, cost, fill,
-  and SIM-verification limitations; never call a backtest a forecast.
+  and broker-execution limitations; never call a backtest a forecast.
 - Artifact delivery: replay the same verified stored result. Use direct delivery through the
   configured limit and an owner-only resource link above it; never accept caller trust evidence.
 - Deletion: list, exact preview, then consume the current single-use revision-bound token. Preview
@@ -59,3 +59,28 @@ For Saxo chart semantics and source limitations, use the reviewed official
 [chart documentation](https://www.developer.saxo/openapi/learn/chart) and
 [reference-data documentation](https://www.developer.saxo/openapi/learn/reference-data). The MCP
 contracts remain authoritative for which source coverage is actually implemented.
+
+## Source capture and saved calculations
+
+Use the typed capture request for the intended analysis. Instrument details require the
+`instrument_details` item; historical bars and quotes use their own item kinds. Account analytics
+accept the intended `analysis_kinds` so the server fetches their required source families. Use
+explicit `cost_choices` when illustrating a proposed quantity and holding period; a one-unit
+illustration cannot be presented as the cost of the user's planned trade.
+
+Pass all required captures to the calculation. Single-dataset model routes accept
+`supporting_dataset_ids` for separately captured details, quotes or history. Supply model
+assumptions and constraints in that family's typed `options`; a populated unrelated section is
+not a supported choice. For a trade proposal, supporting datasets are the current calculation
+inputs; the prior result is bound separately as a dependency.
+
+For long Monte Carlo, optimisation or backtest work, start `saxo_manage_analysis_job` with its
+complete typed `analysis_request`. Inspect the job's safe progress, then use its saved analysis
+handle after completion. Cancellation publishes no partial analysis and retains an already
+completed result. Process shutdown requires a new job rather than a background continuation.
+
+Render a stored table with an explicit `selection` identifying its table, numeric fields and
+labels. Generic table templates accept only stored values with their units and currency.
+Report export without a template includes the exact metrics, tables and limitations, including
+results that contain only tables. Read a returned `saxo-analytics://artifacts/` resource through
+MCP; changed proof or artifact bytes invalidate delivery.

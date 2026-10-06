@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -91,13 +92,28 @@ async def test_fingerprint_only_live_read_hides_balance_values(
 
 
 @pytest.mark.anyio
-async def test_balance_read_refuses_body_mode_before_network(
+async def test_default_live_balance_read_returns_amounts_and_redacts_identifiers(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def unexpected_client(**_kwargs: str) -> _BalanceLiveClient:
-        pytest.fail("balance body policy must refuse before creating a client")
+    cache = tmp_path / "live-token-cache.json"
+    save_token_cache(
+        cache,
+        SaxoTokenSet(
+            access_token="live-access-token",  # noqa: S106
+            environment="LIVE",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+    )
+    monkeypatch.setenv("SAXO_MCP_ENVIRONMENT", "LIVE")
+    monkeypatch.setenv("SAXO_MCP_ENABLE_LIVE_READS", "1")
+    monkeypatch.setenv("SAXO_MCP_LIVE_APP_KEY", "live-app-key")
+    monkeypatch.setenv("SAXO_MCP_LIVE_TOKEN_CACHE_PATH", str(cache))
 
-    monkeypatch.setattr("saxo_bank_mcp.read_tools.create_async_client", unexpected_client)
+    def create_live_client(**_kwargs: str) -> _PrivateBalanceLiveClient:
+        return _PrivateBalanceLiveClient()
+
+    monkeypatch.setattr("saxo_bank_mcp.read_tools.create_async_client", create_live_client)
 
     async with Client(mcp) as client:
         result = await client.call_tool(
@@ -105,17 +121,25 @@ async def test_balance_read_refuses_body_mode_before_network(
             {
                 "method": "GET",
                 "path": "/port/v1/balances/me",
-                "response_mode": "redacted_body",
             },
-            raise_on_error=False,
         )
 
     payload = result.structured_content
     assert payload is not None
-    assert result.is_error is True
-    assert payload["status"] == "denied"
-    assert payload["denial_reason"] == "sensitive_response_requires_fingerprint_only"
-    assert payload["network_call_made"] is False
+    assert result.is_error is False
+    assert payload["status"] == "passed"
+    assert payload["response_visibility"] == "redacted_body"
+    body = json.loads(str(payload["response"]))
+    assert body["CashBalance"] == RAW_BALANCE
+    assert body["CashAvailableForTrading"] == RAW_BALANCE
+    assert body["Currency"] == "EUR"
+    for field in ("AccountId", "AccountKey", "ClientKey", "AccessToken", "Authorization"):
+        assert body[field] == "<redacted>"
+    assert "private-account-key" not in str(payload)
+    assert "live-access-token" not in str(payload)
+    assert payload["response_fingerprint_scope"] == "account_money_state_fields"
+    assert payload["live_write_called"] is False
+    assert payload["order_or_subscription_created"] is False
 
 
 class _BalanceLiveClient:
@@ -147,4 +171,27 @@ class _BalanceLiveClient:
                 "GET",
                 "https://gateway.saxobank.com/openapi/port/v1/balances/me",
             ),
+        )
+
+
+class _PrivateBalanceLiveClient(_BalanceLiveClient):
+    async def get(
+        self,
+        path: str,
+        *,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+    ) -> httpx2.Response:
+        response = await super().get(path, params=params, headers=headers)
+        return httpx2.Response(
+            200,
+            json={
+                **_BALANCE_RESPONSE_FIXTURE,
+                "AccountId": "private-account-id",
+                "AccountKey": "ak",
+                "ClientKey": "ck",
+                "AccessToken": "live-access-token",
+                "Authorization": "Bearer live-access-token",
+            },
+            request=response.request,
         )
