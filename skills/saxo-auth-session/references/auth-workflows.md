@@ -61,7 +61,7 @@ Treat portal-token expiry as caller asserted. Saxo can reject it earlier. After 
 
 Use `saxo_refresh_token` for SIM only. It requires cached refresh token material and cached PKCE verifier. If refresh material is missing, route to a fresh SIM portal token or PKCE login.
 
-LIVE reads use `live_token_for_tool` inside LIVE-capable tools. It refreshes expired access tokens on demand under a cross-process lock. The external `saxo-bank-live-session-keeper` can keep a valid LIVE cache fresh, but it cannot recover a cache whose refresh token is no longer accepted.
+LIVE reads use `live_token_for_tool` inside LIVE-capable tools. It refreshes expired access tokens on demand under a cross-process lock. The external `saxo-bank-live-session-keeper` can keep a valid LIVE cache fresh, and it retries temporary token-endpoint failures, but it cannot recover a cache whose refresh token is no longer accepted or has passed the deadline Saxo returned.
 
 Handle refresh race conditions conservatively:
 

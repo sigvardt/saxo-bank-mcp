@@ -33,6 +33,7 @@ class SaxoTokenSet(BaseModel):
     code_verifier: str | None = None
     environment: TokenEnvironment | None = None
     expires_at: datetime
+    refresh_expires_at: datetime | None = None
 
     @field_validator("access_token")
     @classmethod
@@ -58,6 +59,13 @@ class SaxoTokenSet(BaseModel):
                 "refresh_token and code_verifier must both be present or both be absent",
             )
         return self
+
+    @field_validator("refresh_expires_at")
+    @classmethod
+    def validate_refresh_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise PydanticCustomError("naive_expiry", "token expiry must include timezone")
+        return value
 
     @field_validator("expires_at")
     @classmethod
