@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import time
 import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, urlparse
 
@@ -25,6 +29,7 @@ from saxo_bank_mcp.pkce import (
 from saxo_bank_mcp.token_cache import save_token_cache
 
 DEFAULT_LOGIN_TIMEOUT_SECONDS: Final = 3600.0
+CALLBACK_REQUEST_TIMEOUT_SECONDS: Final = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,20 +82,39 @@ def parse_live_login_callback(
     return codes[0]
 
 
+def open_in_browser(url: str) -> bool:
+    return webbrowser.open(url, new=2)
+
+
+def authorization_url_announcer(url_file: Path | None) -> Callable[[str], bool]:
+    def announce(url: str) -> bool:
+        if url_file is not None:
+            try:
+                _write_owner_only(url_file, f"{url}\n")
+            except OSError as error:
+                raise LiveLoginCallbackError("authorization_url_file_unwritable") from error
+        event = {"status": "authorization_url_ready", "authorization_url": url}
+        sys.stderr.write(json.dumps(event))
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+        return True
+
+    return announce
+
+
 def run_live_login(
     *,
     timeout_seconds: float = DEFAULT_LOGIN_TIMEOUT_SECONDS,
+    open_url: Callable[[str], bool] = open_in_browser,
 ) -> dict[str, JsonValue]:
     settings = resolve_live_oauth_settings()
     pending = prepare_live_login(settings)
     callback_targets: list[str] = []
     server = _callback_server(settings.redirect_uri, callback_targets)
-    server.timeout = timeout_seconds
-    if not webbrowser.open(pending.authorization_url, new=2):
-        server.server_close()
-        raise LiveLoginCallbackError("browser_open_failed")
     try:
-        server.handle_request()
+        if not open_url(pending.authorization_url):
+            raise LiveLoginCallbackError("browser_open_failed")
+        _wait_for_callback(server, callback_targets, timeout_seconds)
     finally:
         server.server_close()
     if not callback_targets:
@@ -119,6 +143,27 @@ def run_live_login(
     }
 
 
+def _wait_for_callback(
+    server: HTTPServer,
+    callback_targets: list[str],
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while not callback_targets:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        server.timeout = remaining
+        server.handle_request()
+
+
+def _write_owner_only(path: Path, text: str) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    path.chmod(0o600)
+
+
 def _callback_server(redirect_uri: str, callback_targets: list[str]) -> HTTPServer:
     parsed = urlparse(redirect_uri)
     if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1"}:
@@ -127,16 +172,19 @@ def _callback_server(redirect_uri: str, callback_targets: list[str]) -> HTTPServ
         raise LiveLoginCallbackError("redirect_uri_port_missing")
 
     class CallbackHandler(BaseHTTPRequestHandler):
+        timeout = CALLBACK_REQUEST_TIMEOUT_SECONDS
+
         def do_GET(self) -> None:
-            callback_targets.append(self.path)
             accepted = urlparse(self.path).path == parsed.path
-            self.send_response(200 if accepted else 400)
+            if accepted:
+                callback_targets.append(self.path)
+            self.send_response(200 if accepted else 404)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             message = (
                 "Saxo live login received. You can close this tab."
                 if accepted
-                else "Saxo live login failed. Return to the terminal."
+                else "This is not the Saxo live login callback."
             )
             self.wfile.write(f"<html><body><p>{message}</p></body></html>".encode())
 
@@ -159,13 +207,29 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_LOGIN_TIMEOUT_SECONDS,
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open a browser on this machine; print the authorization URL as a "
+        "JSON line on stderr instead, for headless hosts.",
+    )
+    parser.add_argument(
+        "--url-file",
+        type=Path,
+        help="With --no-browser, also write the authorization URL to this owner-only file.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    url_file: Path | None = args.url_file
+    if url_file is not None and not args.no_browser:
+        parser.error("--url-file requires --no-browser")
+    open_url = authorization_url_announcer(url_file) if args.no_browser else open_in_browser
     try:
-        result = run_live_login(timeout_seconds=float(args.timeout_seconds))
+        result = run_live_login(timeout_seconds=float(args.timeout_seconds), open_url=open_url)
     except (LiveLoginCallbackError, OAuthRequestError) as error:
         sys.stdout.write(json.dumps({"status": "login_failed", "reason": str(error)}))
         sys.stdout.write("\n")

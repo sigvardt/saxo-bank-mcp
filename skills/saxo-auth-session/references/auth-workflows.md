@@ -24,6 +24,12 @@ Use LIVE read setup only for LIVE reads:
 
 Do not move a token between environments. If a cache reports the wrong environment, require replacement through the correct local login/cache flow.
 
+## LIVE browser login on a headless host
+
+When the MCP host has no browser the user can see, run `saxo-bank-live-login --no-browser` in the background with the LIVE environment settings. It does not open a browser on the host. It prints the authorization URL as one JSON line on stderr, and `--url-file` also writes it to an owner-only file.
+
+Give the user that URL. The user's browser must reach the host's callback port, for example through `ssh -N -L 8080:127.0.0.1:8080 <host>` started on the browser machine, matching the configured redirect URI port. The receiver ignores requests to other paths, so a port check does not consume the login. Never ask the user to paste the callback URL, code, or state into chat. After the command reports `live_token_cached`, close the tunnel and prove the session with a LIVE read.
+
 ## SIM PKCE browser flow
 
 Use `saxo_start_pkce_login` when SIM credentials and redirect URI are configured but no usable SIM cache exists.

@@ -27,6 +27,20 @@ EXPECTED_MCP_ARGS: Final = (
     "--transport",
     "stdio",
 )
+CLAUDE_MCP_SERVERS: Final[JsonObject] = {
+    PLUGIN_NAME: {
+        "command": "uv",
+        "args": [
+            "--directory",
+            "${CLAUDE_PLUGIN_ROOT}",
+            "run",
+            "saxo-bank-mcp",
+            "--transport",
+            "stdio",
+        ],
+    },
+}
+CLAUDE_MCP_ERROR: Final = "claude plugin.json mcpServers must launch from ${CLAUDE_PLUGIN_ROOT}"
 SECRET_PATTERNS: Final = ("token", "secret", "password", "api_key", "apikey", "bearer")
 
 JSON_OBJECT_ADAPTER: Final[TypeAdapter[JsonObject]] = TypeAdapter(dict[str, JsonValue])
@@ -105,7 +119,8 @@ def test_claude_manifest_and_marketplace_validate_against_native_shape() -> None
     # When: the Claude publication contract is inspected.
     entry = _plugin_entry(marketplace, ".claude-plugin/marketplace.json")
 
-    # Then: Claude uses supported fields, repository-root source, and the shared MCP file.
+    # Then: Claude uses supported fields, repository-root source, and a plugin-root MCP launch,
+    # because Claude Code resolves a relative `cwd` against the session, not the plugin.
     assert set(manifest) == {
         "name",
         "displayName",
@@ -124,9 +139,7 @@ def test_claude_manifest_and_marketplace_validate_against_native_shape() -> None
     assert _string(manifest, "repository", ".claude-plugin/plugin.json.repository") == (
         REPOSITORY_URL
     )
-    assert _string(manifest, "mcpServers", ".claude-plugin/plugin.json.mcpServers") == (
-        MCP_CONFIG_PATH
-    )
+    assert manifest["mcpServers"] == CLAUDE_MCP_SERVERS
     assert entry["name"] == PLUGIN_NAME
     assert entry["source"] == "."
     assert entry["description"] == manifest["description"]
@@ -135,7 +148,7 @@ def test_claude_manifest_and_marketplace_validate_against_native_shape() -> None
 
 
 def test_shared_mcp_config_is_credential_free_stdio_launch_contract() -> None:
-    # Given: both plugin manifests reference the root MCP config.
+    # Given: the Codex manifest and in-repository sessions use the root MCP config.
     mcp_config = _json_object(Path(".mcp.json"))
 
     # When: the server launch contract is inspected.
@@ -166,6 +179,7 @@ def test_shared_mcp_config_is_credential_free_stdio_launch_contract() -> None:
     ("fixture_name", "expected_error"),
     [
         ("custom_codex_mcp_path", "codex plugin.json mcpServers must be ./.mcp.json"),
+        ("claude_session_relative_mcp", CLAUDE_MCP_ERROR),
         ("stale_version", "claude plugin.json version must equal project.version"),
         ("absolute_cwd", "mcpServers.saxo-bank-mcp.cwd must be ."),
         ("embedded_token", "mcpServers.saxo-bank-mcp must not contain secret-like config"),
@@ -188,6 +202,8 @@ def test_packaging_contract_rejects_field_specific_failure_fixtures(
     match fixture_name:
         case "custom_codex_mcp_path":
             codex_manifest["mcpServers"] = "./custom.mcp.json"
+        case "claude_session_relative_mcp":
+            claude_manifest["mcpServers"] = MCP_CONFIG_PATH
         case "stale_version":
             claude_manifest["version"] = "0.1.1"
         case "absolute_cwd":
@@ -214,8 +230,8 @@ def _packaging_errors(
     errors: list[str] = []
     if codex_manifest.get("mcpServers") != MCP_CONFIG_PATH:
         errors.append("codex plugin.json mcpServers must be ./.mcp.json")
-    if claude_manifest.get("mcpServers") != MCP_CONFIG_PATH:
-        errors.append("claude plugin.json mcpServers must be ./.mcp.json")
+    if claude_manifest.get("mcpServers") != CLAUDE_MCP_SERVERS:
+        errors.append(CLAUDE_MCP_ERROR)
     for label, payload in (
         ("codex plugin.json", codex_manifest),
         ("claude plugin.json", claude_manifest),
