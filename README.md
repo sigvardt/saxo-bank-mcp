@@ -78,7 +78,16 @@ uv run python -m saxo_bank_mcp.qa live-read --out .omo/evidence/saxo-bank-mcp/li
 `uv run saxo-bank-live-login` keeps the localhost callback receiver open for up
 to one hour by default. The command must still be running when Saxo redirects
 the browser to `http://localhost:8080/callback`. After the callback succeeds,
-the command stores the LIVE token in the configured owner-only cache.
+the command stores the LIVE token in the configured owner-only cache. The
+receiver answers other paths with 404 and keeps waiting, so a stray request or
+port check does not end the login; a callback with the wrong `state` still fails.
+
+On a headless host, run `uv run saxo-bank-live-login --no-browser` instead. It
+does not open a browser locally; it prints the authorization URL as one JSON line
+on stderr, and `--url-file PATH` also writes it to an owner-only file. Open that
+URL in a browser whose `localhost:8080` reaches the host, for example after
+`ssh -N -L 8080:127.0.0.1:8080 <host>` on the browser machine. Never paste the
+callback URL or its code anywhere; the redirect must reach the receiver.
 
 The external `saxo-bank-live-session-keeper` refreshes the LIVE token before
 expiry. LIVE tools refresh an expired access token on demand under the same

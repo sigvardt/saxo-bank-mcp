@@ -16,5 +16,17 @@
     "openapi",
     "trading"
   ],
-  "mcpServers": "./.mcp.json"
+  "mcpServers": {
+    "saxo-bank-mcp": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "run",
+        "saxo-bank-mcp",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
 }
