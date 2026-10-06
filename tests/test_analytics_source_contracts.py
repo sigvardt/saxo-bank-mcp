@@ -529,13 +529,19 @@ def test_additive_envelope_and_recursive_fields_are_incompatible(
     payload: dict[str, Any],
     additive_path: str,
 ) -> None:
-    contract = source_contracts_by_id()[contract_id]
+    selected = source_contracts_by_id()[contract_id]
+    contract = selected.model_copy(update={"unmodeled_field_policy": "reject"})
 
     comparison = compare_source_schema(contract, payload)
 
     assert comparison.compatible is False
     assert additive_path in comparison.additive_fields
     assert comparison.quarantined_analysis_kinds == contract.dependent_analysis_kinds
+    if selected.unmodeled_field_policy == "ignore":
+        supported = compare_source_schema(selected, payload)
+        assert supported.compatible is True
+        assert additive_path in supported.additive_fields
+        assert supported.quarantined_analysis_kinds == ()
 
 
 def test_unknown_enum_values_quarantine_dependent_analytics() -> None:

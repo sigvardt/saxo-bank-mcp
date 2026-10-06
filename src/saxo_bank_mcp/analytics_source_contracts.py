@@ -362,6 +362,7 @@ class SourceContract(BaseModel):
     query_parameters: tuple[str, ...] = ()
     response_envelope: SourceResponseEnvelope
     fields: tuple[SourceField, ...]
+    unmodeled_field_policy: Literal["reject", "ignore"] = "reject"
     stable_key_fields: tuple[str, ...] = ()
     stable_key_policy: Literal["required_unique", "unkeyed_snapshot"]
     revision_fields: tuple[str, ...] = ()
@@ -525,6 +526,7 @@ class SchemaComparison(BaseModel):
     )
 
     compatible: bool
+    unmodeled_field_policy: Literal["reject", "ignore"] = "reject"
     structural_errors: tuple[str, ...] = ()
     missing_required_fields: tuple[str, ...] = ()
     null_required_fields: tuple[str, ...] = ()
@@ -562,7 +564,7 @@ class SchemaComparison(BaseModel):
                 self.null_required_fields,
                 self.required_type_mismatches,
                 self.optional_type_mismatches,
-                self.additive_fields,
+                self.additive_fields if self.unmodeled_field_policy == "reject" else (),
                 self.unknown_enum_values,
             )
         )
@@ -1078,8 +1080,12 @@ def source_contract_catalog_sha256(path: Path | None = None) -> str:
 
 def source_contract_fingerprint(contract: SourceContract) -> str:
     """Fingerprint one complete frozen contract without retaining source values."""
+    # The default strict policy preserves identities of unchanged historical contracts.
+    serialized = contract.model_dump(mode="json")
+    if contract.unmodeled_field_policy == "reject":
+        serialized.pop("unmodeled_field_policy")
     material = json.dumps(
-        contract.model_dump(mode="json"),
+        serialized,
         allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
@@ -1520,7 +1526,12 @@ def _is_date(value: str) -> bool:
     try:
         date.fromisoformat(value)
     except ValueError:
-        return False
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return False
+        # Saxo Date values also use midnight ISO datetimes; preserve calendar-date precision.
+        return parsed.hour == parsed.minute == parsed.second == parsed.microsecond == 0
     return True
 
 
@@ -1592,20 +1603,25 @@ def _comparison(
     contract: SourceContract,
     observed: _ObservedSchema,
 ) -> SchemaComparison:
+    # Revision controls need an explicit contract even in partial response schemas.
+    structural_errors = set(observed.structural_errors)
+    if "DataVersion" in observed.additive_fields:
+        structural_errors.add("uncontracted_revision_field")
     compatible = not any(
         (
-            observed.structural_errors,
+            structural_errors,
             observed.missing_required_fields,
             observed.null_required_fields,
             observed.required_type_mismatches,
             observed.optional_type_mismatches,
-            observed.additive_fields,
+            observed.additive_fields if contract.unmodeled_field_policy == "reject" else (),
             observed.unknown_enum_values,
         )
     )
     return SchemaComparison(
         compatible=compatible,
-        structural_errors=tuple(sorted(observed.structural_errors)),
+        unmodeled_field_policy=contract.unmodeled_field_policy,
+        structural_errors=tuple(sorted(structural_errors)),
         missing_required_fields=tuple(sorted(observed.missing_required_fields)),
         null_required_fields=tuple(sorted(observed.null_required_fields)),
         required_type_mismatches=tuple(sorted(observed.required_type_mismatches)),

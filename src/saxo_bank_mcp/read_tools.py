@@ -14,7 +14,7 @@ from saxo_bank_mcp.endpoint_registry import (
 )
 from saxo_bank_mcp.http_client import create_async_client
 from saxo_bank_mcp.live_token_refresh import live_token_for_tool
-from saxo_bank_mcp.read_fingerprints import is_balance_operation, response_fingerprint
+from saxo_bank_mcp.read_fingerprints import response_fingerprint
 from saxo_bank_mcp.read_tool_results import (
     call_class,
     denied,
@@ -66,18 +66,6 @@ async def saxo_call_registered_endpoint(  # noqa: PLR0911
         return tool_result(preflight)
     registered = preflight
     operation = registered.operation
-    if is_balance_operation(operation.operation_id) and response_mode not in {
-        "fingerprint_only",
-        "analytics_contract_receipt",
-    }:
-        return tool_result(
-            denied(
-                method,
-                path,
-                "sensitive_response_requires_fingerprint_only",
-                operation=operation,
-            ),
-        )
     if response_mode == "analytics_contract_receipt":
         if analytics_contract_id is None:
             return tool_result(

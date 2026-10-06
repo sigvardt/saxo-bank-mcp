@@ -19,6 +19,7 @@ import saxo_bank_mcp.analytics_sync as analytics_sync_module
 from saxo_bank_mcp.analytics_config import AnalyticsConfig, load_analytics_config
 from saxo_bank_mcp.analytics_market_data import ChartInterval
 from saxo_bank_mcp.analytics_provider import SaxoAnalyticsProvider
+from saxo_bank_mcp.analytics_reference_data import capture_instrument_details
 from saxo_bank_mcp.analytics_resolver import InstrumentResolver
 from saxo_bank_mcp.analytics_store import (
     AnalyticsStore,
@@ -26,12 +27,15 @@ from saxo_bank_mcp.analytics_store import (
     StoreValidationError,
 )
 from saxo_bank_mcp.analytics_sync import (
+    AccountAnalyticsSyncSpec,
+    CostCaptureChoice,
     OptionChainSyncSpec,
     OptionReferenceDatasetRow,
     PriceBarDatasetSummary,
     PriceBarSyncSpec,
     QuoteDatasetRow,
     QuoteSyncSpec,
+    ReferenceDetailsSyncSpec,
     SyncError,
     SyncLimitError,
     SyncResearchRequest,
@@ -151,11 +155,54 @@ def test_account_analytics_sync_spec_exposes_only_safe_on_demand_capture_scope()
     assert "account_key" not in serialized
     assert "client_key" not in serialized
     assert "source_fact" not in serialized
-    assert "holding" not in serialized
-    assert "balance" not in serialized
+    assert "account_key" not in schema["properties"]
+    assert "price" not in schema["properties"]
 
 
-async def _resolved_handle(config: AnalyticsConfig) -> str:
+def test_account_capture_accepts_full_recipe_set_and_bounds_explicit_choices() -> None:
+    from saxo_bank_mcp.analytics_runtime import (  # noqa: PLC0415 - recipe catalog imports sync
+        RECIPE_KINDS,
+    )
+
+    handle = "ih_00000000000040008000000000000000"
+    spec = AccountAnalyticsSyncSpec(
+        safe_account_selector="proc-acct-abcdefghijklmnopqrstuvwx",
+        analysis_kinds=cast("tuple[analytics_sync_module.AccountAnalyticsKind, ...]", RECIPE_KINDS),
+        instrument_handles=(handle,),
+        from_date=date(2026, 7, 1),
+        to_date=date(2026, 7, 31),
+        cost_choices=(
+            CostCaptureChoice(instrument_handle=handle, amount=12.0, holding_period_days=30),
+        ),
+    )
+    assert len(spec.analysis_kinds) == 58
+    assert spec.cost_choices[0].amount == 12.0
+    with pytest.raises(ValueError, match="both boundaries"):
+        AccountAnalyticsSyncSpec(
+            safe_account_selector=spec.safe_account_selector,
+            analysis_kinds=("portfolio_risk",),
+            from_date=date(2026, 7, 1),
+        )
+    with pytest.raises(ValueError, match="ordered"):
+        AccountAnalyticsSyncSpec(
+            safe_account_selector=spec.safe_account_selector,
+            analysis_kinds=("portfolio_risk",),
+            from_date=date(2026, 7, 31),
+            to_date=date(2026, 7, 1),
+        )
+    with pytest.raises(ValueError, match="instrument scope"):
+        AccountAnalyticsSyncSpec(
+            safe_account_selector=spec.safe_account_selector,
+            analysis_kinds=("pretrade_impact",),
+            cost_choices=spec.cost_choices,
+        )
+    with pytest.raises(ValueError, match="Extra inputs"):
+        ReferenceDetailsSyncSpec.model_validate({"instrument_handle": handle, "Uics": [123]})
+    request = SyncResearchRequest(items=(ReferenceDetailsSyncSpec(instrument_handle=handle),))
+    assert request.items[0].data_kind == "instrument_details"
+
+
+async def _resolved_handle(config: AnalyticsConfig, *, related_root: int | None = None) -> str:
     executor = _PayloadExecutor(
         (
             {
@@ -176,7 +223,28 @@ async def _resolved_handle(config: AnalyticsConfig) -> str:
         config,
     )
     result = await resolver.resolve_instruments("FIX", (), ())
-    return result.matches[0].instrument_handle
+    handle = result.matches[0].instrument_handle
+    if related_root is not None:
+        await capture_instrument_details(
+            handle,
+            config=config,
+            provider=SaxoAnalyticsProvider(
+                request_executor=_PayloadExecutor(
+                    (
+                        {
+                            "Data": [
+                                {
+                                    "Uic": 1001,
+                                    "AssetType": "Stock",
+                                    "RelatedOptionRoots": [related_root],
+                                }
+                            ]
+                        },
+                    )
+                )
+            ),
+        )
+    return handle
 
 
 @pytest.mark.anyio
@@ -1386,7 +1454,7 @@ async def test_quote_row_fingerprint_distinguishes_entitlement_quality(
 @pytest.mark.anyio
 async def test_option_row_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     result = await capture_option_chain(
         handle,
         (date(2026, 9, 18),),
@@ -1436,7 +1504,7 @@ async def test_option_row_material_column_mismatch_fails_closed(
     mutation_sql: str,
 ) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     result = await capture_option_chain(
         handle,
         (date(2026, 9, 18),),
@@ -1481,7 +1549,7 @@ async def test_option_handle_metadata_mismatch_rolls_back_reuse(
     metadata_mutation: str,
 ) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     payload = {
         "ExpiryDates": ["2026-09-18"],
         "OptionRootId": 1001,
@@ -2044,7 +2112,7 @@ async def test_option_chain_entitlement_refusal_is_sanitized_and_persisted(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     executor = _EntitlementExecutor()
 
     result = await capture_option_chain(
@@ -2088,7 +2156,7 @@ async def test_option_chain_entitlement_refusal_is_sanitized_and_persisted(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (2, 0, 1)
+    assert counts == (3, 0, 2)
     assert payload_row is not None
     payload_text = str(payload_row[0])
     assert "private broker explanation" not in payload_text
@@ -2102,7 +2170,7 @@ async def test_entitled_option_chain_persists_safe_normalized_references(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     executor = _PayloadExecutor(
         (
             {
@@ -2153,7 +2221,7 @@ async def test_entitled_option_chain_persists_safe_normalized_references(
         ).fetchone()
     finally:
         connection.close()
-    assert counts == (2, 1, 2, 1)
+    assert counts == (3, 1, 2, 2)
 
 
 @pytest.mark.anyio
@@ -2161,7 +2229,7 @@ async def test_multiple_option_expiries_retain_every_entitled_matching_option(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    handle = await _resolved_handle(config)
+    handle = await _resolved_handle(config, related_root=1001)
     expiries = (date(2026, 9, 18), date(2026, 12, 18))
     executor = _PayloadExecutor(
         tuple(

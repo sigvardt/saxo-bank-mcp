@@ -14,6 +14,10 @@ Call `saxo_analytics_capabilities` first when module support, source coverage, p
 entitlement, delay, or limits are not already current in this workflow. Use logical tool IDs only;
 resolve the registered tool whose name ends with that logical ID.
 
+Use the user's selected environment; an explicit LIVE default persists until they request
+demo. Analytics computation and private owner delivery work in LIVE without a special mode.
+Refresh the installed capability receipt after a server reload or implementation change.
+
 For every analysis response:
 
 - Cite its `analysis_id`.

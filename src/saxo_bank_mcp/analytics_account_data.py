@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final, Literal, cast
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_ingestion_models import IngestionFingerprints
 from saxo_bank_mcp.analytics_instrument_identity import (
     InstrumentIdentityError,
     instrument_handle_for_saxo_identity,
@@ -52,12 +53,14 @@ from saxo_bank_mcp.analytics_source_contracts import (
     source_contracts_by_id,
 )
 from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreQuotaError
-from saxo_bank_mcp.analytics_sync import IngestionFingerprints
 
 _TRANSACTIONS_CONTRACT: Final = "transactions_v1"
 _BOOKINGS_CONTRACT: Final = "bookings_v1"
 _CLOSED_POSITIONS_CONTRACT: Final = "closed_positions_history_v1"
 _COSTS_CONTRACT: Final = "costs_v1"
+ACCOUNT_ANALYSIS_KIND_LIMIT: Final = 58
+ACCOUNT_ANALYSIS_DATE_LIMIT_DAYS: Final = 3660
+COST_HOLDING_PERIOD_LIMIT_DAYS: Final = 36_500
 _NORMALIZED_ROW_ESTIMATE_BYTES: Final = 512
 _SOURCE_PAGE_SIZE: Final = 500
 _MAX_SOURCE_TEXT_LENGTH: Final = 1_000
@@ -92,12 +95,64 @@ _UNBOUND_EXISTING_ALIAS_MESSAGE: Final = (
 type Clock = Callable[[], datetime]
 type AccountDataKind = Literal["transactions", "bookings", "closed_positions", "costs"]
 type AccountAnalysisKind = Literal[
-    "portfolio_performance",
-    "position_sizing",
-    "scenario_custom",
-    "portfolio_minimum_variance",
+    "bounded_backtest",
+    "cash_and_settlement",
+    "corporate_action_center",
+    "cost_xray",
     "derivatives_model",
+    "derivatives_scenario",
+    "execution_quality",
+    "fixed_income",
+    "futures_curve",
+    "fx_forward_carry",
+    "goal_model",
+    "income_calendar",
+    "instrument_dossier",
+    "instrument_price_return",
+    "instrument_price_volume",
+    "instrument_quote",
+    "instrument_resolution",
+    "instrument_risk",
+    "iv_surface",
+    "margin_fire_drill",
+    "market_comparison",
+    "market_correlation_regime",
+    "market_microstructure",
+    "market_volatility_dispersion",
+    "monte_carlo",
+    "multi_instrument_comparison",
+    "option_chain",
+    "option_greeks",
+    "option_payoff",
+    "portfolio_attribution",
+    "portfolio_comparison",
+    "portfolio_exposure",
+    "portfolio_margin",
+    "portfolio_minimum_variance",
+    "portfolio_overview",
+    "portfolio_performance",
+    "portfolio_query",
+    "portfolio_risk",
+    "portfolio_risk_parity",
+    "portfolio_scenario",
+    "portfolio_time_machine",
+    "position_sizing",
     "pretrade_impact",
+    "regulatory_cost_report",
+    "saved_condition_checks",
+    "scenario_combined",
+    "scenario_currency",
+    "scenario_custom",
+    "scenario_historical",
+    "scenario_margin",
+    "scenario_rate",
+    "scenario_volatility",
+    "session_cockpit",
+    "tax_lot_export",
+    "technical_indicators",
+    "trading_conditions",
+    "trading_mirror",
+    "wrapper_comparison",
 ]
 
 
@@ -395,6 +450,8 @@ async def sync_cost_sources(  # noqa: PLR0913
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
     reference_prices: Mapping[str, float] | None = None,
+    reference_amounts: Mapping[str, float] | None = None,
+    holding_period_days: int = 1,
     visibility: VisibilityMode = VisibilityMode.FINGERPRINT_ONLY,
     trusted_local_host: bool = False,
     clock: Clock = lambda: datetime.now(UTC),
@@ -416,11 +473,18 @@ async def sync_cost_sources(  # noqa: PLR0913
     price_by_handle = {} if reference_prices is None else dict(reference_prices)
     if price_by_handle and set(price_by_handle) != set(handles):
         raise AccountSyncValidationError("cost sync reference price scope is invalid")
-    if any(
-        isinstance(value, bool) or not math.isfinite(float(value)) or value <= 0
-        for value in price_by_handle.values()
-    ):
+    if any(not _positive_number(value) for value in price_by_handle.values()):
         raise AccountSyncValidationError("cost sync reference price is invalid")
+    amount_by_handle = {} if reference_amounts is None else dict(reference_amounts)
+    if amount_by_handle and set(amount_by_handle) != set(handles):
+        raise AccountSyncValidationError("cost sync amount scope is invalid")
+    if any(not _positive_number(value) for value in amount_by_handle.values()):
+        raise AccountSyncValidationError("cost sync amount is invalid")
+    if (
+        type(holding_period_days) is not int
+        or not 0 <= holding_period_days <= COST_HOLDING_PERIOD_LIMIT_DAYS
+    ):
+        raise AccountSyncValidationError("cost sync holding period is invalid")
     selectors = _instrument_selectors(config, handles)
     budget = _source_budget(config, request_budget)
     request_count_start = budget.used
@@ -429,9 +493,9 @@ async def sync_cost_sources(  # noqa: PLR0913
     for selector in selectors:
         request: dict[str, object] = {
             "AccountKey": validated_scope.account_key.get_secret_value(),
-            "Amount": 1,
+            "Amount": amount_by_handle.get(selector.handle, 1),
             "AssetType": selector.asset_type,
-            "HoldingPeriodInDays": 1,
+            "HoldingPeriodInDays": holding_period_days,
             "Uic": selector.identifier,
         }
         if selector.handle in price_by_handle:
@@ -448,6 +512,7 @@ async def sync_cost_sources(  # noqa: PLR0913
             budget,
         )
         envelope = build_source_capture_envelope(capture, pages)
+        _assert_cost_request_scope(envelope.pages, selector, request)
         records = _normalize_costs(
             envelope.pages,
             validated_scope.alias,
@@ -461,7 +526,10 @@ async def sync_cost_sources(  # noqa: PLR0913
                 records=records,
                 coverage_start=captured_at,
                 coverage_end=captured_at,
-                warnings=_record_warnings(records, envelope.pages),
+                warnings=(
+                    *_record_warnings(records, envelope.pages),
+                    *(("cost_quantity_assumed_one",) if not amount_by_handle else ()),
+                ),
                 instrument_handle=selector.handle,
             ),
         )
@@ -481,13 +549,86 @@ async def sync_cost_sources(  # noqa: PLR0913
     )
 
 
-async def sync_account_analysis_sources(  # noqa: PLR0913
+def _positive_number(value: object) -> bool:
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _assert_cost_request_scope(
+    pages: tuple[SourcePage, ...], selector: _InstrumentSelector, request: Mapping[str, object]
+) -> None:
+    for page in pages:
+        for row in page.rows:
+            if row.get("Uic") != selector.identifier or row.get("AssetType") != selector.asset_type:
+                raise AccountSyncValidationError("cost source instrument does not match request")
+            for field in ("Amount", "Price", "HoldingPeriodInDays"):
+                if (
+                    field in request
+                    and (field != "HoldingPeriodInDays" or row.get(field) is not None)
+                    and _optional_number(row.get(field)) != request[field]
+                ):
+                    raise AccountSyncValidationError(
+                        "cost source calculation basis does not match request"
+                    )
+
+
+def account_analysis_source_contracts(
+    analysis_kinds: Sequence[AccountAnalysisKind],
+) -> tuple[str, ...]:
+    """Return each selected recipe's exact source closure without reading account data."""
+    try:
+        kinds = TypeAdapter(tuple[AccountAnalysisKind, ...]).validate_python(
+            tuple(analysis_kinds), strict=True
+        )
+    except ValidationError as error:
+        raise AccountSyncValidationError("account analysis source kind is invalid") from error
+    if not kinds or len(kinds) > ACCOUNT_ANALYSIS_KIND_LIMIT or len(set(kinds)) != len(kinds):
+        raise AccountSyncValidationError(
+            "account analysis source kinds must be nonempty and unique"
+        )
+    # Runtime recipes import sync data types, so consult their catalog only after module loading.
+    from saxo_bank_mcp import (  # noqa: PLC0415 - runtime recipes depend on sync types
+        analytics_runtime_market,
+        analytics_runtime_models,
+        analytics_runtime_portfolio,
+    )
+
+    closures = {
+        **analytics_runtime_market.SOURCE_CONTRACTS,
+        **analytics_runtime_portfolio.SOURCE_CONTRACTS,
+        **analytics_runtime_models.SOURCE_CONTRACTS,
+    }
+    if any(kind not in closures for kind in kinds):
+        raise AccountSyncValidationError("account analysis source closure is unavailable")
+    return tuple(sorted({contract for kind in kinds for contract in closures[kind]}))
+
+
+def account_analysis_history_kinds(
+    analysis_kinds: Sequence[AccountAnalysisKind],
+) -> tuple[AccountDataKind, ...]:
+    """Select historical activity only; current cost illustrations use their own capture."""
+    contracts = set(account_analysis_source_contracts(analysis_kinds))
+    candidates: tuple[tuple[str, AccountDataKind], ...] = (
+        (_TRANSACTIONS_CONTRACT, "transactions"),
+        (_BOOKINGS_CONTRACT, "bookings"),
+        (_CLOSED_POSITIONS_CONTRACT, "closed_positions"),
+    )
+    return tuple(kind for contract, kind in candidates if contract in contracts)
+
+
+async def sync_account_analysis_sources(  # noqa: C901, PLR0912, PLR0913 - distinct frozen source scopes
     scope: AccountScope,
     analysis_kinds: Sequence[AccountAnalysisKind],
     instruments: Sequence[str],
     *,
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
+    from_date: date | None = None,
+    to_date: date | None = None,
     clock: Clock = lambda: datetime.now(UTC),
     request_budget: SourceRequestBudget | None = None,
 ) -> tuple[tuple[AccountAnalysisSourceSummary, ...], int]:
@@ -499,9 +640,8 @@ async def sync_account_analysis_sources(  # noqa: PLR0913
         trusted_local_host=False,
     )
     assert_persisted_account_scope_binding(config, validated_scope)
-    kinds = tuple(dict.fromkeys(analysis_kinds))
-    if not kinds:
-        raise AccountSyncValidationError("account analysis source kinds are required")
+    required_contracts = set(account_analysis_source_contracts(analysis_kinds))
+    _require_account_date_range(from_date, to_date)
     handles = tuple(dict.fromkeys(instruments))
     if len(handles) > config.limits.sync_instruments:
         raise AccountSyncValidationError("account analysis instrument count exceeds its limit")
@@ -512,19 +652,31 @@ async def sync_account_analysis_sources(  # noqa: PLR0913
     account_key = validated_scope.account_key.get_secret_value()
     client_key = validated_scope.client_key.get_secret_value()
     requested: list[tuple[str, str | None, dict[str, object]]] = []
-    if "portfolio_performance" in kinds:
+    performance_contracts = ("performance_summary_v4", "performance_timeseries_v4")
+    if required_contracts.intersection(performance_contracts):
         common = {
             "AccountKey": account_key,
             "ClientKey": client_key,
-            "StandardPeriod": "Year",
         }
+        if from_date is None or to_date is None:
+            common["StandardPeriod"] = "Year"
+        else:
+            if to_date > captured_at.date():
+                raise AccountSyncValidationError(
+                    "account performance dates exceed the capture cutoff"
+                )
+            common["FromDate"] = from_date.isoformat()
+            common["ToDate"] = to_date.isoformat()
         requested.extend(
-            (
-                ("performance_summary_v4", None, dict(common)),
-                ("performance_timeseries_v4", None, dict(common)),
-            ),
+            (contract, None, dict(common))
+            for contract in performance_contracts
+            if contract in required_contracts
         )
-    if {"scenario_custom", "portfolio_minimum_variance"} & set(kinds):
+    if "exposure_instruments_v1" in required_contracts:
+        if not selectors:
+            raise AccountSyncValidationError(
+                "account exposure requires resolved instrument handles"
+            )
         requested.extend(
             (
                 "exposure_instruments_v1",
@@ -538,9 +690,26 @@ async def sync_account_analysis_sources(  # noqa: PLR0913
             )
             for selector in selectors
         )
+    for contract in ("corporate_action_events_v2", "corporate_action_holdings_v2"):
+        if contract not in required_contracts:
+            continue
+        request: dict[str, object] = {
+            "$top": _SOURCE_PAGE_SIZE,
+            "AccountKey": account_key,
+            "ClientKey": client_key,
+            "IncludeSubAccounts": False,
+        }
+        if (
+            contract == "corporate_action_events_v2"
+            and from_date is not None
+            and to_date is not None
+        ):
+            request["FromExDate"] = from_date.isoformat()
+            request["ToExDate"] = to_date.isoformat()
+        requested.append((contract, None, request))
     if not requested:
         return (), 0
-    if len(requested) > config.limits.sync_instruments:
+    if len(requested) > budget.limit - budget.used:
         raise AccountSyncValidationError("account analysis source request limit exceeded")
     prepared: list[tuple[str, str | None, tuple[SourcePage, ...]]] = []
     for contract_id, instrument_handle, request in requested:
@@ -550,6 +719,8 @@ async def sync_account_analysis_sources(  # noqa: PLR0913
         )
         pages = await _fetch_pages(provider, contract_id, request, capture, budget)
         prepared.append((contract_id, instrument_handle, pages))
+    if sum(page.row_count for _, _, pages in prepared for page in pages) > config.limits.sync_rows:
+        raise AccountSyncValidationError("account analysis source row limit exceeded")
     summaries = _persist_account_analysis_sources(
         config,
         validated_scope,
@@ -557,6 +728,17 @@ async def sync_account_analysis_sources(  # noqa: PLR0913
         captured_at=captured_at,
     )
     return summaries, budget.used - request_count_start
+
+
+def _require_account_date_range(from_date: date | None, to_date: date | None) -> None:
+    if (from_date is None) != (to_date is None):
+        raise AccountSyncValidationError("account analytics dates require both boundaries")
+    if from_date is None or to_date is None:
+        return
+    if type(from_date) is not date or type(to_date) is not date or to_date < from_date:
+        raise AccountSyncValidationError("account analytics dates must be ordered calendar dates")
+    if (to_date - from_date).days > ACCOUNT_ANALYSIS_DATE_LIMIT_DAYS:
+        raise AccountSyncValidationError("account analytics date range exceeds ten years")
 
 
 async def _sync_history_contracts(  # noqa: PLR0913
@@ -1115,6 +1297,39 @@ def _persist_prepared(
     return tuple(summaries), invalidated_total
 
 
+def _analysis_source_coverage(
+    contract_id: str, source_pages: tuple[SourcePage, ...]
+) -> tuple[datetime, datetime]:
+    observed: list[datetime] = []
+    if contract_id in {"performance_summary_v4", "performance_timeseries_v4"}:
+        for page in source_pages:
+            for row in page.rows:
+                raw_dates = [row.get("From"), row.get("To")]
+                for group, series in (
+                    ("Balance", "AccountValue"),
+                    ("TimeWeighted", "Accumulated"),
+                    ("MoneyWeighted", "Accumulated"),
+                ):
+                    points = _optional_mapping(row.get(group)).get(series)
+                    if isinstance(points, tuple):
+                        raw_dates.extend(
+                            point.get("Date") for point in points if isinstance(point, Mapping)
+                        )
+                observed.extend(
+                    _required_date_or_timestamp(raw) for raw in raw_dates if raw is not None
+                )
+    if observed:
+        if max(observed) > max(page.source_timestamp for page in source_pages):
+            raise AccountSyncValidationError(
+                "account performance observations exceed capture cutoff"
+            )
+        return min(observed), max(observed)
+    return (
+        min(page.source_timestamp for page in source_pages),
+        max(page.source_timestamp for page in source_pages),
+    )
+
+
 def _persist_account_analysis_sources(
     config: AnalyticsConfig,
     scope: AccountScope,
@@ -1143,8 +1358,7 @@ def _persist_account_analysis_sources(
         with store.market_ingestion_transaction(reservation) as connection:
             bind_account_scope(connection, scope)
             for contract_id, instrument_handle, source_pages in prepared:
-                coverage_start = min(page.source_timestamp for page in source_pages)
-                coverage_end = max(page.source_timestamp for page in source_pages)
+                coverage_start, coverage_end = _analysis_source_coverage(contract_id, source_pages)
                 page_ids: list[str] = []
                 for page in source_pages:
                     serialized = page.model_dump(mode="json")
@@ -1807,6 +2021,8 @@ def _required_timestamp(value: object) -> datetime:
 
 
 def _required_date_or_timestamp(value: object) -> datetime:
+    if isinstance(value, str) and value[_ISO_DATE_LENGTH:] in {"T00:00:00", "T00:00:00.000"}:
+        return _required_date_or_timestamp(value[:_ISO_DATE_LENGTH])
     if isinstance(value, str) and len(value) == _ISO_DATE_LENGTH:
         try:
             timestamp = datetime.fromisoformat(f"{value}T00:00:00+00:00")
@@ -1875,6 +2091,8 @@ __all__ = (
     "AccountSyncValidationError",
     "PrivateAccountRecord",
     "SyncResult",
+    "account_analysis_history_kinds",
+    "account_analysis_source_contracts",
     "new_account_alias",
     "sync_account_analysis_sources",
     "sync_account_history",

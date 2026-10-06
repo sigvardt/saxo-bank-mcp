@@ -47,6 +47,11 @@ type ChartTemplateId = Literal[
     "pretrade_impact_card",
     "execution_report_card",
     "session_cockpit",
+    "stored_table_line",
+    "stored_table_bar",
+    "stored_table_scatter",
+    "stored_table_heatmap",
+    "stored_table_composite",
 ]
 type ChartKind = Literal[
     "line",
@@ -225,8 +230,26 @@ _CORE_TEMPLATE_BINDINGS: Final = (
         chart_kind="dashboard",
     ),
 )
+STORED_TABLE_TEMPLATES: Final = (
+    "stored_table_line",
+    "stored_table_bar",
+    "stored_table_scatter",
+    "stored_table_heatmap",
+    "stored_table_composite",
+)
+_TABLE_TEMPLATE_KINDS: Final[dict[ChartTemplateId, ChartKind]] = {
+    "stored_table_line": "line",
+    "stored_table_bar": "bar",
+    "stored_table_scatter": "scatter",
+    "stored_table_heatmap": "heatmap",
+    "stored_table_composite": "composite",
+}
 _BINDINGS_BY_TEMPLATE: Final = MappingProxyType(
-    {binding.template_id: binding for binding in _CORE_TEMPLATE_BINDINGS},
+    {binding.template_id: binding for binding in _CORE_TEMPLATE_BINDINGS}
+    | {
+        name: TemplateBinding(template_id=name, analysis_kind="stored_table", chart_kind=kind)
+        for name, kind in _TABLE_TEMPLATE_KINDS.items()
+    },
 )
 
 
@@ -285,7 +308,10 @@ class ChartSemantics(_StrictModel):
     @model_validator(mode="after")
     def validate_semantics(self) -> Self:
         binding = _BINDINGS_BY_TEMPLATE[self.template_id]
-        if self.analysis_kind != binding.analysis_kind:
+        if (
+            self.template_id not in _TABLE_TEMPLATE_KINDS
+            and self.analysis_kind != binding.analysis_kind
+        ):
             raise ValueError("chart template is not bound to this analysis kind")
         if len(set(self.labels)) != len(self.labels):
             raise ValueError("chart labels must be unique")
@@ -412,7 +438,7 @@ def _bound_visible_stamp_lines(  # pyright: ignore[reportUnusedFunction]
         f"Cutoff: {stamps.data_cutoff.isoformat().replace('+00:00', 'Z')}",
         f"Delay: {stamps.quote_delay}",
         f"Price type: {stamps.price_type}",
-        f"Currency: {stamps.currency}",
+        f"Reporting currency: {stamps.currency}",
         f"Adjustment: {stamps.adjustment_status}",
         f"Warnings: {warning_text}",
         f"Analysis: {stamps.analysis_id}",

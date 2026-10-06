@@ -31,6 +31,7 @@ from saxo_bank_mcp.analytics_provider import (
 from saxo_bank_mcp.analytics_source_contracts import (
     FrozenSourceJsonValue,
     SourceJsonValue,
+    source_contracts_by_id,
 )
 from saxo_bank_mcp.endpoint_registry import EndpointOperation
 
@@ -1549,7 +1550,11 @@ async def test_recursive_schema_drift_is_refused_before_source_page_yield(
     quarantined_kind: str,
 ) -> None:
     executor = FakeExecutor([_json_response(200, payload)])
-    provider = _provider(executor)
+    contracts = dict(source_contracts_by_id())
+    contracts[contract_id] = contracts[contract_id].model_copy(
+        update={"unmodeled_field_policy": "reject"}
+    )
+    provider = SaxoAnalyticsProvider(request_executor=executor, contracts=contracts)
 
     with pytest.raises(SourceSchemaDriftError) as caught:
         _ = [page async for page in provider.fetch(contract_id, source_request)]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal, Self
 
@@ -292,12 +292,14 @@ class _ExecutionRun:
     ending_position_weight: float
 
 
-def run_backtest(  # noqa: PLR0911
+def run_backtest(  # noqa: PLR0911, PLR0913
     request: BacktestRequest,
     *,
     visibility: VisibilityMode,
     trusted_local_host: bool,
     ghost_verification: GhostPortfolioVerification | None = None,
+    cancellation_check: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> BacktestResult | ResearchRefusal:
     """Run the bounded vectorized signal engine with explicit next-open execution."""
     private_delivery = require_delivery_boundary(
@@ -359,6 +361,7 @@ def run_backtest(  # noqa: PLR0911
         entry=entry,
         exit_=exit_,
         warm_up=warm_up,
+        cancellation_check=cancellation_check,
     )
     try:
         baseline = _execute_path(
@@ -366,18 +369,27 @@ def run_backtest(  # noqa: PLR0911
             decision_targets=decision_targets,
             decision_causes=decision_causes,
             cost_multiplier=1.0,
+            cancellation_check=cancellation_check,
+            progress=progress,
+            work_offset=0,
         )
         zero_cost = _execute_path(
             request,
             decision_targets=decision_targets,
             decision_causes=decision_causes,
             cost_multiplier=0.0,
+            cancellation_check=cancellation_check,
+            progress=progress,
+            work_offset=len(dataset.bars) - 1,
         )
         double_cost = _execute_path(
             request,
             decision_targets=decision_targets,
             decision_causes=decision_causes,
             cost_multiplier=2.0,
+            cancellation_check=cancellation_check,
+            progress=progress,
+            work_offset=2 * (len(dataset.bars) - 1),
         )
         split_windows = _split_windows(baseline.equity_curve, request.strategy.evaluation_split)
     except (ArithmeticError, OverflowError, ValueError):
@@ -556,6 +568,7 @@ def _decision_targets(
     entry: NDArray[np.bool_],
     exit_: NDArray[np.bool_],
     warm_up: int,
+    cancellation_check: Callable[[], None] | None = None,
 ) -> tuple[FloatArray, tuple[BacktestFillCause | None, ...]]:
     count = len(request.dataset.bars)
     targets = np.zeros(count, dtype=np.float64)
@@ -565,6 +578,8 @@ def _decision_targets(
     intended_weight = direction * request.strategy.sizing.target_weight
     first_decision = warm_up - 1
     for index, bar in enumerate(request.dataset.bars):
+        if cancellation_check is not None:
+            cancellation_check()
         scheduled = index >= first_decision and (
             (index - first_decision) % request.strategy.rebalancing.interval_bars == 0
         )
@@ -584,12 +599,15 @@ def _decision_targets(
     return targets, tuple(causes)
 
 
-def _execute_path(  # noqa: PLR0915
+def _execute_path(  # noqa: C901, PLR0913, PLR0915
     request: BacktestRequest,
     *,
     decision_targets: FloatArray,
     decision_causes: Sequence[BacktestFillCause | None],
     cost_multiplier: float,
+    cancellation_check: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    work_offset: int = 0,
 ) -> _ExecutionRun:
     bars = request.dataset.bars
     equity = request.starting_equity
@@ -602,6 +620,10 @@ def _execute_path(  # noqa: PLR0915
     fills: list[BacktestFill] = []
     curve = [BacktestEquityPoint(at=bars[0].at, equity=equity)]
     for index in range(1, len(bars)):
+        if cancellation_check is not None:
+            cancellation_check()
+        if progress is not None:
+            progress(work_offset + index, 3 * (len(bars) - 1))
         previous = bars[index - 1]
         current = bars[index]
         current_open = _price(current.open_price)

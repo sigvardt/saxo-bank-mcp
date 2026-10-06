@@ -7,6 +7,7 @@ import re
 import stat
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from saxo_bank_mcp.analytics_metric_definitions import MetricDefinition
 from saxo_bank_mcp.analytics_models import (
     AnalysisRequest,
     AnalysisResult,
+    MetricClass,
     MetricValue,
     NamedModelAssumption,
     ValueUnitClass,
@@ -43,6 +45,8 @@ _OWNER_DIRECTORY_MODE: Final = 0o700
 _ANALYSIS_ID_LENGTH: Final = 35
 _OPAQUE_UUID_VERSION: Final = 4
 _SHA256_LENGTH: Final = 64
+_MAX_DEPENDENCY_DEPTH: Final = 32
+_MAX_DEPENDENCY_NODES: Final = 100
 _IDENTITY_INPUT_KEYS: Final = frozenset(
     {
         "analysis_parameters_sha256",
@@ -201,6 +205,12 @@ def build_analysis_parameters_sha256(  # noqa: PLR0913
     schema_version: str = "1",
 ) -> str:
     """Fingerprint a validated request before its deterministic result identity exists."""
+    # Preserve identities of saved requests that predate dependency bindings.
+    absent_dependencies = {
+        name
+        for name in ("analysis_dependencies", "input_dataset_dependencies")
+        if not getattr(request.parameters, name)
+    }
     return _canonical_component_sha256(
         _ANALYSIS_PARAMETERS_DOMAIN,
         {
@@ -208,7 +218,9 @@ def build_analysis_parameters_sha256(  # noqa: PLR0913
             "analysis_kind": analysis_kind,
             "assumptions": [assumption.model_dump(mode="json") for assumption in assumptions],
             "as_of": as_of.isoformat(),
-            "request": request.model_dump(mode="json"),
+            "request": request.model_dump(
+                mode="json", exclude={"parameters": absent_dependencies}
+            ),
             "schema_version": schema_version,
         },
     )
@@ -268,7 +280,14 @@ def _canonical_json(value: object) -> bytes:
     ).encode()
 
 
-def replay_analysis(  # noqa: C901, PLR0912, PLR0915
+@dataclass(slots=True)
+class _ReplayContext:
+    active: set[str] = field(default_factory=set)
+    checked: dict[str, AnalysisResult] = field(default_factory=dict)
+    visited: set[str] = field(default_factory=set)
+
+
+def replay_analysis(
     analysis_id: str,
     *,
     config: AnalyticsConfig,
@@ -276,15 +295,59 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
     at: datetime | None = None,
 ) -> AnalysisResult:
     """Read an owner-only result only while all persisted proof bindings remain active."""
-    _require_analysis_id(analysis_id)
     checked_at = at or datetime.now(UTC)
     if checked_at.tzinfo is None or checked_at.utcoffset() != datetime.now(UTC).utcoffset():
         raise AnalysisReplayRefused("non_utc_replay_time")
+    return _replay_with_context(
+        analysis_id, config=config, registry=registry, at=checked_at, context=_ReplayContext()
+    )
+
+
+def _replay_with_context(
+    analysis_id: str,
+    *,
+    config: AnalyticsConfig,
+    registry: ProofRegistry,
+    at: datetime,
+    context: _ReplayContext,
+) -> AnalysisResult:
+    _require_analysis_id(analysis_id)
+    if analysis_id in context.active:
+        raise AnalysisReplayRefused("analysis_dependency_cycle")
+    if analysis_id in context.checked:
+        return context.checked[analysis_id]
+    if (
+        len(context.active) >= _MAX_DEPENDENCY_DEPTH
+        or len(context.visited) >= _MAX_DEPENDENCY_NODES
+    ):
+        raise AnalysisReplayRefused("analysis_dependency_limit")
+    context.visited.add(analysis_id)
+    context.active.add(analysis_id)
+    try:
+        result = _read_analysis(
+            analysis_id, config=config, registry=registry, checked_at=at, context=context
+        )
+        context.checked[analysis_id] = result
+        return result
+    finally:
+        context.active.remove(analysis_id)
+
+
+def _read_analysis(  # noqa: C901, PLR0912, PLR0915
+    analysis_id: str,
+    *,
+    config: AnalyticsConfig,
+    registry: ProofRegistry,
+    checked_at: datetime,
+    context: _ReplayContext,
+) -> AnalysisResult:
     store_path = _owner_only_store_path(config)
     try:
         connection = duckdb.connect(
             str(store_path),
-            read_only=True,
+            # Match the process-owned store connection mode during concurrent jobs.
+            # Replay issues SELECTs in a transaction and never writes stored material.
+            read_only=False,
             config=dict(_CONNECTION_CONFIG),
         )
     except duckdb.Error as error:
@@ -313,7 +376,7 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
         result_json = _stored_str(row[6])
         if status == "invalidated":
             raise AnalysisReplayRefused("analysis_invalidated")
-        if status != "verified":
+        if status not in {"verified", "degraded"}:
             raise AnalysisReplayRefused("analysis_not_verified")
         _verify_payload(result_json, byte_count, fingerprint)
         try:
@@ -322,6 +385,7 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             raise AnalysisReplayRefused("analysis_payload_invalid") from error
         if (
             result.analysis_id != analysis_id
+            or result.status.value != status
             or result.analysis_kind != analysis_kind
             or result.provenance.dataset_id != dataset_id
             or result.provenance.source_revision != source_revision
@@ -349,7 +413,9 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             raise AnalysisReplayRefused("dataset_integrity_changed") from error
         dataset_revision = dataset.source_revision
         dataset_fingerprint = dataset.fingerprint_sha256
-        if dataset.quality_state.value != "complete":
+        if dataset.quality_state.value == "invalid":
+            raise AnalysisReplayRefused("dataset_invalidated")
+        if dataset.quality_state.value != "complete" and status == "verified":
             raise AnalysisReplayRefused("dataset_not_verified")
         if dataset_revision != source_revision:
             raise AnalysisReplayRefused("source_revision_changed")
@@ -381,13 +447,15 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
         profile = registry.profile(result.analysis_kind)
         if profile is None:
             raise AnalysisReplayRefused("missing_proof_profile")
-        declared_contract_ids = {binding.contract_id for binding in profile.source_contracts}
+        declared_contract_ids = registry.required_source_contract_ids(
+            result.analysis_kind,
+        )
         proof_source_contracts = {
             contract_id: contract_sha256
             for contract_id, contract_sha256 in source_contracts.items()
             if contract_id in declared_contract_ids
         }
-        if set(proof_source_contracts) != declared_contract_ids:
+        if frozenset(proof_source_contracts) != declared_contract_ids:
             raise AnalysisReplayRefused("proof_source_contract_missing")
         proof_status = registry.status(
             result.analysis_kind,
@@ -396,6 +464,7 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             source_revision=result.provenance.source_revision,
             engine_versions=engine_versions,
             at=checked_at,
+            metric_ids=tuple(metric.metric_id for metric in result.metrics),
         )
         if proof_status.state is not ProofState.ACTIVE:
             raise AnalysisReplayRefused(proof_status.reason_code)
@@ -439,6 +508,14 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             or identity.seed_sha256 != result.provenance.analysis_seed_sha256
         ):
             raise AnalysisReplayRefused("analysis_identity_changed")
+        _verify_dependencies(
+            result,
+            connection=connection,
+            config=config,
+            registry=registry,
+            at=checked_at,
+            context=context,
+        )
         connection.execute("COMMIT")
         transaction_open = False
         return result  # noqa: TRY300
@@ -449,6 +526,40 @@ def replay_analysis(  # noqa: C901, PLR0912, PLR0915
             with suppress(duckdb.Error):
                 connection.execute("ROLLBACK")
         connection.close()
+
+
+def _verify_dependencies(  # noqa: PLR0913 - one shared replay context and timestamp
+    result: AnalysisResult,
+    *,
+    connection: duckdb.DuckDBPyConnection,
+    config: AnalyticsConfig,
+    registry: ProofRegistry,
+    at: datetime,
+    context: _ReplayContext,
+) -> None:
+    if result.request.request_kind == "recipe" and (
+        result.provenance.analysis_dependencies != result.request.parameters.analysis_dependencies
+        or result.provenance.input_dataset_dependencies
+        != result.request.parameters.input_dataset_dependencies
+    ):
+        raise AnalysisReplayRefused("analysis_dependency_binding_changed")
+    for dependency in result.provenance.input_dataset_dependencies:
+        try:
+            dataset = AnalyticsStore.authenticate_dataset(connection, dependency.dataset_id)
+        except StoreError as error:
+            raise AnalysisReplayRefused("input_dataset_integrity_changed") from error
+        if dataset.quality_state.value == "invalid":
+            raise AnalysisReplayRefused("input_dataset_invalidated")
+        if dataset.fingerprint_sha256 != dependency.fingerprint_sha256:
+            raise AnalysisReplayRefused("input_dataset_integrity_changed")
+    for dependency in result.provenance.analysis_dependencies:
+        parent = _replay_with_context(
+            dependency.analysis_id, config=config, registry=registry, at=at, context=context
+        )
+        if hashlib.sha256(_canonical_json(parent.model_dump(mode="json"))).hexdigest() != (
+            dependency.result_sha256
+        ):
+            raise AnalysisReplayRefused("analysis_dependency_changed")
 
 
 def _owner_only_store_path(config: AnalyticsConfig) -> Path:
@@ -536,10 +647,15 @@ def _verify_result_metric_bindings(
     for metric_id in result_metric_ids:
         if metric_id not in definitions:
             raise AnalysisReplayRefused("metric_definition_missing")
-    required_metric_ids = {binding.metric_id for binding in profile.metric_definitions}
-    if any(metric_id not in required_metric_ids for metric_id in result_metric_ids):
+    allowed_metric_ids = {binding.metric_id for binding in profile.metric_definitions}
+    required_metric_ids = (
+        allowed_metric_ids
+        if profile.required_metric_ids is None
+        else set(profile.required_metric_ids)
+    )
+    if any(metric_id not in allowed_metric_ids for metric_id in result_metric_ids):
         raise AnalysisReplayRefused("metric_not_bound")
-    if set(result_metric_ids) != required_metric_ids:
+    if not required_metric_ids <= set(result_metric_ids):
         raise AnalysisReplayRefused("required_metric_missing")
     requested_price_currencies = {
         binding.metric_id: binding.currency
@@ -560,6 +676,13 @@ def _verify_result_metric_bindings(
             definition,
             reporting_currency=result.request.parameters.reporting_currency,
             price_currency=requested_price_currencies.get(metric.metric_id),
+            expected_metric_class=(
+                MetricClass.APPROXIMATION
+                if metric.metric_id in profile.approximation_metric_ids
+                else MetricClass.MODEL_OUTPUT
+                if metric.metric_id in profile.model_metric_ids
+                else definition.default_metric_class
+            ),
         )
         if metric.proof_profile_id != profile.proof_profile_id:
             raise AnalysisReplayRefused("proof_receipt_changed")
@@ -571,8 +694,9 @@ def _verify_metric_semantics(
     *,
     reporting_currency: str,
     price_currency: str | None,
+    expected_metric_class: MetricClass,
 ) -> None:
-    if metric.metric_class is not definition.default_metric_class:
+    if metric.metric_class is not expected_metric_class:
         raise AnalysisReplayRefused("metric_class_mismatch")
     if metric.unit_class is not definition.unit_class:
         raise AnalysisReplayRefused("metric_unit_class_mismatch")

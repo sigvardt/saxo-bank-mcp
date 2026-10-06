@@ -7,6 +7,15 @@ from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from typing import Final
 
+from fastmcp.exceptions import ResourceError
+from fastmcp.resources import ResourceResult
+from fastmcp.resources.base import ResourceContent
+
+from saxo_bank_mcp.analytics_config import load_analytics_config
+from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused
+from saxo_bank_mcp.analytics_release import load_production_registry
+from saxo_bank_mcp.analytics_render import read_artifact
+from saxo_bank_mcp.analytics_store import AnalyticsStore, StoreError
 from saxo_bank_mcp.fastmcp_logging_safety import (
     FASTMCP_VALIDATION_SAFETY_TRANSFORM,
     SafeFastMCP,
@@ -69,7 +78,35 @@ def create_mcp_server(
     server.add_transform(FASTMCP_VALIDATION_SAFETY_TRANSFORM)
     server.add_middleware(SAFE_REQUEST_LEDGER_MIDDLEWARE)
     register_saxo_tools(server, allowed_tools=allowed_tools)
+    if allowed_tools is None or allowed_tools & {"saxo_render_chart", "saxo_export_report"}:
+        server.resource(
+            "saxo-analytics://artifacts/{artifact_id}",
+            name="Saxo private analytics artifact",
+            description="Read a private chart or report while its source proof remains valid.",
+        )(_read_analytics_artifact)
     return server
+
+
+def _read_analytics_artifact(artifact_id: str) -> ResourceResult:
+    store: AnalyticsStore | None = None
+    try:
+        config = load_analytics_config(os.environ)
+        registry = load_production_registry(config)
+        store = AnalyticsStore.open(config)
+        content, media_type = read_artifact(
+            artifact_id,
+            config=config,
+            store=store,
+            proof_registry=registry,
+        )
+        return ResourceResult([ResourceContent(content=content, mime_type=media_type)])
+    except (StoreError, AnalysisReplayRefused, ValueError) as error:
+        raise ResourceError(
+            "Private analytics artifact is unavailable or its proof has changed."
+        ) from error
+    finally:
+        if store is not None:
+            store.close()
 
 
 @asynccontextmanager

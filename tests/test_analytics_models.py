@@ -767,9 +767,9 @@ def test_active_proof_receipt_schema_closes_and_deduplicates_checks() -> None:
     assert checks_schema["minItems"] == len(_REQUIRED_PROOF_CHECKS)
     assert checks_schema["maxItems"] == len(_REQUIRED_PROOF_CHECKS)
     assert checks_schema["uniqueItems"] is True
-    assert schema["$defs"][proof_check_definition]["enum"] == list(
-        _REQUIRED_PROOF_CHECKS,
-    )
+    assert schema["$defs"][proof_check_definition]["enum"] == [
+        *_REQUIRED_PROOF_CHECKS, "installed_end_to_end",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1570,6 +1570,7 @@ def test_generated_schema_forbids_extra_fields_and_freezes_request_discriminator
             "instrument": "#/$defs/InstrumentAnalysisRequest",
             "market": "#/$defs/MarketAnalysisRequest",
             "portfolio": "#/$defs/PortfolioAnalysisRequest",
+            "recipe": "#/$defs/RecipeAnalysisRequest",
         },
     } in discriminators
 

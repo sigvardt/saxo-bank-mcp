@@ -143,7 +143,7 @@ def test_html_table_export_is_sanitized_readable_and_value_exact(tmp_path: Path)
     assert "Cutoff: 2026-08-01T12:00:00Z" in text
     assert "Delay: delayed_15_minutes" in text
     assert "Price type: bar_close" in text
-    assert "Currency: DKK" in text
+    assert "Reporting currency: DKK" in text
     assert "Adjustment: adjusted" in text
     assert "Warnings: synthetic_delayed_fixture" in text
     assert "Provenance: Saxo OpenAPI / fixture:t19" in text

@@ -14,8 +14,8 @@
 
 ## Read families and safe notes
 
-- Account, client, user, regulatory, portfolio, history, and report reads can expose private data. Use aliases in user text and retain only redacted assertions, counts, hashes, or fingerprints.
-- Balance reads require `response_mode=fingerprint_only`, including account summaries. Do not plan `redacted_body` for `get.port.v1.balances`, `get.port.v1.balances.me`, or `get.port.v1.balances.marginoverview`. Treat the fingerprint scope `account_money_state_fields` as a modeled account money-state proof only.
+- Account, client, user, regulatory, portfolio, history, and report reads can expose private data. Use aliases in user text. Requested financial values belong in the authenticated owner's conversation; persistent public evidence contains only redacted assertions, counts, hashes, or fingerprints.
+- Balance summaries use the normal `redacted_body` response, which returns amounts while redacting credentials and technical account identifiers. Use `response_mode=fingerprint_only` for change detection or value-free evidence. Treat the fingerprint scope `account_money_state_fields` as a modeled account money-state proof only.
 - Position, order, closed-position, exposure, and trade-message reads can support readback. They do not prove a write did not occur unless paired with request-ledger and transport evidence.
 - Reference, instrument, and trading-condition reads are account-aware. Do not reuse one account's permissions, tick sizes, or order settings for another account.
 - Info price and price-list reads are planning inputs only. They do not prove order safety.

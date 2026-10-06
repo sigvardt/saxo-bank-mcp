@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from decimal import Decimal, DecimalException, localcontext
 from typing import Final, Literal, Self
 
@@ -179,9 +179,9 @@ class BootstrapGoalResult(_StrictModel):
     bootstrap_algorithm: Literal["seeded_non_circular_moving_block_bootstrap_v1"] = (
         _BOOTSTRAP_ALGORITHM
     )
-    probability_label: Literal[
-        "seeded_block_bootstrap_model_distribution_not_prediction"
-    ] = _PROBABILITY_LABEL
+    probability_label: Literal["seeded_block_bootstrap_model_distribution_not_prediction"] = (
+        _PROBABILITY_LABEL
+    )
     is_not_forecast: Literal[True] = True
     model_distribution_only: Literal[True] = True
     prediction_claim: Literal[False] = False
@@ -203,6 +203,8 @@ def run_bootstrap_goal_model(
     *,
     visibility: VisibilityMode,
     trusted_local_host: bool,
+    cancellation_check: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> BootstrapGoalResult | ResearchRefusal:
     """Run deterministic block-bootstrap paths and an order-neutral sequence reference."""
     private_delivery = require_delivery_boundary(
@@ -231,7 +233,7 @@ def run_bootstrap_goal_model(
             missing_fields=("annual_inflation_assumption",),
         )
     try:
-        values = _simulate(request)
+        values = _simulate(request, cancellation_check=cancellation_check, progress=progress)
     except (ArithmeticError, DecimalException, OverflowError):
         return _refusal(
             request,
@@ -258,7 +260,12 @@ def run_bootstrap_goal_model(
     )
 
 
-def _simulate(request: BootstrapGoalRequest) -> PrivateBootstrapGoalValues:
+def _simulate(
+    request: BootstrapGoalRequest,
+    *,
+    cancellation_check: Callable[[], None] | None = None,
+    progress: Callable[[int, int], None] | None = None,
+) -> PrivateBootstrapGoalValues:
     observations = tuple(item.return_ratio for item in request.calibration.observations)
     sample_rng = random.Random(  # noqa: S311 - deterministic model stream, not security.
         _domain_seed(request.random_seed, b"bootstrap-sampling"),
@@ -270,12 +277,14 @@ def _simulate(request: BootstrapGoalRequest) -> PrivateBootstrapGoalValues:
     goal_hits = 0
     ruin_hits = 0
     neutral_failures = 0
-    zero_net_flows = all(
-        flow.contribution == flow.withdrawal for flow in request.cash_flows
-    )
+    zero_net_flows = all(flow.contribution == flow.withdrawal for flow in request.cash_flows)
     with localcontext() as context:
         context.prec = 50
-        for _ in range(request.path_count):
+        for path_index in range(request.path_count):
+            if cancellation_check is not None:
+                cancellation_check()
+            if progress is not None:
+                progress(path_index, request.path_count)
             sampled_returns = _sample_returns(
                 observations,
                 horizon=request.horizon_periods,
@@ -293,6 +302,8 @@ def _simulate(request: BootstrapGoalRequest) -> PrivateBootstrapGoalValues:
             goal_hits += ending_value >= request.explicit_goal
             ruin_hits += ruined
             neutral_failures += neutral_ending < request.explicit_goal
+        if progress is not None:
+            progress(request.path_count, request.path_count)
         path_count = Decimal(request.path_count)
         goal_probability = Decimal(goal_hits) / path_count
         ruin_probability = Decimal(ruin_hits) / path_count

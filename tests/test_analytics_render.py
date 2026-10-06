@@ -213,7 +213,7 @@ def test_png_is_deterministic_and_embeds_parity_and_required_stamps() -> None:
         "Cutoff: 2026-08-01T12:00:00Z",
         "Delay: delayed_15_minutes",
         "Price type: bar_close",
-        "Currency: DKK",
+        "Reporting currency: DKK",
         "Adjustment: adjusted",
         "Warnings: synthetic_delayed_fixture",
         "Provenance: Saxo OpenAPI / fixture:t19",
@@ -585,8 +585,8 @@ def test_composite_axes_have_honest_units_titles_and_one_complete_legend() -> No
 
     plotly = render_module._plotly_figure(chart)
     layout = cast("dict[str, object]", plotly["layout"])
-    assert cast("dict[str, object]", layout["yaxis"])["title"] == "Index"
-    assert cast("dict[str, object]", layout["yaxis2"])["title"] == "Percent"
+    assert cast("dict[str, object]", layout["yaxis"])["title"] == {"text": "Index"}
+    assert cast("dict[str, object]", layout["yaxis2"])["title"] == {"text": "Percent"}
 
     mixed: dict[str, object] = corrected.copy()
     raw_series = corrected["series"]

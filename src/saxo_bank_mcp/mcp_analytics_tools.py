@@ -10,9 +10,11 @@ import json
 import os
 import re
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from threading import RLock
+from queue import Empty, SimpleQueue
+from threading import Event, RLock
 from typing import Annotated, Final, Literal, cast
 
 import mcp.types as mt
@@ -21,9 +23,14 @@ from pydantic import AnyUrl, BaseModel, BeforeValidator, ConfigDict, Field, Secr
 
 from saxo_bank_mcp.analytics_account_data import (
     AccountScope,
+    AccountSyncError,
+    account_analysis_history_kinds,
+    account_analysis_source_contracts,
     sync_account_analysis_sources,
-    sync_account_history,
+    sync_bookings,
+    sync_closed_positions,
     sync_cost_sources,
+    sync_transactions,
 )
 from saxo_bank_mcp.analytics_config import (
     AnalyticsConfig,
@@ -72,7 +79,6 @@ from saxo_bank_mcp.analytics_market import (
 )
 from saxo_bank_mcp.analytics_metric_definitions import (
     MetricDefinition,
-    load_metric_definition_catalog,
 )
 from saxo_bank_mcp.analytics_models import (
     AnalysisId,
@@ -96,7 +102,6 @@ from saxo_bank_mcp.analytics_proof_profiles import (
     ProofProfile,
     ProofProfileError,
     ProofRegistry,
-    load_proof_profile_catalog,
 )
 from saxo_bank_mcp.analytics_provenance import AnalysisReplayRefused, replay_analysis
 from saxo_bank_mcp.analytics_provider import (
@@ -113,11 +118,14 @@ from saxo_bank_mcp.analytics_query import (
     PortfolioMetric,
     PortfolioQueryError,
 )
+from saxo_bank_mcp.analytics_reference_data import capture_instrument_details
+from saxo_bank_mcp.analytics_release import load_production_registry
 from saxo_bank_mcp.analytics_render import (
     ArtifactBindingRegistry,
     ArtifactRefusal,
     ArtifactResourceLink,
     InlineArtifact,
+    StoredChartSelection,
     StoredRenderRequest,
     render_analysis,
 )
@@ -127,6 +135,11 @@ from saxo_bank_mcp.analytics_resolver import (
     ResolutionResult,
     ResolutionStatus,
 )
+from saxo_bank_mcp.analytics_runtime import execute_analysis
+from saxo_bank_mcp.analytics_runtime_inputs import AnalyticsExecutionError
+from saxo_bank_mcp.analytics_runtime_market import MarketOptions
+from saxo_bank_mcp.analytics_runtime_models import ModelOptions
+from saxo_bank_mcp.analytics_runtime_portfolio import PortfolioOptions
 from saxo_bank_mcp.analytics_storage_tools import (
     DeletionPreviewResult,
     DeletionResult,
@@ -157,11 +170,13 @@ from saxo_bank_mcp.analytics_sync import (
     AccountSnapshotSyncSpec,
     AnalysisInputDatasetSummary,
     AnalysisInputSyncSpec,
+    DatasetHandleSummary,
     DatasetNotFoundError,
     DatasetPage,
     IngestionFingerprints,
     QuoteDatasetRow,
     QuoteDatasetSummary,
+    ReferenceDetailsSyncSpec,
     SyncError,
     SyncLimitError,
     SyncResearchRequest,
@@ -179,7 +194,13 @@ from saxo_bank_mcp.analytics_universes import (
     UniverseSummary,
     UniverseValidationError,
 )
+from saxo_bank_mcp.auth import SaxoTokenSet
 from saxo_bank_mcp.config import SaxoRuntimeConfig, resolve_sim_auth_settings
+from saxo_bank_mcp.live_mode import (
+    LiveReadSettingsError,
+    live_cached_token_for_tool,
+    resolve_live_read_settings,
+)
 from saxo_bank_mcp.mcp_token_state import CachedTokenBlocked, cached_token_for_tool
 from saxo_bank_mcp.process_scoped_selectors import resolve_bound_account_selector
 from saxo_bank_mcp.server_tool_ids import ANALYTICS_TOOL_IDS
@@ -206,6 +227,58 @@ def _sync_request_from_decoded_json(value: object) -> SyncResearchRequest:
 type FastMcpSyncResearchRequest = Annotated[
     SyncResearchRequest,
     BeforeValidator(_sync_request_from_decoded_json),
+]
+
+
+def _decoded_fastmcpmodeloptions(value: object) -> ModelOptions:
+    """Decode transport JSON with the domain model's strict JSON rules."""
+    return (
+        value
+        if isinstance(value, ModelOptions)
+        else ModelOptions.model_validate_json(json.dumps(value))
+    )
+
+
+type FastMcpModelOptions = Annotated[ModelOptions, BeforeValidator(_decoded_fastmcpmodeloptions)]
+
+
+def _decoded_fastmcpmarketoptions(value: object) -> MarketOptions:
+    """Decode transport JSON with the domain model's strict JSON rules."""
+    return (
+        value
+        if isinstance(value, MarketOptions)
+        else MarketOptions.model_validate_json(json.dumps(value))
+    )
+
+
+type FastMcpMarketOptions = Annotated[MarketOptions, BeforeValidator(_decoded_fastmcpmarketoptions)]
+
+
+def _decoded_fastmcpportfoliooptions(value: object) -> PortfolioOptions:
+    """Decode transport JSON with the domain model's strict JSON rules."""
+    return (
+        value
+        if isinstance(value, PortfolioOptions)
+        else PortfolioOptions.model_validate_json(json.dumps(value))
+    )
+
+
+type FastMcpPortfolioOptions = Annotated[
+    PortfolioOptions, BeforeValidator(_decoded_fastmcpportfoliooptions)
+]
+
+
+def _decoded_fastmcpstrategydefinition(value: object) -> StrategyDefinition:
+    """Decode transport JSON with the domain model's strict JSON rules."""
+    return (
+        value
+        if isinstance(value, StrategyDefinition)
+        else StrategyDefinition.model_validate_json(json.dumps(value))
+    )
+
+
+type FastMcpStrategyDefinition = Annotated[
+    StrategyDefinition, BeforeValidator(_decoded_fastmcpstrategydefinition)
 ]
 
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
@@ -400,7 +473,7 @@ class VerifiedAnalysisToolResponse(_StrictToolModel):
     tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     analysis_id: AnalysisId
-    result: AnalysisResult
+    result: AnalysisResult | None
     warnings: tuple[str, ...] = ()
     next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
     next_action: str = Field(min_length=1, max_length=500)
@@ -417,7 +490,7 @@ class DegradedAnalysisToolResponse(_StrictToolModel):
     tool_name: str = Field(pattern=r"^saxo_[a-z0-9_]{1,127}$")
     analysis_kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,127}$")
     analysis_id: AnalysisId
-    result: AnalyticsDegradation
+    result: AnalyticsDegradation | AnalysisResult | None
     warnings: tuple[str, ...]
     next_tool: Literal["saxo_explain_analysis"] = "saxo_explain_analysis"
     next_action: str = Field(min_length=1, max_length=500)
@@ -550,12 +623,14 @@ class StoredMarketToolRequest(_StrictToolModel):
     dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
     periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
     conditions: tuple[SavedCondition, ...] = Field(default=(), max_length=100)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpMarketOptions = Field(default_factory=MarketOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredInstrumentToolRequest(_StrictToolModel):
     analysis_kind: Literal[
         "fixed_income",
+        "instrument_resolution",
         "instrument_price_return",
         "instrument_price_volume",
         "instrument_quote",
@@ -565,14 +640,15 @@ class StoredInstrumentToolRequest(_StrictToolModel):
         "technical_indicators",
         "trading_conditions",
     ]
-    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=2)
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
     instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=25)
     rolling_window: int = Field(default=20, ge=2, le=1000)
     periods_per_year: float = Field(default=252.0, gt=0, allow_inf_nan=False)
     requested_return: Literal["price_return", "adjusted_price_return", "total_return"] = (
         "price_return"
     )
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpMarketOptions = Field(default_factory=MarketOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredMetricQueryChoice(_StrictToolModel):
@@ -634,19 +710,22 @@ class StoredPortfolioToolRequest(_StrictToolModel):
     ]
     dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
     query_intent: StoredPortfolioQueryChoice | None = None
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpPortfolioOptions = Field(default_factory=PortfolioOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredPositionSizingToolRequest(_StrictToolModel):
     analysis_kind: Literal["position_sizing"] = "position_sizing"
     dataset_id: DatasetId
+    supporting_dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=24)
     instrument_handle: InstrumentHandle
     method: Literal["stop_distance", "volatility"]
     maximum_loss: Decimal = Field(gt=0, allow_inf_nan=False)
     risk_budget_confirmed: bool
     stop_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
     volatility_multiple: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpModelOptions = Field(default_factory=ModelOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class ExplicitScenarioShock(_StrictToolModel):
@@ -669,15 +748,18 @@ class StoredScenarioToolRequest(_StrictToolModel):
         "scenario_combined",
     ]
     dataset_id: DatasetId
+    supporting_dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=24)
     shocks: tuple[ExplicitScenarioShock, ...] = Field(min_length=1, max_length=100)
     numeric_shocks_echoed_by_caller: bool
     caller_accepted_numeric_shocks: bool
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpModelOptions = Field(default_factory=ModelOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredOptimizationToolRequest(_StrictToolModel):
     analysis_kind: Literal["portfolio_minimum_variance", "portfolio_risk_parity"]
     dataset_id: DatasetId
+    supporting_dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=24)
     objective: Literal["minimum_variance", "risk_parity"]
     objective_confirmed_by_caller: bool
     constraints_confirmed_by_caller: bool
@@ -685,7 +767,8 @@ class StoredOptimizationToolRequest(_StrictToolModel):
     maximum_turnover: Decimal = Field(ge=0, allow_inf_nan=False)
     maximum_transaction_cost_ratio: Decimal = Field(ge=0, allow_inf_nan=False)
     maximum_margin_ratio: Decimal = Field(ge=0, allow_inf_nan=False)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpModelOptions = Field(default_factory=ModelOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredDerivativesToolRequest(_StrictToolModel):
@@ -700,24 +783,56 @@ class StoredDerivativesToolRequest(_StrictToolModel):
         "fx_forward_carry",
     ]
     dataset_id: DatasetId
+    supporting_dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=24)
     instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=25)
     volatility_assumption: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
     rate_assumption: Decimal | None = Field(default=None, allow_inf_nan=False)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpModelOptions = Field(default_factory=ModelOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class StoredBacktestToolRequest(_StrictToolModel):
     analysis_kind: Literal["bounded_backtest"] = "bounded_backtest"
     dataset_id: DatasetId
+    supporting_dataset_ids: tuple[DatasetId, ...] = Field(default=(), max_length=24)
     instrument_handle: InstrumentHandle
-    strategy: StrategyDefinition
+    strategy: FastMcpStrategyDefinition
     starting_equity: float = Field(gt=0, allow_inf_nan=False)
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY
+    options: FastMcpModelOptions = Field(default_factory=ModelOptions)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
+
+
+class StoredPretradeToolRequest(_StrictToolModel):
+    """A local modeled impact preview with no order authority."""
+
+    analysis_kind: Literal["pretrade_impact"] = "pretrade_impact"
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+    instrument_handles: tuple[InstrumentHandle, ...] = Field(min_length=1, max_length=1)
+    options: FastMcpModelOptions
+    proposal_price: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    maximum_loss: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
 
 
 class AnalyticsJobParameter(_StrictToolModel):
     name: str = Field(min_length=1, max_length=64)
     value: str | int | float | bool | None
+
+
+class StoredGoalToolRequest(_StrictToolModel):
+    """A bounded simulation from authenticated calibration data and explicit goals."""
+
+    analysis_kind: Literal["monte_carlo", "goal_model"]
+    dataset_ids: tuple[DatasetId, ...] = Field(min_length=1, max_length=25)
+    options: FastMcpModelOptions
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT
+
+
+type StoredJobAnalysisRequest = Annotated[
+    StoredGoalToolRequest | StoredOptimizationToolRequest | StoredBacktestToolRequest,
+    Field(discriminator="analysis_kind"),
+]
+_JOB_ANALYSIS_ADAPTER: TypeAdapter[StoredJobAnalysisRequest] = TypeAdapter(StoredJobAnalysisRequest)
 
 
 class AnalyticsJobToolRequest(_StrictToolModel):
@@ -728,19 +843,58 @@ class AnalyticsJobToolRequest(_StrictToolModel):
     parameters: tuple[AnalyticsJobParameter, ...] = Field(default=(), max_length=100)
     total_work_units: int = Field(ge=1, le=5_000_000)
     restart_interrupted: bool = False
+    analysis_request: StoredJobAnalysisRequest | None = None
 
     def to_domain(self) -> JobRequest:
+        encoded = None if self.analysis_request is None else self.analysis_request.model_dump_json()
+        dataset_ids = self.dataset_ids
+        handles = self.instrument_handles
+        if self.analysis_request is not None:
+            if self.parameters or self.analysis_ids:
+                raise ValueError("typed calculation jobs use only their analysis request choices")
+            if isinstance(self.analysis_request, StoredBacktestToolRequest):
+                required_handles = (self.analysis_request.instrument_handle,)
+            elif isinstance(self.analysis_request, StoredOptimizationToolRequest):
+                choice = self.analysis_request.options.optimization
+                required_handles = (
+                    tuple(asset.instrument_handle for asset in choice.assets) if choice else ()
+                )
+            else:
+                required_handles = ()
+            expected_kind = (
+                "backtest"
+                if isinstance(self.analysis_request, StoredBacktestToolRequest)
+                else "optimization"
+                if isinstance(self.analysis_request, StoredOptimizationToolRequest)
+                else "monte_carlo"
+            )
+            if self.job_kind != expected_kind:
+                raise ValueError("job kind and typed analysis request do not match")
+            if handles and handles != required_handles:
+                raise ValueError("job instrument handles must match the typed calculation request")
+            handles = required_handles
+            dataset_ids = (
+                self.analysis_request.dataset_ids
+                if isinstance(self.analysis_request, StoredGoalToolRequest)
+                else (
+                    self.analysis_request.dataset_id,
+                    *self.analysis_request.supporting_dataset_ids,
+                )
+            )
+        if self.dataset_ids and self.dataset_ids != dataset_ids:
+            raise ValueError("job dataset handles must match the typed calculation request")
         return JobRequest(
             job_kind=self.job_kind,
-            dataset_ids=self.dataset_ids,
+            dataset_ids=dataset_ids,
             analysis_ids=self.analysis_ids,
-            instrument_handles=self.instrument_handles,
+            instrument_handles=handles,
             parameters=tuple(
                 JobParameter(name=parameter.name, value=parameter.value)
                 for parameter in self.parameters
             ),
             total_work_units=self.total_work_units,
             restart_interrupted=self.restart_interrupted,
+            recipe_request_json=encoded,
         )
 
 
@@ -749,8 +903,7 @@ def saxo_analytics_capabilities() -> CapabilitiesResponse:
     tool = "saxo_analytics_capabilities"
     try:
         config = _analytics_config()
-        definitions = load_metric_definition_catalog()
-        catalog = load_proof_profile_catalog(definitions=definitions)
+        catalog = _proof_registry(config).catalog
     except (AnalyticsConfigError, OSError, ProofProfileError, ValueError) as error:
         return _known_failure(tool, error, next_tool=tool)
     profiles = tuple(
@@ -926,6 +1079,7 @@ async def saxo_sync_research_data(request: FastMcpSyncResearchRequest) -> SyncRe
         result = await _sync_research_request(request)
     except (
         AnalyticsConfigError,
+        AccountSyncError,
         PortfolioSnapshotError,
         SourceProviderError,
         StoredAnalysisExecutionError,
@@ -964,7 +1118,10 @@ async def _sync_research_request(request: SyncResearchRequest) -> SyncResult:
         for item in request.items
         if not isinstance(
             item,
-            AccountSnapshotSyncSpec | AccountAnalyticsSyncSpec | AnalysisInputSyncSpec,
+            AccountSnapshotSyncSpec
+            | AccountAnalyticsSyncSpec
+            | AnalysisInputSyncSpec
+            | ReferenceDetailsSyncSpec,
         )
     )
     results: list[SyncResult] = []
@@ -987,6 +1144,12 @@ async def _sync_research_request(request: SyncResearchRequest) -> SyncResult:
             )
         elif isinstance(item, AnalysisInputSyncSpec):
             results.append(_route_server_analysis_input(item, config=config))
+        elif isinstance(item, ReferenceDetailsSyncSpec):
+            results.append(
+                await capture_instrument_details(
+                    item.instrument_handle, provider=provider, config=config
+                )
+            )
     if not results:
         raise SyncError("research sync contains no executable item")
     statuses = {result.status for result in results}
@@ -1048,13 +1211,27 @@ async def _capture_server_account_snapshot(
 
 def _server_account_scope(safe_account_selector: str) -> AccountScope:
     runtime = SaxoRuntimeConfig.from_env()
-    if runtime.requested_environment.value != "SIM":
-        raise SyncError("account analytics capture requires current SIM runtime proof")
-    settings = resolve_sim_auth_settings(require_redirect=False)
-    cached = cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
-    if isinstance(cached, CachedTokenBlocked):
-        raise SyncError("current SIM authentication is unavailable")
-    binding = resolve_bound_account_selector(cached.token, safe_account_selector)
+    try:
+        settings = (
+            resolve_live_read_settings()
+            if runtime.requested_environment.value == "LIVE"
+            else resolve_sim_auth_settings(require_redirect=False)
+        )
+    except LiveReadSettingsError as error:
+        raise SyncError(error.code) from error
+    if runtime.requested_environment.value == "LIVE":
+        live_token = live_cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
+        if not isinstance(live_token, SaxoTokenSet):
+            raise SyncError("current authentication is unavailable")
+        token = live_token
+    else:
+        cached = cached_token_for_tool("saxo_sync_research_data", settings.cache_path)
+        if isinstance(cached, CachedTokenBlocked):
+            raise SyncError("current authentication is unavailable")
+        token = cached.token
+    if token.environment != runtime.requested_environment.value:
+        raise SyncError("token_environment_mismatch")
+    binding = resolve_bound_account_selector(token, safe_account_selector)
     if binding is None or not binding.client_key or not binding.currency:
         raise SyncError("current server-owned account context is unavailable")
     return AccountScope(
@@ -1070,159 +1247,154 @@ async def _capture_server_account_analytics(
     provider: SaxoAnalyticsProvider,
     config: AnalyticsConfig,
 ) -> SyncResult:
-    """Capture an exact bounded source closure from a process-issued account selector."""
+    """Capture the selected recipes' exact account sources through registered GET reads."""
     scope = _server_account_scope(item.safe_account_selector)
     budget = SourceRequestBudget(config.limits.sync_instruments)
     snapshot = await capture_portfolio_snapshot(
-        scope,
-        provider=provider,
-        config=config,
-        request_budget=budget,
+        scope, provider=provider, config=config, request_budget=budget
     )
     handles = tuple(dict.fromkeys((*item.instrument_handles, *snapshot.position_handles)))
-    results: list[AccountAnalysisSourceDatasetSummary] = []
-    source_count = snapshot.source_request_count
-    snapshot_summary = AccountSnapshotDatasetSummary(
-        dataset_id=snapshot.dataset_id,
-        account_alias=snapshot.account_alias,
-        eligible_analysis_kinds=tuple(
-            kind
-            for kind in item.analysis_kinds
-            if kind
-            in {
-                "portfolio_performance",
-                "position_sizing",
-                "scenario_custom",
-                "portfolio_minimum_variance",
-                "derivatives_model",
-                "pretrade_impact",
-            }
-        ),
-        quality_state=(
-            QualityState.COMPLETE if snapshot.status == "complete" else QualityState.PARTIAL
-        ),
-        coverage_start=snapshot.as_of,
-        coverage_end=snapshot.as_of,
-        row_count=snapshot.balance_row_count + snapshot.position_count + snapshot.order_count,
-        warnings=snapshot.warnings,
-        fingerprints=snapshot.fingerprints,
+    closures = {
+        kind: set(account_analysis_source_contracts((kind,))) for kind in item.analysis_kinds
+    }
+    required = set(account_analysis_source_contracts(item.analysis_kinds))
+
+    def eligible(contract: str) -> tuple[AccountAnalyticsKind, ...]:
+        return tuple(kind for kind in item.analysis_kinds if contract in closures[kind])
+
+    summaries: list[DatasetHandleSummary] = [
+        AccountSnapshotDatasetSummary(
+            dataset_id=snapshot.dataset_id,
+            account_alias=snapshot.account_alias,
+            eligible_analysis_kinds=tuple(
+                kind
+                for kind in item.analysis_kinds
+                if closures[kind] & {"balances_v1", "positions_v1", "orders_v1"}
+            ),
+            quality_state=QualityState.COMPLETE
+            if snapshot.status == "complete"
+            else QualityState.PARTIAL,
+            coverage_start=snapshot.as_of,
+            coverage_end=snapshot.as_of,
+            row_count=snapshot.balance_row_count + snapshot.position_count + snapshot.order_count,
+            warnings=snapshot.warnings,
+            fingerprints=snapshot.fingerprints,
+        )
+    ]
+    start = (
+        snapshot.as_of - timedelta(days=365)
+        if item.from_date is None
+        else datetime.combine(item.from_date, datetime.min.time(), tzinfo=UTC)
     )
-    if "portfolio_performance" in item.analysis_kinds:
-        history = await sync_account_history(
-            scope,
-            snapshot.as_of - timedelta(days=365),
+    end = (
+        snapshot.as_of
+        if item.to_date is None
+        else min(
             snapshot.as_of,
-            provider=provider,
-            config=config,
-            request_budget=budget,
+            datetime.combine(item.to_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC),
         )
-        source_count += history.source_request_count
-        contract_by_kind = {
-            "transactions": "transactions_v1",
-            "bookings": "bookings_v1",
-            "closed_positions": "closed_positions_history_v1",
-            "costs": "costs_v1",
-        }
-        results.extend(
-            AccountAnalysisSourceDatasetSummary(
-                dataset_id=summary.dataset_id,
-                account_alias=summary.account_alias,
-                contract_id=contract_by_kind[summary.data_kind],
-                instrument_handle=summary.instrument_handle,
-                eligible_analysis_kinds=("portfolio_performance",),
-                quality_state=summary.quality_state,
-                coverage_start=summary.coverage_start,
-                coverage_end=summary.coverage_end,
-                row_count=summary.row_count,
-                warnings=summary.warnings,
-                fingerprints=summary.fingerprints,
-            )
-            for summary in history.datasets
-        )
-    cost_kinds = cast(
-        "tuple[AccountAnalyticsKind, ...]",
-        tuple(
-            kind
-            for kind in item.analysis_kinds
-            if kind in {"position_sizing", "portfolio_minimum_variance", "pretrade_impact"}
-        ),
     )
-    quote_summaries: list[QuoteDatasetSummary] = []
-    if handles and cost_kinds:
-        reference_prices: dict[str, float] = {}
+    history_dispatch = {
+        "transactions": sync_transactions,
+        "bookings": sync_bookings,
+        "closed_positions": sync_closed_positions,
+    }
+    history_contracts = {
+        "transactions": "transactions_v1",
+        "bookings": "bookings_v1",
+        "closed_positions": "closed_positions_history_v1",
+    }
+    for history_kind in account_analysis_history_kinds(item.analysis_kinds):
+        history = await history_dispatch[history_kind](
+            scope, start, end, provider=provider, config=config, request_budget=budget
+        )
+        for summary in history.datasets:
+            contract = history_contracts[summary.data_kind]
+            summaries.append(
+                AccountAnalysisSourceDatasetSummary(
+                    dataset_id=summary.dataset_id,
+                    account_alias=summary.account_alias,
+                    contract_id=contract,
+                    instrument_handle=summary.instrument_handle,
+                    eligible_analysis_kinds=eligible(contract),
+                    quality_state=summary.quality_state,
+                    coverage_start=summary.coverage_start,
+                    coverage_end=summary.coverage_end,
+                    row_count=summary.row_count,
+                    warnings=summary.warnings,
+                    fingerprints=summary.fingerprints,
+                )
+            )
+    if "reference_instrument_details_v1" in required:
         for handle in handles:
+            details = await capture_instrument_details(
+                handle, provider=provider, config=config, request_budget=budget
+            )
+            summaries.extend(details.datasets)
+    if "costs_v1" in required:
+        cost_handles = (
+            tuple(choice.instrument_handle for choice in item.cost_choices)
+            or item.instrument_handles
+            or handles
+        )
+        if not cost_handles:
+            raise SyncError("cost capture requires resolved instrument handles")
+        choices = {choice.instrument_handle: choice for choice in item.cost_choices}
+        for handle in cost_handles:
             quote_result = await capture_quote(
-                handle,
+                handle, provider=provider, config=config, request_budget=budget
+            )
+            quote_summary = quote_result.datasets[0]
+            if not isinstance(quote_summary, QuoteDatasetSummary):
+                raise SyncError("cost reference quote is unavailable")
+            summaries.append(quote_summary)
+            reference_price = _cost_reference_price(
+                get_dataset(quote_summary.dataset_id, 1, 1, config=config), handle
+            )
+            choice = choices.get(handle)
+            costs = await sync_cost_sources(
+                scope,
+                (handle,),
                 provider=provider,
                 config=config,
+                reference_prices={handle: reference_price},
+                reference_amounts=None if choice is None else {handle: choice.amount},
+                holding_period_days=1 if choice is None else choice.holding_period_days,
                 request_budget=budget,
             )
-            source_count += quote_result.source_request_count
-            if len(quote_result.datasets) != 1 or not isinstance(
-                quote_result.datasets[0],
-                QuoteDatasetSummary,
-            ):
-                raise SyncError("current server-owned cost reference quote is unavailable")
-            quote_summary = quote_result.datasets[0]
-            quote_summaries.append(quote_summary)
-            quote_page = get_dataset(quote_summary.dataset_id, 1, 1, config=config)
-            reference_prices[handle] = _cost_reference_price(quote_page, handle)
-        costs = await sync_cost_sources(
-            scope,
-            handles,
-            provider=provider,
-            config=config,
-            reference_prices=reference_prices,
-            request_budget=budget,
-        )
-        source_count += costs.source_request_count
-        results.extend(
-            AccountAnalysisSourceDatasetSummary(
-                dataset_id=summary.dataset_id,
-                account_alias=summary.account_alias,
-                contract_id="costs_v1",
-                instrument_handle=summary.instrument_handle,
-                eligible_analysis_kinds=cost_kinds,
-                quality_state=summary.quality_state,
-                coverage_start=summary.coverage_start,
-                coverage_end=summary.coverage_end,
-                row_count=summary.row_count,
-                warnings=summary.warnings,
-                fingerprints=summary.fingerprints,
+            summaries.extend(
+                AccountAnalysisSourceDatasetSummary(
+                    dataset_id=summary.dataset_id,
+                    account_alias=summary.account_alias,
+                    contract_id="costs_v1",
+                    instrument_handle=summary.instrument_handle,
+                    eligible_analysis_kinds=eligible("costs_v1"),
+                    quality_state=summary.quality_state,
+                    coverage_start=summary.coverage_start,
+                    coverage_end=summary.coverage_end,
+                    row_count=summary.row_count,
+                    warnings=summary.warnings,
+                    fingerprints=summary.fingerprints,
+                )
+                for summary in costs.datasets
             )
-            for summary in costs.datasets
-        )
-    supplemental, supplemental_count = await sync_account_analysis_sources(
+    supplemental, _ = await sync_account_analysis_sources(
         scope,
         item.analysis_kinds,
         handles,
         provider=provider,
         config=config,
+        from_date=item.from_date,
+        to_date=item.to_date,
         request_budget=budget,
     )
-    source_count += supplemental_count
-    results.extend(
+    summaries.extend(
         AccountAnalysisSourceDatasetSummary(
             dataset_id=summary.dataset_id,
             account_alias=summary.account_alias,
             contract_id=summary.contract_id,
             instrument_handle=summary.instrument_handle,
-            eligible_analysis_kinds=tuple(
-                kind
-                for kind in item.analysis_kinds
-                if summary.contract_id
-                in {
-                    "portfolio_performance": {
-                        "performance_summary_v4",
-                        "performance_timeseries_v4",
-                    },
-                    "scenario_custom": {"exposure_instruments_v1"},
-                    "portfolio_minimum_variance": {"exposure_instruments_v1"},
-                    "derivatives_model": set(),
-                    "pretrade_impact": set(),
-                    "position_sizing": set(),
-                }[kind]
-            ),
+            eligible_analysis_kinds=eligible(summary.contract_id),
             quality_state=summary.quality_state,
             coverage_start=summary.coverage_start,
             coverage_end=summary.coverage_end,
@@ -1232,12 +1404,11 @@ async def _capture_server_account_analytics(
         )
         for summary in supplemental
     )
-    summaries = (snapshot_summary, *quote_summaries, *results)
-    quality_complete = all(summary.quality_state is QualityState.COMPLETE for summary in summaries)
+    complete = all(summary.quality_state is QualityState.COMPLETE for summary in summaries)
     return SyncResult(
-        status=SyncStatus.COMPLETE if quality_complete else SyncStatus.DEGRADED,
-        source_request_count=source_count,
-        datasets=summaries,
+        status=SyncStatus.COMPLETE if complete else SyncStatus.DEGRADED,
+        source_request_count=budget.used,
+        datasets=tuple(summaries),
     )
 
 
@@ -1350,6 +1521,7 @@ def saxo_analyze_market(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        request=request,
         periods_per_year=request.periods_per_year,
     )
 
@@ -1363,6 +1535,7 @@ def saxo_analyze_instruments(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        request=request,
         parameters=(
             InstrumentExecutionParameters(
                 instrument_handles=request.instrument_handles,
@@ -1385,6 +1558,7 @@ def saxo_analyze_portfolio(
         request.analysis_kind,
         request.dataset_ids,
         VisibilityMode(request.visibility),
+        request=request,
         parameters=(
             PortfolioExecutionParameters()
             if request.analysis_kind == "portfolio_performance"
@@ -1400,8 +1574,9 @@ def saxo_size_position(
     return _stored_analysis_response(
         "saxo_size_position",
         request.analysis_kind,
-        (request.dataset_id,),
+        (request.dataset_id, *request.supporting_dataset_ids),
         VisibilityMode(request.visibility),
+        request=request,
         parameters=PositionSizingExecutionParameters(
             instrument_handle=request.instrument_handle,
             method=request.method,
@@ -1430,8 +1605,9 @@ def saxo_run_scenario(
     return _stored_analysis_response(
         "saxo_run_scenario",
         request.analysis_kind,
-        (request.dataset_id,),
+        (request.dataset_id, *request.supporting_dataset_ids),
         VisibilityMode(request.visibility),
+        request=request,
         parameters=ScenarioExecutionParameters(
             analysis_kind=request.analysis_kind,
             shocks=tuple(
@@ -1466,8 +1642,9 @@ def saxo_optimize_portfolio(
     return _stored_analysis_response(
         "saxo_optimize_portfolio",
         request.analysis_kind,
-        (request.dataset_id,),
+        (request.dataset_id, *request.supporting_dataset_ids),
         VisibilityMode(request.visibility),
+        request=request,
         parameters=OptimizationExecutionParameters(
             analysis_kind=request.analysis_kind,
             objective=request.objective,
@@ -1488,8 +1665,9 @@ def saxo_model_derivatives(
     return _stored_analysis_response(
         "saxo_model_derivatives",
         request.analysis_kind,
-        (request.dataset_id,),
+        (request.dataset_id, *request.supporting_dataset_ids),
         VisibilityMode(request.visibility),
+        request=request,
         parameters=(
             DerivativesExecutionParameters(
                 instrument_handles=request.instrument_handles,
@@ -1509,8 +1687,9 @@ def saxo_backtest_strategy(
     return _stored_analysis_response(
         "saxo_backtest_strategy",
         request.analysis_kind,
-        (request.dataset_id,),
+        (request.dataset_id, *request.supporting_dataset_ids),
         VisibilityMode(request.visibility),
+        request=request,
         parameters=BacktestExecutionParameters(
             instrument_handle=request.instrument_handle,
             strategy=request.strategy,
@@ -1519,7 +1698,30 @@ def saxo_backtest_strategy(
     )
 
 
-def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices only
+def _checked_pretrade_choices(
+    options: ModelOptions | None,
+    analysis_id: AnalysisId,
+    side: str,
+    quantity: Decimal,
+    holding_period_days: int,
+) -> ModelOptions:
+    if (
+        options is None
+        or options.pretrade is None
+        or options.pretrade.origin_analysis_id != analysis_id
+    ):
+        raise AnalyticsExecutionError("pretrade_model_choices_required")
+    choice = options.pretrade
+    if (
+        choice.side != side
+        or Decimal(str(choice.quantity)) != quantity
+        or choice.holding_period_days != holding_period_days
+    ):
+        raise AnalyticsExecutionError("pretrade_model_choices_mismatch")
+    return options
+
+
+def saxo_propose_trade_from_analysis(  # noqa: PLR0911, PLR0913 - explicit user choices and legacy proof routing
     analysis_id: AnalysisId,
     instrument_handle: InstrumentHandle,
     side: Literal["buy", "sell"],
@@ -1530,11 +1732,47 @@ def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices o
     ] = None,
     maximum_loss: Annotated[Decimal | None, Field(default=None, gt=0, allow_inf_nan=False)] = None,
     holding_period_days: Annotated[int, Field(default=0, ge=0, le=36500)] = 0,
-    visibility: AnalysisVisibility = VisibilityMode.FINGERPRINT_ONLY,
+    visibility: AnalysisVisibility = VisibilityMode.PRIVATE_USER_RESULT,
+    supporting_dataset_ids: tuple[DatasetId, ...] = (),
+    options: FastMcpModelOptions | None = None,
 ) -> CanonicalAnalysisToolResponse:
     """Replay one stored analysis and accept only explicit user trade choices."""
     tool = "saxo_propose_trade_from_analysis"
     selected_visibility = VisibilityMode(visibility)
+    config = _analytics_config()
+    registry = _proof_registry(config)
+    profile = registry.profile("pretrade_impact")
+    if profile is not None and profile.source_revision_scope == "contract":
+        try:
+            origin = replay_analysis(analysis_id, config=config, registry=registry)
+            options = _checked_pretrade_choices(
+                options, analysis_id, side, quantity, holding_period_days
+            )
+            current_dataset_ids = supporting_dataset_ids or (origin.provenance.dataset_id,)
+            return _stored_analysis_response(
+                tool,
+                "pretrade_impact",
+                current_dataset_ids,
+                selected_visibility,
+                request=StoredPretradeToolRequest(
+                    dataset_ids=current_dataset_ids,
+                    instrument_handles=(instrument_handle,),
+                    options=options,
+                    proposal_price=proposal_price,
+                    maximum_loss=maximum_loss,
+                    visibility=visibility,
+                ),
+            )
+        except (AnalysisReplayRefused, AnalyticsExecutionError) as error:
+            return _canonical_analysis_refusal(
+                tool,
+                "pretrade_impact",
+                selected_visibility,
+                error.reason_code,
+                "The exact prior result and explicit local model choices are required.",
+                next_tool="saxo_explain_analysis",
+                next_action="Supply matching model choices after inspecting the saved result.",
+            )
     if _server_environment() != "SIM":
         return _canonical_analysis_refusal(
             tool,
@@ -1630,12 +1868,13 @@ def saxo_propose_trade_from_analysis(  # noqa: PLR0913 - explicit user choices o
             store.close()
 
 
-def saxo_render_analysis(
+def saxo_render_analysis(  # noqa: PLR0913 - typed artifact selectors
     analysis_id: AnalysisId,
     template_id: str,
     output_format: Literal["png", "html"] = "png",
     width: int = 1200,
     height: int = 675,
+    selection: StoredChartSelection | None = None,
 ) -> ToolResult:
     """Issue a server-owned binding and render one proof-replayed stored analysis."""
     tool = "saxo_render_analysis"
@@ -1655,6 +1894,7 @@ def saxo_render_analysis(
                 output_format="png" if output_format == "png" else "plotly_html",
                 width=width,
                 height=height,
+                selection=selection,
             ),
             config=config,
             store=store,
@@ -1678,12 +1918,14 @@ def saxo_render_analysis(
             store.close()
 
 
-def saxo_export_analysis(
+def saxo_export_analysis(  # noqa: PLR0913 - bounded artifact choices
     analysis_id: AnalysisId,
     export_kind: ExportKind,
     output_format: AnalyticsExportFormat,
     template_id: str | None = None,
     viewport_width: int = 1280,
+    table_id: str | None = None,
+    selection: StoredChartSelection | None = None,
 ) -> ToolResult:
     """Issue a server-owned binding and export exact proof-replayed values."""
     tool = "saxo_export_analysis"
@@ -1698,15 +1940,15 @@ def saxo_export_analysis(
                 next_action="Retry with a supported table format.",
             ),
         )
-    if export_kind == "report" and (output_format not in {"html", "pdf"} or template_id is None):
+    if export_kind == "report" and output_format not in {"html", "pdf"}:
         return _artifact_failure_result(
             tool,
             _refusal(
                 tool,
                 "export_request_incomplete",
-                "Report export requires an approved template and HTML or PDF format.",
+                "Report export requires HTML or PDF format.",
                 next_tool=tool,
-                next_action="Retry with template_id and a supported report format.",
+                next_action="Retry with a supported report format.",
             ),
         )
     store: AnalyticsStore | None = None
@@ -1722,13 +1964,15 @@ def saxo_export_analysis(
             request = StoredTableExportRequest(
                 binding_id=issued.binding_id,
                 output_format=cast("Literal['csv', 'parquet', 'json', 'html']", output_format),
+                table_id=table_id,
             )
         else:
             request = StoredReportExportRequest(
                 binding_id=issued.binding_id,
-                template_id=cast("str", template_id),
+                template_id=template_id,
                 output_format=cast("Literal['html', 'pdf']", output_format),
                 viewport_width=viewport_width,
+                selection=selection,
             )
         return _artifact_result(
             tool,
@@ -1947,18 +2191,9 @@ def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0912, PLR0913
     *,
     periods_per_year: float | None = None,
     parameters: StoredExecutionParameters | None = None,
+    request: BaseModel | None = None,
 ) -> CanonicalAnalysisToolResponse:
     """Authenticate exact stored lineage and fail closed before any unproved calculation."""
-    if visibility is VisibilityMode.PRIVATE_USER_RESULT and _server_environment() == "LIVE":
-        return _canonical_analysis_refusal(
-            tool,
-            analysis_kind,
-            visibility,
-            "inline_private_not_enabled",
-            "Private LIVE values require owner-only proof-bound artifact delivery.",
-            next_tool="saxo_export_analysis",
-            next_action="Export a verified stored analysis through owner-only bound delivery.",
-        )
     store: AnalyticsStore | None = None
     try:
         config = _analytics_config()
@@ -1966,6 +2201,26 @@ def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0912, PLR0913
         authenticated_datasets = tuple(
             store.get_authenticated_dataset(dataset_id) for dataset_id in dataset_ids
         )
+        if request is not None:
+            registry = _proof_registry(config)
+            profile = registry.profile(analysis_kind)
+            if profile is not None and profile.source_revision_scope == "contract":
+                result = execute_analysis(
+                    tool_name=tool, request=request, config=config, store=store, registry=registry
+                )
+                response_type = (
+                    VerifiedAnalysisToolResponse
+                    if result.status.value == "verified"
+                    else DegradedAnalysisToolResponse
+                )
+                return response_type(
+                    tool_name=tool,
+                    analysis_kind=analysis_kind,
+                    analysis_id=result.analysis_id,
+                    result=result if visibility is VisibilityMode.PRIVATE_USER_RESULT else None,
+                    warnings=_warning_codes(result),
+                    next_action="Explain or export this exact stored result by its handle.",
+                )
         source_revisions = {dataset.source_revision for dataset in authenticated_datasets}
         if len(source_revisions) != 1:
             raise StoredAnalysisExecutionError(  # noqa: TRY301
@@ -2064,7 +2319,7 @@ def _stored_analysis_response(  # noqa: C901, PLR0911, PLR0912, PLR0913
                 "Use only an installed proof-bound analysis kind; do not provide source values."
             ),
         )
-    except StoredAnalysisExecutionError as error:
+    except (StoredAnalysisExecutionError, AnalyticsExecutionError, AnalysisReplayRefused) as error:
         return _canonical_analysis_refusal(
             tool,
             analysis_kind,
@@ -2332,13 +2587,7 @@ def _proof_registry(
     )
     if active_registry is not None:
         return active_registry
-    definitions = load_metric_definition_catalog()
-    catalog = load_proof_profile_catalog(definitions=definitions)
-    return ProofRegistry(
-        definitions=definitions,
-        catalog=catalog,
-        config=config,
-    )
+    return load_production_registry(config)
 
 
 def _analytics_config() -> AnalyticsConfig:
@@ -2368,24 +2617,77 @@ def _job_manager_for_config(config: AnalyticsConfig) -> AnalyticsJobManager:
         return manager
 
 
-def _analytics_job_handlers(
+def _analytics_job_handlers(  # noqa: C901, PLR0915 - one owner for job lifecycle
     config: AnalyticsConfig,
     store: AnalyticsStore,
 ) -> dict[JobKind, JobHandler]:
-    async def verify_persisted_job_input(
+    async def calculate_model_job(  # noqa: C901 - cancellation and progress stay paired
         request: JobRequest,
         context: JobExecutionContext,
     ) -> JobConclusion:
-        expected_instruments = 1 if request.job_kind == "backtest" else 0
-        if (
-            len(request.dataset_ids) != 1
-            or request.analysis_ids
-            or len(request.instrument_handles) != expected_instruments
-        ):
-            raise JobStateError("analytics job persisted-input shape is invalid")
-        store.get_authenticated_dataset(request.dataset_ids[0])
-        await context.report_progress(context.total_work_units)
-        raise JobStateError("proof-bound analytics job executor is unavailable")
+        if request.analysis_ids or request.recipe_request_json is None:
+            raise JobStateError("a typed analysis_request is required for calculation jobs")
+        typed = _JOB_ANALYSIS_ADAPTER.validate_json(request.recipe_request_json)
+        expected_kind = (
+            "monte_carlo"
+            if isinstance(typed, StoredGoalToolRequest)
+            else "optimization"
+            if isinstance(typed, StoredOptimizationToolRequest)
+            else "backtest"
+        )
+        if request.job_kind != expected_kind:
+            raise JobStateError("job kind and typed analysis request do not match")
+        await context.report_progress(0)
+        cancelled = Event()
+        progress_updates: SimpleQueue[tuple[int, int]] = SimpleQueue()
+
+        def report_work(completed: int, total: int) -> None:
+            check_cancellation()
+            progress_updates.put((completed, total))
+
+        def check_cancellation() -> None:
+            if cancelled.is_set():
+                raise AnalyticsExecutionError("job_cancelled")
+
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                execute_analysis,
+                tool_name="saxo_manage_analysis_job",
+                request=typed,
+                config=config,
+                store=store,
+                registry=_proof_registry(config),
+                cancellation_check=check_cancellation,
+                progress=report_work,
+                persist=False,
+            )
+        )
+        completed_units = 0
+        try:
+            while not worker.done():
+                await asyncio.wait({worker}, timeout=0.05)
+                latest: tuple[int, int] | None = None
+                while True:
+                    try:
+                        latest = progress_updates.get_nowait()
+                    except Empty:
+                        break
+                if latest is not None:
+                    done, total = latest
+                    units = min(
+                        context.total_work_units - 1,
+                        int(context.total_work_units * done / max(total, 1)),
+                    )
+                    if units > completed_units:
+                        await context.report_progress(units)
+                        completed_units = units
+            result = worker.result()
+        except asyncio.CancelledError:
+            cancelled.set()
+            with suppress(AnalyticsExecutionError):
+                await asyncio.shield(worker)
+            raise
+        return await context.commit_analysis(result)
 
     async def generate_report(
         request: JobRequest,
@@ -2426,9 +2728,9 @@ def _analytics_job_handlers(
         return JobConclusion(analysis_id=None, artifact_ids=(delivery.artifact_id,))
 
     return {
-        "monte_carlo": verify_persisted_job_input,
-        "optimization": verify_persisted_job_input,
-        "backtest": verify_persisted_job_input,
+        "monte_carlo": calculate_model_job,
+        "optimization": calculate_model_job,
+        "backtest": calculate_model_job,
         "report_generation": generate_report,
     }
 

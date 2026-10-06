@@ -12,7 +12,19 @@ from typing import Final, Literal, cast
 import duckdb
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from saxo_bank_mcp.analytics_account_data import (
+    ACCOUNT_ANALYSIS_DATE_LIMIT_DAYS,
+    ACCOUNT_ANALYSIS_KIND_LIMIT,
+    COST_HOLDING_PERIOD_LIMIT_DAYS,
+    AccountAnalysisKind,
+)
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
+from saxo_bank_mcp.analytics_ingestion_models import IngestionFingerprints
+from saxo_bank_mcp.analytics_instrument_identity import (
+    InstrumentIdentityError,
+    instrument_handle_for_saxo_identity,
+    put_saxo_instrument_identity,
+)
 from saxo_bank_mcp.analytics_market_data import (
     ChartInterval,
     MarketDataError,
@@ -24,6 +36,8 @@ from saxo_bank_mcp.analytics_market_data import (
     normalize_option_chain,
     normalize_price_series,
     normalize_quote,
+    option_reference_fingerprint,
+    option_reference_payload,
 )
 from saxo_bank_mcp.analytics_models import (
     AnalysisId,
@@ -105,16 +119,6 @@ class _StrictModel(BaseModel):
     )
 
 
-class IngestionFingerprints(_StrictModel):
-    """Value-free fingerprints retained for every market ingestion."""
-
-    raw_pages_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    normalized_rows_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    source_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    entitlements_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    correction_state_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-
-
 class _DatasetHandleSummary(_StrictModel):
     dataset_id: DatasetId
     instrument_handle: InstrumentHandle
@@ -152,6 +156,12 @@ class OptionChainDatasetSummary(_DatasetHandleSummary):
     entitlement_error_code: str | None = Field(max_length=128)
 
 
+class InstrumentDetailsDatasetSummary(_DatasetHandleSummary):
+    """Handle-only receipt for authenticated instrument reference details."""
+
+    data_kind: Literal["instrument_details"] = "instrument_details"
+
+
 type AnalysisInputKind = Literal[
     "portfolio_performance",
     "position_sizing",
@@ -161,14 +171,7 @@ type AnalysisInputKind = Literal[
     "bounded_backtest",
     "pretrade_impact",
 ]
-type AccountAnalyticsKind = Literal[
-    "portfolio_performance",
-    "position_sizing",
-    "scenario_custom",
-    "portfolio_minimum_variance",
-    "derivatives_model",
-    "pretrade_impact",
-]
+type AccountAnalyticsKind = AccountAnalysisKind
 
 
 class AccountSnapshotDatasetSummary(_StrictModel):
@@ -177,17 +180,7 @@ class AccountSnapshotDatasetSummary(_StrictModel):
     dataset_id: DatasetId
     data_kind: Literal["account_snapshot"] = "account_snapshot"
     account_alias: str = Field(pattern=r"^aa_[0-9a-f]{32}$")
-    eligible_analysis_kinds: tuple[
-        Literal[
-            "portfolio_performance",
-            "position_sizing",
-            "scenario_custom",
-            "portfolio_minimum_variance",
-            "derivatives_model",
-            "pretrade_impact",
-        ],
-        ...,
-    ]
+    eligible_analysis_kinds: tuple[AccountAnalyticsKind, ...]
     quality_state: QualityState
     coverage_start: datetime
     coverage_end: datetime
@@ -232,6 +225,7 @@ type DatasetHandleSummary = (
     PriceBarDatasetSummary
     | QuoteDatasetSummary
     | OptionChainDatasetSummary
+    | InstrumentDetailsDatasetSummary
     | AccountSnapshotDatasetSummary
     | AccountAnalysisSourceDatasetSummary
     | AnalysisInputDatasetSummary
@@ -272,6 +266,13 @@ class OptionChainSyncSpec(_StrictModel):
     expiries: tuple[date, ...]
 
 
+class ReferenceDetailsSyncSpec(_StrictModel):
+    """Request instrument details with one already-resolved opaque handle."""
+
+    data_kind: Literal["instrument_details"] = "instrument_details"
+    instrument_handle: InstrumentHandle
+
+
 class AccountSnapshotSyncSpec(_StrictModel):
     """Request current account source material by a process-issued safe selector only."""
 
@@ -279,13 +280,26 @@ class AccountSnapshotSyncSpec(_StrictModel):
     safe_account_selector: str = Field(pattern=r"^proc-acct-[A-Za-z0-9_-]{20,64}$")
 
 
+class CostCaptureChoice(_StrictModel):
+    """Explicit quantity and holding horizon for an instrument's cost illustration."""
+
+    instrument_handle: InstrumentHandle
+    amount: float = Field(gt=0, le=1_000_000_000_000, allow_inf_nan=False)
+    holding_period_days: int = Field(default=1, ge=0, le=COST_HOLDING_PERIOD_LIMIT_DAYS)
+
+
 class AccountAnalyticsSyncSpec(_StrictModel):
     """Request exact supplemental account sources by safe server-issued handles only."""
 
     data_kind: Literal["account_analytics"] = "account_analytics"
     safe_account_selector: str = Field(pattern=r"^proc-acct-[A-Za-z0-9_-]{20,64}$")
-    analysis_kinds: tuple[AccountAnalyticsKind, ...] = Field(min_length=1, max_length=6)
+    analysis_kinds: tuple[AccountAnalyticsKind, ...] = Field(
+        min_length=1, max_length=ACCOUNT_ANALYSIS_KIND_LIMIT
+    )
     instrument_handles: tuple[InstrumentHandle, ...] = Field(default=(), max_length=25)
+    from_date: date | None = None
+    to_date: date | None = None
+    cost_choices: tuple[CostCaptureChoice, ...] = Field(default=(), max_length=25)
 
     @model_validator(mode="after")
     def _validate_unique_scope(self) -> AccountAnalyticsSyncSpec:
@@ -293,6 +307,16 @@ class AccountAnalyticsSyncSpec(_StrictModel):
             raise ValueError("account analytics kinds must be unique")
         if len(self.instrument_handles) != len(set(self.instrument_handles)):
             raise ValueError("account analytics instrument handles must be unique")
+        choices = tuple(choice.instrument_handle for choice in self.cost_choices)
+        if len(choices) != len(set(choices)) or not set(choices).issubset(self.instrument_handles):
+            raise ValueError("cost choices require distinct handles inside the instrument scope")
+        if (self.from_date is None) != (self.to_date is None):
+            raise ValueError("account analytics dates require both boundaries")
+        if self.from_date is not None and self.to_date is not None:
+            if self.to_date < self.from_date:
+                raise ValueError("account analytics dates must be ordered")
+            if (self.to_date - self.from_date).days > ACCOUNT_ANALYSIS_DATE_LIMIT_DAYS:
+                raise ValueError("account analytics date range exceeds ten years")
         return self
 
 
@@ -315,6 +339,7 @@ type ResearchSyncSpec = (
     PriceBarSyncSpec
     | QuoteSyncSpec
     | OptionChainSyncSpec
+    | ReferenceDetailsSyncSpec
     | AccountSnapshotSyncSpec
     | AccountAnalyticsSyncSpec
     | AnalysisInputSyncSpec
@@ -646,6 +671,7 @@ async def capture_quote(  # noqa: PLR0913
     captured_at = _require_utc_clock(clock())
     request: dict[str, object] = {
         "AssetType": selector.asset_type,
+        "FieldGroups": "Quote,PriceInfo,DisplayAndFormat",
         "Uic": selector.identifier,
     }
     capture = build_source_capture_context(
@@ -787,12 +813,14 @@ async def capture_option_chain(  # noqa: PLR0913
     requested_expiries = _validate_expiries(expiries, config)
     _preflight_market_capacity(config, len(requested_expiries))
     selector = _instrument_selector(config, instrument_handle)
+    root = _option_root_selector(config, instrument_handle, selector)
     captured_at = _require_utc_clock(clock())
     results: list[SyncResult] = []
     for expiry in requested_expiries:
         request: dict[str, object] = {
             "ExpiryDates": [expiry.isoformat()],
-            "OptionRootId": selector.identifier,
+            "OptionRootId": root.option_root_id,
+            "OptionSpaceSegment": "SpecificDates",
         }
         capture = build_source_capture_context(
             {"options_chain_reference_v1": request},
@@ -867,15 +895,122 @@ async def capture_option_chain(  # noqa: PLR0913
                 config=config,
                 envelope_pages=envelope.pages,
                 instrument_handle=instrument_handle,
-                expected_root_id=selector.identifier,
+                expected_root_id=root.option_root_id,
                 requested_expiry=expiry,
                 captured_at=captured_at,
+                lineage_page_ids=root.source_page_ids,
+                underlying_handle=root.underlying_handle,
+                expected_asset_type=root.asset_type,
             ),
         )
     return _combine_sync_results(
         results,
         source_request_count=budget.used - request_count_start,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _OptionRootSelector:
+    option_root_id: int
+    underlying_handle: str
+    source_page_ids: tuple[str, ...]
+    asset_type: str | None = None
+
+
+def _option_root_selector(
+    config: AnalyticsConfig,
+    instrument_handle: str,
+    selector: _InstrumentSelector,
+) -> _OptionRootSelector:
+    store = AnalyticsStore.open(config)
+    try:
+        pages = store.find_authenticated_source_materials(
+            contract_name="reference_instrument_details_v1",
+            instrument_handle=instrument_handle,
+        )
+    finally:
+        store.close()
+    for page in sorted(pages, key=lambda item: (item.source_timestamp, item.page_id), reverse=True):
+        raw_rows = page.payload.get("rows", ())
+        if not isinstance(raw_rows, Sequence) or isinstance(raw_rows, str | bytes):
+            continue
+        for row in raw_rows:
+            if (
+                not isinstance(row, Mapping)
+                or row.get("Uic") != selector.identifier
+                or row.get("AssetType") != selector.asset_type
+            ):
+                continue
+            enhanced = row.get("RelatedOptionRootsEnhanced")
+            if enhanced is not None:
+                values = _related_option_root_values(enhanced)
+                roots = {
+                    value.get("OptionRootId")
+                    for value in values
+                    if value.get("AssetType")
+                    in {"StockOption", "FuturesOption", "StockIndexOption"}
+                }
+            else:
+                legacy = row.get("RelatedOptionRoots", ())
+                if not isinstance(legacy, Sequence) or isinstance(legacy, str | bytes):
+                    raise SyncValidationError("related option roots are invalid")
+                roots = set(legacy)
+            if len(roots) != 1 or any(type(value) is not int or value < 0 for value in roots):
+                raise SyncValidationError("related option root is unavailable or ambiguous")
+            root_id = cast("int", next(iter(roots)))
+            root_types = (
+                {
+                    cast("str", value["AssetType"])
+                    for value in _related_option_root_values(enhanced)
+                    if value.get("OptionRootId") == root_id
+                }
+                if enhanced is not None
+                else set[str]()
+            )
+            if len(root_types) > 1:
+                raise SyncValidationError("related option root type is ambiguous")
+            return _OptionRootSelector(
+                root_id,
+                _option_underlying_handle(config, instrument_handle, selector, row),
+                (page.page_id,),
+                next(iter(root_types)) if root_types else None,
+            )
+    raise SyncValidationError("authenticated option root reference is unavailable")
+
+
+def _related_option_root_values(value: object) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise SyncValidationError("related option roots are invalid")
+    values = cast("Sequence[object]", value)
+    if any(not isinstance(item, Mapping) for item in values):
+        raise SyncValidationError("related option root is invalid")
+    return tuple(cast("Mapping[str, object]", item) for item in values)
+
+
+def _option_underlying_handle(
+    config: AnalyticsConfig,
+    instrument_handle: str,
+    selector: _InstrumentSelector,
+    row: Mapping[str, object],
+) -> str:
+    if selector.asset_type not in {"StockOption", "FuturesOption", "StockIndexOption"}:
+        return instrument_handle
+    underlying_type = row.get("UnderlyingAssetType")
+    candidates = _related_option_root_values(row.get("RelatedInstruments"))
+    identifiers = {
+        value.get("Uic") for value in candidates if value.get("AssetType") == underlying_type
+    }
+    if (
+        not isinstance(underlying_type, str)
+        or len(identifiers) != 1
+        or any(type(value) is not int or value < 0 for value in identifiers)
+    ):
+        raise SyncValidationError("option root underlying identity is unavailable or ambiguous")
+    handle = instrument_handle_for_saxo_identity(
+        underlying_type, cast("int", next(iter(identifiers)))
+    )
+    _instrument_selector(config, handle)
+    return handle
 
 
 async def sync_research_data(
@@ -941,6 +1076,11 @@ def _preflight_research_request(  # noqa: C901
         for item in request.items
         if isinstance(item, PriceBarSyncSpec | QuoteSyncSpec | OptionChainSyncSpec)
     }
+    handles.update(
+        item.instrument_handle
+        for item in request.items
+        if isinstance(item, ReferenceDetailsSyncSpec)
+    )
     if len(handles) > config.limits.sync_instruments:
         raise SyncLimitError("synchronous research instrument limit exceeded")
     projected_rows = 0
@@ -961,6 +1101,9 @@ def _preflight_research_request(  # noqa: C901
             item_expiries = _validate_expiries(item.expiries, config)
             projected_storage_rows += len(item_expiries)
             projected_source_requests += len(item_expiries)
+        elif isinstance(item, ReferenceDetailsSyncSpec):
+            projected_storage_rows += 1
+            projected_source_requests += 1
         elif isinstance(item, AnalysisInputSyncSpec):
             if len(item.source_dataset_ids) != len(set(item.source_dataset_ids)):
                 raise SyncValidationError("analysis input source handles must be unique")
@@ -984,7 +1127,7 @@ def get_dataset(
         raise SyncValidationError("dataset page must be at least one")
     if not 1 <= limit <= config.limits.response_rows:
         raise SyncLimitError("dataset response row limit exceeded")
-    connection = _connect(config, read_only=True)
+    connection = _connect(config)
     try:
         metadata, source_pages, source_revision = _authenticated_dataset_metadata(
             connection,
@@ -1336,7 +1479,7 @@ def _validate_stored_quotes(
     _validate_normalized_rows_fingerprint(metadata, canonical_row_fingerprint)
 
 
-def _validate_stored_options(  # noqa: C901
+def _validate_stored_options(  # noqa: C901, PLR0915
     connection: duckdb.DuckDBPyConnection,
     rows: Sequence[tuple[object, ...]],
     metadata: Mapping[str, object],
@@ -1356,14 +1499,7 @@ def _validate_stored_options(  # noqa: C901
         raise SyncError("stored option normalized-row integrity check failed") from error
     canonical_metadata_options: dict[int, NormalizedOptionReference] = {}
     for option in metadata_options:
-        expected_fingerprint = _fingerprint(
-            {
-                "expiry": option.expiry.isoformat(),
-                "put_call": option.put_call,
-                "source_identifier": option.source_identifier,
-                "strike_value": option.strike_value,
-            },
-        )
+        expected_fingerprint = option_reference_fingerprint(option)
         if (
             option.fingerprint_sha256 != expected_fingerprint
             or option.source_identifier in canonical_metadata_options
@@ -1371,10 +1507,10 @@ def _validate_stored_options(  # noqa: C901
             raise SyncError("stored option normalized-row integrity check failed")
         canonical_metadata_options[option.source_identifier] = option
     option_handles = _validated_option_handles(connection)
-    identifiers_by_handle = {handle: identifier for identifier, handle in option_handles.items()}
+    identifiers_by_handle = {handle: identity for identity, handle in option_handles.items()}
     try:
         expected_underlying_handle = _validate_instrument_handle(
-            metadata.get("instrument_handle"),
+            metadata.get("underlying_handle", metadata.get("instrument_handle")),
         )
         expected_captured_at = _required_utc_text(
             metadata.get("captured_at"),
@@ -1404,7 +1540,8 @@ def _validate_stored_options(  # noqa: C901
         ):
             raise SyncError("stored option normalized-row integrity check failed")
         put_call = cast("Literal['call', 'put']", put_call_value)
-        source_identifier = identifiers_by_handle.get(option_handle)
+        identity = identifiers_by_handle.get(option_handle)
+        source_identifier = identity[1] if identity is not None else None
         metadata_option = (
             canonical_metadata_options.get(source_identifier)
             if source_identifier is not None
@@ -1414,7 +1551,9 @@ def _validate_stored_options(  # noqa: C901
             source_identifier is None
             or metadata_option is None
             or source_identifier in seen_identifiers
-            or currency != _MISSING_CURRENCY
+            or currency != (metadata_option.currency or _MISSING_CURRENCY)
+            or identity is None
+            or identity[0] != (metadata_option.asset_type or "ContractOption")
             or underlying_handle != expected_underlying_handle
             or captured_at != expected_captured_at
             or expiry != metadata_option.expiry
@@ -1424,8 +1563,8 @@ def _validate_stored_options(  # noqa: C901
             raise SyncError("stored option normalized-row integrity check failed")
         expected_payload = _canonical_stored_json(
             {
-                "currency": None,
-                "currency_state": "unavailable",
+                "currency": metadata_option.currency,
+                "currency_state": "available" if metadata_option.currency else "unavailable",
                 "option_reference_sha256": metadata_option.fingerprint_sha256,
             },
         )
@@ -1447,7 +1586,7 @@ def _validate_stored_options(  # noqa: C901
     )
     _validate_normalized_rows_fingerprint(
         metadata,
-        _fingerprint([option.model_dump(mode="json") for option in ordered_options]),
+        _fingerprint([option_reference_payload(option) for option in ordered_options]),
     )
 
 
@@ -1527,7 +1666,7 @@ def _instrument_selector(
     config: AnalyticsConfig,
     instrument_handle: str,
 ) -> _InstrumentSelector:
-    connection = _connect(config, read_only=True)
+    connection = _connect(config)
     try:
         row = connection.execute(
             """
@@ -2015,7 +2154,7 @@ def _latest_visible_bar_lineage(
     start: datetime,
     end: datetime,
 ) -> _VisibleBarLineage:
-    connection = _connect(config, read_only=True)
+    connection = _connect(config)
     try:
         candidates = cast(
             "list[tuple[object, ...]]",
@@ -2559,10 +2698,19 @@ def _persist_available_option_chain(  # noqa: PLR0913
     expected_root_id: int,
     requested_expiry: date,
     captured_at: datetime,
+    lineage_page_ids: Sequence[str] = (),
+    underlying_handle: str | None = None,
+    expected_asset_type: str | None = None,
 ) -> SyncResult:
     rows = tuple(row for page in envelope_pages for row in page.rows)
     if len(rows) != 1:
         raise SyncError("option-chain capture did not return exactly one source row")
+    if (
+        rows[0].get("OptionSpace") is not None
+        and expected_asset_type is not None
+        and rows[0].get("AssetType") != expected_asset_type
+    ):
+        raise SyncError("option root asset type does not match the authenticated reference")
     chain = normalize_option_chain(
         row=rows[0],
         expected_root_id=expected_root_id,
@@ -2603,7 +2751,8 @@ def _persist_available_option_chain(  # noqa: PLR0913
         "expiries": [requested_expiry.isoformat()],
         "fingerprints": fingerprints.model_dump(mode="json"),
         "instrument_handle": instrument_handle,
-        "normalized_rows": [option.model_dump(mode="json") for option in chain.options],
+        "normalized_rows": [option_reference_payload(option) for option in chain.options],
+        "underlying_handle": underlying_handle or instrument_handle,
         "warnings": list(sorted_warnings),
     }
     _stored_pages, dataset_id = _persist_market_capture(
@@ -2615,11 +2764,12 @@ def _persist_available_option_chain(  # noqa: PLR0913
         quality_state=quality_state,
         sync_metadata=sync_metadata,
         normalized_bytes=(len(chain.options) * _NORMALIZED_ROW_ESTIMATE_BYTES),
+        lineage_page_ids=lineage_page_ids,
         persist_normalized=lambda connection, stored_page_ids: _persist_normalized_options(
             connection=connection,
             pages=envelope_pages,
             stored_page_ids=stored_page_ids,
-            underlying_handle=instrument_handle,
+            underlying_handle=underlying_handle or instrument_handle,
             chain=chain,
         ),
     )
@@ -2827,7 +2977,18 @@ def _persist_normalized_options(
         source_page,
     )
     for option in chain.options:
-        option_handle = option_handles[option.source_identifier]
+        option_handle = option_handles[
+            (option.asset_type or "ContractOption", option.source_identifier)
+        ]
+        if (
+            option.underlying_identifier is not None
+            and option.underlying_asset_type is not None
+            and instrument_handle_for_saxo_identity(
+                option.underlying_asset_type, option.underlying_identifier
+            )
+            != underlying_handle
+        ):
+            raise SyncError("option underlying identity does not match the selected instrument")
         row_fingerprint_sha256 = _option_row_fingerprint(
             option_handle=option_handle,
             underlying_handle=underlying_handle,
@@ -2843,8 +3004,8 @@ def _persist_normalized_options(
         )
         payload = json.dumps(
             {
-                "currency": None,
-                "currency_state": "unavailable",
+                "currency": option.currency,
+                "currency_state": "available" if option.currency else "unavailable",
                 "option_reference_sha256": option.fingerprint_sha256,
             },
             allow_nan=False,
@@ -2879,7 +3040,7 @@ def _persist_normalized_options(
                 source_page.source_timestamp,
                 option.expiry,
                 option.strike_value,
-                _MISSING_CURRENCY,
+                option.currency or _MISSING_CURRENCY,
                 option.put_call,
                 row_fingerprint_sha256,
                 payload,
@@ -2892,7 +3053,7 @@ def _persist_normalized_options(
 
 def _validated_option_handles(
     connection: duckdb.DuckDBPyConnection,
-) -> dict[int, str]:
+) -> dict[tuple[str, int], str]:
     rows = cast(
         "list[tuple[object, ...]]",
         connection.execute(
@@ -2904,7 +3065,9 @@ def _validated_option_handles(
                 s.fingerprint_sha256,
                 s.metadata_json
             FROM safe_instruments AS s
-            WHERE s.asset_type = 'ContractOption'
+            WHERE s.asset_type IN (
+                'ContractOption', 'StockOption', 'FuturesOption', 'StockIndexOption'
+            )
                 OR EXISTS (
                     SELECT 1
                     FROM option_snapshots AS o
@@ -2913,7 +3076,7 @@ def _validated_option_handles(
             """,
         ).fetchall(),
     )
-    handles: dict[int, str] = {}
+    handles: dict[tuple[str, int], str] = {}
     for row in rows:
         try:
             handle = _validate_instrument_handle(row[0])
@@ -2929,17 +3092,21 @@ def _validated_option_handles(
         metadata = cast("dict[str, object]", loaded_metadata)
         identifier = metadata.get("identifier")
         if (
-            asset_type != "ContractOption"
-            or safe_label != _OPTION_SAFE_LABEL
+            asset_type not in {"ContractOption", "StockOption", "FuturesOption", "StockIndexOption"}
+            or (asset_type == "ContractOption" and safe_label != _OPTION_SAFE_LABEL)
             or hashlib.sha256(metadata_json.encode()).hexdigest() != fingerprint_sha256
             or metadata.get("asset_type") != asset_type
             or metadata.get("display_label") != safe_label
             or type(identifier) is not int
             or identifier < 0
-            or identifier in handles
+            or (asset_type, identifier) in handles
+            or (
+                asset_type != "ContractOption"
+                and handle != instrument_handle_for_saxo_identity(asset_type, identifier)
+            )
         ):
             raise SyncError("stored option instrument integrity check failed")
-        handles[identifier] = handle
+        handles[(asset_type, identifier)] = handle
     return handles
 
 
@@ -2947,15 +3114,15 @@ def _option_handles(
     connection: duckdb.DuckDBPyConnection,
     options: Sequence[NormalizedOptionReference],
     source_page: SourcePage,
-) -> dict[int, str]:
+) -> dict[tuple[str, int], str]:
     handles = _validated_option_handles(connection)
     for option in options:
-        if option.source_identifier in handles:
+        identity = (option.asset_type or "ContractOption", option.source_identifier)
+        if identity in handles:
             continue
-        option_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
         metadata: dict[str, object] = {
             "aliases": list[str](),
-            "asset_type": "ContractOption",
+            "asset_type": identity[0],
             "display_label": _OPTION_SAFE_LABEL,
             "exchange": None,
             "identifier": option.source_identifier,
@@ -2967,6 +3134,24 @@ def _option_handles(
             separators=(",", ":"),
             sort_keys=True,
         )
+        if option.asset_type is not None:
+            try:
+                write = put_saxo_instrument_identity(
+                    connection,
+                    asset_type=option.asset_type,
+                    uic=option.source_identifier,
+                    safe_label=_OPTION_SAFE_LABEL,
+                    source_revision=source_page.source_revision,
+                    source_timestamp=source_page.source_timestamp,
+                    fingerprint_sha256=hashlib.sha256(metadata_json.encode()).hexdigest(),
+                    metadata_json=metadata_json,
+                    update_existing=False,
+                )
+            except InstrumentIdentityError as error:
+                raise SyncError("stored option instrument integrity check failed") from error
+            handles[identity] = write.instrument_handle
+            continue
+        option_handle = new_safe_handle(HandleKind.INSTRUMENT_HANDLE)
         connection.execute(
             """
             INSERT INTO safe_instruments (
@@ -2989,18 +3174,17 @@ def _option_handles(
                 metadata_json,
             ),
         )
-        handles[option.source_identifier] = option_handle
+        handles[identity] = option_handle
     return handles
 
 
 def _connect(
     config: AnalyticsConfig,
-    *,
-    read_only: bool,
 ) -> duckdb.DuckDBPyConnection:
+    # Consistent mode permits reads beside the process-owned job writer.
     return duckdb.connect(
         str(config.paths.store_path),
-        read_only=read_only,
+        read_only=False,
         config=dict(_CONNECTION_CONFIG),
     )
 
@@ -3172,10 +3356,17 @@ _PRICE_BAR_PAGE_SQL: Final = (
 
 
 __all__ = (
+    "AccountAnalysisSourceDatasetSummary",
+    "AccountAnalyticsKind",
+    "AccountAnalyticsSyncSpec",
+    "AccountSnapshotDatasetSummary",
+    "AccountSnapshotSyncSpec",
+    "CostCaptureChoice",
     "DatasetHandleSummary",
     "DatasetNotFoundError",
     "DatasetPage",
     "IngestionFingerprints",
+    "InstrumentDetailsDatasetSummary",
     "OptionChainDatasetSummary",
     "OptionChainSyncSpec",
     "OptionReferenceDatasetRow",
@@ -3185,6 +3376,7 @@ __all__ = (
     "QuoteDatasetRow",
     "QuoteDatasetSummary",
     "QuoteSyncSpec",
+    "ReferenceDetailsSyncSpec",
     "SyncError",
     "SyncLimitError",
     "SyncResearchRequest",

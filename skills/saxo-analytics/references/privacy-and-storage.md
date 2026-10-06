@@ -13,9 +13,14 @@ An expired handle is refused and reacquired through the exact named workflow.
 
 ## Artifacts and jobs
 
-Rendering and export must bind to a stored verified analysis. Do not accept caller-provided
+Rendering and export must bind to a stored replayable verified or degraded analysis. Preserve
+every warning and unavailable dimension of a degraded result. Do not accept caller-provided
 provenance, visibility, trust, or proof. Direct delivery is bounded to 25 MiB; larger valid output
 uses the server-owned owner-only local resource mode. Never accept a caller path.
+
+Replay checks original captures and every prior analysis dependency as well as the combined
+dataset. A saved chart or report becomes unavailable if any required source, result, code proof
+or artifact changes; obtain a fresh calculation instead of overriding that check.
 
 Jobs live only while the MCP process runs. Use `saxo_manage_analysis_job` for allowlisted bounded
 work, at most the configured concurrency, explicit cancellation, safe restart refusal, and no

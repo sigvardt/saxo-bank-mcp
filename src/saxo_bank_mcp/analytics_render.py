@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from functools import cache
 from importlib.resources import files
 from io import BytesIO
-from typing import Final, Literal, Self, cast
+from typing import Annotated, Final, Literal, Self, cast
 from uuid import uuid4
 
 import matplotlib as mpl
@@ -27,10 +27,11 @@ from matplotlib.figure import Figure
 from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 from matplotlib.transforms import Bbox
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from saxo_bank_mcp.analytics_chart_semantics import (
     PRIVACY_FOOTER,
+    STORED_TABLE_TEMPLATES,
     ArtifactEnvironment,
     ArtifactStamps,
     ChartSemantics,
@@ -44,10 +45,13 @@ from saxo_bank_mcp.analytics_chart_semantics import (
 )
 from saxo_bank_mcp.analytics_config import AnalyticsConfig
 from saxo_bank_mcp.analytics_models import (
+    AnalysisCell,
     AnalysisId,
     AnalysisResult,
+    AnalysisTable,
     ArtifactId,
     ArtifactSummary,
+    ContractName,
     HandleKind,
     Sha256Fingerprint,
     VisibilityMode,
@@ -60,6 +64,12 @@ from saxo_bank_mcp.analytics_store import (
     StoreError,
     _artifact_analysis_binding,
     _ArtifactAnalysisBinding,
+    _open_owner_artifact_directory,
+    _open_owner_artifact_file_at,
+    _owned_artifact_path,
+    _require_artifact_analysis_binding,
+    _require_current_artifact_directory,
+    _require_named_artifact_identity,
 )
 
 mpl.use("Agg", force=True)
@@ -77,6 +87,9 @@ _MAX_WIDTH: Final = 2560
 _MIN_HEIGHT: Final = 240
 _MAX_HEIGHT: Final = 1600
 _SCATTER_SERIES_COUNT: Final = 2
+_MAX_STORED_CHART_ROWS: Final = 500
+_MAX_HEATMAP_ANNOTATIONS: Final = 40
+_HEATMAP_LIGHT_BACKGROUND_THRESHOLD: Final = 0.5
 _MAX_DISPLAY_TICKS: Final = 8
 _MIN_READABLE_FONT_PX: Final = 12
 _INK_THRESHOLD: Final = 248
@@ -228,6 +241,34 @@ class StoredRenderRequest(_StrictModel):
     output_format: RenderFormat
     width: int = Field(ge=_MIN_WIDTH, le=_MAX_WIDTH)
     height: int = Field(ge=_MIN_HEIGHT, le=_MAX_HEIGHT)
+    selection: StoredChartSelection | None = None
+
+
+def _decoded_json_array(value: object) -> object:
+    """Accept transport JSON arrays while preserving strict typed field names."""
+    return tuple(cast("list[object]", value)) if isinstance(value, list) else value
+
+
+type StoredFields = Annotated[tuple[ContractName, ...], BeforeValidator(_decoded_json_array)]
+
+
+class StoredChartSelection(_StrictModel):
+    """Select exact stored fields, without accepting caller values or unit claims."""
+
+    table_id: ContractName
+    fields: StoredFields = Field(min_length=1, max_length=25)
+    label_field: ContractName | None = None
+    secondary_fields: StoredFields = Field(default=(), max_length=25)
+
+    @model_validator(mode="after")
+    def validate_fields(self) -> Self:
+        if len(set(self.fields)) != len(self.fields) or len(set(self.secondary_fields)) != len(
+            self.secondary_fields
+        ):
+            raise ValueError("chart fields must be unique")
+        if not set(self.secondary_fields) <= set(self.fields):
+            raise ValueError("secondary fields must belong to the selected fields")
+        return self
 
 
 class ArtifactBindingReceipt(_StrictModel):
@@ -304,8 +345,6 @@ class ArtifactBindingRegistry:
     def _base_visibility(self, binding_id: str) -> VisibilityMode:
         visibility = self._result_for(binding_id).visibility
         if visibility in {VisibilityMode.PRIVATE_USER_RESULT, VisibilityMode.INLINE_PRIVATE}:
-            if self._environment == "LIVE":
-                return VisibilityMode.LOCAL_RESOURCE_LINK
             return VisibilityMode.INLINE_PRIVATE
         if visibility is VisibilityMode.LOCAL_RESOURCE_LINK:
             return VisibilityMode.LOCAL_RESOURCE_LINK
@@ -437,7 +476,7 @@ def _render_plotly_html_payload(  # pyright: ignore[reportUnusedFunction]
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; connect-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; connect-src 'none'">
 <title>{html.escape(semantics.title)}</title>
 <style>
 :root{{--artifact-width:{viewport_width}px;--ink:#162033;--muted:#4a5568;--line:#d9e2ef}}
@@ -451,7 +490,7 @@ h1{{font-size:22px;line-height:1.25;margin:0 0 4px;overflow-wrap:anywhere}}p{{fo
 th,td{{padding:5px;border:1px solid var(--line);text-align:right;overflow-wrap:anywhere}}th:first-child,td:first-child{{text-align:left}}
 @media(max-width:600px){{main{{padding:8px}}h1{{font-size:18px}}#chart{{height:{max(320, min(height, 480))}px}}.stamps{{font-size:12px}}
 .semantic-fallback table,.semantic-fallback tbody,.semantic-fallback tr,.semantic-fallback td{{display:block;width:100%}}.semantic-fallback thead{{position:absolute;clip:rect(0 0 0 0);width:1px;height:1px;overflow:hidden}}
-.semantic-fallback tr{{margin-bottom:8px;border:1px solid var(--line)}}.semantic-fallback td{{display:grid;grid-template-columns:minmax(88px,40%) 1fr;border:0;border-bottom:1px solid var(--line);font-size:12px;text-align:right;overflow-wrap:anywhere}}
+.semantic-fallback tr{{margin-bottom:8px;border:1px solid var(--line)}}.semantic-fallback td{{display:grid;grid-template-columns:minmax(88px,40%) 1fr;column-gap:12px;border:0;border-bottom:1px solid var(--line);font-size:12px;text-align:right;overflow-wrap:anywhere}}
 .semantic-fallback td::before{{content:attr(data-field-label);font-weight:700;text-align:left}}}}
 </style></head>
 <body data-viewport-width="{viewport_width}" data-semantics-sha256="{semantics_sha256}"><main>
@@ -606,6 +645,7 @@ def render_analysis(
             request.template_id,
             stamps=stamps,
             bindings=bindings,
+            selection=request.selection,
         )
         if isinstance(semantics, ArtifactRefusal):
             return semantics
@@ -626,12 +666,13 @@ def render_analysis(
     )
 
 
-def _bound_chart_semantics(  # noqa: PLR0911
+def _bound_chart_semantics(  # noqa: C901, PLR0911 - exact table and legacy scalar shape checks
     binding_id: str,
     template_id: str,
     *,
     stamps: ArtifactStamps,
     bindings: ArtifactBindingRegistry,
+    selection: StoredChartSelection | None = None,
 ) -> ChartSemantics | ArtifactRefusal:
     """Derive one truthful exact-value chart from the stored result metrics."""
     try:
@@ -645,6 +686,17 @@ def _bound_chart_semantics(  # noqa: PLR0911
             reason="the stored proof profile does not bind this artifact template",
             next_action="request a template registered for the stored analysis kind",
         )
+    if selection is not None:
+        if template_id not in STORED_TABLE_TEMPLATES:
+            return _table_shape_refusal("artifact_table_template_required")
+        try:
+            return _stored_table_semantics(
+                result, selection, cast("ChartTemplateId", template_id), stamps
+            )
+        except (KeyError, ValueError):
+            return _table_shape_refusal("artifact_table_fields_incompatible")
+    if template_id in STORED_TABLE_TEMPLATES:
+        return _table_shape_refusal("artifact_table_selection_required")
     metric_units = {metric.unit for metric in result.metrics}
     kind = chart_kind_for(cast("ChartTemplateId", template_id))
     if kind in {"scatter", "heatmap", "surface", "waterfall", "composite"}:
@@ -700,6 +752,121 @@ def _bound_chart_semantics(  # noqa: PLR0911
             reason="the stored result cannot satisfy the exact registered chart semantics",
             next_action="request a verified template compatible with every stored metric",
         )
+
+
+def _table_shape_refusal(code: str) -> ArtifactRefusal:
+    return ArtifactRefusal(
+        reason_code=code,
+        reason="the exact stored fields, units and dimensions do not satisfy this chart shape",
+        next_action="select a stored table and numeric fields with explicit units; use table export for larger or textual results",
+    )
+
+
+def _stored_table_semantics(
+    result: AnalysisResult,
+    selection: StoredChartSelection,
+    template: ChartTemplateId,
+    stamps: ArtifactStamps,
+) -> ChartSemantics:
+    table = next((item for item in result.tables if item.table_id == selection.table_id), None)
+    if table is None:
+        raise ValueError("selected stored table is unavailable")
+    if not table.rows or len(table.rows) > _MAX_STORED_CHART_ROWS:
+        raise ValueError("stored chart requires one to 500 exact observations")
+    rows = tuple({cell.field: cell for cell in row.cells} for row in table.rows)
+    if any(len(values) != len(row.cells) for row, values in zip(table.rows, rows, strict=True)):
+        raise ValueError("stored chart fields are ambiguous")
+    labels = _stored_table_labels(table, selection.label_field)
+    kind = chart_kind_for(template)
+    series: list[ChartSeries] = []
+    for field in selection.fields:
+        cells = tuple(row.get(field) for row in rows)
+        if not any(cell is not None for cell in cells):
+            raise ValueError("selected stored field is unavailable")
+        units = {_stored_cell_unit(cell) for cell in cells if cell is not None}
+        if len(units) != 1:
+            raise ValueError("selected stored field changes its unit or currency")
+        if any(
+            cell is not None and cell.value is not None and type(cell.value) not in {int, float}
+            for cell in cells
+        ):
+            raise ValueError("selected stored field is not numeric")
+        series.append(
+            ChartSeries(
+                name=field.replace("_", " ").title(),
+                values=tuple(
+                    float(cell.value)
+                    if cell is not None and isinstance(cell.value, int | float)
+                    else None
+                    for cell in cells
+                ),
+                unit=next(iter(units)),
+                style="bar" if kind == "bar" else "scatter" if kind == "scatter" else "line",
+                axis="secondary" if field in selection.secondary_fields else "primary",
+            )
+        )
+    primary = next((item for item in series if item.axis == "primary"), None)
+    if primary is None:
+        raise ValueError("stored chart requires a primary axis")
+    secondary = next((item for item in series if item.axis == "secondary"), None)
+    return ChartSemantics(
+        template_id=template,
+        analysis_kind=result.analysis_kind,
+        title=table.title,
+        subtitle="Exact selected stored observations; missing values remain missing",
+        x_axis_title=_unit_title(series[0].name, series[0].unit)
+        if kind == "scatter"
+        else _stored_observation_axis_title(table, selection.label_field),
+        y_axis_title=_unit_title(series[1].name, series[1].unit)
+        if kind == "scatter" and len(series) == _SCATTER_SERIES_COUNT
+        else _unit_title("Value", primary.unit),
+        secondary_y_axis_title=_unit_title("Value", secondary.unit) if secondary else None,
+        labels=labels,
+        series=tuple(series),
+        stamps=stamps,
+    )
+
+
+def _stored_table_labels(table: AnalysisTable, field: str | None) -> tuple[str, ...]:
+    if field is not None:
+        labels: list[str] = []
+        for row in table.rows:
+            matches = tuple(cell for cell in row.cells if cell.field == field)
+            if len(matches) != 1 or matches[0].value is None:
+                raise ValueError("stored observation label is unavailable")
+            labels.append(str(matches[0].value))
+        return tuple(labels)
+    timed = tuple(row.at.isoformat() if row.at else "" for row in table.rows)
+    if all(timed) and len(set(timed)) == len(timed):
+        return timed
+    handles = tuple(row.instrument_handle or "" for row in table.rows)
+    if all(handles) and len(set(handles)) == len(handles):
+        return handles
+    return tuple(
+        f"{index + 1}: {row.instrument_handle or row.label}" for index, row in enumerate(table.rows)
+    )
+
+
+def _stored_observation_axis_title(table: AnalysisTable, field: str | None) -> str:
+    if field is not None:
+        return field.replace("_", " ").title()
+    times = tuple(row.at for row in table.rows)
+    if all(times) and len(set(times)) == len(times):
+        dates = {value.date() for value in times if value is not None}
+        return f"UTC time ({next(iter(dates)).isoformat()})" if len(dates) == 1 else "UTC time"
+    handles = tuple(row.instrument_handle for row in table.rows)
+    return "Stored instrument handle" if all(handles) else "Stored observation"
+
+
+def _stored_cell_unit(cell: AnalysisCell) -> str:
+    unit, currency = cell.unit, cell.currency
+    if unit is None and currency is None:
+        raise ValueError("stored analytical field has no declared unit")
+    return f"{unit or 'currency'}_{currency.lower()}" if currency else str(unit)
+
+
+def _unit_title(label: str, unit: str) -> str:
+    return f"{label} ({unit.replace('_', ' ')})"
 
 
 def _produce_and_deliver_bound(
@@ -823,6 +990,69 @@ def _current_artifact_environment() -> Literal["SIM", "LIVE"]:
     return cast("Literal['SIM', 'LIVE']", value)
 
 
+def read_artifact(
+    artifact_id: str,
+    *,
+    config: AnalyticsConfig,
+    store: AnalyticsStore,
+    proof_registry: ProofRegistry,
+) -> tuple[bytes, str]:
+    """Read an owner artifact after proof replay, exact metadata and file checks."""
+    if re.fullmatch(r"ar_[0-9a-f]{32}", artifact_id) is None or store._config != config:
+        raise StoreError("owner artifact handle is invalid")
+    query = """
+        SELECT analysis_id, media_type, sha256, byte_count, visibility
+        FROM artifacts WHERE artifact_id = ?
+    """
+    with store._read_connection() as connection:
+        row = connection.execute(query, (artifact_id,)).fetchone()
+    if row is None:
+        raise StoreError("owner artifact is unavailable")
+    analysis_id, media_type, digest, byte_count, visibility = cast("tuple[object, ...]", row)
+    if (
+        not isinstance(analysis_id, str)
+        or not isinstance(media_type, str)
+        or not isinstance(digest, str)
+        or type(byte_count) is not int
+        or byte_count < 0
+        or byte_count > config.limits.store_quota_bytes
+        or visibility != VisibilityMode.LOCAL_RESOURCE_LINK.value
+    ):
+        raise StoreError("owner artifact metadata is invalid")
+    result = replay_analysis(analysis_id, config=config, registry=proof_registry, at=_utc_now())
+    if result.visibility not in {
+        VisibilityMode.PRIVATE_USER_RESULT,
+        VisibilityMode.INLINE_PRIVATE,
+        VisibilityMode.LOCAL_RESOURCE_LINK,
+    }:
+        raise StoreError("owner artifact visibility is not authorized")
+    with store._read_connection() as connection:
+        if connection.execute(query, (artifact_id,)).fetchone() != row:
+            raise StoreError("owner artifact metadata changed during replay")
+        _require_artifact_analysis_binding(
+            connection, analysis_id, _artifact_analysis_binding(result)
+        )
+        path = _owned_artifact_path(config, artifact_id, media_type)
+        with _open_owner_artifact_directory(path.parent) as directory:
+            descriptor, identity = _open_owner_artifact_file_at(directory, path.name)
+            try:
+                chunks: list[bytes] = []
+                total = 0
+                while chunk := os.read(descriptor, min(1024 * 1024, byte_count + 1 - total)):
+                    total += len(chunk)
+                    if total > byte_count:
+                        raise StoreError("owner artifact byte count changed")
+                    chunks.append(chunk)
+                content = b"".join(chunks)
+                if total != byte_count or hashlib.sha256(content).hexdigest() != digest:
+                    raise StoreError("owner artifact integrity check failed")
+                _require_named_artifact_identity(directory, path.name, identity)
+                _require_current_artifact_directory(directory)
+            finally:
+                os.close(descriptor)
+    return content, media_type
+
+
 def _build_figure(
     semantics: ChartSemantics,
     *,
@@ -856,7 +1086,12 @@ def _build_figure(
     ]
     secondary_axis = _draw_chart(axis, semantics)
     axis.set_xlabel(semantics.x_axis_title, fontsize=9, labelpad=7)
-    axis.set_ylabel(semantics.y_axis_title, fontsize=9, labelpad=7)
+    kind = chart_kind_for(semantics.template_id)
+    axis.set_ylabel(
+        "Stored field" if kind in {"heatmap", "surface"} else semantics.y_axis_title,
+        fontsize=9,
+        labelpad=7,
+    )
     bounded_texts.extend((axis.xaxis.label, axis.yaxis.label))
     if secondary_axis is not None:
         secondary_title = semantics.secondary_y_axis_title
@@ -866,7 +1101,6 @@ def _build_figure(
         bounded_texts.append(secondary_axis.yaxis.label)
     axis.grid(visible=True, axis="y", linewidth=0.5, color="#d9e2ef", alpha=0.8)
     axis.tick_params(labelsize=8)
-    kind = chart_kind_for(semantics.template_id)
     if kind not in {"scatter", "dashboard", "card"}:
         _bounded_ticks(axis, semantics.labels)
     else:
@@ -891,18 +1125,13 @@ def _build_figure(
             ncols=min(3, len(semantics.series)),
         )
         bounded_texts.extend(drawn.get_texts())
-    compact_lines = _compact_stamp_lines(semantics.stamps)
-    for index, line in enumerate(compact_lines):
-        bounded_texts.append(
-            figure.text(
-                0.04,
-                0.175 - index * 0.038,
-                line,
-                fontsize=7,
-                color="#27364d",
-                va="top",
-            ),
-        )
+    footer = "\n".join(
+        textwrap.fill(line, width=max(28, width // 6), break_on_hyphens=False)
+        for line in _compact_stamp_lines(semantics.stamps)
+    )
+    bounded_texts.append(
+        figure.text(0.04, 0.14, footer, fontsize=7, color="#27364d", va="top", linespacing=1.25),
+    )
     return figure, canvas, tuple(bounded_texts), label_texts
 
 
@@ -951,8 +1180,10 @@ def _draw_lines(
                 positions,
                 values,
                 linewidth=1.8,
-                marker="o",
-                markersize=3.5,
+                linestyle="--" if series.axis == "secondary" else "-",
+                marker="s" if series.axis == "secondary" else "o",
+                markerfacecolor="none" if series.axis == "secondary" else color,
+                markersize=5.0 if series.axis == "secondary" else 3.5,
                 color=color,
                 label=label,
             )
@@ -1003,9 +1234,38 @@ def _draw_heatmap(axis: Axes, semantics: ChartSemantics) -> None:
         ],
         dtype=np.float64,
     )
-    axis.imshow(matrix, aspect="auto", interpolation="nearest", cmap="RdYlBu")
+    image = axis.imshow(matrix, aspect="auto", interpolation="nearest", cmap="RdYlBu")
+    key = axis.figure.colorbar(image, ax=axis, fraction=0.035, pad=0.025)
+    key.set_label(semantics.y_axis_title, fontsize=8)
+    key.ax.tick_params(labelsize=8)
     axis.set_yticks(np.arange(len(semantics.series)))
     axis.set_yticklabels(tuple(_short_label(series.name, 22) for series in semantics.series))
+    if matrix.size <= _MAX_HEATMAP_ANNOTATIONS:
+        for row, series in enumerate(semantics.series):
+            for column, value in enumerate(series.values):
+                if value is None:
+                    color = "#4a5568"
+                else:
+                    rgba = cast(
+                        "np.ndarray[tuple[int, int], np.dtype[np.float64]]",
+                        image.cmap(image.norm(np.asarray([value], dtype=np.float64))),
+                    )
+                    red, green, blue, _alpha = rgba[0]
+                    color = (
+                        "#162033"
+                        if 0.2126 * red + 0.7152 * green + 0.0722 * blue
+                        > _HEATMAP_LIGHT_BACKGROUND_THRESHOLD
+                        else "white"
+                    )
+                axis.text(
+                    column,
+                    row,
+                    _canonical_value(value),
+                    ha="center",
+                    va="center",
+                    color=color,
+                    fontsize=8,
+                )
 
 
 def _draw_scatter(
@@ -1049,14 +1309,32 @@ def _bounded_ticks(axis: Axes, labels: Sequence[str]) -> None:
     positions = np.arange(len(labels), dtype=np.float64)
     sampled = _sample_tick_positions(positions)
     axis.set_xticks(sampled)
+    exact = tuple(labels[int(position)] for position in sampled)
+    display = _readable_tick_labels(exact)
     tick_labels = axis.set_xticklabels(
-        tuple(_short_label(labels[int(position)], 18) for position in sampled),
-        rotation=18,
+        display,
+        rotation=0 if any("\n" in label for label in display) else 18,
         ha="center",
     )
     if tick_labels:
         tick_labels[0].set_horizontalalignment("left")
         tick_labels[-1].set_horizontalalignment("right")
+
+
+def _readable_tick_labels(labels: Sequence[str]) -> tuple[str, ...]:
+    rendered: list[str] = []
+    for label in labels:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}T.+(?:Z|\+00:00)", label):
+            at = datetime.fromisoformat(label)
+            clock = at.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
+            rendered.append(f"{at.date().isoformat()}\n{clock}")
+        elif re.fullmatch(r"ih_[0-9a-f]{32}", label):
+            rendered.append(textwrap.fill(label, width=18, break_on_hyphens=False))
+        else:
+            rendered.append(_short_label(label, 18))
+    if len(set(rendered)) != len(rendered):
+        rendered = [f"{index + 1}: {value}" for index, value in enumerate(rendered)]
+    return tuple(rendered)
 
 
 def _sample_tick_positions(
@@ -1147,6 +1425,7 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
                 "z": [list(series.values) for series in semantics.series],
                 "colorscale": "RdYlBu",
                 "hoverongaps": False,
+                "colorbar": {"title": {"text": semantics.y_axis_title}},
             },
         ]
     elif kind == "waterfall":
@@ -1203,6 +1482,8 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
                 "x": list(semantics.labels),
                 "y": list(series.values),
                 "yaxis": "y2" if series.axis == "secondary" else "y",
+                "line": {"dash": "dash" if series.axis == "secondary" else "solid"},
+                "marker": {"symbol": "square-open" if series.axis == "secondary" else "circle"},
             }
             for series in semantics.series
         ]
@@ -1216,11 +1497,16 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
         "paper_bgcolor": "#ffffff",
         "plot_bgcolor": "#ffffff",
         "showlegend": True,
+        "legend": {"orientation": "h", "x": 0.0, "y": 1.02, "xanchor": "left", "yanchor": "bottom"},
         "template": None,
-        "xaxis": {"title": semantics.x_axis_title, "automargin": True},
-        "yaxis": {"title": semantics.y_axis_title, "automargin": True, "zeroline": True},
+        "xaxis": {"title": {"text": semantics.x_axis_title}, "automargin": True},
+        "yaxis": {
+            "title": {"text": "Stored field" if kind == "heatmap" else semantics.y_axis_title},
+            "automargin": True,
+            "zeroline": True,
+        },
         "yaxis2": {
-            "title": semantics.secondary_y_axis_title or "",
+            "title": {"text": semantics.secondary_y_axis_title or ""},
             "overlaying": "y",
             "side": "right",
             "automargin": True,
@@ -1243,9 +1529,9 @@ def _plotly_figure(semantics: ChartSemantics) -> dict[str, object]:
     }
     if kind == "surface":
         layout["scene"] = {
-            "xaxis": {"title": semantics.x_axis_title},
-            "yaxis": {"title": "Series"},
-            "zaxis": {"title": semantics.y_axis_title},
+            "xaxis": {"title": {"text": semantics.x_axis_title}},
+            "yaxis": {"title": {"text": "Series"}},
+            "zaxis": {"title": {"text": semantics.y_axis_title}},
         }
     return {"data": data, "layout": layout}
 
@@ -1301,10 +1587,10 @@ def _compressed_sanitized_plotly_runtime() -> str:
         flags=re.IGNORECASE,
     )
     for placeholder, namespace in placeholders.items():
-        expression = b'["http","://' + namespace.split(b"://", maxsplit=1)[1] + b'"].join("")'
-        runtime = runtime.replace(b'"' + placeholder + b'"', expression)
-        runtime = runtime.replace(b"'" + placeholder + b"'", expression)
-        runtime = runtime.replace(placeholder, b"blocked:namespace")
+        # Escape the slashes inside the original JS literal, including nested
+        # HTML/JSON strings; injecting an expression would change its syntax.
+        escaped = namespace.replace(b"/", b"\\u002f")
+        runtime = runtime.replace(placeholder, escaped)
     if any(pattern.search(runtime) is not None for pattern in _NETWORK_RUNTIME_PATTERNS):
         raise RuntimeError("sanitized Plotly runtime retains a network capability")
     compressed = gzip.compress(runtime, compresslevel=9, mtime=0)

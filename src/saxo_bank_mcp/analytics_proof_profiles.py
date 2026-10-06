@@ -124,6 +124,11 @@ class ProofProfile(_StrictModel):
     metric_definitions: tuple[MetricDefinitionBinding, ...]
     source_contracts: tuple[SourceContractProofBinding, ...]
     source_revision: str | None
+    source_revision_scope: Literal["capture", "contract"] = "capture"
+    required_metric_ids: tuple[str, ...] | None = None
+    additional_source_contracts: tuple[SourceContractProofBinding, ...] = ()
+    model_metric_ids: tuple[str, ...] = ()
+    approximation_metric_ids: tuple[str, ...] = ()
     engines: tuple[EngineProofBinding, ...]
     artifact_template_ids: tuple[str, ...]
     definition_catalog_sha256: str
@@ -131,7 +136,7 @@ class ProofProfile(_StrictModel):
     valid_until: datetime | None
 
     @model_validator(mode="after")
-    def _validate_profile(self) -> Self:
+    def _validate_profile(self) -> Self:  # noqa: C901 - immutable binding validation
         _require_safe_name(self.proof_profile_id, "proof profile identifier")
         _require_version(self.profile_version, "proof profile version")
         _require_safe_name(self.analysis_kind, "analysis kind")
@@ -152,7 +157,7 @@ class ProofProfile(_StrictModel):
         if self.activation_state is ProfileActivationState.ACTIVE:
             if (
                 self.quarantine_reason is not None
-                or self.source_revision is None
+                or (self.source_revision_scope == "capture" and self.source_revision is None)
                 or not self.engines
                 or self.valid_until is None
             ):
@@ -162,6 +167,20 @@ class ProofProfile(_StrictModel):
                 )
         elif self.quarantine_reason is None:
             raise ValueError("quarantined proof profiles require a reason code")
+        if self.required_metric_ids is not None and not set(self.required_metric_ids) <= {
+            binding.metric_id for binding in self.metric_definitions
+        }:
+            raise ValueError("required metrics must belong to the proof profile")
+        declared_metrics = {binding.metric_id for binding in self.metric_definitions}
+        for identifiers, label in (
+            (self.model_metric_ids, "model metrics"),
+            (self.approximation_metric_ids, "approximation metrics"),
+        ):
+            _require_unique(identifiers, label)
+            if not set(identifiers) <= declared_metrics:
+                raise ValueError("metric classes must belong to the proof profile")
+        if set(self.model_metric_ids) & set(self.approximation_metric_ids):
+            raise ValueError("metric classes must not overlap")
         if self.quarantine_reason is not None:
             _require_safe_name(self.quarantine_reason, "quarantine reason")
         if self.valid_until is not None and (
@@ -327,6 +346,16 @@ class ProofRegistry:
         """Return the exact immutable registration for one analysis kind."""
         return self._profiles.get(analysis_kind)
 
+    def required_source_contract_ids(
+        self,
+        analysis_kind: str,
+    ) -> frozenset[str]:
+        """Use the same exact source selection for execution and replay."""
+        profile = self.profile(analysis_kind)
+        if profile is None:
+            return frozenset()
+        return frozenset(binding.contract_id for binding in profile.source_contracts)
+
     def status(  # noqa: C901, PLR0911, PLR0912, PLR0913
         self,
         analysis_kind: str,
@@ -336,6 +365,7 @@ class ProofRegistry:
         source_revision: str | None = None,
         engine_versions: Mapping[str, tuple[str, str]] | None = None,
         at: datetime | None = None,
+        metric_ids: Sequence[str] | None = None,
     ) -> ProofStatus:
         profile = self._profiles.get(analysis_kind)
         if profile is None:
@@ -372,10 +402,17 @@ class ProofRegistry:
             binding.contract_id: frozenset(binding.field_paths)
             for binding in profile.source_contracts
         }
-        expected_source_fields = _metric_source_fields(
-            profile.metric_definitions,
-            current_definitions,
+        expected_source_fields = (
+            {
+                binding.contract_id: frozenset(binding.field_paths)
+                for binding in profile.additional_source_contracts
+            }
+            if profile.source_revision_scope == "contract"
+            else _metric_source_fields(profile.metric_definitions, current_definitions)
         )
+        for binding in profile.additional_source_contracts:
+            expected_source_fields.setdefault(binding.contract_id, frozenset())
+            expected_source_fields[binding.contract_id] |= frozenset(binding.field_paths)
         if profile_source_fields != expected_source_fields:
             return _status(
                 ProofState.STALE,
@@ -389,6 +426,12 @@ class ProofRegistry:
         expected_sources = {
             binding.contract_id: binding.contract_sha256 for binding in profile.source_contracts
         }
+        if profile.source_revision_scope == "contract" and metric_ids is not None:
+            selected_metrics = set(metric_ids)
+            if not selected_metrics <= {item.metric_id for item in profile.metric_definitions}:
+                return _status(ProofState.REFUSED, "metric_not_bound", profile)
+            if not set(profile.required_metric_ids or ()) <= selected_metrics:
+                return _status(ProofState.REFUSED, "required_metric_missing", profile)
         if dict(source_contracts) != expected_sources:
             return _status(ProofState.STALE, "source_contract_changed", profile)
         frozen_source_fields = _source_field_paths_by_contract()
@@ -402,7 +445,10 @@ class ProofRegistry:
                 "metric_source_field_missing",
                 profile,
             )
-        if profile.source_revision != source_revision:
+        if (
+            profile.source_revision_scope == "capture"
+            and profile.source_revision != source_revision
+        ):
             return _status(ProofState.STALE, "source_revision_changed", profile)
         supplied_engines = dict(engine_versions or {})
         expected_engines = {

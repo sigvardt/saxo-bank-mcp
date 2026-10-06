@@ -37,6 +37,7 @@ packages = ["src/saxo_bank_mcp"]
 "data/analytics/metric_definitions.json" = "saxo_bank_mcp/_analytics_metric_definitions/metric_definitions.json"
 "data/analytics/migrations" = "saxo_bank_mcp/_analytics_migrations"
 "data/analytics/proof_profiles.json" = "saxo_bank_mcp/_analytics_proof_profiles/proof_profiles.json"
+"data/analytics/production_release.json" = "saxo_bank_mcp/_analytics_production/production_release.json"
 "data/analytics/source_contracts.json" = "saxo_bank_mcp/_analytics_source_contracts/source_contracts.json"
 "data/analytics/vision_coverage_requirements.json" = "saxo_bank_mcp/_analytics_vision_requirements/vision_coverage_requirements.json"
 "data/analytics/source_matrix_candidate.json" = "saxo_bank_mcp/_analytics_source_matrix/source_matrix_candidate.json"
