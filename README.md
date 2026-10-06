@@ -89,10 +89,16 @@ URL in a browser whose `localhost:8080` reaches the host, for example after
 `ssh -N -L 8080:127.0.0.1:8080 <host>` on the browser machine. Never paste the
 callback URL or its code anywhere; the redirect must reach the receiver.
 
-The external `saxo-bank-live-session-keeper` refreshes the LIVE token before
-expiry. LIVE tools refresh an expired access token on demand under the same
-cross-process lock. If the computer remains offline beyond Saxo's refresh-token
-lifetime, rerun the browser login with `uv run saxo-bank-live-login`.
+The external `saxo-bank-live-session-keeper` refreshes the LIVE token five
+minutes before expiry. LIVE tools refresh an expired access token on demand under
+the same cross-process lock. Network errors, timeouts and Saxo 5xx or 429
+responses are temporary: the keeper retries every 30 seconds, and a LIVE read
+reports `token_refresh_temporarily_failed` with no login requirement. A rejected
+refresh (for example HTTP 401) or a passed `refresh_token_expires_in` deadline,
+which the cache now records from Saxo's response, needs a new browser login with
+`uv run saxo-bank-live-login`. The keeper writes one JSON line per refresh
+attempt or status change to stderr: time, status, HTTP status, error class and
+expiry times, never token values.
 
 To keep the session alive independently of an MCP client, run
 `uv run saxo-bank-live-session-keeper`. On the primary macOS workstation this

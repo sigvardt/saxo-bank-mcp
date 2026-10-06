@@ -47,6 +47,14 @@ class OAuthTokenResponse(BaseModel):
         validation_alias=AliasChoices("refresh_token", "refreshToken", "RefreshToken"),
     )
     expires_in: int = Field(validation_alias=AliasChoices("expires_in", "expiresIn", "ExpiresIn"))
+    refresh_token_expires_in: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "refresh_token_expires_in",
+            "refreshTokenExpiresIn",
+            "RefreshTokenExpiresIn",
+        ),
+    )
 
     @field_validator("access_token", "refresh_token")
     @classmethod
@@ -59,6 +67,13 @@ class OAuthTokenResponse(BaseModel):
     @classmethod
     def validate_expires_in(cls, value: int) -> int:
         if value <= 0:
+            raise PydanticCustomError("oauth_expiry", "OAuth token expiry must be positive")
+        return value
+
+    @field_validator("refresh_token_expires_in")
+    @classmethod
+    def validate_refresh_token_expires_in(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
             raise PydanticCustomError("oauth_expiry", "OAuth token expiry must be positive")
         return value
 
@@ -76,6 +91,11 @@ class OAuthTokenResponse(BaseModel):
             code_verifier=code_verifier,
             environment=environment,
             expires_at=issued_at + timedelta(seconds=self.expires_in),
+            refresh_expires_at=(
+                None
+                if self.refresh_token_expires_in is None
+                else issued_at + timedelta(seconds=self.refresh_token_expires_in)
+            ),
         )
 
 

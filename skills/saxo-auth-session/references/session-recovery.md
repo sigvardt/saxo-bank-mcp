@@ -24,6 +24,8 @@ For a plan-only diagnosis of generic expired SIM access where refresh material m
 
 For LIVE reads, call the intended LIVE read tool once. It performs on-demand refresh under the refresh lock. If the keeper is running, let it maintain a valid cache. Do not inspect or print the cache.
 
+If a LIVE read reports `token_refresh_temporarily_failed`, the token endpoint did not answer and the session may still be valid. Wait about a minute and retry the read once; the keeper keeps retrying in the meantime. Start a new browser login only after `token_refresh_rejected` or `refresh_token_expired`.
+
 ### Expired without refresh
 
 For SIM, use a fresh local portal-token cache flow or restart SIM PKCE. For LIVE, rerun the local LIVE browser login.
