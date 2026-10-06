@@ -1301,6 +1301,7 @@ async def test_parent_process_cannot_activate_backtest_ghost_proof(
         "backtest_sim_proof_unavailable",
         "missing_proof_profile",
         "release_unverified",
+        "source_contract_missing",
     }
 
 
