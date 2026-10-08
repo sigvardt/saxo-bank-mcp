@@ -56,7 +56,7 @@ environment are checked again immediately before execution.
 ```bash
 export SAXO_MCP_ENVIRONMENT=LIVE
 export SAXO_MCP_ENABLE_LIVE_READS=1
-export SAXO_MCP_LIVE_CREDENTIAL_FILE="$HOME/Desktop/saxo_bank_mcp_LIVE_credentials.txt"
+export SAXO_MCP_LIVE_CREDENTIAL_FILE="$HOME/.config/saxo-bank-mcp/saxo_bank_mcp_LIVE_credentials.txt"
 export SAXO_MCP_LIVE_TOKEN_CACHE_PATH
 export SAXO_MCP_LIVE_REDIRECT_URI=http://localhost:8080/callback
 uv run saxo-bank-live-login

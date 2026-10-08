@@ -36,7 +36,9 @@ See [analytics principles and verification](docs/analytics.md) and the
 
 ## SIM Auth
 
-SIM is the default environment. Keep credentials in the local credential file or
+SIM is the default environment. Keep credentials in the local credential files
+(`~/.config/saxo-bank-mcp/saxo_bank_mcp_DEMO_credentials.txt` and `..._LIVE_credentials.txt`,
+folder mode 700, files 600, outside iCloud-synced folders such as the Desktop) or the
 environment; do not copy values into this repo, docs, logs, or evidence.
 
 ```bash
@@ -68,7 +70,7 @@ repository:
 ```bash
 export SAXO_MCP_ENVIRONMENT=LIVE
 export SAXO_MCP_ENABLE_LIVE_READS=1
-export SAXO_MCP_LIVE_CREDENTIAL_FILE="$HOME/Desktop/saxo_bank_mcp_LIVE_credentials.txt"
+export SAXO_MCP_LIVE_CREDENTIAL_FILE="$HOME/.config/saxo-bank-mcp/saxo_bank_mcp_LIVE_credentials.txt"
 export SAXO_MCP_LIVE_TOKEN_CACHE_PATH
 export SAXO_MCP_LIVE_REDIRECT_URI=http://localhost:8080/callback
 uv run saxo-bank-live-login
