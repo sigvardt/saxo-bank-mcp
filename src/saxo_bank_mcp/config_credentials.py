@@ -8,10 +8,10 @@ from saxo_bank_mcp.auth_status import SimCredentialSource
 from saxo_bank_mcp.credentials import CredentialFileError, parse_sim_pkce_credentials_file
 
 DEFAULT_SIM_CREDENTIAL_FILE: Final = (
-    Path.home() / "Desktop" / "saxo_bank_mcp_DEMO_credentials.txt"
+    Path.home() / ".config" / "saxo-bank-mcp" / "saxo_bank_mcp_DEMO_credentials.txt"
 )
 DEFAULT_LIVE_CREDENTIAL_FILE: Final = (
-    Path.home() / "Desktop" / "saxo_bank_mcp_LIVE_credentials.txt"
+    Path.home() / ".config" / "saxo-bank-mcp" / "saxo_bank_mcp_LIVE_credentials.txt"
 )
 
 
